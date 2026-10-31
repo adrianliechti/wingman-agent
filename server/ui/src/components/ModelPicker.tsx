@@ -1,5 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import type { SettingsPatch } from "../state/workspaceContext.ts";
 import type { SessionSettings } from "../state/sessionStore.ts";
@@ -117,7 +117,7 @@ export function ModelPicker({ settings, setSettings, retryModels }: Props) {
 		commit(index);
 	};
 
-	if (!model && !settings.modelsError) return null;
+	if (!model) return null;
 
 	return (
 		<div data-composer-model className="relative min-w-0 max-w-[260px]">
@@ -130,13 +130,6 @@ export function ModelPicker({ settings, setSettings, retryModels }: Props) {
 				aria-haspopup="dialog"
 				aria-expanded={open}
 			>
-				{settings.modelsError && (
-					<AlertTriangle
-						size={12}
-						className="shrink-0 text-warning"
-						aria-label="Model discovery failed"
-					/>
-				)}
 				<span className="truncate">{currentName || "Models unavailable"}</span>
 				{effort !== "auto" && effort !== "default" && (
 					<>
@@ -154,9 +147,9 @@ export function ModelPicker({ settings, setSettings, retryModels }: Props) {
 				label="Model and reasoning effort"
 				className="z-[100] min-w-[240px] max-w-[360px] bg-bg-elevated/95 backdrop-blur-sm border border-border rounded-md shadow-xl"
 			>
-				{settings.modelsError && (
-					<div className="flex items-center justify-between gap-3 border-b border-border px-3 py-1.5 text-[11px] text-warning">
-						<span>Model discovery failed</span>
+				{models.length === 0 && (
+					<div className="flex items-center justify-between gap-3 border-b border-border px-3 py-1.5 text-[11px] text-fg-dim">
+						<span>No models available</span>
 						<button
 							type="button"
 							className="shrink-0 rounded p-0.5 cursor-pointer hover:bg-bg-hover disabled:opacity-50 disabled:cursor-default"
@@ -180,33 +173,27 @@ export function ModelPicker({ settings, setSettings, retryModels }: Props) {
 					role="listbox"
 					aria-label="Model"
 				>
-					{models.length === 0 ? (
-						<div className="px-3 py-2 text-[12px] text-fg-dim">
-							{settings.modelsError ? "No models available" : "Loading…"}
-						</div>
-					) : (
-						models.map((m) => (
-							<button
-								type="button"
-								role="option"
-								aria-selected={m.id === model}
-								key={m.id}
-								className={`picker-control flex items-center gap-2 w-full text-left px-3 py-1.5 text-[12px] cursor-pointer whitespace-nowrap transition-colors ${
-									m.id === model
-										? "text-fg bg-bg-active"
-										: "text-fg-muted hover:text-fg hover:bg-bg-hover"
-								}`}
-								onClick={() => selectModel(m.id)}
-							>
-								<ModelProviderIcon
-									namespace={m.namespace}
-									size={13}
-									className="shrink-0"
-								/>
-								<span>{m.name}</span>
-							</button>
-						))
-					)}
+					{models.map((m) => (
+						<button
+							type="button"
+							role="option"
+							aria-selected={m.id === model}
+							key={m.id}
+							className={`picker-control flex items-center gap-2 w-full text-left px-3 py-1.5 text-[12px] cursor-pointer whitespace-nowrap transition-colors ${
+								m.id === model
+									? "text-fg bg-bg-active"
+									: "text-fg-muted hover:text-fg hover:bg-bg-hover"
+							}`}
+							onClick={() => selectModel(m.id)}
+						>
+							<ModelProviderIcon
+								namespace={m.namespace}
+								size={13}
+								className="shrink-0"
+							/>
+							<span>{m.name}</span>
+						</button>
+					))}
 				</div>
 				{efforts.length > 0 && (
 					<div className="border-t border-border px-3 h-9 flex items-center">

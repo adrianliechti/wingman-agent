@@ -65,11 +65,11 @@ func (h *ahpHost) completions(raw json.RawMessage) (t.CompletionsResult, error) 
 	if offset > 0 && offset < len(text) && utf16.DecodeRune(rune(text[offset-1]), rune(text[offset])) != unicode.ReplacementChar {
 		return result, ahpInvalid("offset must be a UTF-16 character boundary within text")
 	}
-	a, err := h.ensureSession(p.Channel)
+	_, ch, err := h.ensureSession(p.Channel)
 	if err != nil {
 		return result, err
 	}
-	if p.Channel != a.chat.Resource {
+	if ch == nil {
 		return result, ahpInvalid("chat channel required")
 	}
 	if p.Kind != t.CompletionItemKindUserMessage {
@@ -86,7 +86,7 @@ func (h *ahpHost) completions(raw json.RawMessage) (t.CompletionsResult, error) 
 		return result, nil
 	}
 	query := strings.ToLower(string(utf16.Decode(text[start+1 : offset])))
-	b := a.controller.backend
+	b := ch.controller.backend
 	if !b.beginOperation() {
 		return result, ahpInvalid("workspace closed")
 	}
@@ -101,16 +101,24 @@ func (h *ahpHost) completions(raw json.RawMessage) (t.CompletionsResult, error) 
 		if !strings.Contains(key, query) && !strings.Contains(strings.ToLower(entry.Description), query) {
 			return
 		}
-		meta, _ := json.Marshal(struct {
-			SkillEntry
-			Kind string `json:"kind"`
-		}{entry, kind})
+		// VS Code's slash-command convention; skills are text-dispatched commands too.
+		meta := map[string]json.RawMessage{}
+		meta["command"], _ = json.Marshal(entry.Name)
+		if entry.Description != "" {
+			meta["description"], _ = json.Marshal(entry.Description)
+		}
+		if entry.InputHint != "" {
+			meta["argumentHint"], _ = json.Marshal(entry.InputHint)
+		}
+		if kind == "skill" {
+			meta["isSkill"] = json.RawMessage("true")
+		}
 		result.Items = append(result.Items, t.CompletionItem{
 			InsertText: "/" + entry.Name,
 			RangeStart: ahpPtr(int64(start)), RangeEnd: ahpPtr(int64(end)),
 			Attachment: t.MessageAttachment{Value: &t.SimpleMessageAttachment{
 				Type: t.MessageAttachmentKindSimple, Label: "/" + entry.Name,
-				DisplayKind: &kind, Meta: map[string]json.RawMessage{"wingman": meta},
+				DisplayKind: &kind, Meta: meta,
 			}},
 		})
 	}
@@ -118,7 +126,10 @@ func (h *ahpHost) completions(raw json.RawMessage) (t.CompletionsResult, error) 
 	// mentions remain skills, and qualified plugin names remain independently
 	// reachable even when a native command has the same bare name.
 	if start == 0 {
-		for _, command := range b.promptCommands(a.controller.ref.SessionID) {
+		if _, ok := b.agent.(code.Compactor); ok {
+			appendItem(SkillEntry{Name: "compact", Description: "Summarize the conversation to free context", InputHint: "focus"}, "command")
+		}
+		for _, command := range b.promptCommands(ch.controller.ref.SessionID) {
 			appendItem(command, "command")
 		}
 	}

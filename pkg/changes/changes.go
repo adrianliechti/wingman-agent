@@ -40,6 +40,7 @@ type FileDiff struct {
 	Patch        string
 	Original     string
 	Modified     string
+	Binary       bool // Original and Modified are empty
 }
 
 type DiffLayer string
@@ -410,7 +411,7 @@ func (m *Manager) fileDiff(ctx context.Context, head *object.Tree, entry statusE
 	}
 
 	diff := FileDiff{Path: entry.path, OriginalPath: entry.originalPath, Status: status, Patch: patch}
-	if !isBinary(original) && !isBinary(modified) {
+	if diff.Binary = isBinary(original) || isBinary(modified); !diff.Binary {
 		diff.Original = string(original)
 		diff.Modified = string(modified)
 	}

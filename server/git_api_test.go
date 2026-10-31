@@ -392,11 +392,8 @@ func TestGitAPIHistoryAndCompare(t *testing.T) {
 	}
 
 	comparison := getGitComparison(t, web.URL, mainBranch, "feature/compare", "merge-base")
-	if comparison.MergeBaseHash == "" || len(comparison.Files) != 1 || comparison.Files[0].Path != "feature.txt" || !strings.Contains(comparison.Files[0].Patch, "+feature") {
+	if comparison.MergeBaseHash == "" || len(comparison.Files) != 1 || comparison.Files[0].Path != "feature.txt" || !strings.Contains(comparison.Files[0].Modified, "feature") {
 		t.Fatalf("comparison = %+v", comparison)
-	}
-	if comparison.Files[0].Original != "" || comparison.Files[0].Modified != "" {
-		t.Fatalf("comparison should omit file contents, got %+v", comparison.Files[0])
 	}
 
 	if err := os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("working feature\n"), 0o644); err != nil {
@@ -413,7 +410,7 @@ func TestGitAPIHistoryAndCompare(t *testing.T) {
 	for _, file := range comparison.Files {
 		files[file.Path] = file
 	}
-	if !strings.Contains(files["feature.txt"].Patch, "+working feature") || files["local.txt"].Status != "added" {
+	if files["feature.txt"].Modified != "working feature\n" || files["local.txt"].Status != "added" {
 		t.Fatalf("worktree files = %+v", files)
 	}
 }
@@ -633,17 +630,17 @@ func getGitComparison(t *testing.T, baseURL, base, head, mode string) GitCompare
 		t.Fatal(err)
 	}
 	defer sub.Close()
-	for _, file := range snapshot.Snapshot.State.Changeset.Files {
-		var meta struct {
-			Patch types.ContentRef `json:"patch"`
-		}
-		if err := json.Unmarshal(file.Meta["wingman"], &meta); err != nil {
-			t.Fatal(err)
+	read := func(side *types.FileEditSide) string {
+		if side == nil {
+			return ""
 		}
 		var content types.ResourceReadResult
-		if err := client.Request(t.Context(), "resourceRead", map[string]any{"channel": "ahp-root://", "uri": meta.Patch.Uri}, &content); err != nil {
+		if err := client.Request(t.Context(), "resourceRead", map[string]any{"channel": "ahp-root://", "uri": side.Content.Uri}, &content); err != nil {
 			t.Fatal(err)
 		}
+		return content.Data
+	}
+	for _, file := range snapshot.Snapshot.State.Changeset.Files {
 		path := file.Id[strings.LastIndex(file.Id, "/")+1:]
 		status := "modified"
 		if file.Edit.Before == nil {
@@ -652,7 +649,7 @@ func getGitComparison(t *testing.T, baseURL, base, head, mode string) GitCompare
 		if file.Edit.After == nil {
 			status = "deleted"
 		}
-		result.Files = append(result.Files, DiffEntry{Path: path, Status: status, Patch: content.Data})
+		result.Files = append(result.Files, DiffEntry{Path: path, Status: status, Original: read(file.Edit.Before), Modified: read(file.Edit.After)})
 	}
 	return result.GitCompare
 }

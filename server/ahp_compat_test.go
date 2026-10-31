@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
@@ -71,7 +73,7 @@ func TestAHPSnapshotPrecedesConcurrentUpdates(test *testing.T) {
 	c := b.session("saved")
 	c.load()
 	h := s.ahpHost()
-	a := h.attach(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	a, _ := h.attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
 	entry := turnQueueEntry(code.TurnInput{ID: "turn", Content: []harness.Content{{Text: "hello"}}}, code.TurnInputActive, 0)
 	c.apply(Frame{Type: EvtTurnInput, Input: &entry})
 	for range 50 {
@@ -111,7 +113,7 @@ func TestAHPReasoningTimingEndsAtNextPartAndSurvivesCompletion(test *testing.T) 
 	c := b.session("saved")
 	c.load()
 	h := s.ahpHost()
-	a := h.attach(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	a, _ := h.attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
 	reasoning := func(parts []t.ResponsePart) t.ReasoningResponsePart {
 		test.Helper()
 		h.mu.Lock()
@@ -152,7 +154,7 @@ func TestAHPPendingMessagesPreserveKindsAndLegacySnapshots(test *testing.T) {
 	c := b.session("saved")
 	c.load()
 	h := s.ahpHost()
-	a := h.attach(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	a, _ := h.attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.state.PendingInputs = []TurnQueueEntry{{ID: "queued", Text: "queued", State: "queued", Intent: "follow_up"}, {ID: "steer-one", Text: "one", State: "queued", Intent: "steer"}, {ID: "steer-two", Text: "two", State: "queued", Intent: "steer"}}
@@ -168,5 +170,71 @@ func TestAHPPendingMessagesPreserveKindsAndLegacySnapshots(test *testing.T) {
 	legacy := (&ahpConnection{version: "1.0.0"}).chatSnapshot(&a.chat)
 	if len(legacy.QueuedMessages) != 1 || legacy.SteeringMessage.Id != "steer-two" {
 		test.Fatalf("legacy snapshot duplicates steering: %+v", legacy)
+	}
+}
+
+func TestAHPFreeformAnswerReachesItsCompanionField(test *testing.T) {
+	view := PromptView{ID: "ask", Kind: PromptKindAsk, Fields: []tool.ElicitField{
+		{Name: "choice", Enum: []string{"a", "b"}, Strict: true, Default: "b"},
+		{Name: "other", Type: "string", CustomAnswerFor: "choice"},
+	}}
+	request := ahpPromptPart(&ahpPrompt{view: view}).Value.(*t.InputRequestResponsePart).Request
+	question, ok := request.Questions[0].Value.(*t.ChatInputSingleSelectQuestion)
+	if len(request.Questions) != 1 || !ok || !*question.AllowFreeformInput || question.Options[1].Recommended == nil {
+		test.Fatalf("questions = %+v", request.Questions)
+	}
+	answer := func(value string, freeform ...string) map[string]t.ChatInputAnswer {
+		return map[string]t.ChatInputAnswer{"choice": {Value: &t.ChatInputAnswered{State: t.ChatInputAnswerStateSubmitted, Value: t.ChatInputAnswerValue{Value: &t.ChatInputSelectedAnswerValue{Kind: t.ChatInputAnswerValueKindSelected, Value: value, FreeformValues: freeform}}}}}
+	}
+	if content, err := ahpAnswers(view, answer("", "custom")); err != nil || content["other"] != "custom" || content["choice"] != nil {
+		test.Fatalf("free-form answer = %v, %v", content, err)
+	}
+	if content, err := ahpAnswers(view, answer("a")); err != nil || content["choice"] != "a" || content["other"] != nil {
+		test.Fatalf("selected answer = %v, %v", content, err)
+	}
+}
+
+// The host's reduced state must match its own projection, or every sync would
+// truncate and replay the active turn.
+func TestAHPToolCallsReduceToTheirProjection(test *testing.T) {
+	s, b, _ := newProtocolServer(test)
+	c := b.session("saved")
+	c.load()
+	a, _ := s.ahpHost().attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	check := func(step string) {
+		test.Helper()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		a.host.mu.Lock()
+		defer a.host.mu.Unlock()
+		_, active := a.transcript(c)
+		if active == nil || a.chat.ActiveTurn == nil || !reflect.DeepEqual(active.ResponseParts, a.chat.ActiveTurn.ResponseParts) {
+			test.Fatalf("%s: reduced state diverged\n%+v\n%+v", step, active, a.chat.ActiveTurn)
+		}
+	}
+	entry := turnQueueEntry(code.TurnInput{ID: "turn", Content: []harness.Content{{Text: "hello"}}}, code.TurnInputActive, 0)
+	c.apply(Frame{Type: EvtTurnInput, Input: &entry})
+	locations := []harness.ToolLocation{{Path: "main.go", Line: 3}}
+	c.apply(Frame{Type: EvtToolCall, ID: "edit", Name: "edit", Kind: "edit", Args: `{"pa`, Hint: "main.go", Partial: true})
+	check("streaming")
+	c.apply(Frame{Type: EvtToolCall, ID: "edit", Name: "edit", Kind: "edit", Args: `{"path":"main.go"}`, Hint: "main.go", Locations: locations})
+	check("running")
+	c.apply(Frame{Type: EvtToolCall, ID: "edit", Name: "edit", Kind: "edit", Args: `{"path":"main.go"}`, Hint: "main.go", Locations: append(locations, harness.ToolLocation{Path: "util.go"})})
+	check("running with new locations")
+	c.apply(Frame{Type: EvtToolResult, ID: "edit", Name: "edit", Kind: "edit", Args: `{"path":"main.go"}`, Hint: "main.go", Locations: locations, Content: "done"})
+	check("completed")
+	c.apply(Frame{Type: EvtToolCall, ID: "run", Name: "shell", Kind: "execute", Args: `{"command":"ls"}`})
+	check("terminal tool")
+	h := a.host
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	parts := a.chat.ActiveTurn.ResponseParts
+	edit := parts[0].Value.(*t.ToolCallResponsePart).ToolCall.Value.(*t.ToolCallCompletedState)
+	run := parts[1].Value.(*t.ToolCallResponsePart).ToolCall.Value.(*t.ToolCallRunningState)
+	if *edit.Intention != "main.go" || string(edit.Meta["toolKind"]) != `"edit"` || len(edit.Content) != 2 || string(run.Meta["toolKind"]) != `"terminal"` {
+		test.Fatalf("tool presentation = %+v %+v", edit, run)
+	}
+	if resource, ok := edit.Content[1].Value.(*t.ToolResultResourceContent); !ok || !strings.HasSuffix(string(resource.Uri), "/main.go#L3") {
+		test.Fatalf("location = %+v", edit.Content[1].Value)
 	}
 }

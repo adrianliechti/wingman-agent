@@ -25,6 +25,7 @@ import {
 } from "@microsoft/agent-host-protocol/client";
 import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 import type { ServerMessage } from "../types/protocol.ts";
+import { boundTerminalState } from "./terminalState.ts";
 import type { WorkspaceScope } from "./sessionStore.ts";
 
 export type ChannelState =
@@ -41,6 +42,7 @@ export type ChannelUpdate = {
 };
 type Observer = {
 	listeners: Set<(update: ChannelUpdate) => void>;
+	errors: Set<(error: Error) => void>;
 	state?: ChannelState;
 	seq: number;
 	pending: ActionEnvelope[];
@@ -53,7 +55,10 @@ type PendingAction = {
 	resolve?: () => void;
 	reject?: (error: Error) => void;
 	timer?: ReturnType<typeof setTimeout>;
+	/** An unconfirmed action stays retryable under its sequence until then. */
+	expires?: number;
 };
+const RETRY_WINDOW = 5 * 60_000;
 
 /** One connection owns all browser AHP channels. The official SDK owns RPC and
  * wire types; its official reducers own authoritative channel state. We process
@@ -69,6 +74,8 @@ export class AHPConnection {
 	private sequence = 0;
 	private actions = new Map<string, PendingAction>();
 	private observers = new Map<string, Observer>();
+	// A lost connection fails pending reads; watches resume after reconnecting.
+	private reads = new Set<(error: Error) => void>();
 	private notifications = new Set<(method: string, params: any) => void>();
 	onNotification(listener: (method: string, params: any) => void) {
 		this.notifications.add(listener);
@@ -139,11 +146,11 @@ export class AHPConnection {
 			entry.reject?.(error);
 			entry.resolve = undefined;
 			entry.reject = undefined;
+			entry.expires = Date.now() + RETRY_WINDOW;
 		}
 	}
 	private failReads(error: Error) {
-		for (const callbacks of [...this.channelErrors.values()])
-			for (const fn of [...callbacks]) fn(error);
+		for (const fail of [...this.reads]) fail(error);
 	}
 	async ready(): Promise<void> {
 		if (this.replaced)
@@ -172,8 +179,10 @@ export class AHPConnection {
 				close: () => transport.close(),
 				recv: async () => {
 					const frame = await transport.recv();
-					if (frame && generation === this.generation) {
-						const message =
+					if (!frame || generation !== this.generation) return frame;
+					let message;
+					try {
+						message =
 							frame.kind === "parsed"
 								? frame.message
 								: JSON.parse(
@@ -181,17 +190,20 @@ export class AHPConnection {
 											? frame.text
 											: new TextDecoder().decode(frame.data),
 									);
-						if (message.method)
-							for (const listener of this.notifications)
-								listener(message.method, message.params);
-						if (message.method === "action")
-							this.action(message.params as ActionEnvelope);
-						else if (message.method === "x-wingman/workspaceChanged")
-							this.emit(message.params.event);
-						else if (message.method?.startsWith("root/session"))
-							this.emit({ type: "sessions_changed" });
+					} catch {
+						return frame; // the SDK reports malformed frames itself
 					}
-					return frame;
+					if (message.method)
+						for (const listener of this.notifications)
+							listener(message.method, message.params);
+					if (message.method === "action")
+						this.action(message.params as ActionEnvelope);
+					else if (message.method === "x-wingman/workspaceChanged")
+						this.emit(message.params.event);
+					else if (message.method?.startsWith("root/session"))
+						this.emit({ type: "sessions_changed" });
+					// Hand the SDK the parsed message so it is not parsed twice.
+					return { kind: "parsed", message };
 				},
 			};
 			client = new AhpClient(wrapped);
@@ -229,9 +241,9 @@ export class AHPConnection {
 				(s) => s.resource === "ahp-root://",
 			);
 			if (!snapshot) throw new Error("Host did not provide its root snapshot");
-			const metadata = (snapshot.state as RootState)._meta?.wingman as
-				| (WorkspaceScope & { directory: string })
-				| undefined;
+			const metadata = (snapshot.state as RootState)._meta?.[
+				"wingman.workspace"
+			] as WorkspaceScope | undefined;
 			if (
 				metadata?.instanceId !== this.scope.instanceId ||
 				metadata.workspaceId !== this.scope.workspaceId
@@ -239,7 +251,7 @@ export class AHPConnection {
 				this.replaced = true;
 				throw new Error("Workspace changed. Reload to reconnect.");
 			}
-			this.directory = metadata.directory;
+			this.directory = result.defaultDirectory ?? "";
 			this.snapshot(snapshot, root);
 			this.status(true);
 			for (const [uri, observer] of this.observers)
@@ -266,14 +278,25 @@ export class AHPConnection {
 	private observe(uri: string): Observer {
 		let observer = this.observers.get(uri);
 		if (!observer) {
-			observer = { listeners: new Set(), seq: -1, pending: [], generation: 0 };
+			observer = {
+				listeners: new Set(),
+				errors: new Set(),
+				seq: -1,
+				pending: [],
+				generation: 0,
+			};
 			this.observers.set(uri, observer);
 		}
 		return observer;
 	}
-	watch(uri: string, listener: (update: ChannelUpdate) => void): () => void {
+	watch(
+		uri: string,
+		listener: (update: ChannelUpdate) => void,
+		onError?: (error: Error) => void,
+	): () => void {
 		const observer = this.observe(uri);
 		observer.listeners.add(listener);
+		if (onError) observer.errors.add(onError);
 		if (
 			this.connected &&
 			observer.state &&
@@ -291,6 +314,7 @@ export class AHPConnection {
 			if (released) return;
 			released = true;
 			observer.listeners.delete(listener);
+			if (onError) observer.errors.delete(onError);
 			if (
 				!observer.listeners.size &&
 				uri !== "ahp-root://" &&
@@ -318,27 +342,24 @@ export class AHPConnection {
 		} catch (error) {
 			if (generation === this.generation && this.connected) {
 				observer.generation = 0;
-				this.channelErrors.get(uri)?.forEach((fn) => fn(error as Error));
+				for (const fn of [...observer.errors]) fn(error as Error);
 			}
 		}
 	}
-	private channelErrors = new Map<string, Set<(error: Error) => void>>();
 	async read<T extends ChannelState>(uri: string): Promise<T> {
 		await this.ready();
 		return new Promise<T>((resolve, reject) => {
 			let release = () => {};
-			const errors = this.channelErrors.get(uri) ?? new Set();
-			this.channelErrors.set(uri, errors);
+			let done = false;
 			const finish = (error?: Error, state?: ChannelState) => {
+				if (done) return;
+				done = true;
+				this.reads.delete(fail);
 				clearTimeout(timer);
-				errors.delete(onError);
-				if (!errors.size) this.channelErrors.delete(uri);
 				queueMicrotask(() => release());
 				if (error) reject(error);
 				else resolve(state as T);
 			};
-			const onError = (error: Error) => finish(error);
-			errors.add(onError);
 			const timer = setTimeout(
 				() =>
 					finish(
@@ -346,7 +367,13 @@ export class AHPConnection {
 					),
 				30000,
 			);
-			release = this.watch(uri, (update) => finish(undefined, update.state));
+			const fail = (error: Error) => finish(error);
+			this.reads.add(fail);
+			release = this.watch(
+				uri,
+				(update) => finish(undefined, update.state),
+				fail,
+			);
 		});
 	}
 	private snapshot(snapshot: Snapshot, observer: Observer) {
@@ -404,9 +431,11 @@ export class AHPConnection {
 				action as ChangesetAction,
 			);
 		else if (channel.startsWith("ahp-terminal:"))
-			observer.state = terminalReducer(
-				observer.state as TerminalState,
-				action as TerminalAction,
+			observer.state = boundTerminalState(
+				terminalReducer(
+					observer.state as TerminalState,
+					action as TerminalAction,
+				),
 			);
 		observer.seq = envelope.serverSeq;
 		this.changed(channel, observer, false, envelope);
@@ -452,17 +481,6 @@ export class AHPConnection {
 		await this.ready();
 		return this.client!.request(method, params);
 	}
-	async extension<T = void>(
-		method: string,
-		params: Record<string, unknown>,
-	): Promise<T> {
-		await this.ready();
-		// The official request helper accepts extension methods on the wire;
-		// its generated CommandMap intentionally contains standard methods only.
-		return (
-			this.client!.request as (method: string, params: unknown) => Promise<T>
-		)(method, params);
-	}
 	async dispatch(
 		channel: string,
 		action: StateAction,
@@ -472,20 +490,19 @@ export class AHPConnection {
 		let pending = this.actions.get(id);
 		if (pending?.resolve) throw new Error("This action is already pending");
 		if (!pending) {
-			if (this.actions.size >= 256)
-				throw new Error(
-					"Too many unconfirmed actions. Reconnect before retrying.",
-				);
+			this.pruneActions();
 			pending = { channel, action, seq: ++this.sequence };
 			this.actions.set(id, pending);
 		}
 		const current = pending;
+		current.expires = undefined;
 		return new Promise<void>((resolve, reject) => {
 			current.resolve = resolve;
 			current.reject = reject;
 			current.timer = setTimeout(() => {
 				current.resolve = undefined;
 				current.reject = undefined;
+				current.expires = Date.now() + RETRY_WINDOW;
 				reject(new Error("Action delivery unconfirmed. Please retry."));
 			}, 30000);
 			try {
@@ -494,8 +511,21 @@ export class AHPConnection {
 				clearTimeout(current.timer);
 				current.resolve = undefined;
 				current.reject = undefined;
+				current.expires = Date.now() + RETRY_WINDOW;
 				reject(error);
 			}
 		});
+	}
+	/** Unconfirmed actions nobody retried are forgotten after the retry window,
+	 * and the oldest are dropped first so new actions are never refused. */
+	private pruneActions() {
+		const now = Date.now();
+		for (const [id, entry] of this.actions)
+			if (entry.expires !== undefined && entry.expires <= now)
+				this.actions.delete(id);
+		for (const [id, entry] of this.actions) {
+			if (this.actions.size < 256) break;
+			if (!entry.resolve) this.actions.delete(id);
+		}
 	}
 }

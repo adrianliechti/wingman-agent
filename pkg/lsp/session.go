@@ -162,6 +162,8 @@ func (c *sessionClient) WorkDoneProgressCreate(context.Context, *protocol.WorkDo
 	return nil
 }
 
+// protocol.Handlers already runs every handler asynchronously, so waiting for
+// the user's review here does not hold up the server's other messages.
 func (c *sessionClient) ApplyEdit(_ context.Context, params *protocol.ApplyWorkspaceEditParams) (*protocol.ApplyWorkspaceEditResult, error) {
 	if params == nil {
 		reason := "the language server sent an empty workspace edit request"
@@ -172,8 +174,6 @@ func (c *sessionClient) ApplyEdit(_ context.Context, params *protocol.ApplyWorks
 		reason := err.Error()
 		return &protocol.ApplyWorkspaceEditResult{Applied: false, FailureReason: &reason}, nil
 	}
-	// The server's further messages wait while the user reviews the edit;
-	// jsonrpc2.Async would release the reader but breaks the stdio stream.
 	if !apply(edit) {
 		reason := "the workspace edit was not applied"
 		return &protocol.ApplyWorkspaceEditResult{Applied: false, FailureReason: &reason}, nil
@@ -909,6 +909,7 @@ func (s *Session) initialize(ctx context.Context) error {
 					DynamicRegistration:    new(true),
 					RelativePatternSupport: new(true),
 				},
+				TextDocumentContent: &protocol.TextDocumentContentClientCapabilities{},
 				WorkspaceEdit: &protocol.WorkspaceEditClientCapabilities{
 					DocumentChanges:         new(true),
 					FailureHandling:         protocol.FailureHandlingKindTextOnlyTransactional,

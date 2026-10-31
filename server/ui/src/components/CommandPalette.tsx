@@ -59,7 +59,7 @@ export function CommandPalette({
 	const [query, setQuery] = useState("");
 	const [activeKey, setActiveKey] = useState<string | null>(null);
 	const listRef = useRef<HTMLDivElement>(null);
-	const skills = useChatCommands(sessionId, true, settings.canCompact);
+	const skills = useChatCommands(sessionId, true);
 	const { backend } = useWorkspace();
 	const sessionList =
 		useQuery(sessionQueries.list(backend)).data ?? EMPTY_SESSIONS;
@@ -126,12 +126,7 @@ export function CommandPalette({
 			if (!match(s.name, s.description)) continue;
 			out.push({
 				key: `skill:${s.name}`,
-				group:
-					s.kind === "skill"
-						? "Skills"
-						: s.kind === "action"
-							? "Session"
-							: "Commands",
+				group: s.kind === "skill" ? "Skills" : "Commands",
 				label: `/${s.name}`,
 				hint: s.description || s.input_hint,
 				icon: <Sparkles size={12} className="text-fg-dim shrink-0" />,

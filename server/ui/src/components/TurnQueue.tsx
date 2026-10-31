@@ -1,13 +1,11 @@
-import { Pencil, Play, X } from "lucide-react";
+import { Pencil, X } from "lucide-react";
 import type { PendingTurnInput } from "../types/session";
 import type { TurnInputState } from "../types/protocol";
 
 interface Props {
 	items: PendingTurnInput[];
-	paused: boolean;
 	onEdit: (item: PendingTurnInput) => void;
 	onRemove?: (id: string, state: TurnInputState) => void;
-	onResume?: () => void;
 	onClear?: () => void;
 }
 
@@ -26,14 +24,7 @@ function statusLabel(item: PendingTurnInput): string {
 	}
 }
 
-export function TurnQueue({
-	items,
-	paused,
-	onEdit,
-	onRemove,
-	onResume,
-	onClear,
-}: Props) {
+export function TurnQueue({ items, onEdit, onRemove, onClear }: Props) {
 	const queued = items.filter(
 		(item) => item.state === "queued" || item.state === "sending",
 	);
@@ -41,20 +32,9 @@ export function TurnQueue({
 		<div className="mb-2 overflow-hidden rounded-lg border border-border-subtle bg-bg-surface/90 shadow-sm">
 			<div className="flex h-7 items-center gap-2 border-b border-border-subtle px-2.5">
 				<span className="text-[10px] font-mono uppercase tracking-wide text-fg-dim">
-					{paused ? "Queue paused" : `${queued.length} queued`}
+					{queued.length} queued
 				</span>
 				<div className="flex-1" />
-				{paused && queued.length > 0 && (
-					<button
-						type="button"
-						className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-success hover:bg-bg-hover"
-						onClick={onResume}
-						title="Run the next queued message"
-					>
-						<Play size={10} fill="currentColor" />
-						Resume
-					</button>
-				)}
 				{queued.length > 0 && (
 					<button
 						type="button"

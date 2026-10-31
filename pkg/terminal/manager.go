@@ -30,7 +30,12 @@ type Event struct {
 	Session *Session
 }
 
-const MaxSessions = 128
+// MaxSessions bounds running terminals. Exited ones keep their scrollback and
+// exit status for reconnecting clients until maxRetainedExited newer ones exit.
+const (
+	MaxSessions       = 128
+	maxRetainedExited = 32
+)
 
 func NewManager(dir string) *Manager {
 	return &Manager{
@@ -69,7 +74,7 @@ func (m *Manager) CreateShell(shell, dir, title string, cols, rows int) (*Sessio
 	if m.sessions == nil {
 		return nil, errors.New("terminal manager is closed")
 	}
-	if len(m.sessions) >= MaxSessions {
+	if m.runningLocked() >= MaxSessions {
 		return nil, errors.New("terminal limit reached; dispose an existing terminal")
 	}
 
@@ -102,7 +107,7 @@ func (m *Manager) CreateCommand(spec CommandSpec, cols, rows int) (*Session, err
 	if m.sessions == nil {
 		return nil, errors.New("terminal manager is closed")
 	}
-	if len(m.sessions) >= MaxSessions {
+	if m.runningLocked() >= MaxSessions {
 		return nil, errors.New("terminal limit reached; dispose an existing terminal")
 	}
 
@@ -218,16 +223,42 @@ func (m *Manager) take(id string) *Session {
 	return s
 }
 
+func (m *Manager) runningLocked() int {
+	running := 0
+	for _, s := range m.sessions {
+		if !s.Exited() {
+			running++
+		}
+	}
+	return running
+}
+
 func (m *Manager) handleExit(s *Session) {
 	m.mu.Lock()
 	fn := m.onExit
 	if m.sessions[s.ID()] == s {
 		m.publishLocked(Event{Kind: "exited", Session: s})
+		m.pruneExitedLocked()
 	}
 	m.mu.Unlock()
 
 	if fn != nil {
 		fn(s.ID())
+	}
+}
+
+func (m *Manager) pruneExitedLocked() {
+	exited := []string{}
+	for _, id := range m.order {
+		if s := m.sessions[id]; s != nil && s.Exited() {
+			exited = append(exited, id)
+		}
+	}
+	for _, id := range exited[:max(0, len(exited)-maxRetainedExited)] {
+		s := m.sessions[id]
+		delete(m.sessions, id)
+		m.order = slices.DeleteFunc(m.order, func(value string) bool { return value == id })
+		m.publishLocked(Event{Kind: "removed", Session: s})
 	}
 }
 

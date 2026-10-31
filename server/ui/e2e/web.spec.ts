@@ -13,7 +13,7 @@ import {
 	probeLanguageCapabilities,
 } from "./lspFixture.ts";
 import { ahpFixture, mockResource, waitResource } from "./ahpFixture.ts";
-import { emptySession, sessionKey } from "../src/state/sessionStore.ts";
+import { canonicalChatURI, emptySession } from "../src/state/sessionStore.ts";
 import type {
 	ChatEntry,
 	PendingPrompt,
@@ -57,7 +57,9 @@ async function mockSavedSessions(
 
 function sessionRow(page: Page, id: string) {
 	return page
-		.locator(`[data-session-id=${JSON.stringify(sessionKey("wingman", id))}]`)
+		.locator(
+			`[data-session-id=${JSON.stringify(canonicalChatURI("wingman", id))}]`,
+		)
 		.filter({ visible: true });
 }
 
@@ -104,12 +106,10 @@ test("session command picker preserves completion metadata through reload and se
 		label: "/reports:shared",
 		displayKind: "skill",
 		_meta: {
-			wingman: {
-				kind: "skill",
-				name: "reports:shared",
-				description: "Plugin workflow",
-				input_hint: "[topic]",
-			},
+			command: "reports:shared",
+			isSkill: true,
+			description: "Plugin workflow",
+			argumentHint: "[topic]",
 			opaque: { keep: [1, 2] },
 		},
 	};
@@ -128,13 +128,7 @@ test("session command picker preserves completion metadata through reload and se
 					type: "simple",
 					label: "/native",
 					displayKind: "command",
-					_meta: {
-						wingman: {
-							kind: "command",
-							name: "native",
-							description: "Backend command",
-						},
-					},
+					_meta: { command: "native", description: "Backend command" },
 				},
 			},
 		];
@@ -170,9 +164,7 @@ test("session command picker preserves completion metadata through reload and se
 		.toBe(2);
 	expect(sent.filter((command) => command.type === "send")[1]).toMatchObject({
 		text: "/native",
-		attachments: [
-			{ label: "/native", _meta: { wingman: { kind: "command" } } },
-		],
+		attachments: [{ label: "/native", _meta: { command: "native" } }],
 	});
 	expect(channels.every((channel) => channel.startsWith("ahp-chat:"))).toBe(
 		true,
@@ -226,7 +218,9 @@ test("renders read and fetch image attachments in restored transcripts", async (
 	await page.goto("/wingman/images");
 	await page.getByRole("button", { name: "2 tools", exact: true }).click();
 	for (const id of ["user", "read-image", "fetch-image"]) {
-		const preview = page.locator(`[data-entry-id="${id}"] img`);
+		const preview = page.locator(
+			`[data-entry-id="${id === "user" ? "user:user" : id}"] img`,
+		);
 		await expect(preview).toBeVisible();
 		await expect(preview).toHaveAttribute("src", image);
 		await expect
@@ -238,7 +232,7 @@ test("renders read and fetch image attachments in restored transcripts", async (
 });
 function sessionTab(page: Page, id: string) {
 	return page.locator(
-		`[data-center-tab=${JSON.stringify(`chat:${sessionKey("wingman", id)}`)}]`,
+		`[data-center-tab=${JSON.stringify(`chat:${canonicalChatURI("wingman", id)}`)}]`,
 	);
 }
 
@@ -315,7 +309,6 @@ async function mockACPBackend(
 		mode: "agent",
 		efforts: ["default"],
 		effort: "default",
-		canDelete: false,
 	};
 	if (entries.length) {
 		const saved = fixture.add(
@@ -329,23 +322,6 @@ async function mockACPBackend(
 		);
 		saved.settings = settings;
 	}
-	const scope = fixture.scope;
-	await mockWorkspace(page, (route) =>
-		route.fulfill({
-			json: {
-				...scope,
-				protocol: 2,
-				backends: [
-					{ id: "wingman", name: "Wingman" },
-					{ id: backend, name: backend },
-				],
-			},
-		}),
-	);
-	await page.route(
-		new RegExp(`/api/v2/backends/${backend}/settings$`),
-		(route) => route.fulfill({ json: emptySession("").settings }),
-	);
 	fixture.onCreate = async (params) => {
 		await control.beforeCreate(params);
 		control.creations.push({ id: params.channel });
@@ -652,7 +628,7 @@ test("keeps mixed background activity compact in the titlebar", async ({
 			},
 		});
 	});
-	await mockLanguage(page, "wingman/activity", async (route) => {
+	await page.route("**/api/workspace/activity", async (route) => {
 		await route.fulfill({
 			json: {
 				analyzing: true,
@@ -1229,110 +1205,6 @@ test("composer harness switching preserves existing conversations and their draf
 	await expect(
 		page.getByRole("button", { name: "Harness: Codex", exact: true }),
 	).toBeVisible();
-});
-
-test("model discovery warning is compact and scoped to Wingman", async ({
-	page,
-}) => {
-	await mockACPBackend(page);
-	const message = "Connection refused at http://localhost:4242/v1/models";
-	await page.route(/\/api\/v2\/backends\/wingman\/settings$/, async (route) => {
-		const response = await route.fetch();
-		await route.fulfill({
-			json: { ...(await response.json()), modelsError: message },
-		});
-	});
-	const input = await composer(page);
-	const warning = page
-		.getByLabel("Model discovery failed")
-		.filter({ visible: true });
-	await expect(warning).toBeVisible();
-	await page
-		.locator("[data-composer-model] button")
-		.filter({ visible: true })
-		.click();
-	const picker = page.getByRole("dialog", {
-		name: "Model and reasoning effort",
-	});
-	await expect(picker.getByText(message, { exact: true })).toHaveCount(0);
-	await expect(picker.locator("details")).toHaveCount(0);
-	await expect(
-		picker.getByRole("button", { name: "Retry model discovery", exact: true }),
-	).toBeVisible();
-	await page.keyboard.press("Escape");
-	await expect(input).toBeEnabled();
-	await page.keyboard.press("Control+k");
-	const palette = page.getByRole("dialog", { name: "Command palette" });
-	await palette
-		.getByRole("combobox", { name: "Search commands" })
-		.fill("new chat");
-	await palette
-		.getByRole("option", { name: "New Chat (Codex)", exact: true })
-		.click();
-	await expect(
-		page.getByPlaceholder("Message Codex…").filter({ visible: true }),
-	).toBeVisible();
-	await expect(warning).toHaveCount(0);
-});
-
-test("model discovery retry recovers without restarting the workspace", async ({
-	page,
-}) => {
-	const refreshURL = "/api/v2/backends/wingman/models/refresh";
-	await page.request.post(`${controlURL()}/model-discovery?fail=true`);
-	try {
-		const failure = await page.request.post(refreshURL);
-		expect(failure.status()).toBe(502);
-		await composer(page);
-		const warning = page
-			.getByLabel("Model discovery failed")
-			.filter({ visible: true });
-		await expect(warning).toBeVisible();
-		await page
-			.locator("[data-composer-model] button")
-			.filter({ visible: true })
-			.click();
-		const picker = page.getByRole("dialog", {
-			name: "Model and reasoning effort",
-		});
-		const retry = picker.getByRole("button", {
-			name: "Retry model discovery",
-			exact: true,
-		});
-		await expect(retry).toHaveText("");
-		await expect(retry.locator("svg")).toBeVisible();
-		let release!: () => void;
-		const gate = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		await page.route(
-			`**${refreshURL}`,
-			async (route) => {
-				await gate;
-				await route.continue();
-			},
-			{ times: 1 },
-		);
-		try {
-			await retry.click();
-			await expect(retry).toBeDisabled();
-			await expect(retry).toHaveAttribute("aria-busy", "true");
-		} finally {
-			release();
-		}
-		await expect(retry).toBeEnabled();
-		await expect(warning).toBeVisible();
-		await page.request.post(`${controlURL()}/model-discovery?fail=false`);
-		await retry.click();
-		await expect(warning).toHaveCount(0);
-		await expect(
-			picker.getByRole("option", { name: "GPT 5.4", exact: true }),
-		).toBeVisible();
-		await expect(retry).toHaveCount(0);
-	} finally {
-		await page.request.post(`${controlURL()}/model-discovery?fail=false`);
-		await page.request.post(refreshURL);
-	}
 });
 
 test("new ACP chats load mode and model before the first message", async ({
@@ -2451,7 +2323,6 @@ test("keeps the session context menu above panel clipping", async ({
 				mode: "",
 				efforts: [],
 				effort: "",
-				canDelete: true,
 			},
 		});
 	});
@@ -3378,7 +3249,7 @@ test("keeps composer pickers visible in a constrained window", async ({
 	page,
 }) => {
 	await page.setViewportSize({ width: 420, height: 300 });
-	await mockResource(page, "x-wingman/fileSearch", async (route) => {
+	await page.route(/\/api\/workspace\/files(\?|$)/, async (route) => {
 		await route.fulfill({
 			json: Array.from({ length: 30 }, (_, index) => ({
 				path: `src/nested/example-${index}.ts`,
@@ -3420,25 +3291,22 @@ test("discovers new agents after earlier tasks finish during the same turn", asy
 		}),
 	);
 	let running = false;
-	await page.route(
-		/\/api\/v2\/backends\/wingman\/sessions\/[^/]+\/tasks$/,
-		(route) =>
-			route.fulfill({
-				json: [
-					{
-						id: "review",
-						description: "New review",
-						agent_type: "code-reviewer",
-						status: running ? "running" : "done",
-						elapsed_seconds: 3,
-						seq: running ? 2 : 1,
-					},
-				],
-			}),
+	await page.route(/\/api\/v2\/chats\/[^/]+\/tasks$/, (route) =>
+		route.fulfill({
+			json: [
+				{
+					id: "review",
+					description: "New review",
+					agent_type: "code-reviewer",
+					status: running ? "running" : "done",
+					elapsed_seconds: 3,
+					seq: running ? 2 : 1,
+				},
+			],
+		}),
 	);
-	await page.route(
-		/\/api\/v2\/backends\/wingman\/sessions\/[^/]+\/schedules$/,
-		(route) => route.fulfill({ json: [] }),
+	await page.route(/\/api\/v2\/chats\/[^/]+\/schedules$/, (route) =>
+		route.fulfill({ json: [] }),
 	);
 	await composer(page);
 	await openSessions(page);
@@ -3611,44 +3479,38 @@ test("keeps scheduled-agent actions above inspector clipping", async ({
 		});
 	});
 	let taskListRequests = 0;
-	await page.route(
-		/\/api\/v2\/backends\/wingman\/sessions\/[^/]+\/tasks$/,
-		async (route) => {
-			taskListRequests++;
-			await route.fulfill({
-				json:
-					taskListRequests === 1
-						? []
-						: [
-								{
-									id: "running-check",
-									description: "Review changes",
-									agent_type: "explore",
-									status: "running",
-									activity: "Reading files",
-									elapsed_seconds: 3,
-									seq: 1,
-								},
-							],
-			});
-		},
-	);
-	await page.route(
-		/\/api\/v2\/backends\/wingman\/sessions\/[^/]+\/schedules$/,
-		async (route) => {
-			await route.fulfill({
-				json: [
-					{
-						id: "deploy-check",
-						prompt: "Check deploy",
-						schedule: "every 1h",
-						status: "active",
-						next_in: "in 42m",
-					},
-				],
-			});
-		},
-	);
+	await page.route(/\/api\/v2\/chats\/[^/]+\/tasks$/, async (route) => {
+		taskListRequests++;
+		await route.fulfill({
+			json:
+				taskListRequests === 1
+					? []
+					: [
+							{
+								id: "running-check",
+								description: "Review changes",
+								agent_type: "explore",
+								status: "running",
+								activity: "Reading files",
+								elapsed_seconds: 3,
+								seq: 1,
+							},
+						],
+		});
+	});
+	await page.route(/\/api\/v2\/chats\/[^/]+\/schedules$/, async (route) => {
+		await route.fulfill({
+			json: [
+				{
+					id: "deploy-check",
+					prompt: "Check deploy",
+					schedule: "every 1h",
+					status: "active",
+					next_in: "in 42m",
+				},
+			],
+		});
+	});
 	await composer(page);
 	await openSessions(page);
 	await page.getByTitle("Agent menu check").click();
@@ -5762,7 +5624,8 @@ test("keeps unsent drafts available when the workspace instance changes", async 
 			if (changed && message.result?.snapshots)
 				for (const snapshot of message.result.snapshots)
 					if (snapshot.resource === "ahp-root://")
-						snapshot.state._meta.wingman.instanceId = "replacement";
+						snapshot.state._meta["wingman.workspace"].instanceId =
+							"replacement";
 			socket.send(JSON.stringify(message));
 		});
 		closeConnection = () => {
@@ -5783,21 +5646,7 @@ test("keeps unsent drafts available when the workspace instance changes", async 
 test("closing the last session leaves empty space and new chat keeps its backend", async ({
 	page,
 }) => {
-	const scope = {
-		...(await (await page.request.get("/api/workspace")).json()),
-		backends: await (await page.request.get("/api/v2/backends")).json(),
-	};
-	await mockWorkspace(page, (route) =>
-		route.fulfill({
-			json: {
-				...scope,
-				backends: [...scope.backends, { id: "fixture", name: "Fixture" }],
-			},
-		}),
-	);
-	await page.route("**/api/v2/backends/fixture/settings", (route) =>
-		route.fulfill({ json: emptySession("").settings }),
-	);
+	(await ahpFixture(page)).agents.set("fixture", "Fixture");
 	await mockSavedSessions(
 		page,
 		[
@@ -5886,28 +5735,10 @@ test.describe("phone navigation", () => {
 	test("switches agents and opens the selected agent's sessions without nested popups", async ({
 		page,
 	}) => {
-		const scope = {
-			...(await (await page.request.get("/api/workspace")).json()),
-			backends: await (await page.request.get("/api/v2/backends")).json(),
-		};
-		await mockWorkspace(page, (route) =>
-			route.fulfill({
-				json: {
-					...scope,
-					backends: [
-						...scope.backends,
-						{ id: "fixture", name: "Fixture" },
-						...Array.from({ length: 20 }, (_, index) => ({
-							id: `agent-${index}`,
-							name: `Agent ${index}`,
-						})),
-					],
-				},
-			}),
-		);
-		await page.route("**/api/v2/backends/fixture/settings", (route) =>
-			route.fulfill({ json: emptySession("").settings }),
-		);
+		const fixture = await ahpFixture(page);
+		fixture.agents.set("fixture", "Fixture");
+		for (let index = 0; index < 20; index++)
+			fixture.agents.set(`agent-${index}`, `Agent ${index}`);
 		await mockSavedSessions(
 			page,
 			[
@@ -5933,9 +5764,13 @@ test.describe("phone navigation", () => {
 			.tap();
 		const dialog = page.getByRole("dialog", { name: "Sessions", exact: true });
 		await expect(dialog).toBeVisible();
-		await dialog.getByRole("button", { name: /From another browser/ }).tap();
+		await dialog.getByRole("button", { name: /^From another browser/ }).tap();
 		await expect(dialog).not.toBeVisible();
-		await expect(page).toHaveURL(/\/fixture\/phone-saved$/);
+		await expect(page).toHaveURL(
+			new RegExp(
+				`/fixture/${encodeURIComponent(canonicalChatURI("fixture", "phone-saved"))}$`,
+			),
+		);
 		await expect(picker).toHaveValue("fixture");
 		await expect(
 			page.getByPlaceholder("Message Fixture…").filter({ visible: true }),
@@ -6093,7 +5928,6 @@ async function reviewActive(
 	);
 	session.prompts = prompts;
 	session.pendingInputs = pendingInputs;
-	session.canSteer = true;
 	const finish = () => {
 		session.phase = "idle";
 		fixture.publish(session);
@@ -6336,10 +6170,7 @@ for (const unavailable of [false, true]) {
 	test(`recovery: backup journals tolerate damaged data with IndexedDB ${unavailable ? "unavailable" : "available"}`, async ({
 		page,
 	}) => {
-		const scope = {
-			...(await (await page.request.get("/api/workspace")).json()),
-			backends: await (await page.request.get("/api/v2/backends")).json(),
-		};
+		const scope = await (await page.request.get("/api/workspace")).json();
 		await page.addInitScript(
 			({ workspace, unavailable }) => {
 				const prefix = `wingman-pending-drafts:${workspace}:`;
@@ -6456,7 +6287,9 @@ test("recovery: turn review previews attributed edits and refuses a conflicting 
 		],
 	});
 	await page.route(
-		/\/sessions\/review-active\/reviews(?:\/review-turn(?:\/undo)?)?$/,
+		new RegExp(
+			`/chats/${encodeURIComponent(canonicalChatURI("wingman", "review-active"))}/reviews(?:/review-turn(?:/undo)?)?$`,
+		),
 		async (route) => {
 			if (route.request().method() === "POST") {
 				attempts++;

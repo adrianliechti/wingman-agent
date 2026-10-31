@@ -1,5 +1,5 @@
 import { fetchJSON, fetchOK } from "./http.ts";
-import { sessionPath } from "../state/workspaceClient.ts";
+import { chatPath } from "../state/workspaceClient.ts";
 export type TurnFileChange = {
 	path: string;
 	before: string;
@@ -27,17 +27,17 @@ export type TurnReview = {
 export const turnReviewKey = (session: string) =>
 	["server", "turn-reviews", session] as const;
 export const listTurnReviews = (session: string, signal?: AbortSignal) =>
-	fetchJSON<TurnReview[]>(`${sessionPath(session)}/reviews`, { signal });
+	fetchJSON<TurnReview[]>(`${chatPath(session)}/reviews`, { signal });
 export const getTurnReview = (
 	session: string,
 	turn: string,
 	signal?: AbortSignal,
 ) =>
 	fetchJSON<TurnReview>(
-		`${sessionPath(session)}/reviews/${encodeURIComponent(turn)}`,
+		`${chatPath(session)}/reviews/${encodeURIComponent(turn)}`,
 		{ signal },
 	);
 export const undoTurn = (session: string, turn: string) =>
-	fetchOK(`${sessionPath(session)}/reviews/${encodeURIComponent(turn)}/undo`, {
+	fetchOK(`${chatPath(session)}/reviews/${encodeURIComponent(turn)}/undo`, {
 		method: "POST",
 	});

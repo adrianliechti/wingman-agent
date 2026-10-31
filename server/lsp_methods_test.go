@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -248,6 +250,25 @@ func TestLSPStructuralFallbacks(t *testing.T) {
 	})
 }
 
+func TestLSPVirtualSourcesAreOnlyServedOnceReported(t *testing.T) {
+	app, _ := newLSPTestApp(t, map[string]string{"main.go": "package main\n"})
+	original := "jdt://contents/rt.jar/java.lang/String.class?=project/java.lang.String"
+	source, ok := app.lspSource(original)
+	if !ok || !strings.HasPrefix(source, lspSourceScheme+"://jdt/") || !strings.HasSuffix(source, "/String.class") {
+		t.Fatalf("virtual source = %q, %v", source, ok)
+	}
+	if path, virtual, ok := app.lspSourceTarget(source); !ok || path != "" || virtual != original {
+		t.Fatalf("source target = %q, %q, %v", path, virtual, ok)
+	}
+	forged := strings.Replace(source, "/String.class", "/Other.class", 1)
+	if _, _, ok := app.lspSourceTarget(forged); ok {
+		t.Fatal("an unreported source was allowed")
+	}
+	if _, ok := app.lspSource(fileuri.FromPath(filepath.Join(app.workspace.RootPath, "main.go"))); ok {
+		t.Fatal("a workspace file was rewritten to a source URI")
+	}
+}
+
 func TestLSPRequestValidation(t *testing.T) {
 	app, root := newLSPTestApp(t, map[string]string{"main.go": "package main\n"})
 	c := newLSPTestClient(t, app, root)
@@ -280,10 +301,29 @@ func TestLSPWorkspaceDiagnosticsAndActivity(t *testing.T) {
 	if report.Items == nil || report.Wingman.UnavailableServers == nil || report.Wingman.CheckedFiles == nil || *report.Wingman.CheckedFiles != 0 {
 		t.Fatalf("workspace report = %+v", report)
 	}
+	rec := httptest.NewRecorder()
+	app.handleWorkspaceActivity(rec, httptest.NewRequest(http.MethodGet, "/api/workspace/activity", nil))
 	var activity lspActivityResponse
-	c.result("wingman/activity", map[string]any{}, &activity)
-	if activity.Analyzing || activity.Services == nil || len(activity.Services) != 0 {
-		t.Fatalf("activity = %+v", activity)
+	if err := json.Unmarshal(rec.Body.Bytes(), &activity); err != nil || activity.Analyzing || activity.Services == nil || len(activity.Services) != 0 {
+		t.Fatalf("activity = %s", rec.Body)
+	}
+}
+
+func TestLSPDiagnosticRefreshReachesCapableClients(t *testing.T) {
+	app, _ := newLSPTestApp(t, nil)
+	conn, ctx := dialEditorTest(t, app, "/lsp")
+	initialize := map[string]any{"capabilities": map[string]any{"workspace": map[string]any{"diagnostics": map[string]any{"refreshSupport": true}}}}
+	editorTestReply(t, conn, ctx, map[string]any{"jsonrpc": "2.0", "id": float64(1), "method": "initialize", "params": initialize})
+	app.refreshDiagnostics()
+	var request struct {
+		ID     string `json:"id"`
+		Method string `json:"method"`
+	}
+	if err := wsjson.Read(ctx, conn, &request); err != nil || request.Method != "workspace/diagnostic/refresh" || request.ID == "" {
+		t.Fatalf("refresh = %+v, %v", request, err)
+	}
+	if err := wsjson.Write(ctx, conn, map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": nil}); err != nil {
+		t.Fatal(err)
 	}
 }
 

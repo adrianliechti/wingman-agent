@@ -14,11 +14,20 @@ export const ActionType = {
 		"chat/toolCallConfirmed" as Protocol.ActionType.ChatToolCallConfirmed,
 	ChatInputCompleted:
 		"chat/inputCompleted" as Protocol.ActionType.ChatInputCompleted,
-	SessionConfigChanged:
-		"session/configChanged" as Protocol.ActionType.SessionConfigChanged,
+	ChatConfigChanged:
+		"chat/configChanged" as Protocol.ActionType.ChatConfigChanged,
 	TerminalInput: "terminal/input" as Protocol.ActionType.TerminalInput,
 	TerminalResized: "terminal/resized" as Protocol.ActionType.TerminalResized,
 	TerminalClaimed: "terminal/claimed" as Protocol.ActionType.TerminalClaimed,
+};
+export const ToolCallConfirmationReason = {
+	UserAction: "user-action" as Protocol.ToolCallConfirmationReason.UserAction,
+};
+export const ToolCallCancellationReason = {
+	Denied: "denied" as Protocol.ToolCallCancellationReason.Denied,
+};
+export const ChatSourceKind = {
+	Fork: "fork" as Protocol.ChatSourceKind.Fork,
 };
 export const PendingMessageKind = {
 	Queued: "queued" as Protocol.PendingMessageKind.Queued,

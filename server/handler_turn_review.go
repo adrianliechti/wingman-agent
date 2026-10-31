@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
-	"github.com/go-chi/chi/v5"
 )
 
 type turnReviewer interface {
@@ -19,12 +18,12 @@ func (b *backendRuntime) handleTurnReviews(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, []harness.TurnReview{})
 		return
 	}
-	reviews, err := reviewer.TurnReviews(r.Context(), chi.URLParam(r, "id"))
+	reviews, err := reviewer.TurnReviews(r.Context(), r.PathValue("id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	turnID := chi.URLParam(r, "turnID")
+	turnID := r.PathValue("turnID")
 	if turnID != "" {
 		for _, review := range reviews {
 			if review.ID == turnID {
@@ -50,11 +49,11 @@ func (b *backendRuntime) handleTurnUndo(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "turn undo is unavailable for this agent", http.StatusNotImplemented)
 		return
 	}
-	if err := reviewer.UndoTurn(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "turnID")); err != nil {
+	if err := reviewer.UndoTurn(r.Context(), r.PathValue("id"), r.PathValue("turnID")); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	b.flushFiles()
-	b.broadcast(Frame{Type: EvtDiffsChanged})
+	b.ahpHost().refreshChangesets()
 	w.WriteHeader(http.StatusNoContent)
 }

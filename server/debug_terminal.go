@@ -32,6 +32,5 @@ func (s *Server) LaunchTerminal(_ context.Context, launch dap.TerminalLaunch) (d
 	if err != nil {
 		return nil, err
 	}
-	s.broadcast(Frame{Type: EvtTerminalsChanged})
 	return process, nil
 }

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -20,6 +21,7 @@ import (
 )
 
 const (
+	maxWorkspaceSearches        = 8
 	defaultWorkspaceSearchLimit = 20000
 	maxWorkspaceSearchLimit     = 20000
 	maxWorkspaceSearchFileSize  = 5 << 20
@@ -67,35 +69,6 @@ type workspaceSearchConfig struct {
 	include []string
 	exclude []string
 	limit   int
-}
-
-func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
-	var request workspaceSearchRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
-	if err := decoder.Decode(&request); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
-		return
-	}
-
-	if _, err := newWorkspaceSearchConfig(request); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	encoder := json.NewEncoder(w)
-	flusher, _ := w.(http.Flusher)
-	err := s.searchWorkspace(r.Context(), request, func(event workspaceSearchEvent) error {
-		if err := encoder.Encode(event); err != nil {
-			return err
-		}
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return nil
-	})
-	if err != nil {
-		return
-	}
 }
 
 func (s *Server) searchWorkspace(ctx context.Context, request workspaceSearchRequest, emit func(workspaceSearchEvent) error) error {
@@ -400,4 +373,47 @@ func workspaceSearchDomain(dir string) []string {
 		return nil
 	}
 	return strings.Split(filepath.ToSlash(dir), "/")
+}
+
+// handleWorkspaceSearch streams matching files as NDJSON; aborting the request
+// cancels the search.
+func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
+	var request workspaceSearchRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		http.Error(w, "invalid search request", http.StatusBadRequest)
+		return
+	}
+	if _, err := newWorkspaceSearchConfig(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if s.searches.Add(1) > maxWorkspaceSearches {
+		s.searches.Add(-1)
+		http.Error(w, "too many searches", http.StatusTooManyRequests)
+		return
+	}
+	defer s.searches.Add(-1)
+	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	defer cancel()
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	encoder, flush := json.NewEncoder(w), http.NewResponseController(w)
+	var summary workspaceSearchEvent
+	err := s.searchWorkspace(ctx, request, func(event workspaceSearchEvent) error {
+		if event.Type == "done" {
+			summary = event
+			return nil
+		}
+		if err := encoder.Encode(event); err != nil {
+			return err
+		}
+		return flush.Flush()
+	})
+	if err != nil {
+		_ = encoder.Encode(map[string]string{"type": "error", "message": err.Error()})
+		return
+	}
+	_ = encoder.Encode(map[string]any{"type": "done", "files": summary.Files, "matches": summary.Matches, "truncated": summary.Truncated})
 }

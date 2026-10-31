@@ -7,6 +7,13 @@ import type {
 import type { AHPConnection } from "./ahpConnection.ts";
 import { languageForPath, resourceErrorCode } from "./fileClient.ts";
 import type { DiffEntry, DiffLayer } from "../types/protocol.ts";
+import { unifiedDiff } from "./unifiedDiff.ts";
+
+function isTextType(type: string): boolean {
+	return /^text\/|[/+](json|xml|javascript|ecmascript|yaml|toml|x-sh)\b/.test(
+		type,
+	);
+}
 
 export function workspaceChangeset(layer?: DiffLayer) {
 	return `ahp-changeset:/wingman/${layer || "uncommitted"}`;
@@ -23,13 +30,17 @@ export class ChangesetClient {
 		for (const release of this.subscriptions.values()) release();
 		this.subscriptions.clear();
 	}
-	private async state(channel: string): Promise<ChangesetState> {
-		await this.ahp.ready();
-		if (!channel.includes("/compare/") && !this.subscriptions.has(channel))
+	/** Keeps a workspace layer subscribed until the client closes. */
+	watch(channel: string) {
+		if (!this.subscriptions.has(channel))
 			this.subscriptions.set(
 				channel,
 				this.ahp.watch(channel, () => {}),
 			);
+	}
+	private async state(channel: string): Promise<ChangesetState> {
+		await this.ahp.ready();
+		if (!channel.includes("/compare/")) this.watch(channel);
 		const state = await this.ahp.read<ChangesetState>(channel);
 		if (state.status === "error")
 			throw new Error(state.error?.message ?? "Changes are unavailable");
@@ -58,6 +69,22 @@ export class ChangesetClient {
 			);
 		return result.data;
 	}
+	/** Text content, or undefined when it is binary or cannot be read. */
+	private async content(
+		ref: ContentRef,
+		signal?: AbortSignal,
+	): Promise<string | undefined> {
+		if (ref.contentType && !isTextType(ref.contentType)) return;
+		try {
+			const text = await this.text(ref, signal);
+			return text.includes("\0") ? undefined : text;
+		} catch (error) {
+			const code = resourceErrorCode(error);
+			// Stale snapshots are retried by the caller; transport errors surface.
+			if (signal?.aborted || code === undefined || code === -32008) throw error;
+			return;
+		}
+	}
 	private async file(
 		file: ChangesetFile,
 		full: boolean,
@@ -65,24 +92,24 @@ export class ChangesetClient {
 	): Promise<DiffEntry> {
 		const { before, after } = file.edit;
 		const path = this.relativePath(after?.uri ?? before?.uri ?? file.id);
-		const originalPath =
-			before && before.uri !== after?.uri
-				? this.relativePath(before.uri)
-				: undefined;
-		const meta = file._meta?.wingman as { patch?: ContentRef } | undefined;
-		const [patch, original, modified] = await Promise.all([
-			this.text(meta?.patch, signal),
-			full ? this.text(before?.content, signal) : undefined,
-			full ? this.text(after?.content, signal) : undefined,
+		const originalPath = before ? this.relativePath(before.uri) : path;
+		const [original, modified] = await Promise.all([
+			before ? this.content(before.content, signal) : "",
+			after ? this.content(after.content, signal) : "",
 		]);
+		const binary = original === undefined || modified === undefined;
+		const patch = unifiedDiff(
+			before ? { path: originalPath, content: original } : undefined,
+			after ? { path, content: modified } : undefined,
+			{ binary },
+		);
 		return {
 			path,
-			original_path:
-				originalPath && originalPath !== path ? originalPath : undefined,
+			original_path: originalPath !== path ? originalPath : undefined,
 			status: !before ? "added" : !after ? "deleted" : "modified",
 			patch,
-			original,
-			modified,
+			original: full && !binary ? original : undefined,
+			modified: full && !binary ? modified : undefined,
 			language: languageForPath(path),
 		};
 	}

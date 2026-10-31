@@ -1,6 +1,7 @@
 import type {
 	PromptKind,
 	PromptField,
+	PromptOption,
 	ToolLocation,
 	TurnInputState,
 	TurnInputIntent,
@@ -10,14 +11,13 @@ export interface PendingPrompt {
 	kind: PromptKind;
 	message: string;
 	fields?: PromptField[];
+	options?: PromptOption[];
 }
 
 export interface ChatEntry {
 	id: string;
-	type: "user" | "assistant" | "tool" | "reasoning";
+	type: "user" | "assistant" | "tool" | "reasoning" | "notice";
 	content: string;
-	// Stable source identity; id above is the local React/rendering identity.
-	messageId?: string;
 	images?: string[];
 	files?: string[];
 	inputId?: string;

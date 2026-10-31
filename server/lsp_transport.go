@@ -47,6 +47,11 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer peer.close()
 	c := &lspConnection{editorSocket: peer, server: s, documents: map[string]lspBuffer{}, replies: map[string]chan json.RawMessage{}}
+	defer func() {
+		s.lspDocumentsMu.Lock()
+		delete(s.lspRefreshers, c)
+		s.lspDocumentsMu.Unlock()
+	}()
 	// Document notifications are processed in receive order. Requests begin only
 	// after preceding changes have been applied; cancellation never queues behind
 	// a slow language server.
@@ -73,6 +78,23 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 						continue
 					}
 					initialized = true
+					var params struct {
+						Capabilities struct {
+							Workspace struct {
+								Diagnostics struct {
+									RefreshSupport bool `json:"refreshSupport"`
+								} `json:"diagnostics"`
+							} `json:"workspace"`
+						} `json:"capabilities"`
+					}
+					if json.Unmarshal(request.Params, &params) == nil && params.Capabilities.Workspace.Diagnostics.RefreshSupport {
+						s.lspDocumentsMu.Lock()
+						if s.lspRefreshers == nil {
+							s.lspRefreshers = map[*lspConnection]struct{}{}
+						}
+						s.lspRefreshers[c] = struct{}{}
+						s.lspDocumentsMu.Unlock()
+					}
 					peer.reply(request.ID, map[string]any{"serverInfo": map[string]any{"name": "Wingman"}, "capabilities": c.capabilities()}, nil)
 					continue
 				}
@@ -206,7 +228,7 @@ func (c *lspConnection) capabilities() map[string]any {
 		"semanticTokensProvider":           map[string]any{"legend": map[string]any{"tokenTypes": lspTokenTypes, "tokenModifiers": lspTokenModifiers}, "full": true},
 		"inlayHintProvider":                true, "diagnosticProvider": map[string]any{"interFileDependencies": true, "workspaceDiagnostics": true},
 		"executeCommandProvider": map[string]any{"commands": []string{}},
-		"workspace":              map[string]any{"textDocumentContent": map[string]any{"schemes": []string{"file"}}},
+		"workspace":              map[string]any{"textDocumentContent": map[string]any{"schemes": []string{lspSourceScheme}}},
 		"experimental":           map[string]any{"wingman": map[string]any{"workspaceURI": fileuri.FromPath(c.server.workspace.RootPath), "scope": c.server.scope, "documentCapabilities": true}},
 	}
 }
@@ -379,4 +401,18 @@ func (c *lspConnection) releaseDocuments() {
 		_ = c.releaseDocument(doc.path)
 	}
 	clear(c.documents)
+}
+
+// refreshDiagnostics asks clients to pull diagnostics again (LSP
+// workspace/diagnostic/refresh). Their responses carry nothing to wait for.
+func (s *Server) refreshDiagnostics() {
+	s.lspDocumentsMu.Lock()
+	clients := make([]*lspConnection, 0, len(s.lspRefreshers))
+	for c := range s.lspRefreshers {
+		clients = append(clients, c)
+	}
+	s.lspDocumentsMu.Unlock()
+	for _, c := range clients {
+		c.send(map[string]any{"jsonrpc": "2.0", "id": fmt.Sprintf("refresh:%d", c.sequence.Add(1)), "method": "workspace/diagnostic/refresh"})
+	}
 }

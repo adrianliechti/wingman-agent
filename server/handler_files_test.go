@@ -1,9 +1,7 @@
 package server
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -15,264 +13,6 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
-
-func TestLanguageForShellPathsUsesMonacoShellID(t *testing.T) {
-	for _, path := range []string{
-		"scripts/publish-cask.sh",
-		"script.bash",
-		"script.zsh",
-		"script.ksh",
-		".bashrc",
-		".bash_profile",
-		".zshrc",
-	} {
-		if got := languageForPath(path); got != "shell" {
-			t.Errorf("languageForPath(%q) = %q, want shell", path, got)
-		}
-	}
-}
-
-func TestFileListingExcludesMetadataAndIncludesHiddenEntries(t *testing.T) {
-	t.Setenv("WINGMAN_URL", "http://localhost:1")
-	workDir := t.TempDir()
-	for _, name := range []string{
-		"visible.txt",
-		".gitignore",
-		".DS_Store",
-		".ds_store",
-		"Thumbs.db",
-		"thumbs.db",
-		"backup.crswap",
-	} {
-		if err := os.WriteFile(filepath.Join(workDir, name), []byte(name), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Mkdir(filepath.Join(workDir, ".github"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{".git", ".svn", ".hg"} {
-		if err := os.Mkdir(filepath.Join(workDir, name), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer app.Close()
-	web := httptest.NewServer(scopedTestHandler(app))
-	defer web.Close()
-
-	res, err := http.Get(web.URL + "/api/files")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("listing status = %d, want %d", res.StatusCode, http.StatusOK)
-	}
-
-	var entries []FileEntry
-	if err := json.NewDecoder(res.Body).Decode(&entries); err != nil {
-		t.Fatal(err)
-	}
-	got := make(map[string]bool, len(entries))
-	for _, entry := range entries {
-		got[entry.Name] = true
-	}
-	for _, name := range []string{"visible.txt", ".gitignore", ".github", "backup.crswap"} {
-		if !got[name] {
-			t.Errorf("listing does not include %q: %#v", name, entries)
-		}
-	}
-	for _, name := range []string{
-		".git",
-		".svn",
-		".hg",
-		".DS_Store",
-		".ds_store",
-		"Thumbs.db",
-		"thumbs.db",
-	} {
-		if got[name] {
-			t.Errorf("listing includes excluded entry %q: %#v", name, entries)
-		}
-	}
-}
-
-func TestFileCreateAndConflictAwareWrite(t *testing.T) {
-	t.Setenv("WINGMAN_URL", "http://localhost:1")
-	workDir := t.TempDir()
-	filePath := filepath.Join(workDir, "editable.txt")
-	if err := os.WriteFile(filePath, []byte("original\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer app.Close()
-	web := httptest.NewServer(scopedTestHandler(app))
-	defer web.Close()
-
-	postJSON := func(endpoint string, body any) *http.Response {
-		t.Helper()
-		data, err := json.Marshal(body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		res, err := http.Post(web.URL+endpoint, "application/json", bytes.NewReader(data))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return res
-	}
-
-	res := postJSON("/api/files", map[string]string{"path": "created.txt"})
-	res.Body.Close()
-	if res.StatusCode != http.StatusNoContent {
-		t.Fatalf("create status = %d, want %d", res.StatusCode, http.StatusNoContent)
-	}
-	if data, err := os.ReadFile(filepath.Join(workDir, "created.txt")); err != nil || len(data) != 0 {
-		t.Fatalf("created file = %q, %v; want empty file", data, err)
-	}
-	res = postJSON("/api/files", map[string]string{"path": "created.txt"})
-	res.Body.Close()
-	if res.StatusCode != http.StatusConflict {
-		t.Fatalf("duplicate create status = %d, want %d", res.StatusCode, http.StatusConflict)
-	}
-
-	res = postJSON("/api/files", map[string]string{
-		"path":    "created-with-content.txt",
-		"content": "draft contents\n",
-	})
-	if res.StatusCode != http.StatusOK {
-		res.Body.Close()
-		t.Fatalf("create with content status = %d, want %d", res.StatusCode, http.StatusOK)
-	}
-	var created FileContent
-	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
-		res.Body.Close()
-		t.Fatal(err)
-	}
-	res.Body.Close()
-	if created.Path != "created-with-content.txt" || created.Content != "draft contents\n" || created.Revision == "" {
-		t.Fatalf("create with content response = %#v", created)
-	}
-	if data, err := os.ReadFile(filepath.Join(workDir, "created-with-content.txt")); err != nil || string(data) != "draft contents\n" {
-		t.Fatalf("created file with content = %q, %v", data, err)
-	}
-
-	res = postJSON("/api/files", map[string]any{
-		"path":      "created-folder",
-		"directory": true,
-	})
-	res.Body.Close()
-	if res.StatusCode != http.StatusNoContent {
-		t.Fatalf("create folder status = %d, want %d", res.StatusCode, http.StatusNoContent)
-	}
-	if info, err := os.Stat(filepath.Join(workDir, "created-folder")); err != nil || !info.IsDir() {
-		t.Fatalf("created folder info = %#v, %v", info, err)
-	}
-	res = postJSON("/api/files", map[string]string{"path": "created-folder/nested.txt"})
-	res.Body.Close()
-	if res.StatusCode != http.StatusNoContent {
-		t.Fatalf("nested create status = %d, want %d", res.StatusCode, http.StatusNoContent)
-	}
-	res = postJSON("/api/files", map[string]any{
-		"path":      "created-folder",
-		"directory": true,
-	})
-	res.Body.Close()
-	if res.StatusCode != http.StatusConflict {
-		t.Fatalf("duplicate folder status = %d, want %d", res.StatusCode, http.StatusConflict)
-	}
-
-	res, err = http.Get(web.URL + "/api/files/path?path=created-folder%2Fnested.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var paths struct {
-		Path string `json:"path"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&paths); err != nil {
-		res.Body.Close()
-		t.Fatal(err)
-	}
-	res.Body.Close()
-	if paths.Path != filepath.Join(workDir, "created-folder", "nested.txt") {
-		t.Fatalf("file paths = %#v", paths)
-	}
-
-	res = postJSON("/api/files/rename", map[string]string{
-		"from": "missing.txt",
-		"to":   "moved.txt",
-	})
-	res.Body.Close()
-	if res.StatusCode != http.StatusNotFound {
-		t.Fatalf("missing rename status = %d, want %d", res.StatusCode, http.StatusNotFound)
-	}
-	res = postJSON("/api/files/rename", map[string]string{
-		"from": "created-folder",
-		"to":   "created-folder/inside",
-	})
-	res.Body.Close()
-	if res.StatusCode != http.StatusBadRequest {
-		t.Fatalf("recursive rename status = %d, want %d", res.StatusCode, http.StatusBadRequest)
-	}
-
-	res, err = http.Get(web.URL + "/api/files/read?path=editable.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var original FileContent
-	if err := json.NewDecoder(res.Body).Decode(&original); err != nil {
-		res.Body.Close()
-		t.Fatal(err)
-	}
-	res.Body.Close()
-	if original.Revision == "" {
-		t.Fatal("read response has no revision")
-	}
-
-	if err := os.WriteFile(filePath, []byte("changed elsewhere\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	res = postJSON("/api/files/write", map[string]any{
-		"path":     "editable.txt",
-		"content":  "my edit\n",
-		"revision": original.Revision,
-	})
-	res.Body.Close()
-	if res.StatusCode != http.StatusConflict {
-		t.Fatalf("stale write status = %d, want %d", res.StatusCode, http.StatusConflict)
-	}
-	if data, err := os.ReadFile(filePath); err != nil || string(data) != "changed elsewhere\n" {
-		t.Fatalf("file after stale write = %q, %v", data, err)
-	}
-
-	res = postJSON("/api/files/write", map[string]any{
-		"path":    "editable.txt",
-		"content": "my edit\n",
-		"force":   true,
-	})
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("forced write status = %d, want %d", res.StatusCode, http.StatusOK)
-	}
-	var saved struct {
-		Revision string `json:"revision"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&saved); err != nil {
-		t.Fatal(err)
-	}
-	if saved.Revision == "" || saved.Revision == original.Revision {
-		t.Fatalf("forced write revision = %q, original = %q", saved.Revision, original.Revision)
-	}
-}
 
 func TestWorkspaceContentSearchStreamsFilteredReplaceableMatches(t *testing.T) {
 	t.Setenv("WINGMAN_URL", "http://localhost:1")
@@ -308,32 +48,21 @@ func TestWorkspaceContentSearchStreamsFilteredReplaceableMatches(t *testing.T) {
 	defer root.Close()
 	app := &Server{workspace: &code.Workspace{Root: root, RootPath: workDir}}
 
-	body, err := json.Marshal(workspaceSearchRequest{
+	var events []workspaceSearchEvent
+	err = app.searchWorkspace(t.Context(), workspaceSearchRequest{
 		Query:         "cat",
 		Replacement:   "dog",
 		CaseSensitive: true,
 		WholeWord:     true,
 		Include:       "*.txt",
+	}, func(event workspaceSearchEvent) error {
+		events = append(events, event)
+		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("search events = %#v, err = %v", events, err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/files/content-search", bytes.NewReader(body))
-	request.Header.Set("Content-Type", "application/json")
-	recorder := httptest.NewRecorder()
-	app.handleWorkspaceSearch(recorder, request)
-	response := recorder.Result()
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		detail, _ := io.ReadAll(response.Body)
-		t.Fatalf("search status = %d, body = %q", response.StatusCode, detail)
-	}
-
-	decoder := json.NewDecoder(response.Body)
-	var fileEvent workspaceSearchEvent
-	if err := decoder.Decode(&fileEvent); err != nil {
-		t.Fatal(err)
-	}
+	fileEvent := events[0]
 	if fileEvent.Type != "file" || fileEvent.File == nil || fileEvent.File.Path != "notes.txt" {
 		t.Fatalf("file event = %#v", fileEvent)
 	}
@@ -348,10 +77,7 @@ func TestWorkspaceContentSearchStreamsFilteredReplaceableMatches(t *testing.T) {
 		t.Fatalf("unicode match columns = %#v", second)
 	}
 
-	var done workspaceSearchEvent
-	if err := decoder.Decode(&done); err != nil {
-		t.Fatal(err)
-	}
+	done := events[1]
 	if done.Type != "done" || done.Files != 1 || done.Matches != 2 || done.Truncated {
 		t.Fatalf("done event = %#v", done)
 	}
@@ -423,7 +149,7 @@ func TestFilePreviewServesWebsiteAssetsInline(t *testing.T) {
 		contentType string
 		body        string
 	}{
-		{"/api/files/preview?path=site%2Findex.html", "text/html", "<!doctype html>"},
+		{"/preview?path=site%2Findex.html", "text/html", "<!doctype html>"},
 		{"/style.css", "text/css", "rebeccapurple"},
 		{"/images/logo.svg", "image/svg+xml", "<svg"},
 	}

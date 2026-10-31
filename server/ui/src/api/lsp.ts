@@ -3,6 +3,7 @@ import type {
 	WorkspaceDiagnostics,
 } from "../types/protocol";
 import { workspaceClient } from "../state/workspaceClient.ts";
+import { fetchJSON } from "./http.ts";
 
 export type LSPDocumentEvent = "open" | "change" | "save" | "close";
 
@@ -17,11 +18,7 @@ export function getWorkspaceDiagnostics(
 export function getLSPActivity(
 	signal?: AbortSignal,
 ): Promise<LSPActivityStatus> {
-	return workspaceClient().lsp.connection.request<LSPActivityStatus>(
-		"wingman/activity",
-		{},
-		signal,
-	);
+	return fetchJSON<LSPActivityStatus>("/api/workspace/activity", { signal });
 }
 
 export async function syncLSPDocument(

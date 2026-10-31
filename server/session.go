@@ -11,6 +11,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/tui"
 	"github.com/google/uuid"
 )
 
@@ -43,17 +44,15 @@ type PromptView struct {
 }
 
 type SessionSettings struct {
-	Models      []modelOption `json:"models"`
-	Model       string        `json:"model"`
-	Effort      string        `json:"effort"`
-	Efforts     []string      `json:"efforts"`
-	Mode        string        `json:"mode"`
-	Modes       []modeOption  `json:"modes"`
-	Unattended  *bool         `json:"unattended,omitempty"`
-	CanDelete   bool          `json:"canDelete"`
-	CanFork     bool          `json:"canFork"`
-	CanCompact  bool          `json:"canCompact"`
-	ModelsError string        `json:"modelsError,omitempty"`
+	Models     []modelOption `json:"models"`
+	Model      string        `json:"model"`
+	Effort     string        `json:"effort"`
+	Efforts    []string      `json:"efforts"`
+	Mode       string        `json:"mode"`
+	Modes      []modeOption  `json:"modes"`
+	Unattended *bool         `json:"unattended,omitempty"`
+	CanFork    bool          `json:"canFork"`
+	CanCompact bool          `json:"canCompact"`
 }
 
 type modelOption struct {
@@ -71,34 +70,27 @@ type UsageView struct {
 	ContextWindow   int64 `json:"contextWindow"`
 }
 
-type CompactionView struct {
-	TokensBefore int64 `json:"tokensBefore"`
-	TokensAfter  int64 `json:"tokensAfter"`
-}
-
 type SessionState struct {
 	Status        string             `json:"status"`
 	Phase         string             `json:"phase"`
 	Retry         *harness.RetryInfo `json:"retry,omitempty"`
 	Error         *string            `json:"error"`
-	Compaction    *CompactionView    `json:"compaction,omitempty"`
 	Usage         UsageView          `json:"usage"`
 	Prompts       []PromptView       `json:"prompts"`
 	PendingInputs []TurnQueueEntry   `json:"pendingInputs"`
-	QueuePaused   bool               `json:"queuePaused"`
 	CanSteer      bool               `json:"canSteer"`
 	Settings      SessionSettings    `json:"settings"`
 	ToolProgress  map[string]string  `json:"toolProgress"`
 }
 
 type SessionChange struct {
-	Type    string            `json:"type"`
-	Entry   *TranscriptEntry  `json:"entry,omitempty"`
-	Entries []TranscriptEntry `json:"entries,omitempty"`
-	ID      string            `json:"id,omitempty"`
-	Text    string            `json:"text,omitempty"`
-	IDs     []string          `json:"ids,omitempty"`
-	State   *SessionState     `json:"state,omitempty"`
+	Type    string
+	Entry   *TranscriptEntry
+	Entries []TranscriptEntry
+	ID      string
+	Text    string
+	IDs     []string
+	State   *SessionState
 }
 
 type sessionController struct {
@@ -115,7 +107,6 @@ type sessionController struct {
 	deliveredTasks map[string]bool
 	// mu protects the complete projection AND subscription registration/publication.
 	mu          sync.Mutex
-	revision    uint64
 	entries     []TranscriptEntry
 	state       SessionState
 	prompts     map[string]pendingPrompt
@@ -124,7 +115,15 @@ type sessionController struct {
 	attempt     map[string]bool
 	activeInput string
 	lastOutcome string
-	ahp         *ahpSession
+	compactions []compactionTurn
+	ahp         *ahpChat
+}
+
+// compactionTurn keeps a compaction turn, which the agent's history does not
+// record, at its place in the transcript.
+type compactionTurn struct {
+	at      int // history entries before it
+	entries []TranscriptEntry
 }
 
 func newSessionController(b *backendRuntime, id string) *sessionController {
@@ -180,12 +179,7 @@ func (b *backendRuntime) settings(sid string) SessionSettings {
 	modes, mode := b.agent.Modes(sid)
 	_, canFork := b.agent.(code.SessionForker)
 	_, canCompact := b.agent.(code.Compactor)
-	state := SessionSettings{Model: model, Effort: effort, Efforts: append([]string{}, efforts...), Mode: mode, Modes: toModeState(modes, mode).Modes, Models: []modelOption{}, CanDelete: supportsDelete(b.agent), CanFork: canFork, CanCompact: canCompact}
-	if discovery, ok := b.agent.(interface{ ModelDiscoveryError() error }); ok {
-		if err := discovery.ModelDiscoveryError(); err != nil {
-			state.ModelsError = err.Error()
-		}
-	}
+	state := SessionSettings{Model: model, Effort: effort, Efforts: append([]string{}, efforts...), Mode: mode, Modes: toModeState(modes, mode).Modes, Models: []modelOption{}, CanFork: canFork, CanCompact: canCompact}
 	if policy, ok := b.agent.(code.UnattendedAgent); ok {
 		enabled := policy.Unattended(sid)
 		state.Unattended = &enabled
@@ -233,6 +227,12 @@ func (c *sessionController) replaceHistory() {
 	if c.state.Status == "deleted" {
 		return
 	}
+	inserted := 0
+	for _, turn := range c.compactions {
+		at := min(turn.at+inserted, len(entries))
+		entries = slices.Insert(entries, at, turn.entries...)
+		inserted += len(turn.entries)
+	}
 	c.entries = entries
 	c.textID = ""
 	c.reasoningID = ""
@@ -257,6 +257,14 @@ func (b *backendRuntime) sendSession(sid string, f Frame) {
 
 func (b *backendRuntime) setSessionPhase(sid, phase string) {
 	b.sendSession(sid, Frame{Type: EvtPhase, Phase: phase})
+}
+
+func (c *sessionController) compactedLocked(inputID string, result harness.CompactResult) {
+	notice := TranscriptEntry{ID: "notice:" + inputID, Type: "notice", Content: fmt.Sprintf("Context compacted · ~%s → ~%s tokens", tui.FormatTokens(result.TokensBefore), tui.FormatTokens(result.TokensAfter))}
+	if n := len(c.compactions); n > 0 && c.compactions[n-1].entries[0].InputID == inputID {
+		c.compactions[n-1].entries = append(c.compactions[n-1].entries, notice)
+	}
+	c.upsertLocked(notice)
 }
 
 func (c *sessionController) index(id string) int {
@@ -296,7 +304,7 @@ func (c *sessionController) apply(f Frame) {
 			switch code.TurnInputState(f.Input.State) {
 			case code.TurnInputActive:
 				c.activeInput, c.lastOutcome = f.Input.ID, ""
-			case code.TurnInputCompleted, code.TurnInputFailed, code.TurnInputCancelled:
+			case code.TurnInputCompleted, code.TurnInputIncomplete, code.TurnInputFailed, code.TurnInputCancelled:
 				if c.activeInput == f.Input.ID {
 					c.activeInput, c.lastOutcome = "", f.Input.State
 				}
@@ -304,9 +312,16 @@ func (c *sessionController) apply(f Frame) {
 		}
 		if f.Input != nil && (f.Input.State == string(code.TurnInputActive) || f.Input.State == string(code.TurnInputSteered)) {
 			c.state.Error = nil
-			c.state.Compaction = nil
 			if f.Input.Origin != "task" && (f.Input.Text != "" || len(f.Input.Files)+len(f.Input.Images) > 0) {
-				c.upsertLocked(TranscriptEntry{ID: "input:" + f.Input.ID, InputID: f.Input.ID, Type: "user", Content: f.Input.Text, Files: f.Input.Files, Images: f.Input.Images})
+				entry := TranscriptEntry{ID: "input:" + f.Input.ID, InputID: f.Input.ID, Type: "user", Content: f.Input.Text, Files: f.Input.Files, Images: f.Input.Images}
+				c.upsertLocked(entry)
+				if f.Input.Compact && c.index(entry.ID) >= 0 && !slices.ContainsFunc(c.compactions, func(turn compactionTurn) bool { return turn.entries[0].ID == entry.ID }) {
+					at := c.index(entry.ID)
+					for _, turn := range c.compactions {
+						at -= len(turn.entries)
+					}
+					c.compactions = append(c.compactions, compactionTurn{at: max(0, at), entries: []TranscriptEntry{entry}})
+				}
 			}
 			c.textID = ""
 			c.reasoningID = ""

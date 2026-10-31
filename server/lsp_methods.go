@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -60,9 +59,6 @@ type lspMethod struct {
 var lspWorkspaceMethods = map[string]func(*lspConnection, context.Context, json.RawMessage) (any, error){
 	"workspace/textDocumentContent": (*lspConnection).textDocumentContent,
 	"workspace/diagnostic":          (*lspConnection).workspaceDiagnostics,
-	"wingman/activity": func(c *lspConnection, _ context.Context, _ json.RawMessage) (any, error) {
-		return c.server.lspActivity(), nil
-	},
 }
 
 var lspDocumentMethods = map[string]lspMethod{
@@ -156,19 +152,23 @@ func unwrapLSPResolve(data, params json.RawMessage) (string, json.RawMessage, er
 	return route.URI, raw, err
 }
 
-func (c *lspConnection) textDocumentContent(_ context.Context, raw json.RawMessage) (any, error) {
+func (c *lspConnection) textDocumentContent(ctx context.Context, raw json.RawMessage) (any, error) {
 	var p struct {
 		URI string `json:"uri"`
 	}
 	if json.Unmarshal(raw, &p) != nil {
 		return nil, ahpInvalid("invalid content request")
 	}
-	path, ok := fileuri.Path(p.URI)
+	path, virtual, ok := c.server.lspSourceTarget(p.URI)
 	if !ok {
-		return nil, ahpInvalid("expected a file URI")
+		return nil, &ahpRPCError{Code: -32803, Message: "source not found"}
 	}
-	if !c.server.lspExternalFileAllowed(filepath.ToSlash(path)) {
-		return nil, &ahpRPCError{Code: -32803, Message: "source file not found"}
+	if virtual != "" {
+		text, err := c.server.workspace.LSPVirtualContent(ctx, virtual)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"text": text}, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -233,16 +233,12 @@ func lspLocations(find lspLocationFinder) func(*lspConnection, context.Context, 
 	}
 }
 
-// Locations outside the workspace become readable through
-// workspace/textDocumentContent only once a language server reported them.
+// Locations outside the workspace become wingman-source documents, readable
+// through workspace/textDocumentContent only once a language server reported them.
 func (c *lspConnection) allowLocations(locations []lsp.Location) []lsp.Location {
-	for _, loc := range locations {
-		if target, ok := fileuri.Path(string(loc.URI)); ok {
-			if rel, err := filepath.Rel(c.server.workspace.RootPath, target); err == nil && (rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
-				if info, err := os.Stat(target); err == nil && info.Mode().IsRegular() {
-					c.server.allowLSPExternalFile(filepath.ToSlash(target))
-				}
-			}
+	for i := range locations {
+		if source, ok := c.server.lspSource(string(locations[i].URI)); ok {
+			locations[i].URI = lsp.DocumentURI(source)
 		}
 	}
 	if locations == nil {

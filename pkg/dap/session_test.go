@@ -3,6 +3,7 @@ package dap
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -497,6 +498,56 @@ func TestAttachChildKeepsEarlierChildren(t *testing.T) {
 	}
 }
 
+func TestChildSessionsShareOneIDSpace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	parent := &Session{id: "parent", state: StateRunning, stateChanged: make(chan struct{})}
+	parent.alive.Store(true)
+	children := map[string]*Session{}
+	for _, name := range []string{"worker A", "worker B"} {
+		client, server := net.Pipe()
+		adapter := newFakeAdapter(t, server)
+		adapter.answer = name
+		go adapter.serve()
+		plan := Plan{Adapter: AdapterDescriptor{Name: "fake"}, Request: "launch", Arguments: map[string]any{"request": "launch", "name": name}}
+		child := newConnectedSession(name, plan, client)
+		defer child.Close()
+		if err := child.initializeAndLaunch(ctx, StartOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := child.WaitForStop(ctx, 0); !ok {
+			t.Fatal("child did not stop on entry")
+		}
+		if !parent.attachChild(child) {
+			t.Fatal("parent rejected a child")
+		}
+		children[name] = child
+	}
+	// Both adapters report thread 11, frame 21 and variables 31.
+	threads, err := parent.Threads(ctx)
+	if err != nil || len(threads) != 2 || threads[0].ID == threads[1].ID {
+		t.Fatalf("merged threads = %+v, %v", threads, err)
+	}
+	for _, thread := range threads {
+		name, _, _ := strings.Cut(thread.Name, ": ")
+		frames, _, err := parent.StackTrace(ctx, thread.ID, 0, 20)
+		if err != nil || len(frames) != 1 {
+			t.Fatalf("%s frames = %+v, %v", name, frames, err)
+		}
+		scopes, err := parent.Scopes(ctx, frames[0].ID)
+		if err != nil || len(scopes) != 1 {
+			t.Fatalf("%s scopes = %+v, %v", name, scopes, err)
+		}
+		variables, err := parent.Variables(ctx, scopes[0].VariablesReference, 0, 0)
+		if err != nil || len(variables) != 1 || variables[0].Value != name {
+			t.Fatalf("thread %q reached the wrong child: %+v, %v", thread.Name, variables, err)
+		}
+	}
+	if status := parent.Status(); status.Stop == nil || !slices.ContainsFunc(threads, func(thread Thread) bool { return thread.ID == status.Stop.ThreadID }) {
+		t.Fatalf("stopped thread %+v is not one of the merged threads %+v", status.Stop, threads)
+	}
+}
+
 func TestPerThreadStopsResumeIndividually(t *testing.T) {
 	session := &Session{state: StateRunning, stateChanged: make(chan struct{})}
 	session.recordStopLocked(Stop{Reason: "breakpoint", ThreadID: 1})
@@ -570,6 +621,7 @@ type fakeAdapter struct {
 	seq    int
 
 	launchSeq            int
+	answer               string // the "answer" variable value; "42" when empty
 	sourceBreakpointLine int
 	breakpointLines      [][]int
 	functionBreakpoint   string
@@ -667,7 +719,7 @@ func (adapter *fakeAdapter) serve() {
 			adapter.send(&godap.VariablesResponse{
 				Response: adapter.response(request.Seq, "variables"),
 				Body: godap.VariablesResponseBody{Variables: []godap.Variable{{
-					Name: "answer", Value: "42", Type: "int",
+					Name: "answer", Value: cmp.Or(adapter.answer, "42"), Type: "int",
 				}}},
 			})
 		case *godap.EvaluateRequest:

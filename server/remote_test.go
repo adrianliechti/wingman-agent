@@ -114,7 +114,7 @@ func remoteInitialize(t *testing.T, conn *websocket.Conn) string {
 		Snapshots []struct {
 			State struct {
 				Meta struct {
-					Wingman WorkspaceScope `json:"wingman"`
+					Workspace WorkspaceScope `json:"wingman.workspace"`
 				} `json:"_meta"`
 			} `json:"state"`
 		} `json:"snapshots"`
@@ -122,7 +122,7 @@ func remoteInitialize(t *testing.T, conn *websocket.Conn) string {
 	if err := json.Unmarshal(result, &initialized); err != nil {
 		t.Fatal(err)
 	}
-	return initialized.Snapshots[0].State.Meta.Wingman.InstanceID
+	return initialized.Snapshots[0].State.Meta.Workspace.InstanceID
 }
 
 func remoteCommand(t *testing.T, client *http.Client, relayURL, instance string, command Command) (int, string) {
@@ -133,12 +133,7 @@ func remoteCommand(t *testing.T, client *http.Client, relayURL, instance string,
 	if remoteInitialize(t, conn) != instance {
 		return 409, "workspace replaced"
 	}
-	resolved := remoteRPC(t, conn, "x-wingman/resolveSession", map[string]any{"channel": "ahp-root://", "backend": "one", "session": "saved"})
-	var resource struct {
-		Resource string `json:"resource"`
-	}
-	_ = json.Unmarshal(resolved, &resource)
-	snapshot := remoteRPC(t, conn, "subscribe", map[string]string{"channel": resource.Resource})
+	snapshot := remoteRPC(t, conn, "subscribe", map[string]string{"channel": canonicalAHPURI("one", "saved")})
 	var session struct {
 		Snapshot struct {
 			State struct {

@@ -1,11 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { GitFork, Loader2, MessageSquare, Trash2 } from "lucide-react";
 import { useState } from "react";
-import {
-	useWorkspace,
-	backendSettingsQuery,
-} from "../state/workspaceContext.ts";
-import { splitSessionKey } from "../state/sessionStore.ts";
+import { useWorkspace } from "../state/workspaceContext.ts";
+import { workspaceClient } from "../state/workspaceClient.ts";
 import { sessionQueries, type SessionInfo } from "../api/sessions";
 import type { TabDisposition } from "../types/tabs";
 import { FloatingMenu } from "./ui/Floating";
@@ -37,18 +34,86 @@ export function AgentSessions({
 		error,
 		refetch,
 	} = useQuery(sessionQueries.list(backend));
-	const settings = useQuery(backendSettingsQuery(backend)).data;
-	const canDelete = settings?.canDelete ?? false;
-	const canFork = !!onSessionFork && (settings?.canFork ?? false);
+	const canDelete = !!onSessionDelete;
+	const canFork = !!onSessionFork && workspaceClient().canFork(backend);
 
 	const [menu, setMenu] = useState<{
 		id: string;
 		title: string;
+		fork: boolean;
 		x: number;
 		y: number;
 	} | null>(null);
 
 	const groups = groupSessions(sessions);
+
+	const renderRow = (
+		id: string,
+		title: string,
+		fork: boolean,
+		updated: string,
+	) => {
+		const active = id === currentSessionId;
+		return (
+			<div
+				key={id}
+				data-session-id={id}
+				className={`group relative mx-1.5 flex items-stretch rounded-md text-[12px] transition-colors ${
+					fork ? "ml-5" : ""
+				} ${
+					active
+						? "bg-bg-active text-fg"
+						: "text-fg-muted hover:bg-bg-hover hover:text-fg"
+				}`}
+				onContextMenu={(e) => {
+					if (touch) return;
+					e.preventDefault();
+					setMenu({ id, title, fork, x: e.clientX, y: e.clientY });
+				}}
+			>
+				<button
+					type="button"
+					className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 py-1.5 text-left"
+					onClick={() => onSessionSelect(id, touch ? "keep" : "preview")}
+					onDoubleClick={() => onSessionSelect(id, "keep")}
+					onKeyDown={(event) => {
+						if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+							event.preventDefault();
+							onSessionSelect(id, "keep");
+						}
+					}}
+					title={title}
+					aria-current={active ? "page" : undefined}
+				>
+					{runningSessionIds?.has(id) ? (
+						<Loader2 size={12} className="shrink-0 animate-spin text-accent" />
+					) : fork ? (
+						<GitFork size={12} className="shrink-0 text-fg-dim" />
+					) : (
+						<MessageSquare size={12} className="shrink-0 text-fg-dim" />
+					)}
+					<div className="min-w-0 flex-1">
+						<div className="truncate text-[12px] leading-snug">{title}</div>
+						{!fork && (
+							<div className="mt-0.5 truncate text-[11px] text-fg-dim">
+								{relativeTime(updated)}
+							</div>
+						)}
+					</div>
+				</button>
+				{touch && canDelete && (
+					<button
+						type="button"
+						className="flex min-h-11 w-11 shrink-0 items-center justify-center rounded-md text-fg-dim active:bg-bg-hover active:text-danger"
+						aria-label={`Delete ${title}`}
+						onClick={() => onSessionDelete?.(id, title)}
+					>
+						<Trash2 size={18} />
+					</button>
+				)}
+			</div>
+		);
+	};
 
 	return (
 		<nav
@@ -92,80 +157,15 @@ export function AgentSessions({
 									{group.label}
 								</span>
 							</div>
-							{group.sessions.map((s) => {
-								const active = s.id === currentSessionId;
-								const displayTitle =
-									s.title || splitSessionKey(s.id).sessionId.substring(0, 8);
-								return (
-									<div
-										key={s.id}
-										data-session-id={s.id}
-										className={`group relative mx-1.5 flex items-stretch rounded-md text-[12px] transition-colors ${
-											active
-												? "bg-bg-active text-fg"
-												: "text-fg-muted hover:bg-bg-hover hover:text-fg"
-										}`}
-										onContextMenu={(e) => {
-											if (touch) return;
-											e.preventDefault();
-											setMenu({
-												id: s.id,
-												title: displayTitle,
-												x: e.clientX,
-												y: e.clientY,
-											});
-										}}
-									>
-										<button
-											type="button"
-											className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 py-1.5 text-left"
-											onClick={() =>
-												onSessionSelect(s.id, touch ? "keep" : "preview")
-											}
-											onDoubleClick={() => onSessionSelect(s.id, "keep")}
-											onKeyDown={(event) => {
-												if (
-													event.key === "Enter" &&
-													(event.ctrlKey || event.metaKey)
-												) {
-													event.preventDefault();
-													onSessionSelect(s.id, "keep");
-												}
-											}}
-											title={s.title || s.id}
-											aria-current={active ? "page" : undefined}
-										>
-											{runningSessionIds?.has(s.id) ? (
-												<Loader2
-													size={12}
-													className="shrink-0 animate-spin text-accent"
-												/>
-											) : (
-												<MessageSquare
-													size={12}
-													className="shrink-0 text-fg-dim"
-												/>
-											)}
-											<div className="min-w-0 flex-1">
-												<div className="truncate text-[12px] leading-snug">
-													{displayTitle}
-												</div>
-												<div className="mt-0.5 truncate text-[11px] text-fg-dim">
-													{relativeTime(s.updated_at)}
-												</div>
-											</div>
-										</button>
-										{touch && canDelete && onSessionDelete && (
-											<button
-												type="button"
-												className="flex min-h-11 w-11 shrink-0 items-center justify-center rounded-md text-fg-dim active:bg-bg-hover active:text-danger"
-												aria-label={`Delete ${displayTitle}`}
-												onClick={() => onSessionDelete(s.id, displayTitle)}
-											>
-												<Trash2 size={18} />
-											</button>
-										)}
-									</div>
+							{group.sessions.flatMap((s) => {
+								const title = s.title || "Untitled session";
+								return s.chats.map((chat, index) =>
+									renderRow(
+										chat.id,
+										index === 0 ? title : chat.title || `Fork of ${title}`,
+										index > 0,
+										s.updated_at,
+									),
 								);
 							})}
 						</div>
@@ -189,7 +189,7 @@ export function AgentSessions({
 						className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-[12px] text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg"
 					>
 						<MessageSquare size={12} className="shrink-0" />
-						Open session
+						{menu.fork ? "Open fork" : "Open session"}
 					</button>
 					{canFork && (
 						<button
@@ -202,7 +202,7 @@ export function AgentSessions({
 							className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-[12px] text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg"
 						>
 							<GitFork size={12} className="shrink-0" />
-							Fork session
+							Fork chat
 						</button>
 					)}
 					{canDelete && <div className="my-1 border-t border-border-subtle" />}
@@ -217,7 +217,7 @@ export function AgentSessions({
 							className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-[12px] text-fg-muted transition-colors hover:bg-bg-hover hover:text-danger"
 						>
 							<Trash2 size={12} className="shrink-0" />
-							Delete session
+							{menu.fork ? "Delete fork" : "Delete session"}
 						</button>
 					)}
 				</FloatingMenu>

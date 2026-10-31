@@ -2,6 +2,7 @@ import type { MessageAttachment } from "@microsoft/agent-host-protocol";
 import { gitStatusQuery } from "./api/git";
 import { useMainLayout } from "./hooks/useMainLayout.ts";
 import { useMobileLayout } from "./hooks/useMobileLayout.ts";
+import { useAgents } from "./hooks/useAgents.ts";
 import { MobileNavigation } from "./components/MobileNavigation";
 import {
 	useWorkspace,
@@ -9,7 +10,7 @@ import {
 	draftSettingsKey,
 } from "./state/workspaceContext.ts";
 import { composerDrafts as getComposerDrafts } from "./state/composerDrafts.ts";
-import { isDraft, sessionKey, splitSessionKey } from "./state/sessionStore.ts";
+import { canonicalChatURI, draftKey, isDraft } from "./state/sessionStore.ts";
 import { workspaceClient } from "./state/workspaceClient.ts";
 import {
 	type QueryClient,
@@ -153,6 +154,7 @@ import { useAutoHidingScrollbars } from "./hooks/useAutoHidingScrollbars";
 import { type OpenDocument, useOpenDocuments } from "./hooks/useOpenDocuments";
 import { useServerQueryInvalidation } from "./hooks/useServerQueryInvalidation";
 import { useSessions } from "./hooks/useSessions";
+import { useCanCompact } from "./hooks/useChatCommands";
 import type {
 	CompareMode,
 	DiffLayer,
@@ -334,6 +336,7 @@ export default function App() {
 	const mobile = useMobileLayout();
 	const { backend: agentId, selectBackend, drafts } = useWorkspace();
 	const [client] = useState(workspaceClient);
+	const agents = useAgents();
 	const [composerDrafts] = useState(getComposerDrafts);
 	const draftStorageError = useSyncExternalStore(
 		composerDrafts.subscribe,
@@ -345,7 +348,10 @@ export default function App() {
 			location.pathname.split("/").filter(Boolean)[1] ?? "",
 		);
 		if (sid) {
-			const key = sessionKey(agentId, sid);
+			// Links before chat URIs carried the native session id.
+			const key = sid.startsWith("ahp-chat:")
+				? sid
+				: canonicalChatURI(agentId, sid);
 			return {
 				id: chatTabId(key),
 				type: "chat",
@@ -361,7 +367,7 @@ export default function App() {
 		connected,
 		sessions,
 		sendChat,
-		command,
+		act,
 		dismissError,
 		subscribe,
 		observe,
@@ -861,8 +867,8 @@ export default function App() {
 								: "Show data preview";
 	const sessionId =
 		activeTab.type === "chat"
-			? activeTab.sessionId || sessionKey(activeTab.backendId ?? agentId, "")
-			: currentSessionId || sessionKey(agentId, "");
+			? activeTab.sessionId || draftKey(activeTab.backendId ?? agentId)
+			: currentSessionId || draftKey(agentId);
 	const workspaceTab =
 		requestedWorkspaceTab === "inspect" && !showInspect
 			? "files"
@@ -874,12 +880,12 @@ export default function App() {
 	const usage = activeSession?.usage ?? EMPTY_USAGE;
 
 	useEffect(() => {
-		const ref = splitSessionKey(sessionId);
-		const path = ref.sessionId
-			? `/${encodeURIComponent(ref.backendId)}/${encodeURIComponent(ref.sessionId)}`
-			: `/${encodeURIComponent(agentId)}`;
+		const path = isDraft(sessionId)
+			? `/${encodeURIComponent(agentId)}`
+			: `/${encodeURIComponent(client.backendOf(sessionId))}/${encodeURIComponent(sessionId)}`;
 		if (location.pathname !== path) window.history.replaceState(null, "", path);
-	}, [agentId, sessionId]);
+		// The provider of a restored chat is known once it loads.
+	}, [client, agentId, sessionId, activeSession?.status]);
 	const observedKeys = JSON.stringify(
 		tabs
 			.filter((tab) => tab.type === "chat" && tab.sessionId)
@@ -892,7 +898,7 @@ export default function App() {
 		if (tab.type === "chat") {
 			selectBackend(
 				tab.backendId ??
-					(tab.sessionId ? splitSessionKey(tab.sessionId).backendId : agentId),
+					(tab.sessionId ? client.backendOf(tab.sessionId) : agentId),
 			);
 		}
 	};
@@ -956,7 +962,7 @@ export default function App() {
 		const tab: CenterTab = {
 			id: recovered?.id ?? chatTabId(sid),
 			type: "chat",
-			backendId: splitSessionKey(sid).backendId,
+			backendId: client.backendOf(sid),
 			label: "Session",
 			sessionId: sid,
 		};
@@ -1732,10 +1738,10 @@ export default function App() {
 			(activeTab.type === "chat"
 				? (activeTab.backendId ??
 					(activeTab.sessionId
-						? splitSessionKey(activeTab.sessionId).backendId
+						? client.backendOf(activeTab.sessionId)
 						: agentId))
 				: currentSessionId
-					? splitSessionKey(currentSessionId).backendId
+					? client.backendOf(currentSessionId)
 					: agentId);
 		const tab = draftChatTab(backend);
 		selectBackend(backend);
@@ -1744,7 +1750,7 @@ export default function App() {
 	};
 	const handleBackendSelect = (backend: string, source = activeTab) => {
 		const currentBackend = source.sessionId
-			? splitSessionKey(source.sessionId).backendId
+			? client.backendOf(source.sessionId)
 			: (source.backendId ?? agentId);
 		if (backend === currentBackend) return;
 		const session = client.store.getSnapshot()[source.sessionId ?? ""];
@@ -1795,10 +1801,16 @@ export default function App() {
 			return;
 		}
 		const id = sessionDelete.id;
+		// Deleting a default chat deletes its session; a fork leaves the session.
 		queryClient.setQueryData(
-			queryKeys.sessions.list(splitSessionKey(id).backendId),
+			queryKeys.sessions.list(client.backendOf(id)),
 			(current: SessionInfo[] = []) =>
-				current.filter((session) => session.id !== id),
+				current
+					.filter((session) => session.id !== id)
+					.map((session) => ({
+						...session,
+						chats: session.chats.filter((chat) => chat.id !== id),
+					})),
 		);
 		setSessionDelete(null);
 		handleSessionDeleted(id);
@@ -1808,7 +1820,7 @@ export default function App() {
 		id: string,
 		disposition: TabDisposition = "keep",
 	) => {
-		selectBackend(splitSessionKey(id).backendId);
+		selectBackend(client.backendOf(id));
 		openChatTab(id, disposition);
 	};
 
@@ -1824,6 +1836,10 @@ export default function App() {
 			});
 			return;
 		}
+		// A new chat changes its session, not the root catalogue.
+		void queryClient.invalidateQueries({
+			queryKey: queryKeys.sessions.list(client.backendOf(id)),
+		});
 		handleSessionSelect(forked, "keep");
 	};
 	const draftCreations = useRef(new Map<string, Promise<string>>());
@@ -1835,7 +1851,7 @@ export default function App() {
 		key: string,
 		draftTabId?: string,
 	): Promise<string> => {
-		const owner = splitSessionKey(key).backendId;
+		const owner = client.backendOf(key);
 		const draft = draftTabId
 			? tabs.find(
 					(tab) =>
@@ -1859,7 +1875,7 @@ export default function App() {
 			.then(async (id) => {
 				const settings = drafts[draftSettingsKey(key, draftID)];
 				if (settings && Object.keys(settings).length)
-					await client.command(id, { type: "settings", ...settings });
+					await client.configure(id, settings);
 				if (draft) {
 					// Keep the composer mounted and preserve current navigation. The
 					// draft may have moved, closed, or changed backend during startup.
@@ -1902,7 +1918,7 @@ export default function App() {
 			const creationKey = JSON.stringify([backend, tab.id]);
 			if (draftInitializationAttempts.current.has(creationKey)) continue;
 			draftInitializationAttempts.current.add(creationKey);
-			void initializeDraftSession(sessionKey(backend, ""), tab.id).catch(() => {
+			void initializeDraftSession(draftKey(backend), tab.id).catch(() => {
 				/* The draft shows the error; sending retries the request. */
 			});
 		}
@@ -1918,6 +1934,18 @@ export default function App() {
 				current.filter((tab) => !tab.sessionId || !deleted.has(tab.sessionId)),
 			);
 	}, [sessions, tabs, setTabs]);
+	// The tab keeps its id so its composer draft stays attached.
+	const redirectTabs = useEffectEvent((from: string, to: string) =>
+		mapTabs((tab) =>
+			tab.type === "chat" && tab.sessionId === from
+				? { ...tab, sessionId: to }
+				: tab,
+		),
+	);
+	useEffect(
+		() => client.onRedirect((from, to) => redirectTabs(from, to)),
+		[client],
+	);
 
 	const sendForSession = async (
 		key: string,
@@ -2008,10 +2036,11 @@ export default function App() {
 					(tab) =>
 						tab.type === "chat" &&
 						!tab.sessionId &&
-						(tab.backendId ?? agentId) === splitSessionKey(sessionId).backendId,
+						(tab.backendId ?? agentId) === client.backendOf(sessionId),
 				)?.id;
 	const { settings: activeSettings, setSettings: setActiveSettings } =
 		useSessionSettings(sessionId, settingsTabId);
+	const canCompact = useCanCompact(sessionId);
 	const { modes, mode } = activeSettings;
 	const selectMode = (mode: string) =>
 		setActiveSettings({ mode }).catch((error) => {
@@ -2218,10 +2247,10 @@ export default function App() {
 					},
 				]
 			: []),
-		...client.scope.backends.map((backend) => ({
+		...agents.map((backend) => ({
 			id: `new-session:${backend.id}`,
 			label:
-				client.scope.backends.length > 1
+				agents.length > 1
 					? `New Chat (${formatAgentName(backend.id, backend.name)})`
 					: "New Chat",
 			icon: <MessageSquarePlus size={12} className="text-fg-dim shrink-0" />,
@@ -2247,7 +2276,7 @@ export default function App() {
 					},
 				]
 			: []),
-		...(activeSettings.canCompact &&
+		...(canCompact &&
 		activeTab.type === "chat" &&
 		!isDraft(sessionId) &&
 		phase === "idle"
@@ -2257,7 +2286,7 @@ export default function App() {
 						label: "Compact context",
 						hint: "/compact",
 						icon: <FoldVertical size={12} className="text-fg-dim shrink-0" />,
-						run: () => void command(sessionId, { type: "compact", text: "" }),
+						run: () => void act((client) => client.compact(sessionId)),
 					},
 				]
 			: []),
@@ -2359,9 +2388,7 @@ export default function App() {
 		if (!tab.sessionId) {
 			const backend = tab.backendId ?? agentId;
 			if (backend === "wingman") return tab.label;
-			const definition = client.scope.backends.find(
-				(item) => item.id === backend,
-			);
+			const definition = agents.find((item) => item.id === backend);
 			return formatAgentName(backend, definition?.name);
 		}
 		const sess = sessions[tab.sessionId];
@@ -2405,11 +2432,11 @@ export default function App() {
 
 	const renderTabContent = (tab: CenterTab): ReactNode => {
 		if (tab.type === "chat") {
-			const key = tab.sessionId || sessionKey(tab.backendId ?? agentId, "");
-			const backendId = splitSessionKey(key).backendId;
-			const backend = client.scope.backends.find(
-				(candidate) => candidate.id === backendId,
-			);
+			const key = tab.sessionId || draftKey(tab.backendId ?? agentId);
+			const backendId = isDraft(key)
+				? (tab.backendId ?? agentId)
+				: client.backendOf(key);
+			const backend = agents.find((candidate) => candidate.id === backendId);
 			const sess = key ? sessions[key] : undefined;
 			const composerDraft = composerDrafts.get(tab);
 			const draftError = !tab.sessionId
@@ -2449,7 +2476,7 @@ export default function App() {
 								completions,
 							)
 						}
-						onCommand={(value) => command(key, value)}
+						onAct={act}
 						loading={
 							isDraft(key)
 								? backendId !== "wingman" && !draftError
@@ -3674,7 +3701,7 @@ export default function App() {
 					className="absolute top-2 right-3 z-140 flex items-center gap-1.5 rounded border border-border bg-bg px-2 py-1 text-[11px] text-fg-muted shadow"
 				>
 					<Loader2 size={12} className="animate-spin" /> Reconnecting
-					<button className="underline" onClick={() => client.focus()}>
+					<button className="underline" onClick={() => client.reconnect()}>
 						Retry
 					</button>
 				</div>

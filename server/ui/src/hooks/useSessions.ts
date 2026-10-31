@@ -1,6 +1,9 @@
 import type { MessageAttachment } from "@microsoft/agent-host-protocol";
 import { useState, useSyncExternalStore } from "react";
-import { workspaceClient, type Command } from "../state/workspaceClient.ts";
+import {
+	workspaceClient,
+	type WorkspaceClient,
+} from "../state/workspaceClient.ts";
 import type { TurnInputIntent } from "../types/protocol.ts";
 import { useToast } from "../components/ui/Feedback.tsx";
 
@@ -24,9 +27,11 @@ export function useSessions() {
 			{ ...view, error: dismissed[key] === view.error ? null : view.error },
 		]),
 	);
-	const command = async (key: string, command: Command) => {
+	const act = async (
+		operation: (client: WorkspaceClient) => Promise<unknown>,
+	) => {
 		try {
-			await client.command(key, command);
+			await operation(client);
 			return true;
 		} catch (error) {
 			toast({
@@ -40,7 +45,7 @@ export function useSessions() {
 	return {
 		connected,
 		sessions,
-		command,
+		act,
 		subscribe: client.subscribe,
 		observe: (keys: string[]) => {
 			const releases = keys.map((key) => client.watch(key));

@@ -1,4 +1,3 @@
-import { sessionKey } from "../state/sessionStore.ts";
 import { QueryClient, type QueryKey } from "@tanstack/react-query";
 import type { ServerMessage } from "../types/protocol";
 
@@ -135,9 +134,6 @@ export function invalidateForServerMessage(
 		case "workspace_changed":
 			invalidate(queryKeys.workspace);
 			break;
-		case "model_changed":
-			invalidate(["server", "backend-settings"]);
-			break;
 		case "sessions_changed":
 			invalidate(queryKeys.sessions.all);
 			break;
@@ -163,10 +159,8 @@ export function invalidateForServerMessage(
 			break;
 		case "tasks_changed":
 			invalidate(
-				message.session
-					? queryKeys.tasks.session(
-							sessionKey(message.backend ?? "wingman", message.session),
-						)
+				message.session?.startsWith("ahp-chat:")
+					? queryKeys.tasks.session(message.session)
 					: queryKeys.tasks.all,
 			);
 			break;

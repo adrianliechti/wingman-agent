@@ -4,7 +4,7 @@ import { queryOptions } from "@tanstack/react-query";
 import { fetchJSON } from "./http.ts";
 import { queryKeys } from "./query.ts";
 
-export interface WorkspaceInfo extends Omit<Bootstrap, "backends"> {
+export interface WorkspaceInfo extends Bootstrap {
 	name: string;
 	path: string;
 	shells: ShellEntry[];

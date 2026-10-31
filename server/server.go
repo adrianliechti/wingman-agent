@@ -75,8 +75,10 @@ type Server struct {
 	ahp        *ahpHost
 
 	dapReferenceSeq  atomic.Uint64
+	searches         atomic.Int32
 	lspDocumentsMu   sync.Mutex
 	lspDocuments     map[string]map[*lspConnection]struct{}
+	lspRefreshers    map[*lspConnection]struct{} // clients that re-pull diagnostics on request
 	lspExternalMu    sync.Mutex
 	lspExternalPaths map[string]bool
 	fileWriteMu      sync.Mutex
@@ -343,6 +345,11 @@ func (s *Server) registerRoutes(r chi.Router) {
 		r.Post("/settings/window.terminal.position", s.handleWindowTerminalSettings)
 		r.Post("/settings/window.sidebar.position", s.handleWindowSidebarSettings)
 		r.Get("/workspace/skills", s.handleSkills)
+		r.Get("/workspace/activity", s.handleWorkspaceActivity)
+		r.Get("/workspace/files", s.handleFileSearch)
+		r.Post("/workspace/search", s.handleWorkspaceSearch)
+		r.Post("/workspace/reveal", s.handleReveal)
+		r.Get("/workspace/terminals/{terminal}/status", s.handleTerminalStatus)
 		r.Get("/workspace", s.handleWorkspace)
 		r.Get("/workspace/insights", s.handleWorkspaceInsights)
 		r.Route("/workspace/git", func(r chi.Router) {
@@ -557,7 +564,7 @@ func (s *Server) checkWorkspace() {
 		ws.SyncProjectMode()
 		s.broadcast(Frame{Type: EvtWorkspaceChanged})
 		if ws.HasLSP() {
-			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
+			s.refreshDiagnostics()
 		}
 		s.prevGit = gitNow
 	}
@@ -567,7 +574,7 @@ func (s *Server) checkWorkspace() {
 		s.prevLSP = lspNow
 		s.broadcast(Frame{Type: EvtWorkspaceChanged})
 		if lspNow {
-			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
+			s.refreshDiagnostics()
 		}
 	}
 
@@ -583,7 +590,7 @@ func (s *Server) checkWorkspace() {
 	if !ws.HasChanges() {
 		s.broadcast(Frame{Type: EvtFilesChanged})
 		if ws.HasLSP() {
-			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
+			s.refreshDiagnostics()
 		}
 		return
 	}
@@ -591,9 +598,8 @@ func (s *Server) checkWorkspace() {
 	if fp != s.prevFingerprint {
 		s.prevFingerprint = fp
 		s.broadcast(Frame{Type: EvtFilesChanged})
-		s.broadcast(Frame{Type: EvtDiffsChanged})
 		if ws.HasLSP() {
-			s.broadcast(Frame{Type: EvtDiagnosticsChanged})
+			s.refreshDiagnostics()
 		}
 	}
 }

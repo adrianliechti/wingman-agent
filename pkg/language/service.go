@@ -169,6 +169,16 @@ func (s *Service) FilesChanged(ctx context.Context, changes []lsp.FileChange) {
 	}
 }
 
+// VirtualContent reads a virtual document a language server returned.
+func (s *Service) VirtualContent(ctx context.Context, uri string) (string, error) {
+	s.lifeMu.RLock()
+	defer s.lifeMu.RUnlock()
+	if s.closed {
+		return "", fmt.Errorf("code intelligence service is closed")
+	}
+	return s.manager.VirtualContent(ctx, uri)
+}
+
 func (s *Service) Activities() []lsp.ServerActivity {
 	s.lifeMu.RLock()
 	defer s.lifeMu.RUnlock()

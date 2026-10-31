@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/changes"
-	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
@@ -126,15 +126,19 @@ func (h *ahpHost) buildChangeset(diffs []changes.FileDiff, editing map[string]bo
 	}
 	for _, diff := range diffs {
 		edit := t.FileEdit{}
+		contentType := "text/plain"
+		if diff.Binary {
+			contentType = "application/octet-stream"
+		}
 		if diff.Status != changes.StatusAdded {
 			original := diff.OriginalPath
 			if original == "" {
 				original = diff.Path
 			}
-			edit.Before = &t.FileEditSide{Uri: h.fileURI(original), Content: contentRef(diff.Original, "text/plain")}
+			edit.Before = &t.FileEditSide{Uri: h.fileURI(original), Content: contentRef(diff.Original, contentType)}
 		}
 		if diff.Status != changes.StatusDeleted {
-			edit.After = &t.FileEditSide{Uri: h.fileURI(diff.Path), Content: contentRef(diff.Modified, "text/plain")}
+			edit.After = &t.FileEditSide{Uri: h.fileURI(diff.Path), Content: contentRef(diff.Modified, contentType)}
 		}
 		var added, removed int64
 		for _, line := range strings.Split(diff.Patch, "\n") {
@@ -146,17 +150,15 @@ func (h *ahpHost) buildChangeset(diffs []changes.FileDiff, editing map[string]bo
 			}
 		}
 		edit.Diff = &t.FileEditDiffStats{Added: &added, Removed: &removed}
+		// The patch also covers changes the contents cannot show, such as modes.
 		identity, _ := json.Marshal(struct {
 			Edit  t.FileEdit
 			Patch string
 		}{edit, diff.Patch})
 		nonce := sha256.Sum256(identity)
-		// Before/after content is standard AHP. The optional unified patch lets
-		// the Web UI preserve binary/rename patches and copy exact Git output.
-		meta, _ := json.Marshal(map[string]any{"patch": contentRef(diff.Patch, "text/x-diff")})
 		next.state.Files = append(next.state.Files, t.ChangesetFile{
 			Id: h.fileURI(diff.Path), Edit: edit, Nonce: ahpPtr(hex.EncodeToString(nonce[:])),
-			IsEditing: ahpPtr(editing[filepath.Clean(diff.Path)]), Meta: map[string]json.RawMessage{"wingman": meta},
+			IsEditing: ahpPtr(editing[filepath.Clean(diff.Path)]),
 		})
 		if bytes > 64<<20 {
 			return nil, fmt.Errorf("changeset exceeds the 64 MiB content limit")
@@ -452,7 +454,7 @@ func (h *ahpHost) invokeChangesetOperation(data json.RawMessage) (any, error) {
 	h.operationStatusLocked(p.Channel, p.OperationId, status, err)
 	h.mu.Unlock()
 	if err != nil {
-		return nil, &ahpRPCError{Code: -32011, Message: err.Error()}
+		return nil, fmt.Errorf("%s failed: %w", p.OperationId, err)
 	}
 	return t.InvokeChangesetOperationResult{}, nil
 }
@@ -462,34 +464,31 @@ func (h *ahpHost) invokeChangesetOperation(data json.RawMessage) (any, error) {
 // change arbitrary files and cannot reliably be attributed to individual paths.
 func (h *ahpHost) editingFilesLocked() map[string]bool {
 	files := map[string]bool{}
-	for _, session := range h.sessions {
-		if session.chat.ActiveTurn == nil {
+	for _, ch := range h.chats {
+		if ch.chat.ActiveTurn == nil {
 			continue
 		}
-		for _, part := range session.chat.ActiveTurn.ResponseParts {
+		for _, part := range ch.chat.ActiveTurn.ResponseParts {
 			tool, ok := part.Value.(*t.ToolCallResponsePart)
 			if !ok {
 				continue
 			}
 			call, ok := tool.ToolCall.Value.(*t.ToolCallRunningState)
-			if !ok {
+			if !ok || string(call.Meta["toolKind"]) != `"edit"` {
 				continue
 			}
-			var meta struct {
-				ToolKind  string                 `json:"toolKind"`
-				Locations []harness.ToolLocation `json:"toolLocations"`
-			}
-			if json.Unmarshal(call.Meta["wingman"], &meta) != nil || meta.ToolKind != "edit" {
-				continue
-			}
-			for _, location := range meta.Locations {
-				path := location.Path
-				if filepath.IsAbs(path) {
-					var err error
-					path, err = filepath.Rel(h.server.workspace.RootPath, path)
-					if err != nil {
-						continue
-					}
+			for _, content := range call.Content {
+				resource, ok := content.Value.(*t.ToolResultResourceContent)
+				if !ok {
+					continue
+				}
+				u, err := url.Parse(string(resource.Uri))
+				if err != nil || u.Scheme != "file" {
+					continue
+				}
+				path, err := filepath.Rel(h.server.workspace.RootPath, filepath.FromSlash(u.Path))
+				if err != nil {
+					continue
 				}
 				if filepath.IsLocal(path) {
 					files[filepath.Clean(path)] = true

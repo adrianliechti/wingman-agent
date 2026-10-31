@@ -59,23 +59,24 @@ export function PromptBar({
 				previous.focus();
 		};
 	}, []);
-	const allFields = useMemo(
+	const fields = useMemo(
 		() => (prompt.kind === "ask" ? (prompt.fields ?? []) : []),
 		[prompt.kind, prompt.fields],
 	);
-	const fields = allFields.filter((field) => !field.custom_answer_for);
-	const customFields = useMemo(() => {
-		const result: Record<string, PromptField> = Object.create(null);
-		for (const field of allFields) {
-			if (field.custom_answer_for) result[field.custom_answer_for] = field;
-		}
-		return result;
-	}, [allFields]);
 	const [selections, setSelections] = useState<Record<string, string[]>>(() => {
 		const init: Record<string, string[]> = Object.create(null);
 		for (const f of fields) {
-			const d = f.default != null ? String(f.default) : "";
-			if (d && f.enum?.includes(d)) init[f.name] = [d];
+			const defaults = (
+				Array.isArray(f.default)
+					? f.default
+					: f.default != null
+						? [f.default]
+						: []
+			)
+				.map(String)
+				.filter((d) => f.enum?.includes(d));
+			if (defaults.length)
+				init[f.name] = f.multiple ? defaults : defaults.slice(0, 1);
 		}
 		return init;
 	});
@@ -86,11 +87,11 @@ export function PromptBar({
 				init[f.name] = String(f.default);
 			}
 		}
-		for (const [question, field] of Object.entries(customFields)) {
-			if (field.default != null) init[question] = String(field.default);
-		}
 		return init;
 	});
+
+	const approvals = (prompt.options ?? []).filter((o) => o.kind === "approve");
+	const denials = (prompt.options ?? []).filter((o) => o.kind === "deny");
 
 	const accept = (content: Record<string, unknown>) => {
 		onReply({ action: "accept", content });
@@ -115,12 +116,6 @@ export function PromptBar({
 	const submit = () => {
 		const content: Record<string, unknown> = Object.create(null);
 		for (const f of fields) {
-			const other = (ownValue(others, f.name) ?? "").trim();
-			const custom = ownValue(customFields, f.name);
-			if (other && custom) {
-				content[custom.name] = coercePromptValue(custom, other);
-				continue;
-			}
 			const value = promptFieldValue(f, selections, others);
 			if (value.length === 0) continue;
 			content[f.name] = f.multiple ? value : coercePromptValue(f, value[0]);
@@ -180,8 +175,7 @@ export function PromptBar({
 		if (!f) return;
 		const value = (ownValue(others, f.name) ?? "").trim();
 		if (!value) return;
-		const target = ownValue(customFields, f.name) ?? f;
-		accept({ [target.name]: coercePromptValue(target, value) });
+		accept({ [f.name]: coercePromptValue(f, value) });
 	};
 
 	const declineButton = (
@@ -225,7 +219,11 @@ export function PromptBar({
 				if (key !== "y" && key !== "n") return;
 				event.preventDefault();
 				event.stopPropagation();
-				onReply({ action: key === "y" ? "accept" : "decline" });
+				const option = (key === "y" ? approvals : denials)[0];
+				onReply({
+					action: key === "y" ? "accept" : "decline",
+					...(option ? { option: option.id } : {}),
+				});
 			}}
 			className="relative mb-2 min-w-0 rounded-lg border border-warning bg-bg-surface/60 flex flex-col focus-visible:outline-2 focus-visible:outline-warning"
 		>
@@ -293,21 +291,45 @@ export function PromptBar({
 			</div>
 			{prompt.kind !== "ask" ? (
 				<div className="flex items-center justify-end gap-1 px-1.5 pb-1.5 pt-1">
-					<button
-						type="button"
-						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
-						onClick={() => onReply({ action: "decline" })}
-					>
-						Deny
-					</button>
-					<button
-						type="button"
-						className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-bg bg-success hover:opacity-90 cursor-pointer transition-opacity"
-						title="Approve once (Y when approval has focus)"
-						onClick={() => onReply({ action: "accept" })}
-					>
-						Approve
-					</button>
+					{(denials.length ? denials : [undefined]).map((option) => (
+						<button
+							key={option?.id ?? "deny"}
+							type="button"
+							className="px-3 h-7 flex items-center justify-center rounded text-[11px] text-fg-muted hover:text-fg hover:bg-bg-hover cursor-pointer transition-colors"
+							onClick={() =>
+								onReply({
+									action: "decline",
+									...(option ? { option: option.id } : {}),
+								})
+							}
+						>
+							{option?.label ?? "Deny"}
+						</button>
+					))}
+					{(approvals.length ? approvals : [undefined]).map((option, index) => (
+						<button
+							key={option?.id ?? "approve"}
+							type="button"
+							className={`px-3 h-7 flex items-center justify-center rounded text-[11px] cursor-pointer transition-opacity ${
+								index === 0
+									? "text-bg bg-success hover:opacity-90"
+									: "text-fg-muted hover:text-fg hover:bg-bg-hover"
+							}`}
+							title={
+								index === 0
+									? `${option?.label ?? "Approve"} (Y when approval has focus)`
+									: undefined
+							}
+							onClick={() =>
+								onReply({
+									action: "accept",
+									...(option ? { option: option.id } : {}),
+								})
+							}
+						>
+							{option?.label ?? "Approve"}
+						</button>
+					))}
 				</div>
 			) : fields.length === 0 ? (
 				<div className="flex items-center justify-end gap-1 px-1.5 pb-1.5 pt-1">
@@ -366,15 +388,8 @@ function PromptQuestion({
 	onOther: (value: string) => void;
 	onSubmit?: () => void;
 }) {
-	const [focused, setFocused] = useState<number | null>(null);
-
 	const options = field.enum ?? [];
 	const hasOptions = options.length > 0;
-
-	const previewIndex =
-		focused ?? (selected[0] ? options.indexOf(selected[0]) : -1);
-	const preview =
-		previewIndex >= 0 ? field.enum_previews?.[previewIndex] : undefined;
 
 	const inputClass =
 		"w-full bg-bg border border-border rounded px-2 py-1 text-fg text-[12px] font-mono outline-none focus:border-warning transition-colors placeholder:text-fg-dim";
@@ -418,14 +433,10 @@ function PromptQuestion({
 											: "border-border hover:border-warning hover:bg-bg-hover"
 									}`}
 									onClick={() => onToggle(option)}
-									onMouseEnter={() => setFocused(i)}
-									onMouseLeave={() => setFocused(null)}
-									onFocus={() => setFocused(i)}
-									onBlur={() => setFocused(null)}
 								>
 									<span className="text-fg text-[12px] font-mono">
 										{field.multiple ? (isSelected ? "☑ " : "☐ ") : ""}
-										{option}
+										{field.enum_labels?.[i] || option}
 									</span>
 									{field.enum_descriptions?.[i] ? (
 										<span className="block text-fg-dim text-[11px] leading-snug">
@@ -436,11 +447,6 @@ function PromptQuestion({
 							);
 						})}
 					</div>
-					{preview ? (
-						<pre className="mt-1 max-h-48 overflow-auto rounded border border-border bg-bg p-2 text-[11px] font-mono text-fg-muted whitespace-pre">
-							{preview}
-						</pre>
-					) : null}
 					{field.strict ? null : (
 						<input
 							autoFocus

@@ -2,7 +2,7 @@ package server
 
 import (
 	"encoding/base64"
-	"encoding/json"
+	"fmt"
 	"net/url"
 	"path/filepath"
 	"reflect"
@@ -12,75 +12,22 @@ import (
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
-func (h *ahpHost) sessionExtension(req ahpRequest) (any, error) {
-	var p struct {
-		Channel   string `json:"channel"`
-		ID        string `json:"id"`
-		Epoch     string `json:"epoch"`
-		Text      string `json:"text"`
-		Operation string `json:"operation"`
-	}
-	if json.Unmarshal(req.Params, &p) != nil || p.ID == "" || p.Epoch == "" {
-		return nil, ahpInvalid("request identity and epoch required")
-	}
-	a, err := h.ensureSession(p.Channel)
-	if err != nil {
-		return nil, err
-	}
-	command := Command{ID: p.ID, Epoch: p.Epoch, Text: p.Text}
-	switch req.Method {
-	case "x-wingman/compact":
-		command.Type = "compact"
-	case "x-wingman/queueControl":
-		switch p.Operation {
-		case "clear":
-			command.Type = "queue_clear"
-		case "resume":
-			command.Type = "queue_resume"
-		case "cancelAll":
-			command.Type, command.ClearQueue = "cancel", true
-		default:
-			return nil, ahpInvalid("unknown queue operation")
+// fileURI names a workspace-relative or absolute path.
+func (h *ahpHost) fileURI(path string) string {
+	if !filepath.IsAbs(path) {
+		root := "/"
+		if h.server.workspace != nil {
+			root = h.server.workspace.RootPath
 		}
+		path = filepath.Join(root, path)
 	}
-	return struct{}{}, a.command(command)
-}
-
-// Wingman-specific presentation data complements AHP's transcript, prompts and
-// queue. Execution remains owned by the session controller and TurnManager.
-type ahpRuntimeInfo struct {
-	Ref          SessionRef        `json:"ref"`
-	Epoch        string            `json:"epoch"`
-	Status       string            `json:"status"`
-	Phase        string            `json:"phase"`
-	Retry        any               `json:"retry,omitempty"`
-	Error        *string           `json:"error"`
-	Compaction   *CompactionView   `json:"compaction,omitempty"`
-	Usage        UsageView         `json:"usage"`
-	QueuePaused  bool              `json:"queuePaused"`
-	CanSteer     bool              `json:"canSteer"`
-	Settings     SessionSettings   `json:"settings"`
-	ToolProgress map[string]string `json:"toolProgress"`
-}
-
-func (a *ahpSession) syncRuntime(c *sessionController) {
-	state := c.state
-	data, _ := json.Marshal(ahpRuntimeInfo{Ref: c.ref, Epoch: c.epoch, Status: state.Status, Phase: state.Phase, Retry: state.Retry, Error: state.Error, Compaction: state.Compaction, Usage: state.Usage, QueuePaused: state.QueuePaused, CanSteer: state.CanSteer, Settings: state.Settings, ToolProgress: state.ToolProgress})
-	if string(a.state.Meta["wingman"]) != string(data) {
-		meta := map[string]json.RawMessage{"wingman": data}
-		a.sessionAction(t.StateAction{Value: &t.SessionMetaChangedAction{Type: t.ActionTypeSessionMetaChanged, Meta: meta}})
-	}
+	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
 }
 
 func (h *ahpHost) message(text string, files, images []string) t.Message {
 	message := t.Message{Text: text, Origin: t.MessageOrigin{Kind: t.MessageKindUser}}
 	for _, file := range files {
-		path := file
-		if !filepath.IsAbs(path) && h.server.workspace != nil {
-			path = filepath.Join(h.server.workspace.RootPath, path)
-		}
-		uri := (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
-		message.Attachments = append(message.Attachments, t.MessageAttachment{Value: &t.MessageResourceAttachment{Type: "resource", Uri: uri, Label: file}})
+		message.Attachments = append(message.Attachments, t.MessageAttachment{Value: &t.MessageResourceAttachment{Type: "resource", Uri: h.fileURI(file), Label: file}})
 	}
 	for _, image := range images {
 		prefix, data, ok := strings.Cut(image, ",")
@@ -95,7 +42,7 @@ func (h *ahpHost) message(text string, files, images []string) t.Message {
 	return message
 }
 
-func (a *ahpSession) syncQueue(c *sessionController) {
+func (a *ahpChat) syncQueue(c *sessionController) {
 	next := map[string]t.PendingMessage{}
 	kinds := map[string]t.PendingMessageKind{}
 	for _, input := range c.state.PendingInputs {
@@ -107,8 +54,6 @@ func (a *ahpSession) syncQueue(c *sessionController) {
 			kind = t.PendingMessageKindSteering
 		}
 		message := a.host.message(input.Text, input.Files, input.Images)
-		meta, _ := json.Marshal(map[string]any{"state": input.State, "position": input.Position})
-		message.Meta = map[string]json.RawMessage{"wingman": meta}
 		next[input.ID] = t.PendingMessage{Id: input.ID, Kind: ahpPtr(kind), Message: message}
 		kinds[input.ID] = kind
 	}
@@ -136,6 +81,86 @@ func (a *ahpSession) syncQueue(c *sessionController) {
 		}
 		if !unchanged {
 			a.chatAction(t.StateAction{Value: &t.ChatPendingMessageSetAction{Type: t.ActionTypeChatPendingMessageSet, Kind: kinds[item.Id], Id: item.Id, Message: item.Message}})
+		}
+	}
+}
+
+func (a *ahpChat) syncConfig(c *sessionController) {
+	values := ahpConfig(c.state.Settings).Values
+	if a.chat.Config == nil || !reflect.DeepEqual(a.chat.Config.Values, values) {
+		a.chatAction(t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: values, Replace: ahpPtr(true)}})
+	}
+}
+
+// syncUsage reports the active turn's usage: inputTokens is the latest
+// request's prompt (the context in use), output and cache reads are this turn's.
+func (a *ahpChat) syncUsage(c *sessionController) {
+	active := a.chat.ActiveTurn
+	if active == nil {
+		return
+	}
+	total := c.state.Usage
+	usage := t.UsageInfo{InputTokens: ahpPtr(total.LastInputTokens), OutputTokens: ahpPtr(total.OutputTokens - a.usageStart.OutputTokens), CacheReadTokens: ahpPtr(total.CachedTokens - a.usageStart.CachedTokens)}
+	if model := c.state.Settings.Model; model != "" {
+		usage.Model = &model
+	}
+	if total.LastInputTokens == 0 && *usage.OutputTokens == 0 {
+		return
+	}
+	if active.Usage == nil || !reflect.DeepEqual(*active.Usage, usage) {
+		a.chatAction(t.StateAction{Value: &t.ChatUsageAction{Type: t.ActionTypeChatUsage, TurnId: active.Id, Usage: usage}})
+	}
+}
+
+// syncActivity reports retries, compaction and tool progress as the chat's
+// status line.
+func (a *ahpChat) syncActivity(c *sessionController) {
+	activity := ""
+	switch {
+	case c.state.Phase == "retrying" && c.state.Retry != nil:
+		activity = fmt.Sprintf("Retrying · %s · attempt %d in %.1fs", c.state.Retry.Reason, c.state.Retry.Attempt, float64(c.state.Retry.DelayMillis)/1000)
+	case c.state.Phase == "retrying":
+		activity = "Retrying…"
+	case c.state.Phase == "compacting":
+		activity = "Compacting context…"
+	case a.chat.ActiveTurn != nil:
+		parts := a.chat.ActiveTurn.ResponseParts
+		for i := len(parts) - 1; i >= 0 && activity == ""; i-- {
+			if tool, ok := parts[i].Value.(*t.ToolCallResponsePart); ok {
+				if running, ok := tool.ToolCall.Value.(*t.ToolCallRunningState); ok && c.state.ToolProgress[running.ToolCallId] != "" {
+					activity = running.DisplayName + ": " + c.state.ToolProgress[running.ToolCallId]
+				}
+			}
+		}
+	}
+	current := ""
+	if a.chat.Activity != nil {
+		current = *a.chat.Activity
+	}
+	if activity == current {
+		return
+	}
+	var value *string
+	if activity != "" {
+		value = &activity
+	}
+	a.chatAction(t.StateAction{Value: &t.ChatActivityChangedAction{Type: t.ActionTypeChatActivityChanged, Activity: value}})
+}
+
+// syncTitle names an untitled default chat, and its session, after the
+// first user message.
+func (a *ahpChat) syncTitle(c *sessionController) {
+	if a.session.chats[0] != a || a.session.state.Title != "New session" {
+		return
+	}
+	for _, e := range c.entries {
+		if e.Type == "user" && e.Content != "" {
+			title := []rune(strings.SplitN(e.Content, "\n", 2)[0])
+			if len(title) > 80 {
+				title = title[:80]
+			}
+			a.session.sessionAction(t.StateAction{Value: &t.SessionTitleChangedAction{Type: t.ActionTypeSessionTitleChanged, Title: string(title)}})
+			return
 		}
 	}
 }

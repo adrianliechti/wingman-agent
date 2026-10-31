@@ -1,5 +1,10 @@
 import type { Page, WebSocketRoute } from "@playwright/test";
-import { emptySession, sessionKey } from "../src/state/sessionStore.ts";
+import {
+	canonicalChatURI,
+	chatToSession,
+	emptySession,
+	sessionToChat,
+} from "../src/state/sessionStore.ts";
 import type {
 	ChatEntry,
 	PendingPrompt,
@@ -12,16 +17,29 @@ export type FixtureSession = Saved & {
 	resource: string;
 	entries: ChatEntry[];
 	phase: string;
+	activity?: string;
 	settings: ReturnType<typeof emptySession>["settings"];
 	prompts: PendingPrompt[];
 	pendingInputs: PendingTurnInput[];
-	canSteer: boolean;
 };
 const fixtures = new WeakMap<Page, AHPFixture>();
-const chatURI = (uri: string) =>
-	uri.replace("ahp-session:", "ahp-chat:") + "/chat";
+const chatURI = sessionToChat;
+/** Saved fixture sessions use the host's canonical URIs, so legacy links resolve. */
+export const fixtureChat = canonicalChatURI;
 const fixtureURI = (backend: string, id: string) =>
-	`ahp-session:/fixture/${encodeURIComponent(backend)}/${encodeURIComponent(id)}`;
+	chatToSession(canonicalChatURI(backend, id));
+const approvalOptions = [
+	{ id: "once", label: "Allow", kind: "approve" },
+	{ id: "session", label: "Allow for this session", kind: "approve", group: 1 },
+	{ id: "deny", label: "Deny", kind: "deny" },
+];
+const choices = (
+	items: { id: string; name: string; description?: string }[],
+) => ({
+	enum: items.map((item) => item.id),
+	enumLabels: items.map((item) => item.name),
+	enumDescriptions: items.map((item) => item.description ?? ""),
+});
 
 /** Browser presentation fixtures speak AHP. Real integration tests exercise the
  * Go host; these fixtures deliberately control latency and transcript contents. */
@@ -34,10 +52,13 @@ export class AHPFixture {
 	resourceObservers = new Set<(request: any, reply?: any) => void>();
 	sessions = new Map<string, FixtureSession>();
 	backends = new Set<string>();
+	/** Display names of the providers the fixture adds to the host's root. */
+	agents = new Map<string, string>();
 	connections = new Set<WebSocketRoute>();
 	subscriptions = new Map<string, Set<WebSocketRoute>>();
 	offline = false;
 	sequence = 0;
+	directory = "";
 	onLoad = (_session: FixtureSession) => {};
 	onCreate?: (params: any) => Promise<FixtureSession>;
 	onCommand?: (command: any, session: FixtureSession) => Promise<void>;
@@ -59,7 +80,6 @@ export class AHPFixture {
 			settings: emptySession("").settings,
 			prompts: [],
 			pendingInputs: [],
-			canSteer: false,
 		};
 		this.sessions.set(session.resource, session);
 		return session;
@@ -78,38 +98,141 @@ export class AHPFixture {
 			createdAt: session.updated_at,
 			modifiedAt: session.updated_at,
 			defaultChat: chatURI(session.resource),
-			_meta: {
-				"wingman.ref": {
-					workspaceId: this.scope.workspaceId,
-					backendId: session.backend,
-					sessionId: session.id,
-				},
-			},
+			chats: [{ resource: chatURI(session.resource), title: session.title }],
+		};
+	}
+	values(session: FixtureSession) {
+		const { model, mode, effort, unattended } = session.settings;
+		return {
+			model,
+			mode,
+			effort,
+			...(unattended !== undefined ? { unattended } : {}),
 		};
 	}
 	state(session: FixtureSession) {
-		const ref = {
-			workspaceId: this.scope.workspaceId,
-			backendId: session.backend,
-			sessionId: session.id,
-		};
+		const { settings } = session;
+		const properties: Record<string, unknown> = {};
+		if (settings.models.length)
+			properties.model = {
+				type: "string",
+				title: "Model",
+				chatMutable: true,
+				...choices(settings.models),
+			};
+		if (settings.modes.length)
+			properties.mode = {
+				type: "string",
+				title: "Mode",
+				chatMutable: true,
+				...choices(settings.modes),
+			};
+		if (settings.efforts.length)
+			properties.effort = {
+				type: "string",
+				title: "Effort",
+				chatMutable: true,
+				enum: settings.efforts,
+			};
+		if (settings.unattended !== undefined)
+			properties.unattended = {
+				type: "boolean",
+				title: "Unattended",
+				chatMutable: true,
+			};
 		return {
-			...this.summary(session),
+			provider: session.backend,
+			title: session.title,
+			status: 1,
 			lifecycle: "ready",
-			chats: [],
 			activeClients: [],
-			config: { schema: { type: "object", properties: {} }, values: {} },
-			_meta: {
-				wingman: {
-					...emptySession(sessionKey(session.backend, session.id)),
-					ref,
-					epoch: `fixture:${session.id}`,
-					status: "ready",
-					phase: session.phase,
-					settings: session.settings,
-					canSteer: session.canSteer,
+			chats: [
+				{
+					resource: chatURI(session.resource),
+					title: session.title,
+					status: 1,
+					modifiedAt: session.updated_at,
 				},
+			],
+			defaultChat: chatURI(session.resource),
+			config: {
+				schema: { type: "object", properties },
+				values: this.values(session),
 			},
+		};
+	}
+	tool(entry: ChatEntry) {
+		const kind = entry.toolKind === "execute" ? "terminal" : entry.toolKind;
+		const locations = (entry.toolLocations ?? []).map((location) => ({
+			type: "resource",
+			uri:
+				new URL(
+					location.path.split("/").map(encodeURIComponent).join("/"),
+					this.directory.replace(/\/$/, "") + "/",
+				).href + (location.line ? `#L${location.line}` : ""),
+		}));
+		return {
+			toolCallId: entry.toolId ?? entry.id,
+			toolName: entry.toolName ?? "Tool",
+			displayName: entry.toolName ?? "Tool",
+			...(entry.toolHint ? { intention: entry.toolHint } : {}),
+			status: entry.toolPartial
+				? "streaming"
+				: entry.toolResult !== undefined
+					? "completed"
+					: "running",
+			...(entry.toolPartial
+				? { partialInput: entry.toolArgs ?? "" }
+				: { toolInput: entry.toolArgs ?? "" }),
+			invocationMessage: entry.toolName ?? "Tool",
+			confirmed: "not-needed",
+			success: true,
+			pastTenseMessage: entry.toolName ?? "Tool",
+			content: [
+				...(entry.toolResult === undefined
+					? []
+					: [{ type: "text", text: entry.toolResult }]),
+				...locations,
+			],
+			...(kind ? { _meta: { toolKind: kind } } : {}),
+		};
+	}
+	question(field: NonNullable<PendingPrompt["fields"]>[number]) {
+		const select = !!field.enum?.length;
+		const defaults = Array.isArray(field.default)
+			? field.default.map(String)
+			: field.default != null
+				? [String(field.default)]
+				: [];
+		return {
+			id: field.name,
+			title: field.title,
+			message: field.description ?? field.name,
+			required: field.required,
+			kind: select
+				? field.multiple
+					? "multi-select"
+					: "single-select"
+				: field.type === "boolean" ||
+					  field.type === "number" ||
+					  field.type === "integer"
+					? field.type
+					: "text",
+			...(select
+				? {
+						options: field.enum!.map((id, index) => ({
+							id,
+							label: field.enum_labels?.[index] ?? id,
+							...(field.enum_descriptions?.[index]
+								? { description: field.enum_descriptions[index] }
+								: {}),
+							...(defaults.includes(id) ? { recommended: true } : {}),
+						})),
+						allowFreeformInput: !field.strict,
+					}
+				: field.default !== undefined
+					? { defaultValue: field.default }
+					: {}),
 		};
 	}
 	chat(session: FixtureSession): any {
@@ -140,7 +263,6 @@ export class AHPFixture {
 						text: user.content,
 						origin: { kind: "user" },
 						attachments,
-						_meta: { "wingman.entry": user },
 					},
 					responseParts: [],
 				});
@@ -155,27 +277,35 @@ export class AHPFixture {
 						entry.content +
 						(entry.images ?? []).map((src) => `\n\n![Image](${src})`).join(""),
 				});
+			else if (entry.type === "notice")
+				parts.push({ kind: "systemNotification", content: entry.content });
 			else if (entry.type === "tool")
-				parts.push({
-					kind: "toolCall",
-					toolCall: {
-						toolCallId: entry.toolId ?? entry.id,
-						toolName: entry.toolName ?? "Tool",
-						displayName: entry.toolName ?? "Tool",
-						status: entry.toolResult !== undefined ? "completed" : "running",
-						toolInput: entry.toolArgs ?? "",
-						invocationMessage: entry.toolName ?? "Tool",
-						confirmed: "not-needed",
-						success: true,
-						pastTenseMessage: entry.toolName ?? "Tool",
-						content:
-							entry.toolResult === undefined
-								? undefined
-								: [{ type: "text", text: entry.toolResult }],
-						_meta: { wingman: entry },
-					},
-				});
+				parts.push({ kind: "toolCall", toolCall: this.tool(entry) });
 		}
+		// Clients derive the phase from the active turn, so a busy session needs one.
+		if (session.phase !== "idle" && !turns.length)
+			turns.push({
+				id: "fixture-turn",
+				startedAt: session.updated_at,
+				state: "complete",
+				message: { text: "Fixture", origin: { kind: "user" } },
+				responseParts:
+					session.phase === "tool_running"
+						? [
+								{
+									kind: "toolCall",
+									toolCall: {
+										toolCallId: "fixture-tool",
+										toolName: "fixture",
+										displayName: "Fixture",
+										status: "running",
+										invocationMessage: "Fixture",
+										confirmed: "not-needed",
+									},
+								},
+							]
+						: [],
+			});
 		const activeTurn = session.phase !== "idle" ? turns.pop() : undefined;
 		if (activeTurn)
 			for (const prompt of session.prompts) {
@@ -189,6 +319,7 @@ export class AHPFixture {
 							status: "pending-confirmation",
 							invocationMessage: prompt.message,
 							toolInput: "",
+							options: prompt.options ?? approvalOptions,
 						},
 					});
 				else
@@ -197,21 +328,9 @@ export class AHPFixture {
 						request: {
 							id: prompt.id,
 							message: prompt.message,
-							questions: (prompt.fields ?? []).map((field) => ({
-								id: field.name,
-								title: field.title,
-								message: field.description ?? field.name,
-								required: field.required,
-								kind: field.enum?.length
-									? field.multiple
-										? "multi-select"
-										: "single-select"
-									: field.type === "boolean" || field.type === "number"
-										? field.type
-										: "text",
-								options: field.enum?.map((id) => ({ id, label: id })),
-								allowFreeformInput: !field.strict,
-							})),
+							questions: (prompt.fields ?? []).map((field) =>
+								this.question(field),
+							),
 						},
 					});
 			}
@@ -220,6 +339,7 @@ export class AHPFixture {
 			title: session.title,
 			status: activeTurn ? 2 : 1,
 			modifiedAt: session.updated_at,
+			...(session.activity ? { activity: session.activity } : {}),
 			turns,
 			activeTurn,
 			queuedMessages: session.pendingInputs.map((input) => ({
@@ -235,12 +355,18 @@ export class AHPFixture {
 			socket.send(JSON.stringify({ jsonrpc: "2.0", method: "action", params }));
 	}
 	publish(session: FixtureSession) {
+		const values = this.values(session);
 		this.send(session.resource, {
-			type: "session/metaChanged",
-			_meta: this.state(session)._meta,
+			type: "session/configChanged",
+			config: values,
 		});
 		const channel = chatURI(session.resource),
 			chat = this.chat(session);
+		this.send(channel, { type: "chat/configChanged", config: values });
+		this.send(channel, {
+			type: "chat/activityChanged",
+			activity: chat.activity,
+		});
 		this.send(channel, { type: "chat/truncated" });
 		this.send(channel, { type: "chat/turnsLoaded", turns: chat.turns });
 		if (chat.activeTurn) {
@@ -254,6 +380,18 @@ export class AHPFixture {
 			for (const part of responseParts)
 				this.send(channel, { type: "chat/responsePart", turnId: id, part });
 		}
+	}
+	private withAgents(agents: any[]) {
+		const known = new Set(agents.map((agent) => agent.provider));
+		const extra = [...new Set([...this.backends, ...this.agents.keys()])]
+			.filter((id) => !known.has(id))
+			.map((id) => ({
+				provider: id,
+				displayName: this.agents.get(id) ?? id,
+				description: "",
+				models: [],
+			}));
+		return [...agents, ...extra];
 	}
 	disconnect() {
 		this.offline = true;
@@ -271,6 +409,15 @@ export class AHPFixture {
 			const forwarded = new Map<unknown, any>();
 			server.onMessage((wire) => {
 				const message = JSON.parse(String(wire));
+				if (message.result?.defaultDirectory)
+					this.directory = message.result.defaultDirectory;
+				for (const snapshot of message.result?.snapshots ?? [])
+					if (snapshot.resource === "ahp-root://")
+						snapshot.state.agents = this.withAgents(snapshot.state.agents);
+				if (message.params?.action?.type === "root/agentsChanged")
+					message.params.action.agents = this.withAgents(
+						message.params.action.agents,
+					);
 				const request = forwarded.get(message.id);
 				if (request) {
 					for (const observer of this.resourceObservers)
@@ -281,7 +428,7 @@ export class AHPFixture {
 				if (resolve) {
 					waiting.delete(message.id);
 					resolve(message);
-				} else socket.send(wire);
+				} else socket.send(JSON.stringify(message));
 			});
 			let clientId = "";
 			socket.onClose(() => {
@@ -373,21 +520,24 @@ export class AHPFixture {
 						reply({});
 						return;
 					}
+					const session = this.find(p.channel);
 					if (
-						request.method === "x-wingman/resolveSession" &&
-						this.backends.has(p.backend)
+						session &&
+						(request.method === "disposeSession" ||
+							request.method === "disposeChat")
 					) {
-						const session = [...this.sessions.values()].find(
-							(s) => s.backend === p.backend && s.id === p.session,
-						);
-						if (!session) {
-							server.send(wire);
-							return;
-						}
-						reply({ resource: session.resource });
+						this.sessions.delete(session.resource);
+						for (const peer of this.connections)
+							peer.send(
+								JSON.stringify({
+									jsonrpc: "2.0",
+									method: "root/sessionRemoved",
+									params: { session: session.resource },
+								}),
+							);
+						reply({});
 						return;
 					}
-					const session = this.find(p.channel);
 					if (session && request.method === "completions") {
 						reply({ items: this.onCompletions?.(p, session) ?? [] });
 						return;
@@ -417,7 +567,7 @@ export class AHPFixture {
 					if (session && request.method === "dispatchAction") {
 						const action = p.action;
 						const command =
-							action.type === "session/configChanged"
+							action.type === "chat/configChanged"
 								? { type: "settings", ...action.config }
 								: action.type === "chat/pendingMessageSet"
 									? {
@@ -435,6 +585,7 @@ export class AHPFixture {
 										? {
 												type: "prompt_response",
 												action: action.approved ? "accept" : "decline",
+												option: action.selectedOptionId,
 												promptId: action.toolCallId.replace("approval:", ""),
 											}
 										: action.type === "chat/inputCompleted"

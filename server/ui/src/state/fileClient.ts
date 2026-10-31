@@ -1,5 +1,6 @@
 import type { AHPConnection } from "./ahpConnection.ts";
-import type { LSPClient } from "./lspClient.ts";
+import { fetchJSON, fetchOK } from "../api/http.ts";
+import { lspSourceScheme, type LSPClient } from "./lspClient.ts";
 import type { FileContent, FileEntry } from "../types/protocol.ts";
 import type { ContentEncoding } from "@microsoft/agent-host-protocol";
 
@@ -83,7 +84,9 @@ export class FileClient {
 	): Promise<FileContent> {
 		signal?.throwIfAborted();
 		if (external) {
-			const uri = absoluteFileURI(path);
+			const uri = path.startsWith(`${lspSourceScheme}:`)
+				? path
+				: absoluteFileURI(path);
 			const result = await this.lsp.connection.request<{ text: string }>(
 				"workspace/textDocumentContent",
 				{ uri },
@@ -198,22 +201,19 @@ export class FileClient {
 		});
 	}
 	async reveal(path: string) {
-		await this.ahp.extension("x-wingman/revealResource", {
-			channel: rootChannel,
-			uri: await this.uri(path),
+		await fetchOK("/api/workspace/reveal", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ path }),
 		});
 	}
-	async search(
+	search(
 		query: string,
 		signal?: AbortSignal,
 	): Promise<{ path: string; name: string }[]> {
-		signal?.throwIfAborted();
-		const result = await this.ahp.extension<{ path: string; name: string }[]>(
-			"x-wingman/fileSearch",
-			{ channel: rootChannel, query },
-		);
-		signal?.throwIfAborted();
-		return result;
+		return fetchJSON(`/api/workspace/files?${new URLSearchParams({ query })}`, {
+			signal,
+		});
 	}
 }
 export function absoluteFileURI(path: string) {

@@ -793,6 +793,7 @@ function BranchPicker({
 		mutationFn: fetchGitBranches,
 		onSuccess: (branches) => {
 			queryClient.setQueryData(queryKeys.git.branches, branches);
+			void queryClient.invalidateQueries({ queryKey: queryKeys.git.status });
 		},
 	});
 	const refetchBranches = branchesQuery.refetch;

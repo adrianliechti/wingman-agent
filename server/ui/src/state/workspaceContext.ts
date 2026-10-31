@@ -5,11 +5,12 @@ import {
 	useSyncExternalStore,
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { fetchJSON, fetchOK } from "../api/http.ts";
+import { fetchOK } from "../api/http.ts";
+import { useRootAgents } from "../hooks/useAgents.ts";
+import { configSettings } from "./ahpSession.ts";
 import {
 	EMPTY_SETTINGS,
 	isDraft,
-	splitSessionKey,
 	type SessionSettings,
 	type SettingsPatch,
 } from "./sessionStore.ts";
@@ -29,29 +30,39 @@ export function useWorkspace() {
 	if (!value) throw new Error("Workspace provider missing");
 	return value;
 }
-export function backendSettingsQuery(backend: string) {
+/** A new chat's defaults; the catalogue revision refetches them when the host discovers models. */
+export function backendSettingsQuery(backend: string, catalogue = "") {
 	return {
-		queryKey: ["server", "backend-settings", backend],
-		queryFn: ({ signal }: { signal: AbortSignal }) =>
-			fetchJSON<SessionSettings>(
-				`/api/v2/backends/${encodeURIComponent(backend)}/settings`,
-				{ signal },
-			),
+		queryKey: ["server", "backend-settings", backend, catalogue],
+		queryFn: async (): Promise<SessionSettings> => {
+			const ahp = workspaceClient().ahp;
+			const { schema, values } = await ahp.request("resolveSessionConfig", {
+				channel: "ahp-root://",
+				provider: backend,
+			});
+			return configSettings(backend, schema.properties, values, ahp.root);
+		},
 	};
 }
 export function draftSettingsKey(key: string, draftId: string) {
-	return JSON.stringify([splitSessionKey(key).backendId, draftId]);
+	return JSON.stringify([workspaceClient().backendOf(key), draftId]);
 }
 export function useSessionSettings(key = "", draftId = key) {
 	const queryClient = useQueryClient();
 	const client = workspaceClient();
 	const { backend, drafts, setDraft } = useWorkspace();
 	const draft = isDraft(key);
-	const owner = key ? splitSessionKey(key).backendId : backend;
+	const owner = key ? client.backendOf(key) : backend;
 	const settingsKey = JSON.stringify([owner, draftId]);
 	const hasDefaults = owner === "wingman";
+	const models = useRootAgents().find(
+		(agent) => agent.provider === owner,
+	)?.models;
 	const catalogs = useQuery({
-		...backendSettingsQuery(owner),
+		...backendSettingsQuery(
+			owner,
+			models?.map((model) => model.id).join() ?? "",
+		),
 		enabled: draft && hasDefaults,
 	});
 	const sessionSettings = useSyncExternalStore(
@@ -67,7 +78,7 @@ export function useSessionSettings(key = "", draftId = key) {
 		: sessionSettings;
 	const setSettings = async (patch: SettingsPatch) => {
 		if (draft) setDraft(settingsKey, patchDraftSettings(settings, patch));
-		else await client.command(key, { type: "settings", ...patch });
+		else await client.configure(key, patch);
 	};
 	const retryModels = async () => {
 		try {
@@ -77,7 +88,7 @@ export function useSessionSettings(key = "", draftId = key) {
 			);
 		} finally {
 			await queryClient.invalidateQueries({
-				queryKey: backendSettingsQuery(owner).queryKey,
+				queryKey: ["server", "backend-settings", owner],
 			});
 		}
 	};

@@ -313,11 +313,11 @@ func TestAHPPersistedSessionURI(t *testing.T) {
 	chat := ahpCreate(t, client, uri)
 	other, _, agent := newProtocolServer(t)
 	h := other.ahpHost()
-	a, err := h.ensureSession(chat)
+	a, ch, err := h.ensureSession(chat)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.resource != uri || a.controller.ref.SessionID != "session-1" || agent.loaded.Load() != 1 {
+	if a.resource != uri || ch.controller.ref.SessionID != "session-1" || agent.loaded.Load() != 1 {
 		t.Fatalf("session alias did not recover: %+v", a)
 	}
 	if s.scope.WorkspaceID != other.scope.WorkspaceID {
@@ -477,5 +477,51 @@ func TestAHPOriginPolicy(t *testing.T) {
 				conn.CloseNow()
 			}
 		})
+	}
+}
+
+func TestAHPSlowRequestDoesNotBlockTheConnection(t *testing.T) {
+	_, _, agent, endpoint := ahpTestServer(t)
+	agent.creating = make(chan struct{})
+	client := ahpTestClient(t, endpoint, "slow")
+	created := make(chan error, 1)
+	go func() {
+		created <- client.Request(t.Context(), "createSession", types.CreateSessionParams{Channel: "ahp-session:/slow", Provider: ahpPtr("one")}, nil)
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := client.Request(ctx, "listSessions", types.ListSessionsParams{Channel: types.RootResourceURI}, nil); err != nil {
+		t.Fatalf("a request waited for a slow session creation: %v", err)
+	}
+	close(agent.creating)
+	if err := <-created; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAHPReconnectRequiresAKnownClient(t *testing.T) {
+	_, _, _, endpoint := ahpTestServer(t)
+	client := ahpTestClient(t, endpoint, "")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	// Its negotiated projection is unknown, so the client must initialize again.
+	if _, err := client.Reconnect(ctx, "stranger", 0, []string{types.RootResourceURI}); err == nil {
+		t.Fatal("reconnect from an unknown client was accepted")
+	}
+}
+
+func TestAHPUnknownSessionLeavesNoController(t *testing.T) {
+	_, b, _, endpoint := ahpTestServer(t)
+	client := ahpTestClient(t, endpoint, "probe")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, _, err := client.Subscribe(ctx, canonicalAHPURI("one", "missing")); err == nil {
+		t.Fatal("subscribing to an unknown session succeeded")
+	}
+	b.mu.Lock()
+	_, kept := b.sessions["missing"]
+	b.mu.Unlock()
+	if kept {
+		t.Fatal("an unknown session id left a controller behind")
 	}
 }

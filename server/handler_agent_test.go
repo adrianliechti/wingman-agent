@@ -29,16 +29,12 @@ func TestAgentAPIContract(t *testing.T) {
 	if boot.Protocol != 2 || boot.InstanceID == "" || boot.WorkspaceID == "" {
 		t.Fatalf("bootstrap: %#v", boot)
 	}
-	backendRequest := httptest.NewRequest(http.MethodGet, "http://localhost/api/v2/backends", nil)
-	backendRequest.Header.Set(instanceHeader, boot.InstanceID)
-	catalogueResponse := httptest.NewRecorder()
-	app.ServeHTTP(catalogueResponse, backendRequest)
-	var backends []AgentEntry
-	if err := json.Unmarshal(catalogueResponse.Body.Bytes(), &backends); err != nil {
-		t.Fatal(err)
-	}
-	if catalogueResponse.Code != 200 || len(backends) == 0 || backends[0].ID != "wingman" {
-		t.Fatalf("backends: %s", catalogueResponse.Body)
+	activityRequest := httptest.NewRequest(http.MethodGet, "http://localhost/api/workspace/activity", nil)
+	activityRequest.Header.Set(instanceHeader, boot.InstanceID)
+	activity := httptest.NewRecorder()
+	app.ServeHTTP(activity, activityRequest)
+	if activity.Code != 200 || !json.Valid(activity.Body.Bytes()) {
+		t.Fatalf("activity: %d %s", activity.Code, activity.Body)
 	}
 
 	var info map[string]any

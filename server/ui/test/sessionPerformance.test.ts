@@ -1,29 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { chatReducer } from "@microsoft/agent-host-protocol";
-import {
-	SessionStore,
-	emptySession,
-	sessionKey,
-} from "../src/state/sessionStore.ts";
+import { SessionStore, emptySession } from "../src/state/sessionStore.ts";
 import { AHPSessionProjection } from "../src/state/ahpSession.ts";
 
 test("AHP token bursts retain completed entries and unrelated summaries and batch renders", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const store = new SessionStore(),
 		projection = new AHPSessionProjection();
-	const key = sessionKey("one", "first"),
-		other = sessionKey("one", "other");
+	const key = "ahp-chat:/first",
+		other = "ahp-chat:/other";
 	const session: any = {
-		_meta: {
-			wingman: {
-				...emptySession(key),
-				ref: { backendId: "one", sessionId: "first", workspaceId: "w" },
-				epoch: "e",
-				phase: "streaming",
-				status: "ready",
-			},
-		},
+		provider: "one",
+		title: "Test",
+		status: 1,
+		lifecycle: "ready",
+		activeClients: [],
+		chats: [{ resource: key, title: "Test", status: 1, modifiedAt: "" }],
+		defaultChat: key,
 	};
 	let chat: any = {
 		resource: "ahp-chat:/first",
@@ -75,7 +69,7 @@ test("AHP token bursts retain completed entries and unrelated summaries and batc
 test("closed histories are bounded without discarding an active session", () => {
 	const store = new SessionStore();
 	for (let i = 0; i < 100; i++) {
-		const key = sessionKey("one", String(i));
+		const key = `ahp-chat:/${i}`;
 		store.expect(key);
 		store.set(key, {
 			...emptySession(key),
@@ -84,5 +78,5 @@ test("closed histories are bounded without discarding an active session", () => 
 		store.forget(key);
 	}
 	assert.equal(Object.keys(store.getSnapshot()).length, 21);
-	assert.equal(store.getSnapshot()[sessionKey("one", "0")].phase, "streaming");
+	assert.equal(store.getSnapshot()["ahp-chat:/0"].phase, "streaming");
 });

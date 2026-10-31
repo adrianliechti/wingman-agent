@@ -9,23 +9,15 @@ import type { ModeOption } from "../api/sessions.ts";
 import { summarizeSession, type SessionSummary } from "./sessionSummary.ts";
 
 export type WorkspaceScope = { workspaceId: string; instanceId: string };
-export type SessionRef = {
-	workspaceId: string;
-	backendId: string;
-	sessionId: string;
-};
 export type SessionSettings = {
 	models: ModelInfo[];
-	modelsError?: string;
 	model: string;
 	effort: string;
 	efforts: string[];
 	modes: ModeOption[];
 	mode: string;
 	unattended?: boolean;
-	canDelete: boolean;
 	canFork?: boolean;
-	canCompact?: boolean;
 };
 export type SettingsPatch = Partial<
 	Pick<SessionSettings, "model" | "effort" | "mode" | "unattended">
@@ -33,9 +25,9 @@ export type SettingsPatch = Partial<
 export type SessionFields = {
 	status: "loading" | "ready" | "error" | "deleted";
 	phase: Phase;
-	retry?: { attempt: number; reason: string; delayMillis: number };
+	/** The host's status line: a retry, tool progress or compaction. */
+	activity?: string;
 	error: string | null;
-	compaction?: { tokensBefore: number; tokensAfter: number };
 	usage: {
 		inputTokens: number;
 		cachedTokens: number;
@@ -45,32 +37,87 @@ export type SessionFields = {
 	};
 	prompts: PendingPrompt[];
 	pendingInputs: PendingTurnInput[];
-	queuePaused: boolean;
-	canSteer: boolean;
 	settings: SessionSettings;
-	toolProgress: Record<string, string>;
 };
 export type SessionView = SessionFields & {
+	/** The chat URI; a tab shows one chat. */
 	id: string;
+	/** The URI of the session the chat belongs to. */
+	session: string;
+	provider: string;
 	entries: ChatEntry[];
-	epoch: string;
 	revision: number;
 	synchronized: boolean;
 };
 
-export function sessionKey(backendId: string, sessionId: string): string {
-	return JSON.stringify([backendId, sessionId]);
-}
-export function splitSessionKey(key: string): {
-	backendId: string;
-	sessionId: string;
-} {
-	if (!key) return { backendId: "wingman", sessionId: "" };
-	const [backendId, sessionId] = JSON.parse(key) as [string, string];
-	return { backendId, sessionId };
+/** A chat that does not exist yet; real chats are keyed by their chat URI. */
+export function draftKey(backendId: string): string {
+	return JSON.stringify([backendId, ""]);
 }
 export function isDraft(key: string): boolean {
-	return !splitSessionKey(key).sessionId;
+	return !key.startsWith("ahp-chat:");
+}
+export function draftBackend(key: string): string {
+	try {
+		const [backendId] = JSON.parse(key) as [unknown];
+		if (typeof backendId === "string" && backendId) return backendId;
+	} catch {
+		// Not a draft key.
+	}
+	return "wingman";
+}
+
+function base64url(value: string): string {
+	let binary = "";
+	for (const byte of new TextEncoder().encode(value))
+		binary += String.fromCharCode(byte);
+	return btoa(binary)
+		.replace(/\+/g, "-")
+		.replace(/\//g, "_")
+		.replace(/=+$/, "");
+}
+function fromBase64url(value: string): string {
+	const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
+	return new TextDecoder().decode(
+		Uint8Array.from(binary, (char) => char.charCodeAt(0)),
+	);
+}
+/** The host's canonical chat URI for a native session it has not aliased. */
+export function canonicalChatURI(backendId: string, sessionId: string): string {
+	return `ahp-chat:/wingman/${base64url(backendId)}/${base64url(sessionId)}`;
+}
+/** The provider a canonical chat or session URI names, if any. */
+export function canonicalBackend(uri: string): string | undefined {
+	const match = /^ahp-(?:chat|session):\/wingman\/([^/]+)\/[^/]+$/.exec(uri);
+	if (!match) return;
+	try {
+		return fromBase64url(match[1]);
+	} catch {
+		return;
+	}
+}
+export function chatToSession(uri: string): string {
+	return uri.replace(/^ahp-chat:/, "ahp-session:");
+}
+export function sessionToChat(uri: string): string {
+	return uri.replace(/^ahp-session:/, "ahp-chat:");
+}
+/** Keys were `["backend","sessionId"]` before URI identity; drafts stay drafts. */
+export function migrateSessionKey(key: string): string {
+	if (!key || key.startsWith("ahp-chat:")) return key;
+	if (key.startsWith("ahp-session:")) return sessionToChat(key);
+	try {
+		const [backendId, sessionId] = JSON.parse(key) as [unknown, unknown];
+		if (
+			typeof backendId === "string" &&
+			typeof sessionId === "string" &&
+			sessionId
+		)
+			return canonicalChatURI(backendId, sessionId);
+	} catch {
+		// Not a legacy key.
+	}
+	return key;
 }
 
 export const EMPTY_SETTINGS: SessionSettings = {
@@ -80,12 +127,12 @@ export const EMPTY_SETTINGS: SessionSettings = {
 	efforts: [],
 	modes: [],
 	mode: "",
-	canDelete: false,
 };
 export function emptySession(id: string): SessionView {
 	return {
 		id,
-		epoch: "",
+		session: "",
+		provider: "",
 		revision: 0,
 		synchronized: false,
 		status: "loading",
@@ -101,10 +148,7 @@ export function emptySession(id: string): SessionView {
 		},
 		prompts: [],
 		pendingInputs: [],
-		queuePaused: false,
-		canSteer: false,
 		settings: EMPTY_SETTINGS,
-		toolProgress: {},
 	};
 }
 // React presentation cache. AHPConnection owns wire ordering and reducers;

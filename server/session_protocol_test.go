@@ -8,6 +8,7 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,7 @@ type protocolAgent struct {
 	sent     atomic.Int32
 	loaded   atomic.Int32
 	gate     chan struct{}
+	creating chan struct{} // when set, NewSession waits for it to close
 }
 
 func (a *protocolAgent) Name() string { return "test" }
@@ -50,6 +52,9 @@ func (a *protocolAgent) SetModel(_ context.Context, _, value string) error {
 	return nil
 }
 func (a *protocolAgent) NewSession(context.Context) (string, error) {
+	if a.creating != nil {
+		<-a.creating
+	}
 	return fmt.Sprintf("session-%d", a.created.Add(1)), nil
 }
 func (a *protocolAgent) LoadSession(_ context.Context, id string) error {
@@ -85,7 +90,7 @@ func (a *protocolAgent) Close() error  { return nil }
 func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
 	a.sent.Add(1)
 	a.mu.Lock()
-	a.messages = append(a.messages, harness.Message{Role: harness.RoleUser, Content: harness.CloneContent(input)})
+	a.messages = append(a.messages, harness.Message{Role: harness.RoleUser, InputID: harness.InputIDFromContext(ctx), Content: harness.CloneContent(input)})
 	a.mu.Unlock()
 	return func(yield func(harness.Message, error) bool) {
 		if !yield(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "live prefix", TextID: "answer"}}}, nil) {
@@ -168,7 +173,7 @@ func TestSessionRestoresEditableQueueAndRejectsMissingHistory(t *testing.T) {
 	c.mu.Lock()
 	state := c.state
 	c.mu.Unlock()
-	if len(state.PendingInputs) != 1 || state.PendingInputs[0].ID != "saved-input" || state.PendingInputs[0].Text != "original" || !state.QueuePaused {
+	if len(state.PendingInputs) != 1 || state.PendingInputs[0].ID != "saved-input" || state.PendingInputs[0].Text != "original" || !b.turns.Snapshot("saved").Paused {
 		t.Fatalf("restored queue: %+v", state)
 	}
 	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "edit", Epoch: c.epoch, Type: "queue_update", InputID: "saved-input", Text: "edited", Files: []string{"next.go"}})
@@ -352,11 +357,9 @@ func TestSessionQueuePersistenceFailureDoesNotAcknowledgeClearing(t *testing.T) 
 	a.mu.Lock()
 	a.failSave = true
 	a.mu.Unlock()
-	for _, kind := range []string{"queue_clear", "cancel"} {
-		rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: kind, Epoch: c.epoch, Type: kind, ClearQueue: true})
-		if rec.Code != 409 {
-			t.Fatalf("%s silently succeeded: %d", kind, rec.Code)
-		}
+	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "cancel", Epoch: c.epoch, Type: "cancel", ClearQueue: true})
+	if rec.Code != 409 {
+		t.Fatalf("cancel silently succeeded: %d", rec.Code)
 	}
 	if len(b.turns.Snapshot("saved").Inputs) != 1 {
 		t.Fatal("failed persistence removed the input")
@@ -434,7 +437,7 @@ func (a *compactingProtocolAgent) Compact(ctx context.Context, _, focus string) 
 	}
 }
 
-func TestSessionCompactCommandReportsPhaseAndOutcome(t *testing.T) {
+func TestSessionCompactMessageRunsAsTurn(t *testing.T) {
 	s, other, _ := newProtocolServer(t)
 	a := &compactingProtocolAgent{protocolAgent: &protocolAgent{}, focus: make(chan string, 1), release: make(chan error, 1)}
 	b := s.bindBackend("compact", a)
@@ -450,27 +453,38 @@ func TestSessionCompactCommandReportsPhaseAndOutcome(t *testing.T) {
 		return c.state
 	}
 
-	rec := protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-1", Epoch: c.epoch, Type: "compact", Text: "api design"})
-	if rec.Code != 200 {
-		t.Fatalf("compact: %d %s", rec.Code, rec.Body)
-	}
-	if focus := <-a.focus; focus != "api design" || state().Phase != "compacting" {
-		t.Fatalf("focus=%q phase=%q", focus, state().Phase)
-	}
-	a.release <- nil
-	waitProtocol(t, func() bool { return state().Phase == "idle" && state().Compaction != nil })
-	if st := state(); st.Compaction.TokensAfter != 90 || st.Error != nil {
-		t.Fatalf("state after compaction = %+v", st)
+	entries := func() []TranscriptEntry {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return slices.Clone(c.entries)
 	}
 
-	rec = protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-2", Epoch: c.epoch, Type: "compact"})
+	rec := protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-1", Epoch: c.epoch, Type: "send", Text: "/compact api design"})
 	if rec.Code != 200 {
 		t.Fatalf("compact: %d %s", rec.Code, rec.Body)
 	}
-	<-a.focus
+	if focus := <-a.focus; focus != "api design" {
+		t.Fatalf("focus=%q", focus)
+	}
+	waitProtocol(t, func() bool { return state().Phase == "compacting" })
+	a.release <- nil
+	waitProtocol(t, func() bool { return state().Phase == "idle" && len(entries()) == 2 })
+	// The agent's history has no record of the compaction; the turn survives its reload.
+	c.replaceHistory()
+	if e := entries(); len(e) != 2 || e[0].ID != "input:compact-1" || e[0].Content != "/compact api design" || e[1].Type != "notice" || e[1].Content != "Context compacted · ~900 → ~90 tokens" || state().Error != nil {
+		t.Fatalf("compaction turn = %+v", e)
+	}
+
+	rec = protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-2", Epoch: c.epoch, Type: "send", Text: "/compact"})
+	if rec.Code != 200 {
+		t.Fatalf("compact: %d %s", rec.Code, rec.Body)
+	}
+	if focus := <-a.focus; focus != "" {
+		t.Fatalf("focus=%q", focus)
+	}
 	a.release <- errors.New("compaction did not reduce context")
 	waitProtocol(t, func() bool { return state().Phase == "idle" && state().Error != nil })
-	if st := state(); *st.Error != "compaction did not reduce context" || st.Compaction != nil {
-		t.Fatalf("state after failure = %+v", st)
+	if st, e := state(), entries(); *st.Error != "compaction did not reduce context" || len(e) != 3 || e[2].ID != "input:compact-2" {
+		t.Fatalf("state after failure = %+v %+v", st, e)
 	}
 }

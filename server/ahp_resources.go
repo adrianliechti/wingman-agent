@@ -338,7 +338,7 @@ func (h *ahpHost) mutateResource(req ahpRequest) (any, error) {
 		return nil, err
 	}
 	s.flushFiles()
-	s.broadcast(Frame{Type: EvtDiagnosticsChanged})
+	s.refreshDiagnostics()
 	return struct{}{}, nil
 }
 func (h *ahpHost) writeResource(rel string, p t.ResourceWriteParams) error {

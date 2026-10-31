@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/url"
 	"path/filepath"
 	"slices"
@@ -10,19 +11,30 @@ import (
 	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
+	"github.com/go-chi/chi/v5"
 	"github.com/microsoft/agent-host-protocol/clients/go/ahp"
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
-const ahpTerminalBuffer = 256 << 10
+// Like VS Code's agent host, retained output is trimmed to 80,000 bytes once
+// it exceeds 100,000; clients bound their own copies the same way.
+const (
+	ahpTerminalMaxContent     = 100_000
+	ahpTerminalTrimmedContent = 80_000
+)
 
 type ahpTerminal struct {
 	resource string
 	session  *terminal.Session
 	state    t.TerminalState // protected by host.mu
+	size     int             // bytes of retained content, protected by host.mu
 	opMu     sync.Mutex
 	filter   terminalOutputFilter
 	removed  bool
+}
+
+func ahpHostTerminalClaim() t.TerminalClaim {
+	return t.TerminalClaim{Value: &t.TerminalClientClaim{Kind: t.TerminalClaimKindClient, ClientId: ahpHostClient}}
 }
 
 func (h *ahpHost) prepareChannel(channel string) error {
@@ -46,7 +58,7 @@ func (h *ahpHost) prepareChannel(channel string) error {
 		}
 		return nil
 	}
-	_, err := h.ensureSession(channel)
+	_, _, err := h.ensureSession(channel)
 	return err
 }
 
@@ -135,7 +147,7 @@ func (h *ahpHost) attachTerminal(session *terminal.Session, resource string, cla
 		resource = "ahp-terminal:/wingman/" + session.ID()
 	}
 	if claim.Value == nil {
-		claim = t.TerminalClaim{Value: &t.TerminalClientClaim{Kind: t.TerminalClaimKindClient, ClientId: "wingman-host"}}
+		claim = ahpHostTerminalClaim()
 	}
 	cols, rows := session.Size()
 	cwd := (&url.URL{Scheme: "file", Path: filepath.ToSlash(session.Cwd())}).String()
@@ -184,6 +196,7 @@ func (h *ahpHost) attachTerminal(session *terminal.Session, resource string, cla
 				a.filter = terminalOutputFilter{}
 				clear := t.StateAction{Value: &t.TerminalClearedAction{Type: t.ActionTypeTerminalCleared}}
 				ahp.ApplyActionToTerminal(&a.state, clear)
+				a.size = 0
 				h.publish(resource, clear, nil, nil)
 				h.terminalDataLocked(a, a.filter.feed(snapshot))
 				h.mu.Unlock()
@@ -219,25 +232,44 @@ func (h *ahpHost) terminalDataLocked(a *ahpTerminal, data string) {
 	if data == "" {
 		return
 	}
-	content := ""
-	for _, part := range a.state.Content {
-		if p, ok := part.Value.(*t.TerminalUnclassifiedPart); ok {
-			content += p.Value
-		}
-	}
-	if len(content)+len(data) > ahpTerminalBuffer+(64<<10) {
-		data = content + data
-		data = data[len(data)-ahpTerminalBuffer:]
-		for len(data) > 0 && !utf8.RuneStart(data[0]) {
-			data = data[1:]
-		}
-		clear := t.StateAction{Value: &t.TerminalClearedAction{Type: t.ActionTypeTerminalCleared}}
-		ahp.ApplyActionToTerminal(&a.state, clear)
-		h.publish(a.resource, clear, nil, nil)
-	}
 	action := t.StateAction{Value: &t.TerminalDataAction{Type: t.ActionTypeTerminalData, Data: data}}
 	ahp.ApplyActionToTerminal(&a.state, action)
 	h.publish(a.resource, action, nil, nil)
+	if a.size += len(data); a.size > ahpTerminalMaxContent {
+		// Only new subscribers see the shorter snapshot; current ones keep
+		// rendering their own history, so no reset is broadcast.
+		var content strings.Builder
+		for _, part := range a.state.Content {
+			if p, ok := part.Value.(*t.TerminalUnclassifiedPart); ok {
+				content.WriteString(p.Value)
+			}
+		}
+		tail := string(terminal.SafeTail([]byte(content.String()), ahpTerminalTrimmedContent))
+		a.state.Content = []t.TerminalContentPart{{Value: &t.TerminalUnclassifiedPart{Type: "unclassified", Value: tail}}}
+		a.size = len(tail)
+	}
+}
+
+// AHP terminals are never unowned: a disconnected owner hands its terminals
+// to the host, from which any client may claim them.
+func (h *ahpHost) releaseTerminalsLocked(clientID string) {
+	for c := range h.clients {
+		if c.id == clientID {
+			return
+		}
+	}
+	released := false
+	for _, a := range h.terminals {
+		if claim, ok := a.state.Claim.Value.(*t.TerminalClientClaim); ok && claim.ClientId == clientID {
+			action := t.StateAction{Value: &t.TerminalClaimedAction{Type: t.ActionTypeTerminalClaimed, Claim: ahpHostTerminalClaim()}}
+			ahp.ApplyActionToTerminal(&a.state, action)
+			h.publish(a.resource, action, nil, nil)
+			released = true
+		}
+	}
+	if released {
+		h.publishTerminalsLocked()
+	}
 }
 
 func (c *ahpConnection) createTerminal(raw json.RawMessage) (any, error) {
@@ -284,7 +316,7 @@ func (c *ahpConnection) createTerminal(raw json.RawMessage) (any, error) {
 	exists := h.terminals[p.Channel] != nil
 	h.mu.Unlock()
 	if exists {
-		return nil, &ahpRPCError{Code: -32003, Message: "terminal already exists"}
+		return nil, &ahpRPCError{Code: int(t.ErrorCodeAlreadyExists), Message: "terminal already exists"}
 	}
 	session, err := h.server.terminals.CreateShell(shell, dir, name, int(cols), int(rows))
 	if err != nil {
@@ -389,6 +421,8 @@ func (c *ahpConnection) executeTerminalAction(p t.DispatchActionParams) error {
 	switch p.Action.Value.(type) {
 	case *t.TerminalTitleChangedAction, *t.TerminalClaimedAction:
 		h.publishTerminalsLocked()
+	case *t.TerminalClearedAction:
+		a.size = 0
 	}
 	return nil // dispatch publishes the authoritative acknowledgement exactly once.
 }
@@ -451,4 +485,24 @@ func (f *terminalOutputFilter) feed(data []byte) string {
 		f.pending = p[n:]
 	}
 	return out.String()
+}
+
+// handleTerminalStatus reports whether a terminal runs a command besides its
+// shell, so closing it can ask for confirmation.
+func (s *Server) handleTerminalStatus(w http.ResponseWriter, r *http.Request) {
+	uri, err := url.PathUnescape(chi.URLParam(r, "terminal"))
+	if err != nil {
+		http.Error(w, "invalid terminal URI", http.StatusBadRequest)
+		return
+	}
+	h := s.ahpHost()
+	h.startTerminals()
+	h.mu.Lock()
+	terminal := h.terminals[uri]
+	h.mu.Unlock()
+	if terminal == nil {
+		http.Error(w, "terminal not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]bool{"busy": terminal.session.HasForegroundProcess()})
 }

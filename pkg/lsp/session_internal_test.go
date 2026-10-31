@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -228,6 +229,54 @@ func TestCommandEditsReportTheClientsDecision(t *testing.T) {
 	}
 	if result, _ := client.ApplyEdit(ctx, edit(filepath.Join(filepath.Dir(root), "outside.go"))); result.Applied || len(decisions) != 2 {
 		t.Fatalf("an edit outside the workspace reached the client: %+v, %d decisions", result, len(decisions))
+	}
+}
+
+func TestCommandEditReviewDoesNotBlockTheServersMessages(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	hostSide, serverSide := net.Pipe()
+	session := &Session{rootURI: fileuri.FromPath(root), documents: map[string]*document{}}
+	_, conn, _ := protocol.NewClient(ctx, &sessionClient{session: session}, jsonrpc2.NewStream(hostSide))
+	defer conn.Close()
+	server := jsonrpc2.NewConn(jsonrpc2.NewStream(serverSide))
+	server.Go(ctx, jsonrpc2.MethodNotFoundHandler)
+	defer server.Close()
+
+	review := make(chan bool)
+	reviewing := make(chan struct{})
+	session.applyEdit = func(CommandWorkspaceEdit) bool {
+		close(reviewing)
+		return <-review
+	}
+	uri := fileuri.FromPath(filepath.Join(root, "main.go"))
+	applied := make(chan protocol.ApplyWorkspaceEditResult, 1)
+	go func() {
+		var result protocol.ApplyWorkspaceEditResult
+		_, _ = server.Call(ctx, "workspace/applyEdit", protocol.ApplyWorkspaceEditParams{Edit: protocol.WorkspaceEdit{Changes: map[lspuri.URI][]protocol.TextEdit{lspuri.MustParse(uri): {{NewText: "x"}}}}}, &result)
+		applied <- result
+	}()
+	<-reviewing
+	if err := server.Notify(ctx, "textDocument/publishDiagnostics", protocol.PublishDiagnosticsParams{URI: lspuri.MustParse(uri), Diagnostics: []protocol.Diagnostic{{Message: protocol.String("pending review")}}}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		session.mu.Lock()
+		published := session.documents[uri] != nil && session.documents[uri].published
+		session.mu.Unlock()
+		if published {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("diagnostics waited for the edit review")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	review <- true
+	if result := <-applied; !result.Applied {
+		t.Fatalf("reviewed edit = %+v, want applied", result)
 	}
 }
 

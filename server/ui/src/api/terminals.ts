@@ -7,6 +7,7 @@ import type {
 import { RpcError } from "@microsoft/agent-host-protocol/client";
 import type { TerminalEntry } from "../types/protocol";
 import { queryKeys } from "./query.ts";
+import { APIError, fetchJSON } from "./http.ts";
 import { workspaceClient } from "../state/workspaceClient.ts";
 import { ActionType } from "../state/ahpValues.ts";
 
@@ -25,6 +26,9 @@ export function terminalEntry(
 		busy: false,
 	};
 }
+// The host holds terminals it created and those whose owner disconnected.
+export const hostTerminalClientId = "wingman-host";
+
 export function ownTerminalClaim(): TerminalClaim {
 	return {
 		kind: "client",
@@ -57,16 +61,16 @@ export async function startTerminal(shell?: string): Promise<TerminalEntry> {
 export async function getTerminal(id: string): Promise<TerminalEntry | null> {
 	const uri = terminalURI(id);
 	try {
-		const ahp = workspaceClient().ahp;
 		const [state, status] = await Promise.all([
-			ahp.read<TerminalState>(uri),
-			ahp.extension<{ busy: boolean }>("x-wingman/terminalStatus", {
-				channel: uri,
-			}),
+			workspaceClient().ahp.read<TerminalState>(uri),
+			fetchJSON<{ busy: boolean }>(
+				`/api/workspace/terminals/${encodeURIComponent(uri)}/status`,
+			),
 		]);
 		return { ...terminalEntry(uri, state), busy: status.busy };
 	} catch (error) {
 		if (error instanceof RpcError && error.code === -32008) return null;
+		if (error instanceof APIError && error.status === 404) return null;
 		throw error;
 	}
 }
@@ -76,10 +80,14 @@ export async function deleteTerminal(id: string): Promise<void> {
 	try {
 		const state = await ahp.read<TerminalState>(uri);
 		if (state.claim.kind !== "client" || state.claim.clientId !== ahp.clientId)
-			await ahp.dispatch(uri, {
-				type: ActionType.TerminalClaimed,
-				claim: ownTerminalClaim(),
-			});
+			try {
+				await ahp.dispatch(uri, {
+					type: ActionType.TerminalClaimed,
+					claim: ownTerminalClaim(),
+				});
+			} catch {
+				return; // another open window owns it; only this tab closes
+			}
 		await ahp.request("disposeTerminal", { channel: uri });
 	} catch (error) {
 		if (!(error instanceof RpcError && error.code === -32008)) throw error;

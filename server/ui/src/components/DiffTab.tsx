@@ -110,25 +110,24 @@ function buildDiffRows(patch: string): DiffRow[] {
 	const rows: DiffRow[] = [];
 	let oldLine = 0;
 	let newLine = 0;
+	let inHunk = false;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 		let cls = "text-fg-muted";
 		let oldNum: string | number = "";
 		let newNum: string | number = "";
 
+		if (line.startsWith("diff ")) inHunk = false;
 		if (line.startsWith("@@")) {
+			inHunk = true;
 			const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
 			if (m) {
 				oldLine = parseInt(m[1], 10);
 				newLine = parseInt(m[2], 10);
 			}
 			cls = "text-purple bg-[rgba(197,134,192,0.08)]";
-		} else if (
-			line.startsWith("+++") ||
-			line.startsWith("---") ||
-			line.startsWith("diff ") ||
-			line.startsWith("index ")
-		) {
+		} else if (!inHunk || line.startsWith("\\ ")) {
+			// File headers (rename, binary summaries) and end-of-file markers.
 			cls = "text-fg-dim";
 		} else if (line.startsWith("+")) {
 			cls = "text-success bg-[rgba(78,201,176,0.1)]";

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
@@ -181,8 +182,11 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 	if input.ID == "" {
 		return TurnInputSnapshot{}, errors.New("input id required")
 	}
-	if len(input.Content) == 0 {
+	if len(input.Content) == 0 && !input.Compact {
 		return TurnInputSnapshot{}, errors.New("input content required")
+	}
+	if input.Compact {
+		input.Intent = TurnInputFollowUp
 	}
 	switch input.Intent {
 	case "":
@@ -390,6 +394,21 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 			err = fmt.Errorf("agent turn panicked: %v", recovered)
 		}
 	}()
+	if item.input.Compact {
+		compactor, ok := m.agent.(Compactor)
+		if !ok {
+			return errors.ErrUnsupported
+		}
+		var focus []string
+		for _, content := range item.input.Content {
+			focus = append(focus, content.AsText())
+		}
+		result, err := compactor.Compact(ctx, sessionID, strings.Join(focus, "\n"))
+		if err == nil {
+			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, Compaction: &result})
+		}
+		return err
+	}
 	ctx = harness.WithInputID(ctx, item.input.ID)
 	ctx = harness.WithStreamEventHandlers(ctx, harness.StreamEventHandlers{
 		Retry: func(info harness.RetryInfo) {
@@ -542,7 +561,7 @@ func (m *TurnManager) RemoveQueued(sessionID, inputID string) error {
 }
 
 func (m *TurnManager) ReplaceQueued(sessionID, inputID string, replacement TurnInput) error {
-	if len(replacement.Content) == 0 {
+	if len(replacement.Content) == 0 && !replacement.Compact {
 		return errors.New("input content required")
 	}
 	s := m.session(sessionID)
@@ -731,7 +750,7 @@ func (m *TurnManager) Snapshot(sessionID string) TurnSnapshot {
 	s := m.session(sessionID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := TurnSnapshot{Paused: s.paused, Compacting: s.compacting, Features: m.Features(sessionID), Error: s.queueErr}
+	out := TurnSnapshot{Paused: s.paused, Compacting: s.compacting || s.active != nil && s.active.input.Compact, Features: m.Features(sessionID), Error: s.queueErr}
 	if s.active != nil {
 		out.Inputs = append(out.Inputs, TurnInputSnapshot{
 			Input: CloneTurnInput(s.active.input), ID: s.active.input.ID, State: TurnInputActive, Intent: s.active.input.Intent,

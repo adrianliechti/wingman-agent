@@ -14,12 +14,10 @@ const attachment = {
 	label: "/reports:shared",
 	displayKind: "skill",
 	_meta: {
-		wingman: {
-			kind: "skill",
-			name: "reports:shared",
-			description: "Report",
-			input_hint: "[topic]",
-		},
+		command: "reports:shared",
+		isSkill: true,
+		description: "Report",
+		argumentHint: "[topic]",
 		opaque: { preserve: [1, 2] },
 	},
 };

@@ -1,7 +1,11 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
-import { terminalURI, ownTerminalClaim } from "../api/terminals.ts";
+import {
+	hostTerminalClientId,
+	terminalURI,
+	ownTerminalClaim,
+} from "../api/terminals.ts";
 import { workspaceClient } from "../state/workspaceClient.ts";
 import { ActionType } from "../state/ahpValues.ts";
 import type { TerminalState } from "@microsoft/agent-host-protocol";
@@ -14,7 +18,7 @@ interface Props {
 	onTitle: (id: string, title: string) => void;
 }
 
-export function TerminalView({ id, active, onTitle }: Props) {
+export function TerminalView({ id, active, onExit, onTitle }: Props) {
 	const hostRef = useRef<HTMLDivElement>(null);
 	const termRef = useRef<Terminal | null>(null);
 	const fitRef = useRef<FitAddon | null>(null);
@@ -22,6 +26,7 @@ export function TerminalView({ id, active, onTitle }: Props) {
 	const [status, setStatus] = useState("");
 
 	const handleTitle = useEffectEvent(onTitle);
+	const handleExit = useEffectEvent(onExit);
 
 	useEffect(() => {
 		const host = hostRef.current;
@@ -49,6 +54,8 @@ export function TerminalView({ id, active, onTitle }: Props) {
 			uri = terminalURI(id);
 		let owned = false,
 			exited = false,
+			sawRunning = false,
+			replaying = false,
 			stopped = false;
 		term.options.disableStdin = true;
 		const report = (error: unknown) => {
@@ -68,21 +75,32 @@ export function TerminalView({ id, active, onTitle }: Props) {
 		let claiming = false;
 		const release = ahp.watch(uri, (event) => {
 			const state = event.state as TerminalState;
+			const wasOwned = owned,
+				wasExited = exited;
 			owned =
 				state.claim.kind === "client" && state.claim.clientId === ahp.clientId;
 			exited = state.lifecycle.status === "exited";
 			term.options.disableStdin = !owned || exited || !ahp.getConnected();
 			if (event.snapshot) {
 				term.reset();
+				// Queries in replayed output must not answer into the live shell.
+				replaying = true;
 				term.write(
 					state.content
 						.map((part) => (part.type === "command" ? part.output : part.value))
 						.join(""),
+					() => {
+						replaying = false;
+					},
 				);
 				resize();
 			} else if (event.action?.action.type === "terminal/data")
 				term.write(event.action.action.data);
 			else if (event.action?.action.type === "terminal/cleared") term.reset();
+			// A host-created or handed-over terminal takes this client's size.
+			if (owned && !wasOwned && !event.snapshot) resize();
+			if (!exited) sawRunning = true;
+			else if (sawRunning && !wasExited) handleExit(id);
 			if (
 				event.snapshot ||
 				event.action?.action.type === "terminal/titleChanged"
@@ -95,7 +113,11 @@ export function TerminalView({ id, active, onTitle }: Props) {
 						? ""
 						: "Read only · owned by another client",
 			);
-			if (!owned && !claiming && event.snapshot) {
+			const handedOver =
+				event.action?.action.type === "terminal/claimed" &&
+				state.claim.kind === "client" &&
+				state.claim.clientId === hostTerminalClientId;
+			if (!owned && !claiming && (event.snapshot || handedOver)) {
 				claiming = true;
 				void ahp
 					.dispatch(uri, {
@@ -119,7 +141,7 @@ export function TerminalView({ id, active, onTitle }: Props) {
 				);
 		});
 		const dataSub = term.onData((data) => {
-			if (owned && !exited && ahp.getConnected())
+			if (owned && !exited && !replaying && ahp.getConnected())
 				void ahp
 					.dispatch(uri, { type: ActionType.TerminalInput, data })
 					.catch(report);

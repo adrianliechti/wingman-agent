@@ -4,72 +4,48 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"maps"
+	"slices"
 	"strings"
 
+	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
+// dispatch applies one client action. Retries carry the same action, so they
+// are recognised by the action's own identity: in-progress actions by their
+// key, and executed ones by the controller's receipt for a derived command ID.
 func (c *ahpConnection) dispatch(raw json.RawMessage) {
 	h := c.host
 	var p t.DispatchActionParams
 	if json.Unmarshal(raw, &p) != nil || p.ClientSeq <= 0 || p.Action.Value == nil {
 		return
 	}
-	data, _ := json.Marshal(p)
-	fingerprint := sha256.Sum256(data)
-	h.mu.Lock()
-	ledger := h.receipts[c.id]
-	if ledger == nil {
-		ledger = &ahpClientReceipts{entries: map[int64]*ahpActionReceipt{}}
-		h.receipts[c.id] = ledger
-	}
-	h.mu.Unlock()
-	ledger.mu.Lock()
-	defer ledger.mu.Unlock()
-	h.mu.Lock()
-	if previous, ok := ledger.entries[p.ClientSeq]; ok {
-		if previous.fingerprint == fingerprint {
-			if previous.envelope != nil {
-				c.notify("action", previous.envelope)
-			}
-		} else {
-			reason := "clientSeq reused with different content"
-			h.publish(p.Channel, p.Action, &t.ActionOrigin{ClientId: c.id, ClientSeq: p.ClientSeq}, &reason)
-		}
-		h.mu.Unlock()
-		return
-	}
-	if p.ClientSeq <= ledger.last {
-		reason := "clientSeq is older than the retained receipt window"
-		h.publish(p.Channel, p.Action, &t.ActionOrigin{ClientId: c.id, ClientSeq: p.ClientSeq}, &reason)
-		h.mu.Unlock()
-		return
-	}
-	receipt := &ahpActionReceipt{fingerprint: fingerprint}
-	ledger.last = p.ClientSeq
-	ledger.entries[p.ClientSeq] = receipt
-	h.mu.Unlock()
+	pending := &ahpPendingAction{params: p, origin: t.ActionOrigin{ClientId: c.id, ClientSeq: p.ClientSeq}}
+	key := ahpActionKey(p.Action)
 	var a *ahpSession
+	var ch *ahpChat
 	var err error
-	pending := &ahpPendingAction{params: p, origin: t.ActionOrigin{ClientId: c.id, ClientSeq: p.ClientSeq}, receipt: receipt}
 	if strings.HasPrefix(p.Channel, "ahp-terminal:") {
 		err = c.executeTerminalAction(p)
-	} else {
-		a, err = h.ensureSession(p.Channel)
-	}
-	if err == nil && a != nil {
+	} else if a, ch, err = h.ensureSession(p.Channel); err == nil {
 		h.mu.Lock()
-		if a.pending[ahpActionKey(p.Action)] != nil {
+		if ack, ok := a.acks[pending.origin]; ok && ack.key == key {
+			c.notify("action", ack.envelope)
+			h.mu.Unlock()
+			return
+		}
+		if running := a.pending[key]; running != nil {
+			h.mu.Unlock()
+			if running.origin == pending.origin {
+				return // a retry of an action whose acknowledgement is still due
+			}
 			err = ahpInvalid("action is already in progress")
 		} else {
-			a.pending[ahpActionKey(p.Action)] = pending
-		}
-		h.mu.Unlock()
-		if err == nil {
-			err = c.executeAction(a, p)
+			a.pending[key] = pending
+			h.mu.Unlock()
+			err = c.executeAction(a, ch, p)
 		}
 	}
 	h.mu.Lock()
@@ -89,37 +65,37 @@ func (c *ahpConnection) dispatch(raw json.RawMessage) {
 		}
 		envelope := h.publish(p.Channel, p.Action, &pending.origin, reason)
 		pending.envelope = &envelope
-		receipt.envelope = &envelope
-	}
-	if a != nil && a.pending[ahpActionKey(p.Action)] == pending {
-		delete(a.pending, ahpActionKey(p.Action))
-	}
-	// Retain a bounded retry window; older sequences are rejected, never rerun.
-	if len(ledger.entries) > 256 {
-		oldest := p.ClientSeq
-		for seq, entry := range ledger.entries {
-			if seq < oldest && entry.envelope != nil {
-				oldest = seq
-			}
+		if a != nil {
+			a.remember(pending.origin, key, envelope)
 		}
-		delete(ledger.entries, oldest)
+	}
+	if a != nil && a.pending[key] == pending {
+		delete(a.pending, key)
 	}
 }
 
-func (c *ahpConnection) executeAction(a *ahpSession, p t.DispatchActionParams) error {
+// ahpCommandID derives a controller command ID from what an action changes,
+// so a retried action reaches the controller's receipt for its first run.
+func ahpCommandID(kind string, values ...any) string {
+	data, _ := json.Marshal(values)
+	sum := sha256.Sum256(data)
+	return "ahp-" + kind + ":" + base64.RawURLEncoding.EncodeToString(sum[:12])
+}
+
+// executeAction applies an action to a session (ch is nil) or one of its chats.
+func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchActionParams) error {
 	h := c.host
-	command := Command{ID: fmt.Sprintf("ahp:%s:%d", c.id, p.ClientSeq), Epoch: a.controller.epoch}
 	h.mu.Lock()
-	if a.deleted {
+	if a.deleted || ch != nil && ch.removed {
 		h.mu.Unlock()
 		return ahpInvalid("session disposed")
 	}
-	chat := p.Channel == a.chat.Resource
-	session := p.Channel == a.resource
-	if !chat && !session {
-		h.mu.Unlock()
-		return ahpInvalid("unknown channel")
+	chat, session := ch != nil, ch == nil
+	if session {
+		ch = a.chats[0] // session config and 1.0 clients address the default chat
 	}
+	command := Command{Epoch: ch.controller.epoch}
+	previous := a.summary()
 	switch action := p.Action.Value.(type) {
 	case *t.ChatPendingMessageSetAction:
 		if !chat || action.Id == "" || action.Message.Origin.Kind != t.MessageKindUser || (action.Kind != t.PendingMessageKindQueued && action.Kind != t.PendingMessageKindSteering) {
@@ -130,19 +106,15 @@ func (c *ahpConnection) executeAction(a *ahpSession, p t.DispatchActionParams) e
 		if action.Kind == t.PendingMessageKindSteering {
 			command.Intent = code.TurnInputSteer
 		}
-		for _, queued := range a.chat.QueuedMessages {
-			if queued.Id == action.Id {
-				command.Type, command.InputID, command.ID = "queue_update", action.Id, fmt.Sprintf("ahp:%s:%d", c.id, p.ClientSeq)
-			}
-		}
-		if a.chat.SteeringMessage != nil && a.chat.SteeringMessage.Id == action.Id {
-			command.Type, command.InputID, command.ID = "queue_update", action.Id, fmt.Sprintf("ahp:%s:%d", c.id, p.ClientSeq)
+		queued := slices.ContainsFunc(ch.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == action.Id }) || ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id
+		if queued {
+			command.Type, command.InputID, command.ID = "queue_update", action.Id, ahpCommandID("queue-update", action.Id, action.Kind, action.Message)
 		}
 		h.mu.Unlock()
 		if err := h.attachments(action.Message, &command); err != nil {
 			return err
 		}
-		if err := a.command(command); err != nil {
+		if err := ch.command(command); err != nil {
 			return err
 		}
 		h.mu.Lock()
@@ -151,17 +123,17 @@ func (c *ahpConnection) executeAction(a *ahpSession, p t.DispatchActionParams) e
 		// so clients never retain a ghost queued message after the turn starts.
 		if pending := a.pending[ahpActionKey(p.Action)]; pending != nil && pending.envelope == nil {
 			queued := false
-			for _, item := range a.chat.QueuedMessages {
+			for _, item := range ch.chat.QueuedMessages {
 				if item.Id == action.Id {
 					queued = true
 				}
 			}
-			if a.chat.SteeringMessage != nil && a.chat.SteeringMessage.Id == action.Id {
+			if ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id {
 				queued = true
 			}
-			a.chatAction(p.Action)
+			ch.chatAction(p.Action)
 			if !queued {
-				a.chatAction(t.StateAction{Value: &t.ChatPendingMessageRemovedAction{Type: t.ActionTypeChatPendingMessageRemoved, Kind: action.Kind, Id: action.Id}})
+				ch.chatAction(t.StateAction{Value: &t.ChatPendingMessageRemovedAction{Type: t.ActionTypeChatPendingMessageRemoved, Kind: action.Kind, Id: action.Id}})
 			}
 		}
 		h.mu.Unlock()
@@ -171,15 +143,15 @@ func (c *ahpConnection) executeAction(a *ahpSession, p t.DispatchActionParams) e
 			h.mu.Unlock()
 			return ahpInvalid("chat and pending message required")
 		}
-		command.Type, command.InputID = "queue_remove", action.Id
+		command.Type, command.InputID, command.ID = "queue_remove", action.Id, ahpCommandID("queue-remove", action.Id)
 		h.mu.Unlock()
-		return a.command(command)
+		return ch.command(command)
 	case *t.ChatTurnStartedAction:
-		if !chat || action.TurnId == "" || a.chat.ActiveTurn != nil {
+		if !chat || action.TurnId == "" || ch.chat.ActiveTurn != nil {
 			h.mu.Unlock()
 			return ahpInvalid("chat must be idle and turnId must be present")
 		}
-		for _, turn := range a.chat.Turns {
+		for _, turn := range ch.chat.Turns {
 			if turn.Id == action.TurnId {
 				h.mu.Unlock()
 				return ahpInvalid("turn already exists")
@@ -195,23 +167,28 @@ func (c *ahpConnection) executeAction(a *ahpSession, p t.DispatchActionParams) e
 		}
 		if action.Message.Model != nil {
 			model := action.Message.Model.Id
-			if err := a.command(Command{ID: command.ID + ":model", Epoch: command.Epoch, Type: "settings", Model: &model}); err != nil {
+			if err := ch.command(Command{ID: command.ID + ":model", Epoch: command.Epoch, Type: "settings", Model: &model}); err != nil {
 				return err
 			}
 		}
-		return a.command(command)
+		return ch.command(command)
 	case *t.ChatTurnCancelledAction:
-		if !chat || a.chat.ActiveTurn == nil || a.chat.ActiveTurn.Id != action.TurnId {
+		if !chat || ch.chat.ActiveTurn == nil || ch.chat.ActiveTurn.Id != action.TurnId {
 			h.mu.Unlock()
 			return ahpInvalid("turn is no longer active")
 		}
-		command.Type = "cancel"
+		// Stopping a turn also drops what was queued behind it.
+		command.Type, command.ID, command.ClearQueue = "cancel", ahpCommandID("cancel", action.TurnId), true
 		h.mu.Unlock()
-		return a.command(command)
+		return ch.command(command)
 	case *t.ChatToolCallConfirmedAction:
 		id := strings.TrimPrefix(action.ToolCallId, "approval:")
-		prompt := a.prompts[id]
-		if !chat || a.chat.ActiveTurn == nil || a.chat.ActiveTurn.Id != action.TurnId || prompt == nil || prompt.response != nil || prompt.view.Kind != PromptKindConfirm {
+		prompt := ch.prompts[id]
+		answer := "decline"
+		if action.Approved {
+			answer = "accept"
+		}
+		if !chat || ch.chat.ActiveTurn == nil || ch.chat.ActiveTurn.Id != action.TurnId || prompt == nil || prompt.response != nil || prompt.view.Kind != PromptKindConfirm {
 			h.mu.Unlock()
 			return ahpInvalid("approval already resolved or expired")
 		}
@@ -219,25 +196,25 @@ func (c *ahpConnection) executeAction(a *ahpSession, p t.DispatchActionParams) e
 			h.mu.Unlock()
 			return ahpInvalid("editing approval input is not supported")
 		}
-		command.Type, command.PromptID, command.Action = "prompt_response", id, "decline"
-		if scope := action.Meta["wingman.scope"]; scope != nil {
-			if json.Unmarshal(scope, &command.Scope) != nil || (command.Scope != "once" && command.Scope != "session") {
+		command.Type, command.PromptID, command.Action, command.ID = "prompt_response", id, answer, ahpCommandID("confirm", id, answer, action.SelectedOptionId)
+		if id := action.SelectedOptionId; id != nil {
+			i := slices.IndexFunc(ahpApprovalOptions, func(o t.ConfirmationOption) bool { return o.Id == *id })
+			if i < 0 || (ahpApprovalOptions[i].Kind == t.ConfirmationOptionKindApprove) != action.Approved {
 				h.mu.Unlock()
-				return ahpInvalid("invalid approval scope")
+				return ahpInvalid("unknown approval option")
 			}
-		}
-		if action.Approved {
-			command.Action = "accept"
+			command.option = &ahpApprovalOptions[i]
 		}
 		h.mu.Unlock()
-		return a.command(command)
+		return ch.command(command)
 	case *t.ChatInputCompletedAction:
-		prompt := a.prompts[action.RequestId]
+		prompt := ch.prompts[action.RequestId]
+		id := ahpCommandID("input", action.RequestId, action.Response, action.Answers)
 		if !chat || prompt == nil || prompt.response != nil || prompt.view.Kind != PromptKindAsk {
 			h.mu.Unlock()
 			return ahpInvalid("input request already resolved or expired")
 		}
-		command.Type, command.PromptID, command.Action = "prompt_response", action.RequestId, string(action.Response)
+		command.Type, command.PromptID, command.Action, command.ID = "prompt_response", action.RequestId, string(action.Response), id
 		answers := maps.Clone(prompt.answers)
 		if answers == nil {
 			answers = map[string]t.ChatInputAnswer{}
@@ -249,14 +226,21 @@ func (c *ahpConnection) executeAction(a *ahpSession, p t.DispatchActionParams) e
 		if err != nil {
 			return err
 		}
-		return a.command(command)
+		return ch.command(command)
 	case *t.SessionConfigChangedAction:
 		if !session {
 			h.mu.Unlock()
 			return ahpInvalid("session channel required")
 		}
 		h.mu.Unlock()
-		return a.setConfig(command.ID, action.Config)
+		return ch.setConfig(ahpCommandID("config", ch.chat.Resource, action.Config, action.Replace), action.Config)
+	case *t.ChatConfigChangedAction:
+		if !chat {
+			h.mu.Unlock()
+			return ahpInvalid("chat channel required")
+		}
+		h.mu.Unlock()
+		return ch.setConfig(ahpCommandID("config", ch.chat.Resource, action.Config, action.Replace), action.Config)
 	case *t.SessionActiveClientSetAction:
 		if !session || action.ActiveClient.ClientId != c.id {
 			h.mu.Unlock()
@@ -281,9 +265,9 @@ func (c *ahpConnection) executeAction(a *ahpSession, p t.DispatchActionParams) e
 			h.mu.Unlock()
 			return ahpInvalid("chat channel required")
 		}
-		a.chatAction(p.Action)
+		ch.chatAction(p.Action)
 	case *t.ChatInputAnswerChangedAction:
-		prompt := a.prompts[action.RequestId]
+		prompt := ch.prompts[action.RequestId]
 		if !chat || prompt == nil || prompt.response != nil {
 			h.mu.Unlock()
 			return ahpInvalid("input request is no longer active")
@@ -296,14 +280,12 @@ func (c *ahpConnection) executeAction(a *ahpSession, p t.DispatchActionParams) e
 		} else {
 			prompt.answers[action.QuestionId] = *action.Answer
 		}
-		a.chatAction(p.Action)
+		ch.chatAction(p.Action)
 	default:
 		h.mu.Unlock()
 		return ahpInvalid("action is not supported by this host")
 	}
-	a.syncInputNeeded()
-	summary := a.summary()
-	h.notifyRoot("root/sessionSummaryChanged", t.SessionSummaryChangedParams{Channel: t.RootResourceURI, Session: a.resource, Changes: t.PartialSessionSummary{Title: &summary.Title, Status: &summary.Status}})
+	a.syncChats(previous)
 	h.mu.Unlock()
 	return nil
 }
@@ -345,7 +327,7 @@ func ahpAnswerValues(view PromptView, content map[string]any) map[string]t.ChatI
 	return answers
 }
 
-func (a *ahpSession) setConfig(id string, values map[string]json.RawMessage) error {
+func (a *ahpChat) setConfig(id string, values map[string]json.RawMessage) error {
 	command := Command{ID: id, Epoch: a.controller.epoch, Type: "settings"}
 	for key, value := range values {
 		if key == "unattended" {
@@ -435,11 +417,18 @@ func ahpAnswers(view PromptView, answers map[string]t.ChatInputAnswer) (map[stri
 			return nil, ahpInvalid("unsupported answer type")
 		}
 	}
+	// A free-form answer to an enum field belongs to its companion text field.
 	for _, field := range view.Fields {
-		if field.CustomAnswerFor != "" {
-			if value, ok := content[field.CustomAnswerFor].(string); ok {
-				content[field.Name] = value
-			}
+		if field.CustomAnswerFor == "" {
+			continue
+		}
+		if _, answered := content[field.Name]; answered {
+			continue
+		}
+		parent := slices.IndexFunc(view.Fields, func(f tool.ElicitField) bool { return f.Name == field.CustomAnswerFor })
+		if value, ok := content[field.CustomAnswerFor].(string); ok && parent >= 0 && !slices.Contains(view.Fields[parent].Enum, value) {
+			content[field.Name] = value
+			delete(content, field.CustomAnswerFor)
 		}
 	}
 	return content, nil

@@ -1,5 +1,8 @@
 import { EditorConnection } from "./editorConnection.ts";
 
+/** Read-only documents outside the workspace that a language server reported. */
+export const lspSourceScheme = "wingman-source";
+
 /** One language connection multiplexes the workspace's language services. */
 export class LSPClient {
 	readonly connection: EditorConnection;
@@ -23,6 +26,7 @@ export class LSPClient {
 						changeAnnotationSupport: {},
 					},
 					textDocumentContent: {},
+					diagnostics: { refreshSupport: true },
 				},
 				textDocument: {
 					synchronization: { didSave: true },

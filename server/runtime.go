@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -135,7 +137,6 @@ func (s *Server) bindBackend(id string, a code.Agent) *backendRuntime {
 				return
 			}
 			b.session(sid).refreshSettings()
-			b.broadcast(Frame{Type: EvtSessionsChanged})
 			b.broadcast(Frame{Type: EvtSkillsChanged})
 		})
 	}
@@ -204,6 +205,22 @@ func (s *Server) resolveBackend(id string, create func(context.Context) (code.Ag
 	return entry.runtime, entry.err
 }
 
+// discard forgets a controller that never loaded, such as one for an
+// unknown session id, so lookups cannot grow the session map.
+func (b *backendRuntime) discard(id string, c *sessionController) {
+	c.opMu.Lock()
+	loaded := c.loaded
+	c.opMu.Unlock()
+	c.mu.Lock()
+	attached := c.ahp != nil
+	c.mu.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !loaded && !attached && b.sessions[id] == c {
+		delete(b.sessions, id)
+	}
+}
+
 func (b *backendRuntime) session(id string) *sessionController {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -228,28 +245,46 @@ func (s *Server) backendHandler(fn func(*backendRuntime, http.ResponseWriter, *h
 
 func (s *Server) registerSessionRoutes(r chi.Router) {
 	r.Route("/v2", func(r chi.Router) {
-		r.Get("/backends", s.handleBackends)
-		r.Route("/backends/{backend}", func(r chi.Router) {
-			r.Get("/settings", s.backendOperation((*backendRuntime).handleDefaultSettings))
-			r.Post("/models/refresh", s.backendOperation((*backendRuntime).handleRefreshModels))
-			r.Route("/sessions/{id}", func(r chi.Router) {
-				r.Get("/reviews", s.backendOperation((*backendRuntime).handleTurnReviews))
-				r.Get("/reviews/{turnID}", s.backendOperation((*backendRuntime).handleTurnReviews))
-				r.Post("/reviews/{turnID}/undo", s.backendOperation((*backendRuntime).handleTurnUndo))
-				r.Get("/tasks", s.backendOperation((*backendRuntime).handleTasks))
-				r.Get("/tasks/{taskID}", s.backendOperation((*backendRuntime).handleTask))
-				r.Post("/tasks/{taskID}/stop", s.backendOperation((*backendRuntime).handleTaskStop))
-				r.Get("/schedules", s.backendOperation((*backendRuntime).handleSchedules))
-				r.Delete("/schedules/{scheduleID}", s.backendOperation((*backendRuntime).handleScheduleDelete))
-				r.Post("/schedules/{scheduleID}/pause", s.backendOperation((*backendRuntime).handleSchedulePause))
-				r.Post("/schedules/{scheduleID}/resume", s.backendOperation((*backendRuntime).handleScheduleResume))
-			})
+		r.Post("/backends/{backend}/models/refresh", s.backendOperation((*backendRuntime).handleRefreshModels))
+		r.Route("/chats/{chat}", func(r chi.Router) {
+			r.Use(s.chatRoute)
+			r.Get("/reviews", s.backendOperation((*backendRuntime).handleTurnReviews))
+			r.Get("/reviews/{turnID}", s.backendOperation((*backendRuntime).handleTurnReviews))
+			r.Post("/reviews/{turnID}/undo", s.backendOperation((*backendRuntime).handleTurnUndo))
+			r.Get("/tasks", s.backendOperation((*backendRuntime).handleTasks))
+			r.Get("/tasks/{taskID}", s.backendOperation((*backendRuntime).handleTask))
+			r.Post("/tasks/{taskID}/stop", s.backendOperation((*backendRuntime).handleTaskStop))
+			r.Get("/schedules", s.backendOperation((*backendRuntime).handleSchedules))
+			r.Delete("/schedules/{scheduleID}", s.backendOperation((*backendRuntime).handleScheduleDelete))
+			r.Post("/schedules/{scheduleID}/pause", s.backendOperation((*backendRuntime).handleSchedulePause))
+			r.Post("/schedules/{scheduleID}/resume", s.backendOperation((*backendRuntime).handleScheduleResume))
 		})
+	})
+}
+
+// chatRoute resolves the AHP chat URI in the path to the native session the
+// handlers address by backend and id.
+func (s *Server) chatRoute(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chat, err := url.PathUnescape(chi.URLParam(r, "chat"))
+		if err != nil {
+			http.Error(w, "invalid chat URI", http.StatusBadRequest)
+			return
+		}
+		_, ch, err := s.ahpHost().ensureSession(chat)
+		if err != nil || ch == nil {
+			http.Error(w, "chat not found", http.StatusNotFound)
+			return
+		}
+		r.SetPathValue("backend", ch.controller.backend.id)
+		r.SetPathValue("id", ch.controller.ref.SessionID)
+		next.ServeHTTP(w, r)
 	})
 }
 
 type Command struct {
 	requireIdle bool
+	option      *t.ConfirmationOption // the approval option an AHP client chose
 
 	ID         string               `json:"id"`
 	Epoch      string               `json:"epoch,omitempty"`
@@ -262,7 +297,6 @@ type Command struct {
 	ClearQueue bool                 `json:"clearQueue,omitempty"`
 	PromptID   string               `json:"promptId,omitempty"`
 	Action     string               `json:"action,omitempty"`
-	Scope      string               `json:"scope,omitempty"`
 	Content    map[string]any       `json:"content,omitempty"`
 	Model      *string              `json:"model,omitempty"`
 	Effort     *string              `json:"effort,omitempty"`
@@ -324,7 +358,13 @@ func (b *backendRuntime) createSession(command Command) commandReceipt {
 	}
 	var id string
 	var err error
-	if command.Type == "fork" {
+	if command.Type == "fork" && command.InputID != "" {
+		through, ok := b.agent.(code.SessionTurnForker)
+		if !ok {
+			return failure(400, "agent cannot fork through an earlier turn")
+		}
+		id, err = through.ForkSessionThrough(code.WithSessionID(b.ctx, command.Source), command.Source, command.InputID, command.Title)
+	} else if command.Type == "fork" {
 		id, err = forker.ForkSession(code.WithSessionID(b.ctx, command.Source), command.Source, command.Title)
 	} else {
 		id, err = b.agent.NewSession(b.ctx)
@@ -421,7 +461,18 @@ func (c *sessionController) execute(command Command) error {
 			id = command.ID
 		}
 		input := code.TurnInput{ID: id, Intent: command.Intent, Origin: "user", Display: &code.TurnInputDisplay{Text: command.Text, Files: command.Files, Images: command.Images}}
-		input.Content = b.buildInput(sid, command)
+		if _, canCompact := b.agent.(code.Compactor); canCompact && isCompactCommand(command.Text) {
+			input.Compact = true
+			if focus := compactFocus(command.Text); focus != "" {
+				input.Content = []harness.Content{{Text: focus}}
+			}
+		} else {
+			input.Content = b.buildInput(sid, command)
+		}
+		// A queue recovered after a restart waits for the user; sending continues it.
+		if command.Type == "send" && b.turns.Snapshot(sid).Paused {
+			b.turns.Resume(sid)
+		}
 		if command.Type == "queue_update" {
 			if err := b.turns.ReplaceQueued(sid, id, input); err != nil {
 				return err
@@ -432,15 +483,6 @@ func (c *sessionController) execute(command Command) error {
 			}
 		}
 		b.ensureTaskPump(sid)
-	case "compact":
-		c.mu.Lock()
-		c.state.Error, c.state.Compaction = nil, nil
-		c.mu.Unlock()
-		if err := b.turns.StartCompact(sid, command.Text, func(result harness.CompactResult, err error) {
-			b.finishCompaction(sid, result, err)
-		}); err != nil {
-			return err
-		}
 	case "queue_remove":
 		if err := b.turns.RemoveQueued(sid, command.InputID); err != nil {
 			return err
@@ -454,15 +496,6 @@ func (c *sessionController) execute(command Command) error {
 			if err := b.turns.CancelCurrent(sid); err != nil {
 				return err
 			}
-		}
-	case "queue_clear":
-		if err := b.turns.ClearQueue(sid); err != nil {
-			return err
-		}
-	case "queue_resume":
-		b.turns.Resume(sid)
-		if err := b.turns.Snapshot(sid).Error; err != nil {
-			return err
 		}
 	case "settings":
 		ctx := code.WithSessionID(b.ctx, sid)
@@ -516,7 +549,6 @@ func (c *sessionController) execute(command Command) error {
 		c.state.Prompts = []PromptView{}
 		c.publishStateLocked()
 		c.mu.Unlock()
-		b.broadcast(Frame{Type: EvtSessionsChanged})
 	default:
 		return fmt.Errorf("unknown session command %q", command.Type)
 	}
@@ -524,25 +556,8 @@ func (c *sessionController) execute(command Command) error {
 	return nil
 }
 
-func (b *backendRuntime) handleDefaultSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, b.settings(""))
-}
-
 func (b *backendRuntime) onToolProgress(ctx context.Context, callID, text string) {
 	if sid := code.SessionIDFromContext(ctx); sid != "" {
 		b.sendSession(sid, Frame{Type: EvtToolProgress, ID: callID, Text: text})
 	}
-}
-
-func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
-	available, err := agents.Available()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	backends := []AgentEntry{{ID: code.BuiltinAgentName, Name: "Wingman"}}
-	for _, a := range available {
-		backends = append(backends, AgentEntry{ID: a.ID, Name: a.Name})
-	}
-	writeJSON(w, backends)
 }

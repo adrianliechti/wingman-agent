@@ -2,7 +2,6 @@ import { queryOptions } from "@tanstack/react-query";
 import type {
 	CompletionItem,
 	MessageAttachment,
-	SessionState,
 } from "@microsoft/agent-host-protocol";
 import { isDraft } from "../state/sessionStore.ts";
 import { workspaceClient } from "../state/workspaceClient.ts";
@@ -10,30 +9,31 @@ import { queryKeys } from "./query.ts";
 import { listWorkspaceSkills, type Skill } from "./skills.ts";
 
 export interface ChatCommand extends Skill {
-	kind: "skill" | "command" | "action";
+	kind: "skill" | "command";
 	attachment?: MessageAttachment;
 }
+/** The host offers `/compact` only when the chat's backend can compact. */
+export function isCompactCommand(command: ChatCommand): boolean {
+	return command.kind === "command" && command.name === "compact";
+}
 
+/** Reads VS Code's slash-command completion convention. */
 export function completionCommand(
 	item: CompletionItem,
 ): ChatCommand | undefined {
-	const info = item.attachment._meta?.wingman as
-		| Partial<ChatCommand>
-		| undefined;
+	const meta = item.attachment._meta;
 	if (
-		!info ||
-		typeof info.name !== "string" ||
-		!["skill", "command"].includes(info.kind ?? "") ||
-		item.insertText !== `/${info.name}`
+		typeof meta?.command !== "string" ||
+		item.insertText !== `/${meta.command}`
 	)
 		return;
 	return {
-		name: info.name,
-		kind: info.kind as "skill" | "command",
+		name: meta.command,
+		kind: meta.isSkill === true ? "skill" : "command",
 		description:
-			typeof info.description === "string" ? info.description : undefined,
+			typeof meta.description === "string" ? meta.description : undefined,
 		input_hint:
-			typeof info.input_hint === "string" ? info.input_hint : undefined,
+			typeof meta.argumentHint === "string" ? meta.argumentHint : undefined,
 		attachment: item.attachment,
 	};
 }
@@ -51,15 +51,11 @@ export function chatCommandsQuery(sessionId?: string, inline = false) {
 				return skills.map((skill) => ({ ...skill, kind: "skill" }));
 			}
 			const client = workspaceClient();
-			const uri = await client.resource(sessionId);
-			const session = await client.ahp.read<SessionState>(uri);
-			if (!session.defaultChat) throw new Error("Session has no chat");
-			signal.throwIfAborted();
 			// Fetch a catalogue on opening the picker; keystroke filtering is local.
 			// A leading space requests inline skills without native slash commands.
 			const text = inline ? " /" : "/";
 			const result = await client.ahp.request("completions", {
-				channel: session.defaultChat,
+				channel: sessionId,
 				kind: "userMessage" as import("@microsoft/agent-host-protocol").CompletionItemKind.UserMessage,
 				text,
 				offset: text.length,

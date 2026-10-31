@@ -89,7 +89,7 @@ func TestSchedulesAPI(t *testing.T) {
 		t.Fatalf("resumed schedule = %+v", got[0])
 	}
 
-	req, _ := http.NewRequest(http.MethodDelete, web.URL+"/api/v2/backends/wingman/sessions/"+created.ID+"/schedules/nope", nil)
+	req, _ := http.NewRequest(http.MethodDelete, web.URL+chatAPIPath("wingman", created.ID)+"/schedules/nope", nil)
 	res, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +99,7 @@ func TestSchedulesAPI(t *testing.T) {
 		t.Fatalf("delete unknown schedule status = %d, want 404", res.StatusCode)
 	}
 
-	req, _ = http.NewRequest(http.MethodDelete, web.URL+"/api/v2/backends/wingman/sessions/"+created.ID+"/schedules/job-1", nil)
+	req, _ = http.NewRequest(http.MethodDelete, web.URL+chatAPIPath("wingman", created.ID)+"/schedules/job-1", nil)
 	res, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func postScheduleAction(t *testing.T, baseURL, sessionID, scheduleID, action str
 	t.Helper()
 
 	res, err := http.Post(
-		baseURL+"/api/v2/backends/wingman/sessions/"+sessionID+"/schedules/"+scheduleID+"/"+action,
+		baseURL+chatAPIPath("wingman", sessionID)+"/schedules/"+scheduleID+"/"+action,
 		"application/json",
 		nil,
 	)
@@ -131,7 +131,7 @@ func postScheduleAction(t *testing.T, baseURL, sessionID, scheduleID, action str
 func getSchedules(t *testing.T, baseURL, sessionID string) []ScheduleEntry {
 	t.Helper()
 
-	res, err := http.Get(baseURL + "/api/v2/backends/wingman/sessions/" + sessionID + "/schedules")
+	res, err := http.Get(baseURL + chatAPIPath("wingman", sessionID) + "/schedules")
 	if err != nil {
 		t.Fatal(err)
 	}

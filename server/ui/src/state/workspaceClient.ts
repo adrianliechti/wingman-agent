@@ -1,77 +1,73 @@
 import type { WorkspaceInfo } from "../api/workspace.ts";
-import { ChangesetClient } from "./changesetClient.ts";
+import { ChangesetClient, workspaceChangeset } from "./changesetClient.ts";
 import { FileClient } from "./fileClient.ts";
 import { DAPClient } from "./dapClient.ts";
 import { LSPClient } from "./lspClient.ts";
 import {
 	MessageKind,
-	type StateAction,
 	type ChatState,
 	type SessionState,
+	type SessionSummary,
 	type Message,
 	type MessageAttachment,
 	type ChatInputResponseKind,
 } from "@microsoft/agent-host-protocol";
 import {
 	ActionType,
+	ChatSourceKind,
 	PendingMessageKind,
 	MessageAttachmentKind,
+	ToolCallCancellationReason,
+	ToolCallConfirmationReason,
 } from "./ahpValues.ts";
 import { RpcError } from "@microsoft/agent-host-protocol/client";
 import { AHPConnection } from "./ahpConnection.ts";
-import {
-	AHPSessionProjection,
-	runtimeInfo,
-	inputAnswers,
-} from "./ahpSession.ts";
+import { AHPSessionProjection, inputAnswers } from "./ahpSession.ts";
 import {
 	APIError,
 	createWorkspaceHTTP,
 	setWorkspaceHTTP,
 } from "../api/http.ts";
-import type { ServerMessage } from "../types/protocol.ts";
+import type { PromptReply, ServerMessage } from "../types/protocol.ts";
+import type { SessionInfo } from "../api/sessions.ts";
 import {
 	SessionStore,
-	sessionKey,
-	splitSessionKey,
+	canonicalBackend,
+	chatToSession,
+	draftBackend,
 	emptySession,
-	type SessionRef,
+	isDraft,
+	sessionToChat,
+	type SettingsPatch,
 	type WorkspaceScope,
 } from "./sessionStore.ts";
 
-export type Bootstrap = WorkspaceScope & {
-	protocol: number;
-	backends: { id: string; name: string }[];
-};
+export type Bootstrap = WorkspaceScope & { protocol: number };
 export async function fetchWorkspace(): Promise<WorkspaceInfo & Bootstrap> {
 	const response = await fetch("/api/workspace");
 	if (!response.ok) throw new APIError(await response.text(), response.status);
 	const scope = (await response.json()) as WorkspaceInfo;
 	if (scope.protocol !== 2 || !scope.instanceId || !scope.workspaceId)
 		throw new Error("Unsupported workspace protocol. Reload the application.");
-	const backends = await createWorkspaceHTTP(scope.instanceId).fetchJSON<
-		Bootstrap["backends"]
-	>("/api/v2/backends");
-	if (!Array.isArray(backends)) throw new Error("Invalid backend catalogue");
-	return { ...scope, backends };
+	return scope;
 }
 
-export type Receipt = {
+type SendRequest = {
 	id: string;
-	ref: SessionRef;
-	epoch: string;
-	outcome: string;
+	text: string;
+	files: string[];
+	images: string[];
+	intent: string;
+	completions: MessageAttachment[];
 };
-export type Command = {
-	type: string;
-	id?: string;
-	epoch?: string;
-	inputId?: string;
-	[key: string]: unknown;
-};
-export function sessionPath(key: string): string {
-	const ref = splitSessionKey(key);
-	return `/api/v2/backends/${encodeURIComponent(ref.backendId)}/sessions/${encodeURIComponent(ref.sessionId)}`;
+export function chatPath(key: string): string {
+	return `/api/v2/chats/${encodeURIComponent(key)}`;
+}
+/** The URI a canonical subscription failed over to, when the host aliases it. */
+function aliasOf(error: unknown): string | undefined {
+	if (!(error instanceof RpcError) || error.code !== -32602) return;
+	const resource = (error.data as { resource?: unknown } | undefined)?.resource;
+	return typeof resource === "string" ? resource : undefined;
 }
 
 export class WorkspaceClient {
@@ -84,10 +80,15 @@ export class WorkspaceClient {
 	readonly files: FileClient;
 	readonly changesets: ChangesetClient;
 	private observed = new Map<string, { count: number; release: () => void }>();
-	private resources = new Map<string, string>();
+	/** Chat URI to the URI of the session that owns it. */
+	private sessions = new Map<string, string>();
+	private providers = new Map<string, string>();
+	private catalogue?: Promise<void>;
+	private redirects = new Map<string, string>();
+	private redirectListeners = new Set<(from: string, to: string) => void>();
 	private sends = new Map<
 		string,
-		{ command: Command; pending?: Promise<Receipt> }
+		{ request: SendRequest; pending?: Promise<void> }
 	>();
 	private forks = new Map<string, { uri: string; pending?: Promise<string> }>();
 	private creations = new Map<
@@ -107,13 +108,35 @@ export class WorkspaceClient {
 		});
 	}
 	readonly getReplaced = () => this.ahp.getReplaced();
+	/** Connects now instead of waiting for the next retry. */
+	reconnect() {
+		void this.ahp.ready().catch(() => {});
+	}
 	readonly getConnected = () => this.ahp.getConnected();
 	readonly subscribeConnection = (listener: () => void) =>
 		this.ahp.subscribeConnection(listener);
-	readonly subscribe = (listener: (event: ServerMessage) => void) =>
-		this.ahp.subscribe(listener);
+	readonly subscribe = (listener: (event: ServerMessage) => void) => {
+		const releaseHost = this.ahp.subscribe(listener);
+		const releaseDiagnostics = this.lsp.connection.onEvent((method) => {
+			if (method === "workspace/diagnostic/refresh")
+				listener({ type: "diagnostics_changed" });
+		});
+		return () => {
+			releaseHost();
+			releaseDiagnostics();
+		};
+	};
+	/** A migrated chat key lives under another URI; owners replace the key. */
+	readonly onRedirect = (listener: (from: string, to: string) => void) => {
+		this.redirectListeners.add(listener);
+		return () => {
+			this.redirectListeners.delete(listener);
+		};
+	};
 	start() {
 		this.ahp.start();
+		// Changeset actions are the client's only signal that workspace changes moved.
+		this.changesets.watch(workspaceChangeset());
 	}
 	stop() {
 		this.changesets.close();
@@ -122,23 +145,64 @@ export class WorkspaceClient {
 		this.ahp.stop();
 		this.store.disconnect();
 	}
-	async resource(key: string): Promise<string> {
-		const known = this.resources.get(key);
-		if (known) return known;
-		const ref = splitSessionKey(key);
-		const result = await this.ahp.extension<{ resource: string }>(
-			"x-wingman/resolveSession",
-			{
-				channel: "ahp-root://",
-				backend: ref.backendId,
-				session: ref.sessionId,
-			},
+	backendOf(key: string): string {
+		if (isDraft(key)) return draftBackend(key);
+		return (
+			this.providers.get(key) ??
+			(this.store.getSnapshot()[key]?.provider ||
+				canonicalBackend(key) ||
+				"wingman")
 		);
-		this.resources.set(key, result.resource);
-		return result.resource;
+	}
+	canFork(backend: string): boolean {
+		return (
+			this.ahp.root.agents.find((agent) => agent.provider === backend)
+				?.capabilities?.multipleChats?.fork === true
+		);
+	}
+	private remember(summary: SessionSummary) {
+		const chats = summary.chats?.length
+			? summary.chats.map((chat) => chat.resource)
+			: [summary.defaultChat ?? sessionToChat(summary.resource)];
+		for (const chat of chats) {
+			this.sessions.set(chat, summary.resource);
+			this.providers.set(chat, summary.provider);
+		}
+	}
+	private async listSessions() {
+		const result = await this.ahp.request("listSessions", {
+			channel: "ahp-root://",
+		});
+		for (const summary of result.items) this.remember(summary);
+		return result.items;
+	}
+	async sessionOf(chat: string): Promise<string> {
+		chat = this.redirects.get(chat) ?? chat;
+		const known = this.sessions.get(chat);
+		if (known) return known;
+		if (canonicalBackend(chat) === undefined) {
+			this.catalogue ??= this.listSessions()
+				.then(() => {})
+				.finally(() => {
+					this.catalogue = undefined;
+				});
+			await this.catalogue;
+		}
+		// A default chat shares its session's path.
+		return this.sessions.get(chat) ?? chatToSession(chat);
+	}
+	private async redirect(from: string, alias: string) {
+		const to = alias.startsWith("ahp-session:")
+			? ((await this.ahp.read<SessionState>(alias)).defaultChat ??
+				sessionToChat(alias))
+			: alias;
+		if (this.redirects.get(from) === to) return;
+		this.redirects.set(from, to);
+		if (alias.startsWith("ahp-session:")) this.sessions.set(to, alias);
+		for (const listener of this.redirectListeners) listener(from, to);
 	}
 	watch(key: string): () => void {
-		if (!splitSessionKey(key).sessionId) return () => {};
+		if (isDraft(key)) return () => {};
 		let entry = this.observed.get(key);
 		if (entry) entry.count++;
 		else {
@@ -149,55 +213,85 @@ export class WorkspaceClient {
 			let resolving = false,
 				attached = false;
 			let releaseChannels = () => {};
+			const live = () => this.observed.get(key) === current;
+			const failed = (error: unknown) => {
+				const alias = aliasOf(error);
+				if (alias && live()) {
+					void this.redirect(key, alias).catch(() => {});
+					return;
+				}
+				if (live())
+					this.store.set(key, {
+						...emptySession(key),
+						status: "error",
+						error: String(error),
+					});
+			};
+			const deleted = () => {
+				if (live())
+					this.store.set(key, { ...emptySession(key), status: "deleted" });
+			};
 			const connect = () => {
 				if (!this.ahp.getConnected() || resolving || attached) return;
 				resolving = true;
-				void this.resource(key)
+				void this.sessionOf(key)
 					.then((uri) => {
-						if (this.observed.get(key) !== current) return;
+						if (!live()) return;
 						attached = true;
 						let session: SessionState | undefined, chat: ChatState | undefined;
 						let sessionConnection = -1,
-							chatConnection = -2;
-						let chatURI = "",
-							revision = 0,
-							releaseChat = () => {};
-						const projection = new AHPSessionProjection();
+							chatConnection = -2,
+							revision = 0;
+						const projection = new AHPSessionProjection(this.ahp.directory);
 						const update = () => {
 							if (session && chat && sessionConnection === chatConnection)
 								this.store.set(
 									key,
-									projection.project(key, session, chat, ++revision),
+									projection.project(key, session, chat, ++revision, {
+										uri,
+										root: this.ahp.root,
+									}),
 								);
 						};
-						const releaseSession = this.ahp.watch(uri, (event) => {
-							session = event.state as SessionState;
-							sessionConnection = event.connection;
-							if (session.defaultChat && session.defaultChat !== chatURI) {
-								releaseChat();
-								chat = undefined;
-								chatURI = session.defaultChat;
-								releaseChat = this.ahp.watch(chatURI, (next) => {
-									chat = next.state as ChatState;
-									chatConnection = next.connection;
-									update();
-								});
-							}
-							update();
+						const releaseSession = this.ahp.watch(
+							uri,
+							(event) => {
+								session = event.state as SessionState;
+								sessionConnection = event.connection;
+								this.providers.set(key, session.provider);
+								for (const summary of session.chats)
+									this.sessions.set(summary.resource, uri);
+								// A disposed fork leaves the session's chat list.
+								if (
+									session.chats.length &&
+									!session.chats.some((summary) => summary.resource === key)
+								)
+									deleted();
+								else update();
+							},
+							failed,
+						);
+						const releaseChat = this.ahp.watch(
+							key,
+							(event) => {
+								chat = event.state as ChatState;
+								chatConnection = event.connection;
+								update();
+							},
+							failed,
+						);
+						// Disposal is announced on the root channel only.
+						const releaseRemoval = this.ahp.onNotification((method, params) => {
+							if (method === "root/sessionRemoved" && params?.session === uri)
+								deleted();
 						});
 						releaseChannels = () => {
 							releaseSession();
 							releaseChat();
+							releaseRemoval();
 						};
 					})
-					.catch((error) => {
-						if (this.observed.get(key) === current)
-							this.store.set(key, {
-								...emptySession(key),
-								status: "error",
-								error: String(error),
-							});
-					})
+					.catch(failed)
 					.finally(() => {
 						resolving = false;
 					});
@@ -222,12 +316,8 @@ export class WorkspaceClient {
 			this.store.forget(key);
 		};
 	}
-	private async state(key: string) {
-		const uri = await this.resource(key);
-		const session = await this.ahp.read<SessionState>(uri);
-		if (!session.defaultChat) throw new Error("Session has no chat");
-		const chat = await this.ahp.read<ChatState>(session.defaultChat);
-		return { uri, session, chat, info: runtimeInfo(session) };
+	private chat(key: string) {
+		return this.ahp.read<ChatState>(this.redirects.get(key) ?? key);
 	}
 	private message(
 		text: string,
@@ -259,129 +349,141 @@ export class WorkspaceClient {
 			origin: { kind: MessageKind.User },
 		};
 	}
-	async command(key: string, command: Command): Promise<Receipt> {
-		const { uri, chat, info } = await this.state(key);
-		if (command.epoch && command.epoch !== info.epoch)
-			throw new Error("Session changed. Reload before retrying.");
-		const id = command.id ?? crypto.randomUUID();
-		let action: StateAction | undefined,
-			channel = chat.resource;
-		switch (command.type) {
-			case "send":
-			case "queue_update":
-				action = {
-					type: ActionType.ChatPendingMessageSet,
-					kind:
-						command.intent === "steer"
-							? PendingMessageKind.Steering
-							: PendingMessageKind.Queued,
-					id: command.inputId ?? id,
-					message: this.message(
-						String(command.text ?? ""),
-						command.files as string[],
-						command.images as string[],
-						command.completions as MessageAttachment[],
-					),
-				};
-				break;
-			case "queue_remove":
-				action = {
+	/** Stopping a turn also drops the queue; the host removes queued messages. */
+	async cancel(key: string) {
+		const chat = await this.chat(key);
+		const turnId = chat.activeTurn?.id;
+		if (!turnId) {
+			await this.clearQueue(key);
+			return;
+		}
+		try {
+			await this.ahp.dispatch(chat.resource, {
+				type: ActionType.ChatTurnCancelled,
+				turnId,
+				duration: 0,
+			});
+		} catch (error) {
+			// Stopping succeeded if the turn ended first.
+			const current = await this.chat(key);
+			if (current.activeTurn?.id === turnId) throw error;
+		}
+	}
+	async clearQueue(key: string) {
+		const chat = await this.chat(key);
+		const pending = [
+			...(chat.steeringMessage ? [chat.steeringMessage] : []),
+			...(chat.queuedMessages ?? []),
+		];
+		await Promise.all(
+			pending.map((input) =>
+				this.ahp.dispatch(chat.resource, {
 					type: ActionType.ChatPendingMessageRemoved,
 					kind:
-						chat.queuedMessages?.find((input) => input.id === command.inputId)
-							?.kind ??
-						(chat.steeringMessage?.id === command.inputId
+						input === chat.steeringMessage
 							? PendingMessageKind.Steering
-							: PendingMessageKind.Queued),
-					id: command.inputId!,
-				};
-				break;
-			case "cancel":
-				if (command.clearQueue)
-					await this.ahp.extension("x-wingman/queueControl", {
-						channel: uri,
-						id,
-						epoch: info.epoch,
-						operation: "cancelAll",
-					});
-				else if (chat.activeTurn)
-					action = {
-						type: ActionType.ChatTurnCancelled,
-						turnId: chat.activeTurn.id,
-						duration: 0,
-					};
-				break;
-			case "settings": {
-				channel = uri;
-				const config: Record<string, unknown> = {};
-				for (const name of ["model", "effort", "mode", "unattended"])
-					if (command[name] !== undefined) config[name] = command[name];
-				action = { type: ActionType.SessionConfigChanged, config };
-				break;
-			}
-			case "prompt_response": {
-				const promptId = String(command.promptId);
-				const part = chat.activeTurn?.responseParts.find(
-					(p) =>
-						p.kind === "toolCall" &&
-						p.toolCall.toolCallId === `approval:${promptId}`,
-				);
-				if (part && chat.activeTurn)
-					action = {
-						type: ActionType.ChatToolCallConfirmed,
-						turnId: chat.activeTurn.id,
-						toolCallId: `approval:${promptId}`,
-						...(command.action === "accept"
-							? {
-									approved: true,
-									confirmed:
-										"user-action" as import("@microsoft/agent-host-protocol").ToolCallConfirmationReason.UserAction,
-								}
-							: {
-									approved: false,
-									reason:
-										"denied" as import("@microsoft/agent-host-protocol").ToolCallCancellationReason.Denied,
-								}),
-						_meta: { "wingman.scope": command.scope ?? "once" },
-					};
-				else
-					action = {
-						type: ActionType.ChatInputCompleted,
-						requestId: promptId,
-						response: command.action as ChatInputResponseKind,
-						answers: inputAnswers(
-							chat,
-							promptId,
-							(command.content ?? {}) as Record<string, unknown>,
-						),
-					};
-				break;
-			}
-			case "delete":
-				await this.ahp.request("disposeSession", { channel: uri });
-				break;
-			case "compact":
-				await this.ahp.extension("x-wingman/compact", {
-					channel: uri,
-					id,
-					epoch: info.epoch,
-					text: command.text ?? "",
-				});
-				break;
-			case "queue_clear":
-			case "queue_resume":
-				await this.ahp.extension("x-wingman/queueControl", {
-					channel: uri,
-					id,
-					epoch: info.epoch,
-					operation: command.type === "queue_clear" ? "clear" : "resume",
-				});
-				break;
-			default:
-				throw new Error(`Unsupported session operation: ${command.type}`);
-		}
-		if (action) await this.ahp.dispatch(channel, action, id);
-		return { id, ref: info.ref, epoch: info.epoch, outcome: "accepted" };
+							: (input.kind ?? PendingMessageKind.Queued),
+					id: input.id,
+				}),
+			),
+		);
+	}
+	/** Compaction is a turn the host runs for a `/compact [focus]` message. */
+	compact(key: string, focus = "") {
+		return this.send(key, focus ? `/compact ${focus}` : "/compact");
+	}
+	async removeQueued(key: string, inputId: string) {
+		const chat = await this.chat(key);
+		const kind =
+			chat.queuedMessages?.find((input) => input.id === inputId)?.kind ??
+			(chat.steeringMessage?.id === inputId
+				? PendingMessageKind.Steering
+				: PendingMessageKind.Queued);
+		await this.ahp.dispatch(chat.resource, {
+			type: ActionType.ChatPendingMessageRemoved,
+			kind,
+			id: inputId,
+		});
+	}
+	async updateQueued(
+		key: string,
+		inputId: string,
+		text: string,
+		files: string[] = [],
+		images: string[] = [],
+		completions: MessageAttachment[] = [],
+	) {
+		const chat = await this.chat(key);
+		const steering =
+			chat.steeringMessage?.id === inputId ||
+			chat.queuedMessages?.find((input) => input.id === inputId)?.kind ===
+				PendingMessageKind.Steering;
+		await this.ahp.dispatch(chat.resource, {
+			type: ActionType.ChatPendingMessageSet,
+			kind: steering ? PendingMessageKind.Steering : PendingMessageKind.Queued,
+			id: inputId,
+			message: this.message(text, files, images, completions),
+		});
+	}
+	async respond(key: string, promptId: string, reply: PromptReply) {
+		const chat = await this.chat(key);
+		const turn = chat.activeTurn;
+		const part = turn?.responseParts.find(
+			(p) => p.kind === "toolCall" && p.toolCall.toolCallId === promptId,
+		);
+		if (turn && part?.kind === "toolCall") {
+			const options =
+				part.toolCall.status === "pending-confirmation"
+					? (part.toolCall.options ?? [])
+					: [];
+			const kind = reply.action === "accept" ? "approve" : "deny";
+			const option =
+				options.find((candidate) => candidate.id === reply.option) ??
+				options.find((candidate) => candidate.kind === kind);
+			const approved = option
+				? option.kind === "approve"
+				: reply.action === "accept";
+			await this.ahp.dispatch(chat.resource, {
+				type: ActionType.ChatToolCallConfirmed,
+				turnId: turn.id,
+				toolCallId: promptId,
+				...(approved
+					? {
+							approved: true,
+							confirmed: ToolCallConfirmationReason.UserAction,
+						}
+					: { approved: false, reason: ToolCallCancellationReason.Denied }),
+				...(option ? { selectedOptionId: option.id } : {}),
+			});
+		} else
+			await this.ahp.dispatch(chat.resource, {
+				type: ActionType.ChatInputCompleted,
+				requestId: promptId,
+				response: reply.action as ChatInputResponseKind,
+				answers: inputAnswers(
+					chat,
+					promptId,
+					(reply.action === "accept" && reply.content) || {},
+				),
+			});
+	}
+	async configure(key: string, settings: SettingsPatch) {
+		const chat = await this.chat(key);
+		const config: Record<string, unknown> = {};
+		for (const [name, value] of Object.entries(settings))
+			if (value !== undefined) config[name] = value;
+		await this.ahp.dispatch(chat.resource, {
+			type: ActionType.ChatConfigChanged,
+			config,
+		});
+	}
+	/** Disposing a session's default chat disposes the session with its forks. */
+	async dispose(key: string) {
+		const uri = await this.sessionOf(key);
+		const session = await this.ahp.read<SessionState>(uri);
+		if (session.defaultChat && session.defaultChat !== key)
+			await this.ahp.request("disposeChat", { channel: key });
+		else await this.ahp.request("disposeSession", { channel: uri });
 	}
 	async send(
 		key: string,
@@ -391,19 +493,13 @@ export class WorkspaceClient {
 		intent = "follow_up",
 		completions: MessageAttachment[] = [],
 	) {
-		const fingerprint = JSON.stringify([
-			key,
-			text,
-			files,
-			images,
-			intent,
-			completions,
-		]);
+		// The session phase may change before the user retries, so intent must not
+		// split the retry identity; a retry keeps the original request.
+		const fingerprint = JSON.stringify([key, text, files, images, completions]);
 		let entry = this.sends.get(fingerprint);
 		if (!entry) {
 			entry = {
-				command: {
-					type: "send",
+				request: {
 					id: crypto.randomUUID(),
 					text,
 					files: [...files],
@@ -416,10 +512,9 @@ export class WorkspaceClient {
 		}
 		if (!entry.pending) {
 			const current = entry;
-			current.pending = this.command(key, current.command)
-				.then((receipt) => {
+			current.pending = this.deliver(key, current.request)
+				.then(() => {
 					this.sends.delete(fingerprint);
-					return receipt;
 				})
 				.finally(() => {
 					current.pending = undefined;
@@ -427,6 +522,28 @@ export class WorkspaceClient {
 		}
 		await entry.pending;
 	}
+	private async deliver(key: string, request: SendRequest) {
+		const chat = await this.chat(key);
+		await this.ahp.dispatch(
+			chat.resource,
+			{
+				type: ActionType.ChatPendingMessageSet,
+				kind:
+					request.intent === "steer"
+						? PendingMessageKind.Steering
+						: PendingMessageKind.Queued,
+				id: request.id,
+				message: this.message(
+					request.text,
+					request.files,
+					request.images,
+					request.completions,
+				),
+			},
+			request.id,
+		);
+	}
+	/** Creates the session a draft becomes and returns its default chat. */
 	create(backend: string, draftID: string): Promise<string> {
 		const key = JSON.stringify([backend, draftID]);
 		let entry = this.creations.get(key);
@@ -443,40 +560,32 @@ export class WorkspaceClient {
 		}
 		return entry.pending!;
 	}
-	private async createAt(
-		backend: string,
-		uri: string,
-		fork?: { source: string; title?: string },
-	): Promise<string> {
+	private async createAt(backend: string, uri: string): Promise<string> {
 		try {
 			await this.ahp.request("createSession", {
 				channel: uri,
 				provider: backend,
-				...(fork ? { _meta: { "wingman.fork": fork } } : {}),
 			});
 		} catch (error) {
 			if (!(error instanceof RpcError && error.code === -32003)) throw error;
 		}
-		const session = await this.ahp.read<SessionState>(uri),
-			info = runtimeInfo(session);
-		const key = sessionKey(info.ref.backendId, info.ref.sessionId);
-		this.resources.set(key, uri);
-		return key;
+		const session = await this.ahp.read<SessionState>(uri);
+		const chat = session.defaultChat ?? sessionToChat(uri);
+		this.sessions.set(chat, uri);
+		this.providers.set(chat, backend);
+		return chat;
 	}
-	async fork(key: string, title?: string): Promise<string> {
-		const fingerprint = JSON.stringify([key, title]),
-			ref = splitSessionKey(key);
+	/** Forks a chat through a completed turn, the latest one by default. */
+	async fork(key: string, title?: string, turnId?: string): Promise<string> {
+		const fingerprint = JSON.stringify([key, title, turnId]);
 		let entry = this.forks.get(fingerprint);
 		if (!entry) {
-			entry = { uri: `ahp-session:/${crypto.randomUUID()}` };
+			entry = { uri: `ahp-chat:/${crypto.randomUUID()}` };
 			this.forks.set(fingerprint, entry);
 		}
 		if (!entry.pending) {
 			const current = entry;
-			current.pending = this.resource(key)
-				.then((source) =>
-					this.createAt(ref.backendId, current.uri, { source, title }),
-				)
+			current.pending = this.createFork(key, current.uri, title, turnId)
 				.then((result) => {
 					this.forks.delete(fingerprint);
 					return result;
@@ -487,34 +596,61 @@ export class WorkspaceClient {
 		}
 		return entry.pending!;
 	}
-	async list(backend: string) {
+	private async createFork(
+		key: string,
+		uri: string,
+		title?: string,
+		turnId?: string,
+	) {
+		const session = await this.sessionOf(key);
+		const source = await this.chat(key);
+		const turn = turnId ?? source.turns.at(-1)?.id;
+		if (!turn) throw new Error("There is no completed turn to fork from");
+		try {
+			await this.ahp.request("createChat", {
+				channel: session,
+				chat: uri,
+				source: {
+					kind: ChatSourceKind.Fork,
+					chat: source.resource,
+					turnId: turn,
+				},
+				...(title ? { title } : {}),
+			});
+		} catch (error) {
+			if (!(error instanceof RpcError && error.code === -32003)) throw error;
+		}
+		this.sessions.set(uri, session);
+		this.providers.set(uri, this.backendOf(key));
+		return uri;
+	}
+	async list(backend: string): Promise<SessionInfo[]> {
 		// Resolve config starts a lazily loaded provider before cataloguing it.
 		await this.ahp.request("resolveSessionConfig", {
 			channel: "ahp-root://",
 			provider: backend,
 		});
-		const result = await this.ahp.request("listSessions", {
-			channel: "ahp-root://",
-		});
-		return result.items
-			.filter((s) => s.provider === backend)
+		const items = await this.listSessions();
+		return items
+			.filter((summary) => summary.provider === backend)
 			.map((summary) => {
-				const ref = summary._meta?.["wingman.ref"] as SessionRef | undefined;
-				if (!ref)
-					throw new Error("Session catalog is missing its native identity");
-				const key = sessionKey(ref.backendId, ref.sessionId);
-				this.resources.set(key, summary.resource);
+				const fallback = summary.defaultChat ?? sessionToChat(summary.resource);
+				const chats = summary.chats?.length
+					? summary.chats
+					: [{ resource: fallback, title: summary.title }];
+				const first =
+					chats.find((chat) => chat.resource === summary.defaultChat) ??
+					chats[0];
 				return {
-					id: key,
+					id: first.resource,
+					session: summary.resource,
 					title: summary.title,
 					updated_at: summary.modifiedAt,
+					chats: [first, ...chats.filter((chat) => chat !== first)].map(
+						(chat) => ({ id: chat.resource, title: chat.title }),
+					),
 				};
 			});
-	}
-	focus() {
-		void this.ahp
-			.extension("x-wingman/focus", { channel: "ahp-root://" })
-			.catch(() => {});
 	}
 }
 

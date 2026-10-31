@@ -173,8 +173,9 @@ type Session struct {
 	terminalID   string
 	terminals    []terminalBinding
 	parent       *Session
-	child        *Session // the focused child; inspection and control go here
+	child        *Session // the focused child; requests without an id go here
 	children     []*Session
+	childRoutes  childRoutes
 	breakpoints  map[string][]SourceBreakpoint
 	adapterIDs   map[int]breakpointRef
 	configured   uint64 // editor breakpoint version applied during configuration
@@ -339,12 +340,18 @@ func newConnectedSession(id string, plan Plan, connection io.ReadWriteCloser) *S
 func (session *Session) ID() string { return session.id }
 
 func (session *Session) Status() Status {
-	if child := session.childSession(); child != nil {
+	if child := session.primaryChild(); child != nil {
 		status := child.Status()
 		session.mu.Lock()
 		status.SessionID = session.id
 		status.StateVersion = session.stateVersion
 		status.StartedAt = session.startedAt
+		if status.Stop != nil {
+			status.Stop.ThreadID = session.childIDLocked("thread", child, status.Stop.ThreadID)
+		}
+		for i, thread := range status.StoppedThreads {
+			status.StoppedThreads[i] = session.childIDLocked("thread", child, thread)
+		}
 		session.mu.Unlock()
 		return status
 	}
@@ -954,6 +961,7 @@ func (session *Session) removeChild(child *Session) {
 		return
 	}
 	session.children = slices.Delete(session.children, index, index+1)
+	session.forgetChildRoutes(child)
 	if session.child == child {
 		session.child = nil
 		if len(session.children) > 0 {
@@ -1459,8 +1467,8 @@ func (session *Session) Continue(ctx context.Context, threadID int) error {
 
 // ContinueThread reports whether the adapter resumed every thread.
 func (session *Session) ContinueThread(ctx context.Context, threadID int) (bool, error) {
-	if child := session.childSession(); child != nil {
-		return child.ContinueThread(ctx, threadID)
+	if child, native := session.threadChild(threadID); child != nil {
+		return child.ContinueThread(ctx, native)
 	}
 	threadID, err := session.resolveThreadID(ctx, threadID)
 	if err != nil {
@@ -1486,8 +1494,8 @@ func (session *Session) ContinueThread(ctx context.Context, threadID int) (bool,
 }
 
 func (session *Session) ReverseContinue(ctx context.Context, threadID int) error {
-	if child := session.childSession(); child != nil {
-		return child.ReverseContinue(ctx, threadID)
+	if child, native := session.threadChild(threadID); child != nil {
+		return child.ReverseContinue(ctx, native)
 	}
 	if !session.Status().Capabilities.SupportsStepBack {
 		return fmt.Errorf("debug adapter %s does not support reverse execution", session.plan.Adapter.Name)
@@ -1500,8 +1508,8 @@ func (session *Session) ReverseContinue(ctx context.Context, threadID int) error
 }
 
 func (session *Session) Next(ctx context.Context, threadID int) error {
-	if child := session.childSession(); child != nil {
-		return child.Next(ctx, threadID)
+	if child, native := session.threadChild(threadID); child != nil {
+		return child.Next(ctx, native)
 	}
 	threadID, err := session.resolveThreadID(ctx, threadID)
 	if err != nil {
@@ -1511,8 +1519,8 @@ func (session *Session) Next(ctx context.Context, threadID int) error {
 }
 
 func (session *Session) StepIn(ctx context.Context, threadID int) error {
-	if child := session.childSession(); child != nil {
-		return child.StepIn(ctx, threadID)
+	if child, native := session.threadChild(threadID); child != nil {
+		return child.StepIn(ctx, native)
 	}
 	threadID, err := session.resolveThreadID(ctx, threadID)
 	if err != nil {
@@ -1522,8 +1530,8 @@ func (session *Session) StepIn(ctx context.Context, threadID int) error {
 }
 
 func (session *Session) StepOut(ctx context.Context, threadID int) error {
-	if child := session.childSession(); child != nil {
-		return child.StepOut(ctx, threadID)
+	if child, native := session.threadChild(threadID); child != nil {
+		return child.StepOut(ctx, native)
 	}
 	threadID, err := session.resolveThreadID(ctx, threadID)
 	if err != nil {
@@ -1533,8 +1541,8 @@ func (session *Session) StepOut(ctx context.Context, threadID int) error {
 }
 
 func (session *Session) StepBack(ctx context.Context, threadID int) error {
-	if child := session.childSession(); child != nil {
-		return child.StepBack(ctx, threadID)
+	if child, native := session.threadChild(threadID); child != nil {
+		return child.StepBack(ctx, native)
 	}
 	if !session.Status().Capabilities.SupportsStepBack {
 		return fmt.Errorf("debug adapter %s does not support stepping backward", session.plan.Adapter.Name)
@@ -1613,8 +1621,8 @@ func (session *Session) restoreFailedResume(runningEpoch uint64, previous stopSt
 }
 
 func (session *Session) Pause(ctx context.Context, threadID int) error {
-	if child := session.childSession(); child != nil {
-		return child.Pause(ctx, threadID)
+	if child, native := session.threadChild(threadID); child != nil {
+		return child.Pause(ctx, native)
 	}
 	threadID, err := session.resolveThreadID(ctx, threadID)
 	if err != nil {
@@ -1631,8 +1639,25 @@ func (session *Session) WaitForStop(ctx context.Context, after uint64) (Status, 
 func (session *Session) StateEpoch() uint64 { return session.stateEpoch() }
 
 func (session *Session) Threads(ctx context.Context) ([]Thread, error) {
-	if child := session.childSession(); child != nil {
-		return child.Threads(ctx)
+	if children := session.childSessions(); len(children) > 0 {
+		var merged []Thread
+		for _, child := range children {
+			threads, err := child.Threads(ctx)
+			if err != nil {
+				if child == session.primaryChild() {
+					return nil, err
+				}
+				continue // a child that is starting or ending has no threads yet
+			}
+			for _, thread := range threads {
+				thread.ID = session.childID("thread", child, thread.ID)
+				if len(children) > 1 {
+					thread.Name = childLabel(child) + ": " + thread.Name
+				}
+				merged = append(merged, thread)
+			}
+		}
+		return merged, nil
 	}
 	response, err := session.request(ctx, &godap.ThreadsRequest{Request: request("threads")})
 	if err != nil {
@@ -1668,8 +1693,12 @@ func (session *Session) resolveThreadID(ctx context.Context, threadID int) (int,
 }
 
 func (session *Session) StackTrace(ctx context.Context, threadID, start, levels int) ([]StackFrame, int, error) {
-	if child := session.childSession(); child != nil {
-		return child.StackTrace(ctx, threadID, start, levels)
+	if child, native := session.threadChild(threadID); child != nil {
+		frames, total, err := child.StackTrace(ctx, native, start, levels)
+		for i := range frames {
+			frames[i].ID = session.childID("frame", child, frames[i].ID)
+		}
+		return frames, total, err
 	}
 	threadID, err := session.resolveThreadID(ctx, threadID)
 	if err != nil {
@@ -1698,8 +1727,16 @@ func (session *Session) StackTrace(ctx context.Context, threadID, start, levels 
 }
 
 func (session *Session) Scopes(ctx context.Context, frameID int) ([]Scope, error) {
-	if child := session.childSession(); child != nil {
-		return child.Scopes(ctx, frameID)
+	if session.childSession() != nil {
+		child, native, err := session.routeChild("frame", frameID)
+		if err != nil {
+			return nil, err
+		}
+		scopes, err := child.Scopes(ctx, native)
+		for i := range scopes {
+			scopes[i].VariablesReference = session.childID("variable", child, scopes[i].VariablesReference)
+		}
+		return scopes, err
 	}
 	if frameID <= 0 {
 		frames, _, err := session.StackTrace(ctx, 0, 0, 1)
@@ -1735,8 +1772,16 @@ func (session *Session) Variables(ctx context.Context, reference, start, count i
 
 // FilteredVariables passes DAP's "indexed" or "named" filter; zero count means all.
 func (session *Session) FilteredVariables(ctx context.Context, reference int, filter string, start, count int) ([]Variable, error) {
-	if child := session.childSession(); child != nil {
-		return child.FilteredVariables(ctx, reference, filter, start, count)
+	if session.childSession() != nil {
+		child, native, err := session.routeChild("variable", reference)
+		if err != nil {
+			return nil, err
+		}
+		variables, err := child.FilteredVariables(ctx, native, filter, start, count)
+		for i := range variables {
+			variables[i].VariablesReference = session.childID("variable", child, variables[i].VariablesReference)
+		}
+		return variables, err
 	}
 	if reference <= 0 {
 		return nil, errors.New("variables_reference must be a positive integer returned by scopes, variables, or evaluate")
@@ -1770,8 +1815,14 @@ func (session *Session) Evaluate(ctx context.Context, expression string, frameID
 // as "repl", "hover", or "watch". Adapters may format or restrict results
 // differently for each context.
 func (session *Session) EvaluateContext(ctx context.Context, expression string, frameID int, evaluationContext string) (Evaluation, error) {
-	if child := session.childSession(); child != nil {
-		return child.EvaluateContext(ctx, expression, frameID, evaluationContext)
+	if session.childSession() != nil {
+		child, native, err := session.routeChild("frame", frameID)
+		if err != nil {
+			return Evaluation{}, err
+		}
+		evaluation, err := child.EvaluateContext(ctx, expression, native, evaluationContext)
+		evaluation.VariablesReference = session.childID("variable", child, evaluation.VariablesReference)
+		return evaluation, err
 	}
 	if strings.TrimSpace(expression) == "" {
 		return Evaluation{}, errors.New("expression is required")

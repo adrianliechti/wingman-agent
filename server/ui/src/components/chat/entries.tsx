@@ -5,12 +5,11 @@ import {
 	FileText,
 	LoaderCircle,
 } from "lucide-react";
-import { memo, useContext, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { ChatEntry } from "../../types/session";
 import type { Phase, ToolLocation } from "../../types/protocol";
 import { MarkdownContent } from "../MarkdownContent";
 import { looksLikeDiffPath, shouldRenderDiff } from "./diffOutput";
-import { ToolProgressContext } from "./progress";
 
 export const EntryView = memo(function EntryView({
 	entry,
@@ -21,6 +20,17 @@ export const EntryView = memo(function EntryView({
 }) {
 	if (entry.type === "reasoning") {
 		return <ReasoningView entry={entry} isStreaming={isStreaming} />;
+	}
+	if (entry.type === "notice") {
+		return (
+			<div
+				data-entry-id={entry.id}
+				role="note"
+				className="mb-4 pl-3.5 text-[11px] leading-relaxed whitespace-pre-wrap break-words text-fg-dim font-mono select-text"
+			>
+				{entry.content}
+			</div>
+		);
 	}
 
 	const isUser = entry.type === "user";
@@ -196,8 +206,6 @@ const ToolRow = memo(function ToolRow({
 	const overflows = result.length > limit;
 	const shown = showAll ? result : truncate(result, limit);
 
-	const progressText =
-		useContext(ToolProgressContext)[entry.toolId ?? ""] ?? "";
 	const command =
 		isCommandTool && typeof args?.command === "string" ? args.command : "";
 	const workdir =
@@ -285,11 +293,6 @@ const ToolRow = memo(function ToolRow({
 						</div>
 					)}
 				</div>
-				{running && progressText && (
-					<div className="pl-5 text-[11px] text-fg-dim font-mono italic overflow-hidden text-ellipsis whitespace-nowrap">
-						{progressText}
-					</div>
-				)}
 				{expanded && canExpand && (
 					<div
 						className={`mt-1 px-3 py-2 text-[11px] whitespace-pre-wrap break-all text-fg-dim bg-bg-surface rounded-md font-mono leading-relaxed ${

@@ -1,4 +1,4 @@
-import { workspaceClient } from "../state/workspaceClient.ts";
+import { fetchOK } from "./http.ts";
 export interface WorkspaceSearchRequest {
 	query: string;
 	replacement: string;
@@ -37,34 +37,32 @@ export async function streamWorkspaceSearch(
 	onFile: (file: WorkspaceSearchFile) => void,
 	signal?: AbortSignal,
 ): Promise<WorkspaceSearchSummary> {
-	signal?.throwIfAborted();
-	const ahp = workspaceClient().ahp;
-	await ahp.ready();
-	signal?.throwIfAborted();
-	const searchId = crypto.randomUUID();
-	const release = ahp.onNotification((method, params) => {
-		if (
-			method === "x-wingman/searchProgress" &&
-			params.searchId === searchId &&
-			!signal?.aborted
-		)
-			onFile(params.file);
+	const response = await fetchOK("/api/workspace/search", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(request),
+		signal,
 	});
-	const cancel = () => {
-		void ahp
-			.extension("x-wingman/cancelSearch", { channel: "ahp-root://", searchId })
-			.catch(() => {});
-	};
-	signal?.addEventListener("abort", cancel, { once: true });
-	try {
-		const result = await ahp.extension<WorkspaceSearchSummary>(
-			"x-wingman/textSearch",
-			{ channel: "ahp-root://", searchId, ...request },
-		);
-		signal?.throwIfAborted();
-		return result;
-	} finally {
-		release();
-		signal?.removeEventListener("abort", cancel);
+	if (!response.body) throw new Error("Search returned no results stream");
+	const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+	let buffer = "";
+	for (;;) {
+		const { done, value } = await reader.read();
+		buffer += value ?? "";
+		const lines = buffer.split("\n");
+		buffer = done ? "" : lines.pop()!;
+		for (const line of lines) {
+			if (!line.trim()) continue;
+			const event = JSON.parse(line);
+			if (event.type === "file") onFile(event.file);
+			else if (event.type === "error") throw new Error(event.message);
+			else if (event.type === "done")
+				return {
+					files: event.files,
+					matches: event.matches,
+					truncated: event.truncated,
+				};
+		}
+		if (done) throw new Error("Search ended without a summary");
 	}
 }

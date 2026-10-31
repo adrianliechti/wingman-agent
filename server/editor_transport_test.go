@@ -100,12 +100,17 @@ func TestLSPWebSocketDocumentVersionsAndScope(t *testing.T) {
 	if err := os.WriteFile(external, []byte("package dependency\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	externalParams := map[string]any{"uri": fileuri.FromPath(external)}
-	if response := call(8, "workspace/textDocumentContent", externalParams); response["error"] == nil {
-		t.Fatal("unreported external file was exposed")
+	unreported, _ := canonicalLSPSource(lspSourceScheme + strings.TrimPrefix(fileuri.FromPath(external), "file"))
+	for _, uri := range []string{fileuri.FromPath(external), unreported} {
+		if response := call(8, "workspace/textDocumentContent", map[string]any{"uri": uri}); response["error"] == nil {
+			t.Fatalf("unreported external file was exposed as %s", uri)
+		}
 	}
-	app.allowLSPExternalFile(filepath.ToSlash(external))
-	if response := call(9, "workspace/textDocumentContent", externalParams); response["error"] != nil || response["result"].(map[string]any)["text"] != "package dependency\n" {
+	source, ok := app.lspSource(fileuri.FromPath(external))
+	if !ok || source != unreported {
+		t.Fatalf("external source = %q, %v", source, ok)
+	}
+	if response := call(9, "workspace/textDocumentContent", map[string]any{"uri": source}); response["error"] != nil || response["result"].(map[string]any)["text"] != "package dependency\n" {
 		t.Fatal(response)
 	}
 

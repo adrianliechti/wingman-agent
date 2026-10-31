@@ -2,11 +2,7 @@
 // AHP projection and browser presentation store used for streaming updates.
 import { performance } from "node:perf_hooks";
 import { chatReducer } from "@microsoft/agent-host-protocol";
-import {
-	SessionStore,
-	emptySession,
-	sessionKey,
-} from "../src/state/sessionStore.ts";
+import { SessionStore } from "../src/state/sessionStore.ts";
 import { AHPSessionProjection } from "../src/state/ahpSession.ts";
 const store = new SessionStore();
 const sessions = 50,
@@ -28,18 +24,16 @@ const turns = Array.from({ length: entriesPerSession / 2 }, (_, i) => ({
 }));
 let active: any;
 for (let i = 0; i < sessions; i++) {
-	const key = sessionKey("wingman", `${i}`),
+	const key = `ahp-chat:/${i}`,
 		projection = new AHPSessionProjection();
 	const session: any = {
-		_meta: {
-			wingman: {
-				...emptySession(key),
-				ref: { workspaceId: "w", backendId: "wingman", sessionId: `${i}` },
-				epoch: "e",
-				status: "ready",
-				phase: "streaming",
-			},
-		},
+		provider: "wingman",
+		title: "Benchmark",
+		status: 1,
+		lifecycle: "ready",
+		activeClients: [],
+		chats: [],
+		defaultChat: key,
 	};
 	const chat: any = {
 		resource: `ahp-chat:/${i}`,

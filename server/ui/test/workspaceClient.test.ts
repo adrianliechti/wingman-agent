@@ -44,7 +44,7 @@ async function fixture(
 										state: {
 											agents: [],
 											_meta: {
-												wingman: { ...scope, directory: "file:///workspace" },
+												"wingman.workspace": scope,
 											},
 										},
 									},
@@ -186,7 +186,9 @@ test("a different host instance is never used for saved commands", async (t) => 
 							fromSeq: 0,
 							state: {
 								agents: [],
-								_meta: { wingman: { ...scope, instanceId: "replacement" } },
+								_meta: {
+									"wingman.workspace": { ...scope, instanceId: "replacement" },
+								},
 							},
 						},
 					],

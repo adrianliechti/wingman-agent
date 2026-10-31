@@ -74,27 +74,29 @@ export async function mockGit(page: Page, method: string, run: Handler) {
 						const { files, ...metadata } = json;
 						states.set(channel, {
 							status: "ready",
-							files: files.map((file: any) => ({
-								id: uri(file.path),
-								nonce: "fixture",
-								edit: {
-									before:
-										file.status === "added"
-											? undefined
-											: {
-													uri: uri(file.original_path || file.path),
-													content: content(file.original ?? ""),
-												},
-									after:
-										file.status === "deleted"
-											? undefined
-											: {
-													uri: uri(file.path),
-													content: content(file.modified ?? ""),
-												},
-								},
-								_meta: { wingman: { patch: content(file.patch) } },
-							})),
+							files: files.map((file: any) => {
+								const { original, modified } = patchSides(file.patch ?? "");
+								return {
+									id: uri(file.path),
+									nonce: "fixture",
+									edit: {
+										before:
+											file.status === "added"
+												? undefined
+												: {
+														uri: uri(file.original_path || file.path),
+														content: content(file.original ?? original),
+													},
+										after:
+											file.status === "deleted"
+												? undefined
+												: {
+														uri: uri(file.path),
+														content: content(file.modified ?? modified),
+													},
+									},
+								};
+							}),
 						});
 						json = { ...metadata, channel };
 					}
@@ -110,4 +112,22 @@ export async function mockGit(page: Page, method: string, run: Handler) {
 		});
 	}
 	handlers.set(method, run);
+}
+
+// Mocks describe changes as patches; the UI diffs the before/after contents.
+function patchSides(patch: string) {
+	const before: string[] = [];
+	const after: string[] = [];
+	for (const line of patch.split("\n")) {
+		if (/^(---|\+\+\+|@@|diff )/.test(line)) continue;
+		if (line.startsWith("-")) before.push(line.slice(1));
+		else if (line.startsWith("+")) after.push(line.slice(1));
+		else if (line.startsWith(" ")) {
+			before.push(line.slice(1));
+			after.push(line.slice(1));
+		}
+	}
+	const text = (lines: string[]) =>
+		lines.length ? `${lines.join("\n")}\n` : "";
+	return { original: text(before), modified: text(after) };
 }

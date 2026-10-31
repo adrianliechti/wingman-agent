@@ -825,6 +825,14 @@ func (w *Workspace) LSPFilesChanged(ctx context.Context, changes []lsp.FileChang
 	}
 }
 
+func (w *Workspace) LSPVirtualContent(ctx context.Context, uri string) (string, error) {
+	service, err := w.languageService()
+	if err != nil {
+		return "", err
+	}
+	return service.VirtualContent(ctx, uri)
+}
+
 func (w *Workspace) CloseEditorDocument(ctx context.Context, filePath string) error {
 	w.mu.RLock()
 	service := w.Language

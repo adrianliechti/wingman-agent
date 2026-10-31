@@ -190,11 +190,11 @@ func TestExternalDefinitionNavigation(t *testing.T) {
 	if len(locations) == 0 {
 		t.Fatal("no definition locations for fmt.Println")
 	}
-	path, ok := fileuri.Path(string(locations[0].URI))
-	if !ok {
-		t.Fatalf("expected file URI, got %+v", locations[0])
+	path, virtual, ok := app.lspSourceTarget(string(locations[0].URI))
+	if !ok || virtual != "" || !strings.HasPrefix(string(locations[0].URI), lspSourceScheme+":/") {
+		t.Fatalf("expected an external wingman-source file, got %+v", locations[0])
 	}
-	if rel, err := filepath.Rel(root, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if rel, err := filepath.Rel(root, path); err == nil && filepath.IsLocal(rel) {
 		t.Fatalf("expected external location, got %+v", locations[0])
 	}
 
@@ -205,7 +205,9 @@ func TestExternalDefinitionNavigation(t *testing.T) {
 	if !strings.Contains(content.Text, "func Println(") {
 		t.Fatalf("external file %s does not contain the Println definition", path)
 	}
-	if response := c.call("workspace/textDocumentContent", map[string]any{"uri": fileuri.FromPath("/etc/hosts")}); response["error"] == nil {
-		t.Fatal("unreported external file was exposed")
+	for _, uri := range []string{fileuri.FromPath("/etc/hosts"), lspSourceScheme + ":///etc/hosts"} {
+		if response := c.call("workspace/textDocumentContent", map[string]any{"uri": uri}); response["error"] == nil {
+			t.Fatalf("unreported external file %s was exposed", uri)
+		}
 	}
 }

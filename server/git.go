@@ -102,9 +102,6 @@ func (s *Server) gitBranches(ctx context.Context, refresh bool) (GitBranches, er
 	for _, b := range branches {
 		result.Branches = append(result.Branches, GitBranch{Name: b.Name, Remote: b.Remote, Current: b.Current})
 	}
-	if refresh {
-		s.broadcast(Frame{Type: EvtDiffsChanged})
-	}
 	return result, nil
 }
 
@@ -162,7 +159,7 @@ func (s *Server) runGit(ctx context.Context, p gitAction) (gitRunResult, error) 
 		return result, err
 	}
 	var err error
-	indexOnly, flush := false, false
+	flush := false
 	switch p.Action {
 	case "init":
 		err = s.workspace.GitInit()
@@ -197,10 +194,8 @@ func (s *Server) runGit(ctx context.Context, p gitAction) (gitRunResult, error) 
 		switch p.Action {
 		case "stage":
 			err = s.workspace.GitStage(ctx, paths)
-			indexOnly = true
 		case "unstage":
 			err = s.workspace.GitUnstage(ctx, paths)
-			indexOnly = true
 		case "revert":
 			if len(paths) != 1 {
 				return result, ahpInvalid("revert requires one path")
@@ -227,11 +222,6 @@ func (s *Server) runGit(ctx context.Context, p gitAction) (gitRunResult, error) 
 	}
 	if flush {
 		s.flushFiles()
-	}
-	if indexOnly {
-		s.broadcast(Frame{Type: EvtGitIndexChanged})
-	} else {
-		s.broadcast(Frame{Type: EvtDiffsChanged})
 	}
 	return result, nil
 }

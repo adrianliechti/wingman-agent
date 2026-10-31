@@ -15,11 +15,20 @@ import {
 } from "@microsoft/agent-host-protocol";
 import { AHPConnection } from "../src/state/ahpConnection.ts";
 import { WorkspaceClient } from "../src/state/workspaceClient.ts";
+import { setWorkspaceHTTP } from "../src/api/http.ts";
+import { streamWorkspaceSearch } from "../src/api/search.ts";
 
 const endpoint = process.env.AHP_TEST_URL!;
 const base = process.env.AHP_TEST_HTTP!;
 const root = process.env.AHP_TEST_ROOT!;
 const scope = JSON.parse(process.env.AHP_TEST_SCOPE!);
+// The browser facade fetches page-relative REST routes.
+const nativeFetch = globalThis.fetch;
+globalThis.fetch = (input, init) =>
+	nativeFetch(
+		typeof input === "string" && input.startsWith("/") ? base + input : input,
+		init,
+	);
 async function until(predicate: () => unknown, label = "condition") {
 	const deadline = Date.now() + 10000;
 	while (!predicate()) {
@@ -78,6 +87,7 @@ test(
 			WebSocketTransport.connect(endpoint),
 		);
 		const browser = new WorkspaceClient(scope, ahp);
+		setWorkspaceHTTP(browser.http);
 		browser.start();
 		t.after(() => browser.stop());
 		await ahp.ready();
@@ -132,6 +142,21 @@ test(
 						(file) => file.path === "resource-moved.txt",
 					),
 				);
+				const found: string[] = [];
+				const summary = await streamWorkspaceSearch(
+					{
+						query: "updated",
+						replacement: "",
+						regex: false,
+						case_sensitive: true,
+						whole_word: false,
+						include: "",
+						exclude: "",
+					},
+					(file) => found.push(file.path),
+				);
+				assert.ok(found.includes("resource-moved.txt"));
+				assert.equal(summary.files, found.length);
 				await browser.files.delete("resource-fixture");
 				await browser.files.delete("resource-fixture");
 				await assert.rejects(
@@ -146,19 +171,33 @@ test(
 			uri = "",
 			chatURI = "";
 		await t.test(
-			"creation is shared and idempotent; catalog carries native identity",
+			"creation is shared and idempotent; chats are identified by URI",
 			async () => {
 				[key] = await Promise.all([
 					browser.create("one", "draft"),
 					browser.create("one", "draft"),
 				]);
 				assert.equal(await browser.create("one", "draft"), key);
-				uri = await browser.resource(key);
+				assert.match(key, /^ahp-chat:/);
+				uri = await browser.sessionOf(key);
 				const session = await ahp.read<any>(uri);
 				chatURI = session.defaultChat;
-				assert.equal(session._meta.wingman.ref.backendId, "one");
+				assert.equal(chatURI, key);
+				assert.equal(session.provider, "one");
+				assert.equal(session._meta, undefined);
+				assert.deepEqual(
+					session.chats.map((c: any) => c.resource),
+					[key],
+				);
 				const list = await browser.list("one");
-				assert.equal(list.filter((s) => s.id === key).length, 1);
+				const listed = list.filter((s) => s.id === key);
+				assert.equal(listed.length, 1);
+				assert.equal(listed[0].session, uri);
+				assert.deepEqual(
+					listed[0].chats.map((c) => c.id),
+					[key],
+				);
+				assert.equal(browser.backendOf(key), "one");
 			},
 		);
 		const release = browser.watch(key);
@@ -209,7 +248,8 @@ test(
 					});
 				const all = (await complete("/")).items;
 				const native = all.find((item) => item.insertText === "/native")!;
-				assert.equal((native.attachment._meta!.wingman as any).kind, "command");
+				assert.equal(native.attachment._meta!.command, "native");
+				assert.equal(native.attachment._meta!.isSkill, undefined);
 				assert.equal(
 					all.filter((item) => item.insertText === "/native").length,
 					1,
@@ -225,16 +265,11 @@ test(
 					),
 				);
 				assert.ok(
-					inline.items.every(
-						(item) => (item.attachment._meta!.wingman as any).kind === "skill",
-					),
+					inline.items.every((item) => item.attachment._meta!.isSkill === true),
 				);
 				assert.equal(
-					(
-						(await complete("use /native")).items[0].attachment._meta!
-							.wingman as any
-					).kind,
-					"skill",
+					(await complete("use /native")).items[0].attachment._meta!.isSkill,
+					true,
 				);
 				assert.deepEqual((await complete("https://example/sha")).items, []);
 				assert.deepEqual((await complete("/tmp/sha")).items, []);
@@ -261,10 +296,7 @@ test(
 					(error: any) => error.code === -32602,
 				);
 				const second = await browser.create("one", "completion-scope");
-				const secondSession = await ahp.read<any>(
-					await browser.resource(second),
-				);
-				const other = (await complete("/", 1, secondSession.defaultChat)).items;
+				const other = (await complete("/", 1, second)).items;
 				assert.ok(all.some((item) => item.insertText === "/only-session-1"));
 				assert.ok(!other.some((item) => item.insertText === "/only-session-1"));
 				const old = await legacy.request("completions", {
@@ -324,10 +356,10 @@ test(
 			},
 		);
 		await t.test("approvals resolve once across clients", async () => {
-			const sid = JSON.parse(key)[1];
-			const response = fetch(`${base}/fixture/confirm?session=${sid}`, {
-				method: "POST",
-			});
+			const response = fetch(
+				`${base}/fixture/confirm?session=${encodeURIComponent(key)}`,
+				{ method: "POST" },
+			);
 			await until(
 				() =>
 					browser.store
@@ -338,22 +370,26 @@ test(
 			const prompt = browser.store
 				.getSnapshot()
 				[key].prompts.find((p) => p.kind === "confirm")!;
-			await browser.command(key, {
-				type: "prompt_response",
-				promptId: prompt.id,
+			assert.deepEqual(prompt.options, [
+				{ id: "once", label: "Allow", kind: "approve" },
+				{ id: "deny", label: "Deny", kind: "deny" },
+			]);
+			await browser.respond(key, prompt.id, {
 				action: "accept",
+				option: "once",
 			});
 			assert.deepEqual(await (await response).json(), { accepted: true });
+			const confirmed = chat.actions.find(
+				(a) => a.action.type === "chat/toolCallConfirmed",
+			);
+			assert.equal(confirmed?.action.selectedOptionId, "once");
+			assert.equal(confirmed?.action._meta, undefined);
 			await until(
 				() => !browser.store.getSnapshot()[key].prompts.length,
 				"approval completion",
 			);
 			await assert.rejects(
-				browser.command(key, {
-					type: "prompt_response",
-					promptId: prompt.id,
-					action: "accept",
-				}),
+				browser.respond(key, prompt.id, { action: "accept" }),
 				/resolved|expired|active/,
 			);
 		});
@@ -361,7 +397,7 @@ test(
 			"typed input requests and answers survive the browser mapping",
 			async () => {
 				const response = fetch(
-					`${base}/fixture/input?session=${JSON.parse(key)[1]}`,
+					`${base}/fixture/input?session=${encodeURIComponent(key)}`,
 					{ method: "POST" },
 				);
 				await until(
@@ -375,9 +411,7 @@ test(
 					.getSnapshot()
 					[key].prompts.find((p) => p.kind === "ask")!;
 				assert.deepEqual(prompt.fields?.[0].enum, ["one", "two"]);
-				await browser.command(key, {
-					type: "prompt_response",
-					promptId: prompt.id,
+				await browser.respond(key, prompt.id, {
 					action: "accept",
 					content: { choice: "two" },
 				});
@@ -405,27 +439,26 @@ test(
 				);
 				assert.equal(chat.state.queuedMessages[0].kind, "queued");
 				const id = chat.state.queuedMessages[0].id;
-				await browser.command(key, {
-					type: "queue_update",
-					inputId: id,
-					text: "edited",
-					intent: "follow_up",
-				});
+				await browser.updateQueued(key, id, "edited");
 				await until(
 					() => chat.state.queuedMessages[0]?.message.text === "edited",
 					"queue update",
 				);
-				await browser.command(key, { type: "queue_remove", inputId: id });
+				await browser.removeQueued(key, id);
 				await until(() => !chat.state.queuedMessages?.length, "queue removal");
 			},
 		);
 		await t.test(
 			"settings and complete turn state are reflected in both clients",
 			async () => {
-				await browser.command(key, { type: "settings", model: "test-model" });
+				await browser.configure(key, { model: "test-model" });
 				await until(
 					() =>
 						browser.store.getSnapshot()[key].settings.model === "test-model",
+				);
+				await until(
+					() => chat.state.config?.values.model === "test-model",
+					"chat config",
 				);
 				await fetch(`${base}/fixture/release`, { method: "POST" });
 				await until(
@@ -453,6 +486,41 @@ test(
 				);
 				await browser.send(key, "after reconnect");
 				await until(() => chat.state.turns.length === 2, "reconnected turn");
+			},
+		);
+		await t.test(
+			"forks are chats of the same session with their own history",
+			{ skip: !browser.canFork("one") && "backend cannot fork" },
+			async () => {
+				const forked = await browser.fork(key, "Fork", chat.state.turns[0].id);
+				assert.equal(await browser.sessionOf(forked), uri);
+				const session = await ahp.read<any>(uri);
+				assert.deepEqual(
+					session.chats.map((c: any) => c.resource),
+					[key, forked],
+				);
+				const unwatch = browser.watch(forked);
+				try {
+					await until(
+						() => browser.store.getSnapshot()[forked]?.synchronized,
+						"forked chat",
+					);
+					assert.deepEqual(
+						browser.store
+							.getSnapshot()
+							[forked].entries.filter((e) => e.type === "user")
+							.map((e) => e.content),
+						["hello"],
+					);
+					await browser.dispose(forked);
+					await until(
+						() => browser.store.getSnapshot()[forked]?.status === "deleted",
+						"fork disposal",
+					);
+				} finally {
+					unwatch();
+				}
+				assert.equal(browser.store.getSnapshot()[key].status, "ready");
 			},
 		);
 		await t.test(
@@ -714,9 +782,8 @@ test(
 			"accepted plugin skills expand once and native commands bypass conflicting skill instructions",
 			async () => {
 				const inputKey = await browser.create("one", "completion-inputs");
-				const state = await ahp.read<any>(await browser.resource(inputKey));
 				const items = await vscode.request("completions", {
-					channel: state.defaultChat,
+					channel: inputKey,
 					kind: "userMessage" as any,
 					text: "/reports:",
 					offset: 9,

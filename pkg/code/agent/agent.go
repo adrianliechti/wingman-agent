@@ -42,13 +42,12 @@ type Agent struct {
 
 	sessionsDir string
 
-	modelMu           sync.Mutex
-	modelID           string
-	effort            string
-	complexModel      string
-	utilityModel      string
-	upstreamModels    map[string]bool
-	modelDiscoveryErr error
+	modelMu        sync.Mutex
+	modelID        string
+	effort         string
+	complexModel   string
+	utilityModel   string
+	upstreamModels map[string]bool
 
 	mu           sync.Mutex // Protects ui and session bookkeeping.
 	sessions     map[string]*sessionState
@@ -277,9 +276,23 @@ func (a *Agent) registerSession(ctx context.Context, s *sessionState) error {
 
 // ForkSession copies history, model and mode; tasks, schedules and queued inputs stay with the source.
 func (a *Agent) ForkSession(ctx context.Context, id, title string) (string, error) {
+	return a.fork(ctx, id, func(source *sessionState, newID string) error {
+		return a.forkJournal(ctx, source, id, newID, title)
+	})
+}
+
+// ForkSessionThrough forks history through the turn of one user input. Only
+// committed history is copied, so the source may keep running.
+func (a *Agent) ForkSessionThrough(ctx context.Context, id, inputID, title string) (string, error) {
+	return a.fork(ctx, id, func(_ *sessionState, newID string) error {
+		return session.ForkThrough(a.sessionsDir, id, newID, title, inputID)
+	})
+}
+
+func (a *Agent) fork(ctx context.Context, id string, journal func(source *sessionState, newID string) error) (string, error) {
 	newID := uuid.NewString()
 	source := a.session(id)
-	if err := a.forkJournal(ctx, source, id, newID, title); err != nil {
+	if err := journal(source, newID); err != nil {
 		return "", err
 	}
 	err := a.copySessionSettings(id, newID)

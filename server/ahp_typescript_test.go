@@ -1,17 +1,21 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
 )
@@ -29,7 +33,7 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 	}
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, b, agent := newProtocolServer(t)
-	b.agent = &completionProtocolAgent{agent}
+	b.agent = &completionProtocolAgent{protocolAgent: agent, forks: map[string][]harness.Message{}}
 	root := t.TempDir()
 	for path, content := range map[string]string{
 		".agents/skills/shared/SKILL.md":                  "---\nname: shared\ndescription: Project shared workflow\n---\nPROJECT WORKFLOW $ARGUMENTS",
@@ -79,8 +83,16 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 		release.Do(func() { close(agent.gate) })
 		w.WriteHeader(204)
 	})
+	// The browser names sessions by chat URI only.
+	nativeSession := func(r *http.Request) string {
+		_, ch, err := s.ahpHost().ensureSession(r.URL.Query().Get("session"))
+		if err != nil || ch == nil {
+			return ""
+		}
+		return ch.controller.ref.SessionID
+	}
 	s.mux.Post("/fixture/confirm", func(w http.ResponseWriter, r *http.Request) {
-		accepted, err := b.Confirm(code.WithSessionID(r.Context(), r.URL.Query().Get("session")), "Allow test operation?")
+		accepted, err := b.Confirm(code.WithSessionID(r.Context(), nativeSession(r)), "Allow test operation?")
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -88,7 +100,7 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 		writeJSON(w, map[string]any{"accepted": accepted})
 	})
 	s.mux.Post("/fixture/input", func(w http.ResponseWriter, r *http.Request) {
-		result, err := b.Elicit(code.WithSessionID(r.Context(), r.URL.Query().Get("session")), tool.ElicitRequest{Message: "Choose one", Fields: []tool.ElicitField{{Name: "choice", Type: "string", Enum: []string{"one", "two"}}}})
+		result, err := b.Elicit(code.WithSessionID(r.Context(), nativeSession(r)), tool.ElicitRequest{Message: "Choose one", Fields: []tool.ElicitField{{Name: "choice", Type: "string", Enum: []string{"one", "two"}}}})
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -108,7 +120,38 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 	}
 }
 
-type completionProtocolAgent struct{ *protocolAgent }
+type completionProtocolAgent struct {
+	*protocolAgent
+	forks map[string][]harness.Message // by fork session, protected by mu
+}
+
+func (a *completionProtocolAgent) Messages(id string) []harness.Message {
+	a.mu.Lock()
+	fork, ok := a.forks[id]
+	a.mu.Unlock()
+	if ok {
+		return slices.Clone(fork)
+	}
+	return a.protocolAgent.Messages(id)
+}
+
+func (a *completionProtocolAgent) ForkSession(ctx context.Context, id, title string) (string, error) {
+	return a.ForkSessionThrough(ctx, id, "", title)
+}
+
+func (a *completionProtocolAgent) ForkSessionThrough(_ context.Context, _, inputID, _ string) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	messages := slices.Clone(a.messages)
+	if start := slices.IndexFunc(messages, func(m harness.Message) bool { return m.InputID == inputID }); inputID != "" && start >= 0 {
+		if end := slices.IndexFunc(messages[start+1:], func(m harness.Message) bool { return m.Role == harness.RoleUser }); end >= 0 {
+			messages = messages[:start+1+end]
+		}
+	}
+	id := fmt.Sprintf("fork-%d", len(a.forks)+1)
+	a.forks[id] = messages
+	return id, nil
+}
 
 func (a *completionProtocolAgent) Commands(sessionID string) []code.Command {
 	return []code.Command{

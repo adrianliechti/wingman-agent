@@ -97,7 +97,9 @@ therefore also removed. `/api/workspace/insights` returns Git activity statistic
 `GET /api/v2/backends` returns the backend catalogue. Startup reads workspace
 identity first, then fetches backends with the returned instance ID before
 initializing its protocol connections. The catalogue is no longer duplicated in
-`/api/workspace`.
+`/api/workspace`. Backend settings and model refresh stay under
+`/api/v2/backends/{provider}`. Turn reviews, tasks and schedules live under
+`/api/v2/chats/{chat}`, where `{chat}` is the URL-encoded chat URI.
 
 ## Git and AHP changesets
 
@@ -128,9 +130,9 @@ Three shared AHP channels describe workspace changes:
 `ahp-changeset:/wingman/uncommitted`, `ahp-changeset:/wingman/staged`, and
 `ahp-changeset:/wingman/unstaged`. The browser subscribes to standard
 `ChangesetState`, applies the official reducer, and retrieves immutable
-before/after `ContentRef`s through `resourceRead`. The small
-`ChangesetFile._meta.wingman.patch` extension points to the exact unified patch,
-including binary/rename information, for rendering and copying Git output.
+before/after `ContentRef`s through `resourceRead` and computes diffs from them.
+A rename has different before/after URIs; binary content has the
+`application/octet-stream` content type and no text.
 
 The host advertises standard `invokeChangesetOperation` operations: `stage` on
 unstaged changes and `unstage` on staged changes, at changeset or resource scope;
@@ -151,13 +153,49 @@ its channel has expired.
 
 ## AHP support
 
-Supported features include provider/model discovery; session creation, listing,
-reopening, and forks; one chat per session; history and streaming text/reasoning;
-tool activity; approvals and typed questions; cancellation; model/effort/mode
-settings; and editable queued/steering messages. The controller remains the
-single authority when browser and IDE clients act concurrently. Retry receipts
-are bounded and scoped to a running host; they do not survive a server restart.
-Session URI mappings are saved under `WINGMAN_HOME/ahp`.
+Supported features include provider/model discovery; session creation, listing
+and reopening; forked chats; history and streaming text/reasoning; tool
+activity; approvals and typed questions; cancellation; per-chat model, effort,
+mode and unattended settings; and editable queued/steering messages. The
+controller remains the single authority when browser and IDE clients act
+concurrently. Retry receipts are bounded and scoped to a running host; they do
+not survive a server restart. Session and chat URI mappings are saved under
+`WINGMAN_HOME/ahp`.
+
+Sessions and chats are identified only by their AHP URIs. A native session that
+was never given an alias is reachable at
+`ahp-session:/wingman/<base64url(backend)>/<base64url(id)>`, with its default
+chat at the same path under `ahp-chat:`. When the session lives under an alias,
+subscribing to that canonical URI fails with InvalidParams and error data
+`{ "resource": "<alias>" }`.
+
+Each chat projects one native session. `createChat` with
+`source: { kind: "fork", chat, turnId }` forks a completed turn of a chat in the
+same session into a new native session, which becomes a chat of that session.
+Forks from an earlier turn copy the journal up to the next input, so the source
+may keep running; only the builtin agent supports this. `disposeChat` deletes a
+forked chat, and `disposeSession` deletes the session with all its chats. Each
+chat has its own queue, turns and settings: `chat/configChanged` changes one
+chat, while `session/configChanged` and the session's config values address the
+default chat.
+
+Stopping a turn (`chat/turnCancelled`) also removes the messages queued behind
+it. A message `/compact [focus]` runs as a compaction turn when the backend can
+compact: the chat's `activity` reads `Compacting context…`, and the turn ends
+with a system notification `Context compacted · ~X → ~Y tokens`. `completions`
+offers `/compact` only for such backends. Compaction turns are not part of the
+agent's history and last for the host process. A queue recovered after a
+restart stays paused until the user sends the next message.
+
+Tool calls carry the tool hint as `intention`. Their content holds the result
+text, file locations as `resource` items (`file:` URIs with an optional
+`#L<line>` fragment) and images as `embeddedResource` items; `_meta.toolKind`
+follows VS Code's convention (`terminal` for shell commands). Pending approvals
+offer the confirmation options `once` and `deny`; each approval is answered once. Retries, tool
+progress and compaction are reported as the chat's `activity`. A steering
+message consumed by a running turn appears as a system notification with the
+user's text. `chat/usage` reports the latest request's prompt tokens as
+`inputTokens`, and the turn's output and cache-read tokens.
 
 Terminal channels share the workspace terminal manager, including debugger
 terminals. They support discovery, creation, ownership, input, resize, titles,
@@ -198,18 +236,19 @@ the changeset if an old content reference is unavailable. An editing flag is
 presentation information, not a lock or proof that applying a change is safe.
 
 The host supports AHP 1.0 and selected 1.1 features: mixed steering/queued
-pending messages, changeset file nonces and `isEditing`, model `vendor`, and
-host-measured reasoning `startedAt`/`duration`. A reasoning run ends when the
-next markdown, tool or reasoning part starts, or before the turn's terminal
-action; timing lasts for the host process and history from earlier processes is
-untimed. The web UI negotiates 1.1; 1.0 clients receive the legacy
-queue/steering projection. Per-chat config, multiple chats,
-mixed providers within one session, client-provided tools, TCP channels,
-experimental channel windows, and protocol-native automations are not advertised.
-Draft/archive/title overrides currently last for the host process. Wingman's
-additional presentation information uses `_meta.wingman`; compacting, queue
-pause/resume, forks, focus, and workspace notifications use documented
-`x-wingman/*` commands or namespaced metadata.
+pending messages, changeset file nonces and `isEditing`, model `vendor` and
+per-model effort schemas, chat activity, and host-measured reasoning
+`startedAt`/`duration`. A reasoning run ends when the next markdown, tool or
+reasoning part starts, or before the turn's terminal action; timing lasts for
+the host process and history from earlier processes is untimed. The web UI
+negotiates 1.1; 1.0 clients receive the legacy queue/steering projection.
+Side chats, chats from other providers, client-provided tools, TCP channels,
+experimental channel windows, and protocol-native automations are not
+advertised. Draft/archive/title overrides currently last for the host process.
+The remaining Wingman extensions are file and text search, `revealResource`,
+`terminalStatus`, `focus`, `workspaceChanged`, the root's `_meta.wingman`
+workspace identity, `createTerminal`'s `_meta["wingman.shell"]`, and completion
+attachments' `_meta.wingman` descriptions.
 
 ## Skills and commands
 
@@ -227,8 +266,7 @@ to the backend without expanding a conflicting skill. Completion attachments
 identify `skill` versus `command` and carry descriptions and argument hints in
 `_meta.wingman`. The WebUI preserves those attachments through draft recovery
 and delivery. Draft chats use the workspace catalogue until a session exists.
-Wingman's Compact action remains an explicit session control via
-`x-wingman/compact`; it is not synthesized as an AHP prompt completion.
+`/compact` is offered as a command when the backend can compact.
 
 ## LSP and DAP scope
 

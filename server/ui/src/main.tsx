@@ -39,8 +39,7 @@ fetchWorkspace()
 		initializeWorkspace(scope);
 		await initializeComposerDrafts(scope.workspaceId);
 		const queryClient = createServerQueryClient();
-		const { backends: _backends, ...workspace } = scope;
-		queryClient.setQueryData(queryKeys.workspace, workspace);
+		queryClient.setQueryData(queryKeys.workspace, scope);
 		root.render(
 			<StrictMode>
 				<QueryClientProvider client={queryClient}>

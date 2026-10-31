@@ -1,5 +1,5 @@
 import { workspaceClient } from "./state/workspaceClient.ts";
-import { editEnvelope } from "./state/lspClient.ts";
+import { editEnvelope, lspSourceScheme } from "./state/lspClient.ts";
 import { readWorkspaceFile } from "./api/files.ts";
 import type { Monaco } from "@monaco-editor/react";
 import type * as MonacoTypes from "monaco-editor";
@@ -1145,6 +1145,9 @@ function lspLocationTarget(
 	locationURI: string,
 	workspaceURI: string,
 ): LSPFileTarget | null {
+	// Sources outside the workspace open read-only through textDocumentContent.
+	if (locationURI.startsWith(`${lspSourceScheme}:`))
+		return { path: locationURI, external: true };
 	const targetPath = fileURIPath(locationURI);
 	const rootPath = fileURIPath(workspaceURI);
 	if (!targetPath || !rootPath) return null;

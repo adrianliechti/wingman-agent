@@ -2,14 +2,20 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
+	"net/url"
+	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
+	lspuri "go.lsp.dev/uri"
 )
 
 type editorCapabilitiesResponse struct {
@@ -51,6 +57,10 @@ type lspServiceActivity struct {
 	Project    string             `json:"project"`
 	Analyzing  bool               `json:"analyzing"`
 	Operations []lsp.WorkProgress `json:"operations"`
+}
+
+func (s *Server) handleWorkspaceActivity(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.lspActivity())
 }
 
 func (s *Server) lspActivity() lspActivityResponse {
@@ -152,21 +162,81 @@ func nonNilStrings(values []string) []string {
 	return values
 }
 
-// allowLSPExternalFile records a language-server reported location outside the
-// workspace so workspace/textDocumentContent may serve exactly those files, read-only.
-func (s *Server) allowLSPExternalFile(path string) {
+// Documents outside the workspace are served read-only under this scheme:
+// files as wingman-source:/path and a language server's own virtual
+// documents as wingman-source://<scheme>/<base64 URI>/<name>.
+const lspSourceScheme = "wingman-source"
+
+// lspSource maps a location a language server reported outside the workspace
+// to its wingman-source URI and allows workspace/textDocumentContent to serve
+// exactly that URI. It reports false for workspace files and unreadable files.
+func (s *Server) lspSource(location string) (string, bool) {
+	u, err := url.Parse(location)
+	if err != nil || u.Scheme == "" {
+		return "", false
+	}
+	source := &url.URL{Scheme: lspSourceScheme}
+	if u.Scheme == "file" {
+		path, ok := fileuri.Path(location)
+		if !ok {
+			return "", false
+		}
+		if rel, err := filepath.Rel(s.workspace.RootPath, path); err == nil && filepath.IsLocal(rel) {
+			return "", false
+		}
+		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+			return "", false
+		}
+		file, _ := url.Parse(fileuri.FromPath(path))
+		source.Path = file.Path
+	} else {
+		name := pathpkg.Base(u.Path)
+		if name == "." || name == "/" {
+			name = u.Scheme
+		}
+		source.Host, source.Path = u.Scheme, "/"+base64.RawURLEncoding.EncodeToString([]byte(location))+"/"+name
+	}
+	canonical, ok := canonicalLSPSource(source.String())
+	if !ok {
+		return "", false
+	}
 	s.lspExternalMu.Lock()
 	defer s.lspExternalMu.Unlock()
 	if s.lspExternalPaths == nil {
 		s.lspExternalPaths = make(map[string]bool)
 	}
-	s.lspExternalPaths[path] = true
+	s.lspExternalPaths[canonical] = true
+	return canonical, true
 }
 
-func (s *Server) lspExternalFileAllowed(path string) bool {
+// Clients and the LSP codec rewrite URIs to vscode-uri's canonical form, so
+// the allow-list compares that form.
+func canonicalLSPSource(value string) (string, bool) {
+	canonical, err := lspuri.Parse(value)
+	return string(canonical), err == nil && canonical.Scheme() == lspSourceScheme
+}
+
+// lspSourceTarget resolves an allowed wingman-source URI to a file path or to
+// the language server's original virtual URI.
+func (s *Server) lspSourceTarget(source string) (path, virtual string, ok bool) {
+	canonical, ok := canonicalLSPSource(source)
+	if !ok {
+		return "", "", false
+	}
 	s.lspExternalMu.Lock()
-	defer s.lspExternalMu.Unlock()
-	return s.lspExternalPaths[path]
+	allowed := s.lspExternalPaths[canonical]
+	s.lspExternalMu.Unlock()
+	u, err := url.Parse(canonical)
+	if !allowed || err != nil {
+		return "", "", false
+	}
+	if u.Host == "" {
+		path, ok = fileuri.Path((&url.URL{Scheme: "file", Path: u.Path}).String())
+		return path, "", ok
+	}
+	encoded, _, _ := strings.Cut(strings.TrimPrefix(u.Path, "/"), "/")
+	data, err := base64.RawURLEncoding.DecodeString(encoded)
+	return "", string(data), err == nil
 }
 
 type lspWorkspaceDocument struct {

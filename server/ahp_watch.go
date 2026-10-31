@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
-	"net/url"
-	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -155,10 +153,4 @@ func (h *ahpHost) runResourceWatches() {
 			h.mu.Unlock()
 		}
 	}
-}
-
-func (h *ahpHost) fileURI(relative string) string {
-	base, _ := url.Parse(h.directoryURI())
-	base.Path = path.Join(base.Path, filepath.ToSlash(relative))
-	return base.String()
 }

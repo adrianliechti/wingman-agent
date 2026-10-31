@@ -186,6 +186,12 @@ export class EditorConnection {
 			return;
 		}
 		if (this.mode === "lsp" && message.method) {
+			if (message.method === "workspace/diagnostic/refresh") {
+				this.send({ jsonrpc: "2.0", id: message.id, result: null });
+				for (const listener of this.listeners)
+					listener(message.method, message.params);
+				return;
+			}
 			if (message.id !== undefined) {
 				const handler =
 					message.method === "workspace/applyEdit"

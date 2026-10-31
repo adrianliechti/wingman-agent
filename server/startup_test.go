@@ -2,19 +2,16 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 )
 
 func TestListenLocalReservesDefaultAndFallbackPorts(t *testing.T) {
@@ -75,11 +72,13 @@ func TestRunStopsForCancelledContext(t *testing.T) {
 	}
 }
 
-func TestModelDiscoveryFailureReachesLateWebClient(t *testing.T) {
+func TestModelRefreshRecoversFromDiscoveryFailure(t *testing.T) {
 	testenv.WingmanHome(t)
 	var fail atomic.Bool
+	var calls atomic.Int32
 	fail.Store(true)
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		if fail.Load() {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -100,33 +99,21 @@ func TestModelDiscoveryFailureReachesLateWebClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := rt.agent.(*agent.Agent)
 	deadline := time.After(5 * time.Second)
-	for a.ModelDiscoveryError() == nil {
+	for calls.Load() == 0 {
 		select {
 		case <-deadline:
-			t.Fatal("model discovery did not report its failure")
+			t.Fatal("model discovery did not run")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 	readSettings := func() SessionSettings {
 		t.Helper()
-		req := httptest.NewRequest(http.MethodGet, "http://localhost/api/v2/backends/wingman/settings", nil)
-		req.Header.Set(instanceHeader, app.scope.InstanceID)
-		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("settings: %d %s", rec.Code, rec.Body)
-		}
-		var settings SessionSettings
-		if err := json.Unmarshal(rec.Body.Bytes(), &settings); err != nil {
-			t.Fatal(err)
-		}
-		return settings
+		return rt.settings("")
 	}
 	settings := readSettings()
-	if !strings.Contains(settings.ModelsError, "401 Unauthorized") || settings.Model != "gpt-6-sol" {
-		t.Fatalf("late client settings: model %q, error %q", settings.Model, settings.ModelsError)
+	if settings.Model != "gpt-6-sol" {
+		t.Fatalf("late client settings: model %q", settings.Model)
 	}
 	retry := func(wantStatus int) {
 		t.Helper()
@@ -143,19 +130,19 @@ func TestModelDiscoveryFailureReachesLateWebClient(t *testing.T) {
 	fail.Store(false)
 	retry(http.StatusNoContent)
 	settings = readSettings()
-	if settings.ModelsError != "" || len(settings.Models) != 1 || settings.Models[0].ID != "gpt-6-sol" {
-		t.Fatalf("successful discovery did not clear failure: %#v", settings)
+	if len(settings.Models) != 1 || settings.Models[0].ID != "gpt-6-sol" {
+		t.Fatalf("successful discovery did not list models: %#v", settings)
 	}
 	view.mu.Lock()
 	liveSettings := view.state.Settings
 	view.mu.Unlock()
-	if liveSettings.ModelsError != "" || len(liveSettings.Models) != 1 {
+	if len(liveSettings.Models) != 1 {
 		t.Fatalf("retry did not refresh the live session: %#v", liveSettings)
 	}
 	fail.Store(true)
 	retry(http.StatusBadGateway)
 	settings = readSettings()
-	if settings.ModelsError == "" || len(settings.Models) != 1 || settings.Models[0].ID != "gpt-6-sol" {
+	if len(settings.Models) != 1 || settings.Models[0].ID != "gpt-6-sol" {
 		t.Fatalf("failed discovery discarded last known models: %#v", settings)
 	}
 }

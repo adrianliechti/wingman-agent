@@ -6,6 +6,7 @@ import {
 } from "react";
 import { WorkspaceContext, type SettingsPatch } from "./workspaceContext.ts";
 import { workspaceClient } from "./workspaceClient.ts";
+import { useRootAgents } from "../hooks/useAgents.ts";
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
 	const client = workspaceClient();
@@ -13,14 +14,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 		client.subscribeConnection,
 		client.getReplaced,
 	);
-	const [backend, selectBackend] = useState(() => {
-		const id = decodeURIComponent(
+	const agents = useRootAgents();
+	const [selected, selectBackend] = useState(() =>
+		decodeURIComponent(
 			location.pathname.split("/").filter(Boolean)[0] ?? "wingman",
-		);
-		return client.scope.backends.some((backend) => backend.id === id)
-			? id
-			: "wingman";
-	});
+		),
+	);
+	// The root lists providers only once connected.
+	const backend =
+		agents.length && !agents.some((agent) => agent.provider === selected)
+			? "wingman"
+			: selected;
 	const [drafts, setDrafts] = useState<Record<string, SettingsPatch>>({});
 	const setDraft = (key: string, patch: SettingsPatch) =>
 		setDrafts((current) => ({
@@ -29,12 +33,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 		}));
 	useEffect(() => {
 		client.start();
-		const focus = () => client.focus();
-		window.addEventListener("focus", focus);
-		return () => {
-			window.removeEventListener("focus", focus);
-			client.stop();
-		};
+		return () => client.stop();
 	}, [client]);
 	const value = { backend, selectBackend, drafts, setDraft };
 	return (

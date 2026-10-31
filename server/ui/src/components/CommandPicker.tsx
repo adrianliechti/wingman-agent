@@ -59,11 +59,7 @@ export function CommandPicker({
 										/{s.name}
 									</span>
 									<span className="text-[10px] text-fg-dim">
-										{s.kind === "skill"
-											? "Skill"
-											: s.kind === "action"
-												? "Action"
-												: "Command"}
+										{s.kind === "skill" ? "Skill" : "Command"}
 									</span>
 									{s.input_hint && (
 										<span className="text-[10.5px] text-fg-dim font-mono truncate">

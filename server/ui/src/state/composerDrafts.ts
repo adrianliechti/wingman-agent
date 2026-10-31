@@ -1,5 +1,6 @@
 import { ComposerDraft, type ComposerContent } from "./composerDraft.ts";
-import type { CenterTab } from "../mainLayout.ts";
+import { chatTabId, type CenterTab } from "../mainLayout.ts";
+import { migrateSessionKey } from "./sessionStore.ts";
 
 export type SavedDraft = {
 	tab: CenterTab;
@@ -77,6 +78,17 @@ function isSavedDraft(value: unknown): value is SavedDraft {
 	);
 }
 
+/** Tabs saved before chat URIs keyed sessions as `["backend","id"]`. */
+export function migrateTab(tab: CenterTab): CenterTab {
+	const sessionId = migrateSessionKey(tab.sessionId ?? "");
+	if (sessionId === (tab.sessionId ?? "")) return tab;
+	return {
+		...tab,
+		id: tab.id === chatTabId(tab.sessionId!) ? chatTabId(sessionId) : tab.id,
+		sessionId,
+	};
+}
+
 // Draft ownership outlives mounted panels and closed tabs. IndexedDB retains
 // attachments as well as text, without a synchronous multi-megabyte write on
 // every keystroke. One ordered writer prevents late saves resurrecting sends.
@@ -99,8 +111,9 @@ export class ComposerDrafts {
 				const records = recover
 					? (this.storage.recover?.() ?? [])
 					: await this.storage.read();
-				for (const record of records) {
-					if (!isSavedDraft(record)) continue;
+				for (const value of records) {
+					if (!isSavedDraft(value)) continue;
+					const record = { ...value, tab: migrateTab(value.tab) };
 					const saved = this.records.get(record.tab.id);
 					if (saved && saved.updated >= record.updated) continue;
 					this.records.set(record.tab.id, record);
