@@ -15,14 +15,17 @@ import (
 // Present before handing a call to a UI so renderers do not need to infer tool
 // semantics from implementation names and raw JSON.
 type Presentation struct {
-	Title string
-	Kind  string
-	Args  string
-	Hint  string
-	Path  string
-	Line  int
-	// Paths lists further files a batch edit touches, after Path.
-	Paths []string
+	Title     string
+	Kind      string
+	Args      string
+	Hint      string
+	Locations []Location
+}
+
+// Location is a file a tool call touches, optionally at a line.
+type Location struct {
+	Path string `json:"path"`
+	Line int    `json:"line,omitempty"`
 }
 
 type presentationSpec struct {
@@ -222,19 +225,21 @@ func Present(name, kind, argsJSON string, hasLocation bool) Presentation {
 	}
 
 	if !hasLocation {
-		p.Path, p.Line = presentationLocation(spec, args)
+		path, line := presentationLocation(spec, args)
 		if name == "glob" || name == "Find files" {
 			if pattern, ok := args["pattern"].(string); ok && filepath.IsAbs(pattern) {
 				dir, _ := doublestar.SplitPattern(filepath.ToSlash(pattern))
-				p.Path = filepath.FromSlash(dir)
+				path = filepath.FromSlash(dir)
 			}
 		}
-		if p.Path == "" && (name == "edit" || name == "Edit file") {
-			if paths := batchEditPaths(args); len(paths) > 0 {
-				p.Path, p.Paths = paths[0], paths[1:]
+		if path != "" {
+			p.Locations = []Location{{Path: path, Line: line}}
+		} else if name == "edit" || name == "Edit file" {
+			for _, path := range batchEditPaths(args) {
+				p.Locations = append(p.Locations, Location{Path: path})
 			}
 		}
-		hasLocation = p.Path != ""
+		hasLocation = len(p.Locations) > 0
 	}
 	omit := spec.omit
 	if hasLocation && len(omit) == 0 {

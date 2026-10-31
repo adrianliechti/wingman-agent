@@ -269,99 +269,95 @@ const ToolRow = memo(function ToolRow({
 			onMouseEnter={() => setHovered(true)}
 			onMouseLeave={() => setHovered(false)}
 		>
-			<div>
-				<div className="flex min-w-0 flex-nowrap items-center gap-1 overflow-hidden py-[3px]">
-					<button
-						type="button"
-						aria-expanded={canExpand ? expanded : undefined}
-						aria-disabled={!canExpand}
-						tabIndex={canExpand ? 0 : -1}
-						className={`group flex min-w-0 items-center gap-2 overflow-hidden text-left text-[12px] text-fg-muted transition-colors ${
-							canExpand ? "cursor-pointer hover:text-fg" : "cursor-default"
-						}`}
-						onClick={() => canExpand && setExpanded(!expanded)}
-					>
-						{running ? (
-							<span className="flex w-3 shrink-0 items-center justify-center text-fg-dim">
-								<LoaderCircle
-									size={12}
-									className="animate-spin"
-									aria-label={
-										entry.toolPartial ? "Preparing tool" : "Tool running"
-									}
-								/>
-							</span>
-						) : (
-							<DisclosureIcon
-								icon={<ToolIcon entry={entry} />}
-								expanded={expanded}
-								disabled={!canExpand}
+			<div className="flex min-w-0 flex-nowrap items-center gap-1 overflow-hidden py-[3px]">
+				<button
+					type="button"
+					aria-expanded={canExpand ? expanded : undefined}
+					aria-disabled={!canExpand}
+					tabIndex={canExpand ? 0 : -1}
+					className={`group flex min-w-0 items-center gap-2 overflow-hidden text-left text-[12px] text-fg-muted transition-colors ${
+						canExpand ? "cursor-pointer hover:text-fg" : "cursor-default"
+					}`}
+					onClick={() => canExpand && setExpanded(!expanded)}
+				>
+					{running ? (
+						<span className="flex w-3 shrink-0 items-center justify-center text-fg-dim">
+							<LoaderCircle
+								size={12}
+								className="animate-spin"
+								aria-label={
+									entry.toolPartial ? "Preparing tool" : "Tool running"
+								}
 							/>
-						)}
-						<span className="shrink-0">{toolLabel}</span>
-						{headerHint && (
-							<span
-								className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-dim"
-								title={entry.toolHint}
-							>
-								{headerHint}
-							</span>
-						)}
-					</button>
-					{onOpenFile && locations.length > 0 && (
-						<div className="flex min-w-0 max-w-[45%] shrink-0 items-center gap-1 overflow-hidden">
-							{locations.map((location, index) => (
-								<button
-									key={`${location.path}:${location.line ?? ""}:${index}`}
-									type="button"
-									className="min-w-0 max-w-[260px] cursor-pointer truncate rounded px-1 py-px font-mono text-[11px] text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg"
-									title={location.path}
-									onClick={() => onOpenFile(location.path, location.line)}
-								>
-									{toolLocationLabel(location)}
-								</button>
-							))}
-						</div>
+						</span>
+					) : (
+						<DisclosureIcon
+							icon={<ToolIcon entry={entry} />}
+							expanded={expanded}
+							disabled={!canExpand}
+						/>
 					)}
-				</div>
-				{expanded && canExpand && (
-					<div
-						className={`mt-1 mb-1.5 ml-5 rounded-md bg-bg-surface px-3 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all text-fg-dim ${
-							showAll ? "max-h-[50vh] overflow-y-auto overscroll-contain" : ""
-						}`}
-					>
-						{command ? (
-							<div className="text-fg">
-								<span className="text-fg-dim">$ </span>
-								{command}
-								{workdir && (
-									<span className="text-fg-dim"> [in {workdir}]</span>
-								)}
-							</div>
-						) : (
-							argEntries.map(({ key, value }) => (
-								<div key={key}>
-									<span className="text-fg-muted">{key}:</span> {value}
-								</div>
-							))
-						)}
-						{hasInputDetails && result && (
-							<div className="my-1.5 h-px bg-border-subtle" />
-						)}
-						{result &&
-							(showAll && result.length > 12000 ? (
-								<VirtualOutput
-									text={result}
-									lineClass={isDiff ? diffLineClass : undefined}
-								/>
-							) : isDiff ? (
-								<DiffText text={shown} />
-							) : (
-								shown
-							))}
+					<span className="shrink-0">{toolLabel}</span>
+					{headerHint && (
+						<span
+							className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-dim"
+							title={entry.toolHint}
+						>
+							{headerHint}
+						</span>
+					)}
+				</button>
+				{onOpenFile && locations.length > 0 && (
+					<div className="flex min-w-0 max-w-[45%] shrink-0 items-center gap-1 overflow-hidden">
+						{locations.map((location, index) => (
+							<button
+								key={`${location.path}:${location.line ?? ""}:${index}`}
+								type="button"
+								className="min-w-0 max-w-[260px] cursor-pointer truncate rounded px-1 py-px font-mono text-[11px] text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg"
+								title={location.path}
+								onClick={() => onOpenFile(location.path, location.line)}
+							>
+								{toolLocationLabel(location)}
+							</button>
+						))}
 					</div>
 				)}
 			</div>
+			{expanded && canExpand && (
+				<div
+					className={`mt-1 mb-1.5 ml-5 rounded-md bg-bg-surface px-3 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all text-fg-dim ${
+						showAll ? "max-h-[50vh] overflow-y-auto overscroll-contain" : ""
+					}`}
+				>
+					{command ? (
+						<div className="text-fg">
+							<span className="text-fg-dim">$ </span>
+							{command}
+							{workdir && <span className="text-fg-dim"> [in {workdir}]</span>}
+						</div>
+					) : (
+						argEntries.map(({ key, value }) => (
+							<div key={key}>
+								<span className="text-fg-muted">{key}:</span> {value}
+							</div>
+						))
+					)}
+					{hasInputDetails && result && (
+						<div className="my-1.5 h-px bg-border-subtle" />
+					)}
+					{result &&
+						(showAll && result.length > 12000 ? (
+							<VirtualOutput
+								text={result}
+								lineClass={isDiff ? diffLineClass : undefined}
+							/>
+						) : isDiff ? (
+							<DiffText text={shown} />
+						) : (
+							shown
+						))}
+				</div>
+			)}
 			{expanded && result && (
 				<div className="mb-1 flex h-4 items-center gap-3 pl-5">
 					{overflows && (

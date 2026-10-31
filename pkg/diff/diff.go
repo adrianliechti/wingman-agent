@@ -1,8 +1,8 @@
 package diff
 
 import (
-	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
@@ -26,19 +26,22 @@ func LineHunks(before, after string, timeout time.Duration) []Hunk {
 
 // LineStats counts added and removed lines, like git's numstat.
 func LineStats(before, after string, timeout time.Duration) (added, removed int) {
-	for _, h := range LineHunks(before, after, timeout) {
-		added += countLines(after[h.AfterStart:h.AfterEnd])
-		removed += countLines(before[h.BeforeStart:h.BeforeEnd])
+	if before == after {
+		return 0, 0
+	}
+	dmp := diffmatchpatch.New()
+	dmp.DiffTimeout = timeout
+	beforeLines, afterLines, _ := dmp.DiffLinesToChars(before, after)
+	// Each rune of the line-encoded diff stands for one whole line.
+	for _, d := range dmp.DiffMain(beforeLines, afterLines, false) {
+		switch d.Type {
+		case diffmatchpatch.DiffInsert:
+			added += utf8.RuneCountInString(d.Text)
+		case diffmatchpatch.DiffDelete:
+			removed += utf8.RuneCountInString(d.Text)
+		}
 	}
 	return added, removed
-}
-
-func countLines(text string) int {
-	n := strings.Count(text, "\n")
-	if text != "" && !strings.HasSuffix(text, "\n") {
-		n++
-	}
-	return n
 }
 
 // CharacterHunks returns semantically cleaned character-level changes.

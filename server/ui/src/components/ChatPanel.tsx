@@ -135,6 +135,9 @@ function wordEndAt(text: string, caret: number): number {
 	return end;
 }
 
+const composerIconButton =
+	"flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40";
+
 export function ChatPanel({
 	draft,
 	draftId,
@@ -178,6 +181,7 @@ export function ChatPanel({
 		error: sendError,
 	} = useSyncExternalStore(draft.subscribe, draft.getSnapshot);
 	const hasDraft = !!input.trim() || images.length > 0 || files.length > 0;
+	const blocked = !available || submitting || prompts.length > 0;
 	const [caret, setCaret] = useState(input.length);
 	const [dismissedToken, setDismissedToken] = useState<string | null>(null);
 	const [showPicker, setShowPicker] = useState(false);
@@ -940,12 +944,7 @@ export function ChatPanel({
 					{incomplete && !isActive && (
 						<IncompleteTurnNotice
 							key={sessionId}
-							disabled={
-								!available ||
-								submitting ||
-								prompts.length > 0 ||
-								pendingInputs.length > 0
-							}
+							disabled={blocked || pendingInputs.length > 0}
 							onContinue={() =>
 								onSend(
 									"Continue the unfinished task from the saved conversation. Check what was already completed and avoid repeating it.",
@@ -1168,8 +1167,8 @@ export function ChatPanel({
 									{isActive && !editingQueueId && hasDraft && (
 										<button
 											type="button"
-											className="flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40"
-											disabled={!available || submitting || prompts.length > 0}
+											className={composerIconButton}
+											disabled={blocked}
 											onClick={() => void handleSubmit("follow_up")}
 											title="Queue after current turn (Alt+Enter)"
 											aria-label="Queue after current turn (Alt+Enter)"
@@ -1180,7 +1179,7 @@ export function ChatPanel({
 									{isActive && (
 										<button
 											type="button"
-											className="flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg"
+											className={composerIconButton}
 											title="Stop (Esc)"
 											aria-label="Stop (Esc)"
 											disabled={!available}
@@ -1193,12 +1192,7 @@ export function ChatPanel({
 										type="button"
 										className="flex h-7 w-7 items-center justify-center rounded-full bg-fg text-bg transition-colors hover:bg-fg-muted disabled:bg-bg-active disabled:text-fg-dim"
 										onClick={() => void handleSubmit()}
-										disabled={
-											!available ||
-											submitting ||
-											prompts.length > 0 ||
-											!hasDraft
-										}
+										disabled={blocked || !hasDraft}
 										title={
 											editingQueueId
 												? "Update queued message (Enter)"

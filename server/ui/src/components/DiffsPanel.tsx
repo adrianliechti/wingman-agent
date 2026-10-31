@@ -57,6 +57,7 @@ import { PanelEmptyState } from "./ui/EmptyState";
 import { Dialog, dialogButtonClass } from "./ui/Feedback";
 import { FloatingMenu, FloatingSurface } from "./ui/Floating";
 import { GitHistoryPanel } from "./GitCompareControls";
+import { statusColor } from "../utils/diffStatus";
 
 interface Props {
 	git?: boolean;
@@ -1370,13 +1371,6 @@ function gitStatusLabel(file: GitFileStatus, staged: boolean) {
 
 function diffStatusLabel(diff: DiffEntry) {
 	return diff.status === "added" ? "A" : diff.status === "deleted" ? "D" : "M";
-}
-
-function statusColor(status: string, conflict?: boolean) {
-	if (conflict) return "text-danger";
-	if (status === "A" || status === "?") return "text-success";
-	if (status === "D") return "text-danger";
-	return "text-warning";
 }
 
 function DiffMenuItem({

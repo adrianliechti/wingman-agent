@@ -97,7 +97,6 @@ type backendRuntime struct {
 	operations     sync.WaitGroup
 	closing        bool
 	modelDiscovery singleflight.Group
-	reviewStats    sync.Map // session/turn ID → turnLineStats of a finished turn
 }
 
 // Operations may nest (commands refresh metadata), but admission closes before

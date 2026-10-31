@@ -13,24 +13,38 @@ import {
 	turnReviewKey,
 	undoTurn,
 	type TurnFileChange,
+	type TurnFileStats,
 } from "../../api/turnReviews";
+import { statusColor } from "../../utils/diffStatus";
 import { useToast } from "../ui/Feedback";
 import { TurnReviewsContext } from "./turnReviewContext";
 const ReviewDiff = lazy(async () => {
 	await import("../../monacoRuntime");
 	return { default: (await import("./TurnReviewDiff")).TurnReviewDiff };
 });
-const validationLabels: Record<string, string> = {
-	passed: "Validation passed",
-	failed: "Validation failed",
-	outdated: "Checks predate the latest edits",
-	not_confirmed: "Validation not confirmed",
-	not_run: "Validation not run",
+const validations: Record<string, { label: string; icon: React.ReactNode }> = {
+	passed: {
+		label: "Validation passed",
+		icon: <CircleCheck size={12} className="text-success" />,
+	},
+	failed: {
+		label: "Validation failed",
+		icon: <CircleX size={12} className="text-danger" />,
+	},
+	outdated: {
+		label: "Checks predate the latest edits",
+		icon: <CircleAlert size={12} />,
+	},
+	not_confirmed: {
+		label: "Validation not confirmed",
+		icon: <CircleDashed size={12} />,
+	},
+	not_run: { label: "Validation not run", icon: <CircleDashed size={12} /> },
 };
-const validationIcons: Record<string, React.ReactNode> = {
-	passed: <CircleCheck size={12} className="text-success" />,
-	failed: <CircleX size={12} className="text-danger" />,
-	outdated: <CircleAlert size={12} />,
+const fileStatus = {
+	A: "Added",
+	D: "Deleted",
+	M: "Modified",
 };
 
 export function TurnReviewCard({
@@ -58,9 +72,11 @@ export function TurnReviewCard({
 			review.outcome !== "incomplete")
 	)
 		return null;
-	const count = new Set(review.files.map((file) => file.path)).size;
-	const added = review.added ?? 0;
-	const removed = review.removed ?? 0;
+	const count = review.files.length;
+	const added = review.files.reduce((sum, file) => sum + file.added, 0);
+	const removed = review.files.reduce((sum, file) => sum + file.removed, 0);
+	const validation =
+		validations[review.validation] ?? validations.not_confirmed;
 	const detail = query.data;
 	return (
 		<div data-turn-review className="mb-6 text-[12px]">
@@ -77,17 +93,12 @@ export function TurnReviewCard({
 						{count} {count === 1 ? "file" : "files"} changed
 					</span>
 					{(added > 0 || removed > 0) && (
-						<span className="shrink-0 font-mono text-[11px] tabular-nums">
-							<span className="text-success">+{added}</span>{" "}
-							<span className="text-danger">−{removed}</span>
-						</span>
+						<LineCounts added={added} removed={removed} />
 					)}
 					<span aria-hidden="true">·</span>
-					<span className="shrink-0">
-						{validationIcons[review.validation] ?? <CircleDashed size={12} />}
-					</span>
+					<span className="shrink-0">{validation.icon}</span>
 					<span className="truncate">
-						{validationLabels[review.validation] ?? "Validation not confirmed"}
+						{validation.label}
 						{review.undone ? " · Undone" : ""}
 						{review.outcome === "incomplete" ? " · Incomplete" : ""}
 					</span>
@@ -109,22 +120,18 @@ export function TurnReviewCard({
 							? "These diffs cover tracked edits; commands and external tools may have made other changes."
 							: "These diffs start from the files as the agent found them."}
 					</p>
-					{query.isPending && (
-						<p role="status" className="px-3 pb-2 text-fg-dim">
-							Loading changes…
-						</p>
-					)}
 					{query.error && (
 						<p role="alert" className="px-3 pb-2 text-danger">
 							{String(query.error)}
 						</p>
 					)}
-					{detail && (
+					{count > 0 && (
 						<div className="px-1.5 pb-1">
-							{detail.files.map((file, index) => (
+							{review.files.map((file, index) => (
 								<ReviewFile
-									key={`${file.path}:${index}`}
+									key={file.path}
 									file={file}
+									change={detail?.files[index]}
 									onOpenFile={onOpenFile}
 								/>
 							))}
@@ -205,19 +212,26 @@ export function TurnReviewCard({
 	);
 }
 
+function LineCounts({ added, removed }: { added: number; removed: number }) {
+	return (
+		<span className="shrink-0 font-mono text-[11px] tabular-nums">
+			<span className="text-success">+{added}</span>{" "}
+			<span className="text-danger">−{removed}</span>
+		</span>
+	);
+}
+
 function ReviewFile({
 	file,
+	change,
 	onOpenFile,
 }: {
-	file: TurnFileChange;
+	file: TurnFileStats;
+	change?: TurnFileChange;
 	onOpenFile?: (path: string) => void;
 }) {
 	const [open, setOpen] = useState(false);
-	const status = !file.beforeExists
-		? { letter: "A", className: "text-success", label: "Added" }
-		: !file.afterExists
-			? { letter: "D", className: "text-danger", label: "Deleted" }
-			: { letter: "M", className: "text-fg-dim", label: "Modified" };
+	const letter = !file.beforeExists ? "A" : !file.afterExists ? "D" : "M";
 	const slash = file.path.lastIndexOf("/");
 	return (
 		<details onToggle={(event) => setOpen(event.currentTarget.open)}>
@@ -227,10 +241,10 @@ function ReviewFile({
 					className={`shrink-0 text-fg-dim transition-transform ${open ? "rotate-90" : ""}`}
 				/>
 				<span
-					className={`w-3 shrink-0 text-center font-mono text-[11px] font-semibold ${status.className}`}
-					title={status.label}
+					className={`w-3 shrink-0 text-center font-mono text-[11px] font-bold ${statusColor(letter)}`}
+					title={fileStatus[letter]}
 				>
-					{status.letter}
+					{letter}
 				</span>
 				<span
 					className="min-w-0 flex-1 truncate font-mono text-[11px]"
@@ -243,6 +257,7 @@ function ReviewFile({
 						</span>
 					)}
 				</span>
+				<LineCounts added={file.added} removed={file.removed} />
 			</summary>
 			{open && (
 				<div className="mt-1 mb-2 ml-6">
@@ -256,11 +271,17 @@ function ReviewFile({
 						</button>
 					)}
 					<div className="h-80 overflow-hidden rounded border border-border-subtle">
-						<Suspense
-							fallback={<p className="p-2 text-fg-dim">Loading diff…</p>}
-						>
-							<ReviewDiff file={file} />
-						</Suspense>
+						{change ? (
+							<Suspense
+								fallback={<p className="p-2 text-fg-dim">Loading diff…</p>}
+							>
+								<ReviewDiff file={change} />
+							</Suspense>
+						) : (
+							<p role="status" className="p-2 text-fg-dim">
+								Loading diff…
+							</p>
+						)}
 					</div>
 				</div>
 			)}

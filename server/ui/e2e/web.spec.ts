@@ -6288,6 +6288,9 @@ test("recovery: turn review previews attributed edits and refuses a conflicting 
 				after: "original user work plus agent change\n",
 				beforeExists: true,
 				afterExists: true,
+				// The listing carries net line counts; the detail carries contents.
+				added: 1,
+				removed: 1,
 			},
 		],
 		checks: [

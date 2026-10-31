@@ -1,25 +1,16 @@
 import type { ChatEntry } from "../../types/session";
 
-export type ToolBucket =
-	| "edit"
-	| "delete"
-	| "move"
-	| "execute"
-	| "read"
-	| "search"
-	| "fetch";
-
 // Ordered by significance; file buckets count distinct locations, the rest count calls.
-const phrases: Record<ToolBucket, [one: string, many: (n: number) => string]> =
-	{
-		edit: ["edited a file", (n) => `edited ${n} files`],
-		delete: ["deleted a file", (n) => `deleted ${n} files`],
-		move: ["moved a file", (n) => `moved ${n} files`],
-		execute: ["ran a command", (n) => `ran ${n} commands`],
-		read: ["read a file", (n) => `read ${n} files`],
-		search: ["ran a search", (n) => `ran ${n} searches`],
-		fetch: ["fetched a page", (n) => `fetched ${n} pages`],
-	};
+const phrases = {
+	edit: ["edited a file", (n) => `edited ${n} files`],
+	delete: ["deleted a file", (n) => `deleted ${n} files`],
+	move: ["moved a file", (n) => `moved ${n} files`],
+	execute: ["ran a command", (n) => `ran ${n} commands`],
+	read: ["read a file", (n) => `read ${n} files`],
+	search: ["ran a search", (n) => `ran ${n} searches`],
+	fetch: ["fetched a page", (n) => `fetched ${n} pages`],
+} satisfies Record<string, [one: string, many: (n: number) => string]>;
+export type ToolBucket = keyof typeof phrases;
 const order = Object.keys(phrases) as ToolBucket[];
 const fileBuckets = new Set<ToolBucket>(["edit", "delete", "move", "read"]);
 const maxPhrases = 3;

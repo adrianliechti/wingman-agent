@@ -9,7 +9,7 @@ interface Props {
 	anchor: Element | null;
 	onSelect: (path: string) => void;
 	onClose: () => void;
-	onUpload?: () => void;
+	onUpload: () => void;
 }
 
 export function FilePicker({ anchor, onSelect, onClose, onUpload }: Props) {
@@ -70,17 +70,15 @@ export function FilePicker({ anchor, onSelect, onClose, onUpload }: Props) {
 					placeholder="Search files…"
 					className="min-w-0 flex-1 bg-transparent text-fg text-[12px] outline-none placeholder:text-fg-dim"
 				/>
-				{onUpload && (
-					<button
-						type="button"
-						onClick={onUpload}
-						className="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg"
-						title="Attach image from your computer"
-						aria-label="Attach image from your computer"
-					>
-						<Paperclip size={13} />
-					</button>
-				)}
+				<button
+					type="button"
+					onClick={onUpload}
+					className="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg"
+					title="Attach image from your computer"
+					aria-label="Attach image from your computer"
+				>
+					<Paperclip size={13} />
+				</button>
 			</div>
 			<div className="max-h-[280px] overflow-y-auto py-1">
 				{hits.length === 0 ? (

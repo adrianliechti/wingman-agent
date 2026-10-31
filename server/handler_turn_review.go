@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/diff"
@@ -30,6 +31,8 @@ func (b *backendRuntime) handleTurnReviews(w http.ResponseWriter, r *http.Reques
 	if turnID != "" {
 		for _, review := range reviews {
 			if review.ID == turnID {
+				// One net change per file, matching the listing's rows.
+				review.Files = netFileChanges(review.Files)
 				writeJSON(w, review)
 				return
 			}
@@ -37,54 +40,45 @@ func (b *backendRuntime) handleTurnReviews(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "turn not found", http.StatusNotFound)
 		return
 	}
-	// Listing cards does not transfer every before/after file version.
-	session := r.PathValue("id")
 	listing := make([]turnReviewListing, len(reviews))
 	for i, review := range reviews {
-		listing[i] = turnReviewListing{TurnReview: review}
-		listing[i].Added, listing[i].Removed = b.turnLineStats(session, review)
-		for j := range review.Files {
-			review.Files[j].Before, review.Files[j].After = "", ""
-		}
+		listing[i] = newTurnReviewListing(review)
 	}
 	writeJSON(w, listing)
 }
 
+// turnReviewListing summarizes each file's net change instead of sending
+// every before/after version.
 type turnReviewListing struct {
 	harness.TurnReview
-	Added   int `json:"added"`
-	Removed int `json:"removed"`
+	Files []turnFileStats `json:"files"`
 }
 
-// turnLineStats caches finished turns, whose recorded edits no longer change.
-func (b *backendRuntime) turnLineStats(session string, review harness.TurnReview) (added, removed int) {
-	key := session + "/" + review.ID
-	if cached, ok := b.reviewStats.Load(key); ok {
-		stats := cached.([2]int)
-		return stats[0], stats[1]
-	}
-	added, removed = netLineStats(review.Files)
-	if review.Outcome != "running" {
-		b.reviewStats.Store(key, [2]int{added, removed})
-	}
-	return added, removed
+type turnFileStats struct {
+	Path         string `json:"path"`
+	BeforeExists bool   `json:"beforeExists"`
+	AfterExists  bool   `json:"afterExists"`
+	Added        int    `json:"added"`
+	Removed      int    `json:"removed"`
 }
 
-// netLineStats compares each file as the agent first found it with its last
-// version, so a later edit that reverts an earlier one nets out.
-func netLineStats(files []tool.FileChange) (added, removed int) {
-	first, last := map[string]string{}, map[string]string{}
-	for _, file := range files {
-		if _, ok := first[file.Path]; !ok {
-			first[file.Path] = file.Before
-		}
-		last[file.Path] = file.After
+func newTurnReviewListing(review harness.TurnReview) turnReviewListing {
+	net := netFileChanges(review.Files)
+	files := make([]turnFileStats, len(net))
+	for i, file := range net {
+		added, removed := diff.LineStats(file.Before, file.After, time.Second)
+		files[i] = turnFileStats{Path: file.Path, BeforeExists: file.BeforeExists, AfterExists: file.AfterExists, Added: added, Removed: removed}
 	}
-	for path, before := range first {
-		a, r := diff.LineStats(before, last[path], time.Second)
-		added, removed = added+a, removed+r
+	return turnReviewListing{TurnReview: review, Files: files}
+}
+
+// netFileChanges folds the edits like undo does, keeping forward-slash paths for the UI.
+func netFileChanges(changes []tool.FileChange) []tool.FileChange {
+	net, _ := tool.NetFileChanges(changes)
+	for i := range net {
+		net[i].Path = filepath.ToSlash(net[i].Path)
 	}
-	return added, removed
+	return net
 }
 
 func (b *backendRuntime) handleTurnUndo(w http.ResponseWriter, r *http.Request) {

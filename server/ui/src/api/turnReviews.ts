@@ -1,18 +1,15 @@
 import { fetchJSON, fetchOK } from "./http.ts";
 import { chatPath } from "../state/workspaceClient.ts";
-export type TurnFileChange = {
-	path: string;
-	before: string;
-	after: string;
-	beforeExists: boolean;
-	afterExists: boolean;
-};
-export type TurnReview = {
+// Both carry one net change per file: from the version the agent first found to its last.
+type TurnFile = { path: string; beforeExists: boolean; afterExists: boolean };
+export type TurnFileStats = TurnFile & { added: number; removed: number };
+export type TurnFileChange = TurnFile & { before: string; after: string };
+type Review<File> = {
 	id: string;
 	inputId: string;
 	started: string;
 	outcome: string;
-	files: TurnFileChange[];
+	files: File[];
 	checks: {
 		command: string;
 		workdir?: string;
@@ -23,10 +20,9 @@ export type TurnReview = {
 	untracked: boolean;
 	uncertain: boolean;
 	undone: boolean;
-	// Net line counts; only review listings carry them.
-	added?: number;
-	removed?: number;
 };
+export type TurnReview = Review<TurnFileStats>;
+export type TurnReviewDetail = Review<TurnFileChange>;
 export const turnReviewKey = (session: string) =>
 	["server", "turn-reviews", session] as const;
 export const listTurnReviews = (session: string, signal?: AbortSignal) =>
@@ -36,7 +32,7 @@ export const getTurnReview = (
 	turn: string,
 	signal?: AbortSignal,
 ) =>
-	fetchJSON<TurnReview>(
+	fetchJSON<TurnReviewDetail>(
 		`${chatPath(session)}/reviews/${encodeURIComponent(turn)}`,
 		{ signal },
 	);
