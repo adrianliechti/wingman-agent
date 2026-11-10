@@ -339,11 +339,13 @@ func testLiveContext(t *testing.T, model, switchModel string) {
 	}
 	// Lower only the configured window to exercise real auto compaction without
 	// buying an entire provider context window's worth of synthetic history.
+	// Require more than removing obsolete snapshots and reasoning can reclaim,
+	// so the checkpoint assertions below exercise summarization too.
 	measured := a.ContextStats().CurrentTokens
 	if measured <= 0 {
 		t.Fatal("backend returned no usable context usage")
 	}
-	cfg.ContextWindow = int(measured) + 500
+	cfg.ContextWindow = int(measured) / 2
 	cfg.ReserveTokens = 1000
 	revisionBefore := a.StateSnapshot().ContextRevision
 	t.Logf("forcing auto compaction: measured=%d window=%d", measured, cfg.ContextWindow)

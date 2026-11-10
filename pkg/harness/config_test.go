@@ -71,6 +71,7 @@ func TestContextWindowFor(t *testing.T) {
 		{"claude-opus-5-5", 1_000_000},
 		{"claude-opus-4-8", 1_000_000},
 		{"claude-fable-5-1", 1_000_000},
+		{"claude-fable-5-2", 1_000_000},
 		{"claude-fable-5", 1_000_000},
 		{"claude-haiku-4-5", 200_000},
 		{"gpt-5.6-sol", 272_000},

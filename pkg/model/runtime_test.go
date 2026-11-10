@@ -21,6 +21,8 @@ func TestModelRuntimeFields(t *testing.T) {
 		{"claude-opus-5", 1_000_000, nil},
 		{"claude-fable-5", 1_000_000, claudeAlwaysThinkingEfforts},
 		{"claude-fable-5-1", 1_000_000, claudeAlwaysThinkingEfforts},
+		{"claude-fable-5-2", 1_000_000, claudeAlwaysThinkingEfforts},
+		{"~anthropic/CLAUDE-FABLE-5-2:latest", 1_000_000, claudeAlwaysThinkingEfforts},
 		{"claude-mythos-5", 1_000_000, claudeAlwaysThinkingEfforts},
 		{"claude-mythos-5-1", 1_000_000, claudeAlwaysThinkingEfforts},
 		{"claude-haiku-4-5", 200_000, nil},

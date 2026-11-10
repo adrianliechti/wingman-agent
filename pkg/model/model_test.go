@@ -31,6 +31,7 @@ func TestCurrentProviderModels(t *testing.T) {
 		{"claude-sonnet-5-5", "Claude Sonnet 5.5", ClassMedium, 1_000_000, 128_000},
 		{"claude-haiku-5-5", "Claude Haiku 5.5", ClassSmall, 1_000_000, 128_000},
 		{"claude-opus-5-5", "Claude Opus 5.5", ClassLarge, 1_000_000, 128_000},
+		{"claude-fable-5-2", "Claude Fable 5.2", ClassLarge, 1_000_000, 128_000},
 		{"claude-fable-5-1", "Claude Fable 5.1", ClassLarge, 1_000_000, 128_000},
 		{"claude-mythos-5-1", "Claude Mythos 5.1", ClassLarge, 1_000_000, 128_000},
 		{"gpt-6-astra", "GPT 6 Astra", ClassLarge, 1_050_000, 128_000},
@@ -93,9 +94,25 @@ func TestClaude51ModelAvailability(t *testing.T) {
 	}
 }
 
+func TestFable52ModelAvailability(t *testing.T) {
+	available := Available(map[string]bool{
+		"claude-fable-5":                     true,
+		"claude-fable-5-1":                   true,
+		"~anthropic/CLAUDE-FABLE-5-2:latest": true,
+	})
+	ids := make([]string, 0, len(available))
+	for _, m := range available {
+		ids = append(ids, m.ID)
+	}
+	want := []string{"~anthropic/CLAUDE-FABLE-5-2:latest", "claude-fable-5-1", "claude-fable-5"}
+	if !slices.Equal(ids, want) {
+		t.Fatalf("Available() ids = %v, want %v", ids, want)
+	}
+}
+
 func TestAlwaysThinkingClaudeEfforts(t *testing.T) {
 	want := []string{"low", "medium", "high", "xhigh", "max"}
-	for _, id := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5", "claude-fable-5-1", "claude-mythos-5", "claude-mythos-5-1"} {
+	for _, id := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5", "claude-fable-5-1", "claude-fable-5-2", "claude-mythos-5", "claude-mythos-5-1"} {
 		t.Run(id, func(t *testing.T) {
 			got, ok := Find(id)
 			if !ok {

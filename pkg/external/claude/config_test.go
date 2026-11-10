@@ -26,11 +26,17 @@ func TestConfigPrefersLatestAvailableModels(t *testing.T) {
 				"claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5", "claude-fable-5",
 				"claude-haiku-4-6", "anthropic/claude-haiku-5-5",
 				"anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-fable-5-1",
+				"anthropic/claude-fable-5-2",
 			},
 			want: ClaudeConfig{
 				HaikuModel: "anthropic/claude-haiku-5-5", SonnetModel: "anthropic/claude-sonnet-5-5",
-				OpusModel: "anthropic/claude-opus-5-5", FableModel: "anthropic/claude-fable-5-1",
+				OpusModel: "anthropic/claude-opus-5-5", FableModel: "anthropic/claude-fable-5-2",
 			},
+		},
+		{
+			name: "fable 5.2 only",
+			ids:  []string{"claude-fable-5-2"},
+			want: ClaudeConfig{FableModel: "claude-fable-5-2", DefaultModel: "claude-fable-5-2"},
 		},
 		{
 			name: "older backend fallback",

@@ -289,6 +289,21 @@ var Models = []Model{
 	},
 
 	{
+		ID: "claude-fable-5-2",
+
+		Namespace: "anthropic",
+
+		Name: "Claude Fable 5.2",
+
+		Class: ClassLarge,
+
+		Output: 128000,
+
+		Context: 1000000,
+
+		Efforts: claudeAlwaysThinkingEfforts,
+	},
+	{
 		ID: "claude-fable-5-1",
 
 		Namespace: "anthropic",

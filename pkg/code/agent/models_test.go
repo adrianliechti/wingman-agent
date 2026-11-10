@@ -276,6 +276,33 @@ func TestGPT61TerraPreservesSupportedEfforts(t *testing.T) {
 	}
 }
 
+func TestFable52ModelSelectionAndEfforts(t *testing.T) {
+	for _, id := range []string{"claude-fable-5-2", "~anthropic/CLAUDE-FABLE-5-2:latest"} {
+		t.Run(id, func(t *testing.T) {
+			a := upstreamAgent(id)
+			models, current := a.Models("")
+			if current != id || len(models) != 1 || models[0].Name != "Claude Fable 5.2" {
+				t.Fatalf("model selection = %q/%+v", current, models)
+			}
+			want := []string{"auto", "low", "medium", "high", "xhigh", "max"}
+			if effort, values := a.Effort(""); effort != "auto" || !slices.Equal(values, want) {
+				t.Fatalf("effort selector = %q/%v, want auto/%v", effort, values, want)
+			}
+			if err := a.SetEffort(t.Context(), "", "none"); err == nil {
+				t.Fatal("SetEffort accepted none for always-on thinking")
+			}
+			for _, effort := range want[1:] {
+				if err := a.SetEffort(t.Context(), "", effort); err != nil {
+					t.Fatal(err)
+				}
+				if got := a.effortFor(nil); got != effort {
+					t.Fatalf("effective effort = %q, want %q", got, effort)
+				}
+			}
+		})
+	}
+}
+
 func TestQwen38EffortDefaultsAndClampsOverrides(t *testing.T) {
 	a := upstreamAgent("qwen3.8:27b-mlx")
 	s := &sessionState{}
