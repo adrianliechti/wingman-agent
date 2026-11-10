@@ -24,7 +24,12 @@ func approveScript(ctx context.Context, dir, script string, opts *Options) error
 	if opts != nil && opts.Disabled {
 		return fmt.Errorf("scheduled scripts are disabled because shell access is disabled")
 	}
-	if !shell.IsDangerousCommand(script) {
+	// The same rule as exec: inside the sandbox only destructive scripts are reviewed.
+	var shellOpts *shell.Options
+	if opts != nil {
+		shellOpts = opts.Shell
+	}
+	if !shell.RequiresApproval(script, shellOpts, dir) {
 		return nil
 	}
 	if opts == nil || opts.Elicitation == nil || (opts.Elicitation.Confirm == nil && opts.Elicitation.Review == nil) {

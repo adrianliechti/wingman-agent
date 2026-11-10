@@ -1649,7 +1649,7 @@ func isPowerShellDownloadCommand(command string) bool {
 		return false
 	}
 	switch cmd {
-	case "invoke-webrequest", "iwr", "curl", "wget":
+	case "invoke-webrequest", "iwr", "invoke-restmethod", "irm", "curl", "wget":
 		return true
 	}
 	return false

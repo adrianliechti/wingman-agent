@@ -16,7 +16,7 @@ const linuxSandboxHelper = "__wingman-linux-sandbox-exec"
 func init() {
 	if len(os.Args) >= 5 && os.Args[1] == linuxSandboxHelper {
 		runtime.LockOSThread()
-		if err := installSandboxSeccomp(os.Args[2] == "network"); err != nil {
+		if err := installSandboxSeccomp(); err != nil {
 			fmt.Fprintln(os.Stderr, "wingman sandbox:", err)
 			os.Exit(126)
 		}
@@ -29,8 +29,10 @@ func init() {
 
 // Mounts and a network namespace do not isolate pathname Unix sockets.
 // Deny creating host-service sockets even when IP networking is approved.
-// socketpair remains available for local parent/child IPC.
-func sandboxSeccompFilter(network bool) ([]unix.SockFilter, error) {
+// socketpair remains available for local parent/child IPC. IP sockets are
+// always allowed: without network approval the command has its own network
+// namespace, where they reach only its private loopback.
+func sandboxSeccompFilter() ([]unix.SockFilter, error) {
 	var arch uint32
 	switch runtime.GOARCH {
 	case "amd64":
@@ -58,16 +60,12 @@ func sandboxSeccompFilter(network bool) ([]unix.SockFilter, error) {
 		filter = append(filter, jump(nr, 0, 1), deny)
 	}
 	filter = append(filter, jump(unix.SYS_SOCKET, 1, 0), statement(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW), statement(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 16))
-	if network {
-		filter = append(filter, jump(unix.AF_INET, 2, 0), jump(unix.AF_INET6, 1, 0), deny, statement(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW))
-	} else {
-		filter = append(filter, deny)
-	}
+	filter = append(filter, jump(unix.AF_INET, 2, 0), jump(unix.AF_INET6, 1, 0), deny, statement(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW))
 	return filter, nil
 }
 
-func installSandboxSeccomp(network bool) error {
-	filter, err := sandboxSeccompFilter(network)
+func installSandboxSeccomp() error {
+	filter, err := sandboxSeccompFilter()
 	if err != nil {
 		return err
 	}

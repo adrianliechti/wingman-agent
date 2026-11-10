@@ -43,7 +43,8 @@ func TestSeccompSocketProbe(t *testing.T) {
 		if fd >= 0 {
 			_ = unix.Close(fd)
 		}
-		allowed := mode == "network" && (family == unix.AF_INET || family == unix.AF_INET6)
+		// IP sockets are allowed in both modes; isolation comes from the network namespace.
+		allowed := family == unix.AF_INET || family == unix.AF_INET6
 		if allowed {
 			if err != nil && !errors.Is(err, unix.EAFNOSUPPORT) {
 				t.Errorf("IP socket %d: %v", family, err)

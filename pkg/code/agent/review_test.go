@@ -161,7 +161,8 @@ func TestShellApprovalDoesNotSurviveLeavingUnattendedMode(t *testing.T) {
 	if err := a.SetUnattended(ctx, id, true); err != nil {
 		t.Fatal(err)
 	}
-	args := map[string]any{"command": "rm -rf fixture", "wait": 10}
+	// Removing .git keeps the command reviewed inside the sandbox too.
+	args := map[string]any{"command": "rm -rf fixture .git", "wait": 10}
 	result, err := exec.Execute(ctx, args)
 	if err != nil || result.IsError || len(*inputs) != 0 || len(ui.confirms) != 0 {
 		t.Fatalf("unattended execution: %+v, %v; reviews=%d", result, err, len(*inputs))
@@ -259,6 +260,39 @@ func TestPermissionHooksDecideBeforeReviewAndUnattended(t *testing.T) {
 			verdict, err := a.review(ctx, tool.Approval{Message: "❯ rm -rf ~", Action: map[string]any{"type": "shell_command"}})
 			if err != nil || verdict.Allowed != tc.allowed || len(*inputs) != tc.reviews || len(ui.confirms) != 0 {
 				t.Fatalf("verdict = %+v, %v; reviews=%d, confirms=%v", verdict, err, len(*inputs), ui.confirms)
+			}
+		})
+	}
+}
+
+// A command the reviewer approved knowing it would be re-run if the sandbox
+// blocked it is not reviewed a second time. Permission hooks still decide.
+func TestCoveredRerunSkipsTheReviewerButNotPermissionHooks(t *testing.T) {
+	deny := func(context.Context, tool.ToolCall) (hook.PermissionRequestOutcome, error) {
+		return hook.PermissionRequestOutcome{Behavior: hook.PermissionDeny}, nil
+	}
+	for _, tc := range []struct {
+		name    string
+		covered bool
+		hooks   []hook.PermissionRequest
+		allowed bool
+		reviews int
+	}{
+		{"covered", true, nil, true, 0},
+		{"covered but a hook denies", true, []hook.PermissionRequest{deny}, false, 0},
+		{"not covered", false, nil, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _, ctx, inputs := newReviewSession(t, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"Not requested."}`)
+			a.session(code.SessionIDFromContext(ctx)).harness.Hooks.PermissionRequest = tc.hooks
+			ctx = tool.WithBackgroundOrigin(hook.WithToolCall(ctx, tool.ToolCall{ID: "call-1", Name: "exec", Args: `{"command":"git push --force","sandbox_permissions":"require_escalated"}`}), "task-1")
+			action := map[string]any{"type": "sandbox_escalation", "command": "git push --force"}
+			if tc.covered {
+				action["covered_by_review"] = true
+			}
+			verdict, err := a.review(ctx, tool.Approval{Message: "❯ git push --force  [outside the sandbox]", Action: action})
+			if err != nil || verdict.Allowed != tc.allowed || len(*inputs) != tc.reviews {
+				t.Fatalf("verdict = %+v, %v; reviews = %d", verdict, err, len(*inputs))
 			}
 		})
 	}
@@ -412,7 +446,7 @@ func TestSandboxedExecSendsExecutionPolicyToReviewerAndHonoursDenial(t *testing.
 		sandboxed  bool
 		deniedRead bool
 	}{
-		{map[string]any{"command": "rm -rf build", "wait": 10}, "shell_command", true, true},
+		{map[string]any{"command": "rm -rf ./*", "wait": 10}, "shell_command", true, true},
 		{map[string]any{"command": "touch " + outside, "wait": 10, "sandbox_permissions": "require_escalated", "justification": "write outside"}, "sandbox_escalation", false, false},
 	} {
 		before := len(*inputs)

@@ -46,7 +46,7 @@ func TestPermissionRequestPreservesSandboxAndDoesNotMutateBase(t *testing.T) {
 		action = req.Action
 		return tool.Verdict{Allowed: true}, nil
 	}}
-	if err := confirmExecution(t.Context(), elicit, "echo fixture", workspace, workspace, mode, "download fixture", "", opts); err != nil {
+	if _, err := confirmExecution(t.Context(), elicit, "echo fixture", workspace, workspace, mode, "download fixture", "", opts, approveThisRun); err != nil {
 		t.Fatal(err)
 	}
 	policy := action["execution_policy"].(map[string]any)
@@ -136,7 +136,7 @@ func TestPermissionReviewRejectsChangedRootAlias(t *testing.T) {
 		}
 		return tool.Verdict{Allowed: true}, nil
 	}}
-	if err := confirmExecution(t.Context(), elicit, "echo fixture", alias, alias, "require_permissions", "fixture", "", &Options{Network: true}); err == nil {
+	if _, err := confirmExecution(t.Context(), elicit, "echo fixture", alias, alias, "require_permissions", "fixture", "", &Options{Network: true}, approveThisRun); err == nil {
 		t.Fatal("approval followed a changed workspace alias")
 	}
 }

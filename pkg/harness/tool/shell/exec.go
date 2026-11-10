@@ -624,7 +624,14 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	}
 
 	justification, _ := args["justification"].(string)
-	err = confirmExecution(ctx, elicit, command, workDir, dir, permissionMode, justification, "", opts)
+	validation, _ := args["validation"].(bool)
+	// A command that is reviewed up front and then blocked by the sandbox would
+	// be reviewed again for its re-run. Validation runs are never re-run.
+	scope := approveThisRun
+	if permissionMode == "use_default" && !validation {
+		scope = approveWithRerun
+	}
+	reviewed, err := confirmExecution(ctx, elicit, command, workDir, dir, permissionMode, justification, "", opts, scope)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -637,7 +644,6 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		tty = false
 	}
 	description, _ := args["description"].(string)
-	validation, _ := args["validation"].(bool)
 
 	run := execRun{
 		command:     command,
@@ -649,6 +655,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 		validation:  validation,
 		wait:        wait,
 		timeout:     timeout,
+		covered:     reviewed && scope == approveWithRerun,
 	}
 	result, denial, err := startExec(ctx, m, workDir, run)
 	if err != nil || denial == "" {
@@ -673,11 +680,30 @@ type execRun struct {
 	validation  bool
 	wait        int
 	timeout     int
+	// covered: the approval of this call already covers its re-run after a sandbox denial.
+	covered bool
+}
+
+func (run execRun) rerunScope() approvalScope {
+	if run.covered {
+		return approveCoveredRerun
+	}
+	return approveThisRun
 }
 
 // retryOutsideSandbox re-runs a command whose sandboxed run failed with a likely
-// sandbox denial, once running it outside the sandbox is approved.
+// sandbox denial, once that is approved. A run that only lacked the network
+// keeps the sandbox and gains network access; everything else, and commands
+// that use the user's credentials, runs outside the sandbox.
 func retryOutsideSandbox(ctx context.Context, m *ExecManager, elicit *tool.Elicitation, workDir string, run execRun, args map[string]any, denied tool.Result, denial string) (tool.Result, error) {
+	if isOfflineDenial(denial) && !usesHostCredentials(run.command) {
+		result, again, err := retryWithNetwork(ctx, m, elicit, workDir, run, args, denied, denial)
+		if err != nil || again == "" {
+			return result, err
+		}
+		// Network access was not enough; the newer failure is the one to explain.
+		denied, denial = result, again
+	}
 	// Permission hooks and the reviewer see the call as it now runs.
 	escalatedArgs := maps.Clone(args)
 	escalatedArgs["sandbox_permissions"] = "require_escalated"
@@ -690,7 +716,7 @@ func retryOutsideSandbox(ctx context.Context, m *ExecManager, elicit *tool.Elici
 		}
 	}
 	justification, _ := args["justification"].(string)
-	err := confirmExecution(ctx, elicit, run.command, workDir, run.dir, "require_escalated", justification, denial, run.opts)
+	_, err := confirmExecution(ctx, elicit, run.command, workDir, run.dir, "require_escalated", justification, denial, run.opts, run.rerunScope())
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return tool.Result{}, ctxErr
 	}
@@ -705,6 +731,44 @@ func retryOutsideSandbox(ctx context.Context, m *ExecManager, elicit *tool.Elici
 	}
 	result.Content += "\nThe sandbox blocked the first run (" + denial + "); this result is from re-running the command outside the sandbox after approval."
 	return result, nil
+}
+
+// retryWithNetwork re-runs the command inside the sandbox with network access
+// once that is approved. A non-empty denial means the re-run was blocked again
+// and result is its output; otherwise result is final.
+func retryWithNetwork(ctx context.Context, m *ExecManager, elicit *tool.Elicitation, workDir string, run execRun, args map[string]any, denied tool.Result, denial string) (tool.Result, string, error) {
+	grantArgs := maps.Clone(args)
+	grantArgs["sandbox_permissions"] = "require_permissions"
+	grantArgs["network"] = true
+	if call, ok := hook.ToolCallFromContext(ctx); ok {
+		if raw, err := json.Marshal(grantArgs); err == nil {
+			call.Args = string(raw)
+			ctx = hook.WithToolCall(ctx, call)
+		}
+	}
+	opts := &Options{}
+	if run.opts != nil {
+		*opts = *run.opts
+	}
+	opts.Network = true
+	justification, _ := args["justification"].(string)
+	_, err := confirmExecution(ctx, elicit, run.command, workDir, run.dir, "require_permissions", justification, denial, opts, run.rerunScope())
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return tool.Result{}, "", ctxErr
+	}
+	if err != nil {
+		denied.Content += "\n" + sandboxDenialNotice + "\nRunning it with network access was not approved: " + err.Error()
+		return denied, "", nil
+	}
+	run.opts = opts
+	result, again, err := startExec(ctx, m, workDir, run)
+	if err != nil {
+		return tool.Result{}, "", err
+	}
+	if again == "" {
+		result.Content += "\nThe sandbox blocked the first run (" + denial + "); this result is from re-running the command with network access after approval."
+	}
+	return result, again, nil
 }
 
 // startExec launches run and waits until it exits or moves to the background.
@@ -995,8 +1059,13 @@ func writeSessionInputLocked(ctx context.Context, m *ExecManager, id int, s *exe
 		combined = applyInputEditing(s.pendingInput, input)
 	}
 	submitted, remainder := splitSubmittedInput(combined)
-	immediateControl := hasImmediateTerminalControl(input)
-	dangerous := immediateControl || s.inputUncertain
+	// A sandboxed process stays confined whatever its line editor holds, so keys
+	// this code cannot model are no reason to review its input. Such a key can
+	// still submit the line, which is then read as typed so far.
+	control := hasImmediateTerminalControl(input)
+	immediateControl := control && !s.sandboxed
+	uncertain := s.inputUncertain && !s.sandboxed
+	dangerous := immediateControl || uncertain || control && s.inputNeedsApproval(combined)
 	approvalText := strings.TrimRight(submitted, "\r\n")
 	if dangerous && approvalText == "" {
 		approvalText = s.pendingInput + input
@@ -1004,12 +1073,14 @@ func writeSessionInputLocked(ctx context.Context, m *ExecManager, id int, s *exe
 	if immediateControl {
 		approvalText += "  [input contains an active terminal control]"
 	}
-	if s.inputUncertain {
+	if uncertain {
 		approvalText += "  [terminal input state is unknown]"
 	}
 	if submitted != "" {
-		overflowed := s.inputOverflow || len(submitted) > maxClassifiableBytes
-		dangerous = dangerous || overflowed || IsDangerousCommand(submitted)
+		// The sandboxed check reads text of any length, but not a pending line
+		// that was cut when it outgrew the limit.
+		overflowed := s.inputOverflow || !s.sandboxed && len(submitted) > maxClassifiableBytes
+		dangerous = dangerous || overflowed || s.inputNeedsApproval(submitted)
 		if overflowed {
 			approvalText += "  [input line exceeded classifier limit]"
 		}
@@ -1047,17 +1118,37 @@ func writeSessionInputLocked(ctx context.Context, m *ExecManager, id int, s *exe
 }
 
 func confirmPendingSessionInputLocked(ctx context.Context, s *execSession, elicit *tool.Elicitation) error {
-	if s.pendingInput == "" && !s.inputOverflow && !s.inputUncertain {
+	uncertain := !s.sandboxed && s.inputUncertain
+	if s.pendingInput == "" && !s.inputOverflow && !uncertain {
 		return nil
 	}
 	text := s.pendingInput
 	if s.inputOverflow {
 		text += "  [input line exceeded classifier limit]"
 	}
-	if s.inputUncertain {
+	if uncertain {
 		text += "  [terminal input state is unknown]"
 	}
-	return confirmIfDangerous(ctx, elicit, "terminal_input", text, s.inputOverflow || s.inputUncertain || IsDangerousCommand(s.pendingInput))
+	return confirmIfDangerous(ctx, elicit, "terminal_input", text, s.inputOverflow || uncertain || s.inputNeedsApproval(s.pendingInput))
+}
+
+// inputNeedsApproval judges text typed into the session. Without a sandbox the
+// full classifier reads it as written, control characters included. Inside
+// one, only destructive commands count and uninterpreted keys are dropped.
+func (s *execSession) inputNeedsApproval(text string) bool {
+	if !s.sandboxed {
+		return IsDangerousCommand(text)
+	}
+	text = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\t':
+			return ' '
+		case isUnmodelledTerminalControl(r):
+			return -1
+		}
+		return r
+	}, text)
+	return IsDestructiveCommand(text, s.workdir)
 }
 
 func hasImmediateTerminalControl(input string) bool {

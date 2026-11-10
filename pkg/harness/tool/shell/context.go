@@ -3,6 +3,7 @@ package shell
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
@@ -20,10 +21,18 @@ func ExecutionContext(workspace string, opts *Options) string {
 	default:
 		b.WriteString("- Shell sandbox: enabled (workspace-write).\n")
 		fmt.Fprintf(&b, "- Shell writable roots: %s.\n", formatPaths(opts.writableRoots(workspace)))
-		if opts != nil && opts.Network {
+		switch {
+		case opts != nil && opts.Network:
 			b.WriteString("- Shell IP network: enabled by host configuration.\n")
-		} else {
+		case runtime.GOOS == "linux" || (runtime.GOOS == "darwin" && (opts == nil || !opts.DisableLoopback)):
+			b.WriteString("- Shell IP network: loopback only by default.\n")
+		default:
 			b.WriteString("- Shell IP network: blocked by default.\n")
+		}
+		if opts != nil && opts.SharedTemp {
+			if dirs := sharedTempDirs(); len(dirs) > 0 {
+				fmt.Fprintf(&b, "- Shell shared temporary directories, also writable: %s.\n", formatPaths(dirs))
+			}
 		}
 	}
 	if opts != nil && opts.TempDir != "" {

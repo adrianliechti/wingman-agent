@@ -91,15 +91,34 @@ func validateWritableRoot(root string) error {
 	return nil
 }
 
-// confirmExecution approves one execution. denial, when set, quotes the failed
-// sandboxed run of the same command that this request retries.
-func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, workspace, workdir, mode, justification, denial string, opts *Options) error {
+// approvalScope says how an approval relates to the automatic re-run that
+// follows a sandbox denial.
+type approvalScope int
+
+const (
+	// approveThisRun covers one execution as proposed.
+	approveThisRun approvalScope = iota
+	// approveWithRerun also covers the one re-run, with network access or
+	// outside the sandbox, that the harness makes if the sandbox blocks the
+	// command. The approver is told so.
+	approveWithRerun
+	// approveCoveredRerun is that re-run, after an approveWithRerun approval
+	// of the same call. Permission hooks still see it; the reviewer does not.
+	approveCoveredRerun
+)
+
+// confirmExecution approves one execution and reports whether an approval was
+// needed and given. denial, when set, quotes the failed sandboxed run of the
+// same command that this request retries.
+func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, workspace, workdir, mode, justification, denial string, opts *Options, scope approvalScope) (bool, error) {
 	sandboxed := workspaceSandboxEnabled(opts) && mode != "require_escalated"
-	if mode == "use_default" && !IsDangerousCommand(command) {
-		return nil
+	// Permission requests are always reviewed. A default command is reviewed
+	// when destructive inside the sandbox, or by the full classifier without one.
+	if mode == "use_default" && !requiresApproval(command, sandboxed, workspace, workdir) {
+		return false, nil
 	}
 	if elicit == nil || (elicit.Review == nil && elicit.Confirm == nil) {
-		return fmt.Errorf("command requires approval, which is unavailable here")
+		return false, fmt.Errorf("command requires approval, which is unavailable here")
 	}
 	kind := "shell_command"
 	if mode == "require_escalated" {
@@ -111,7 +130,13 @@ func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, wo
 		"sandboxed": sandboxed, "network": !sandboxed || opts.Network,
 		"writable_roots": opts.writableRoots(workspace), "protected_directories": protectedDirs,
 		"protected_files":   append(slices.Clone(protectedFiles), protectedRootFiles...),
-		"denied_read_paths": credentialPaths(), "host_unix_sockets": false,
+		"denied_read_paths": []string{}, "host_unix_sockets": false,
+	}
+	if !opts.ReadCredentials {
+		policy["denied_read_paths"] = credentialPaths()
+	}
+	if opts.SharedTemp {
+		policy["shared_temp_writable"] = sharedTempDirs()
 	}
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		policy["host_unix_sockets"] = "not specified by this backend"
@@ -122,7 +147,14 @@ func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, wo
 	if !sandboxed {
 		policy = map[string]any{"sandboxed": false, "network": true, "filesystem": "user privileges", "host_unix_sockets": true}
 	}
+	rerun := scope == approveWithRerun && sandboxed && mode == "use_default"
+	if rerun {
+		policy["rerun_if_blocked"] = true
+	}
 	text := command + "  [in " + workdir + "]"
+	if rerun {
+		text += "\nIf the sandbox blocks it, it runs once more with the access it needs."
+	}
 	if mode == "require_escalated" {
 		text += "  [outside the sandbox]"
 	} else if mode == "require_permissions" {
@@ -147,20 +179,23 @@ func confirmExecution(ctx context.Context, elicit *tool.Elicitation, command, wo
 	if denial != "" {
 		action["sandbox_denial"] = denial
 	}
+	if scope == approveCoveredRerun {
+		action["covered_by_review"] = true
+	}
 	verdict, err := elicit.Approve(ctx, tool.Approval{
 		Message: "❯ " + approvalDisplayText(text),
 		Action:  action,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to get approval: %w", err)
+		return false, fmt.Errorf("failed to get approval: %w", err)
 	}
 	if err := verdict.Err("command execution denied by user"); err != nil {
-		return err
+		return false, err
 	}
 	for path, approved := range boundaries {
 		if canonicalPath(path) != approved {
-			return fmt.Errorf("execution path %q changed during approval; request review again", path)
+			return false, fmt.Errorf("execution path %q changed during approval; request review again", path)
 		}
 	}
-	return nil
+	return true, nil
 }

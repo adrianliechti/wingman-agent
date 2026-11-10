@@ -3,6 +3,7 @@ package shell
 import (
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -19,6 +20,16 @@ type Options struct {
 	// Network grants IP networking for this execution while retaining the
 	// filesystem sandbox. Only the approval path may set this per command.
 	Network bool
+	// DisableLoopback keeps commands without Network off the host's loopback
+	// interface on macOS, where it also reaches other local services.
+	DisableLoopback bool
+	// ReadCredentials lets commands use the user's credentials, as Codex does:
+	// credential stores stay readable inside the sandbox and authentication
+	// variables stay in the environment. Without it both are withheld.
+	ReadCredentials bool
+	// SharedTemp also lets sandboxed commands write the host's shared temporary
+	// directories, for tools that ignore TMPDIR such as mktemp on macOS.
+	SharedTemp bool
 
 	// ExtraWritableRoots grants the workspace sandbox write access to
 	// directories outside the workspace, such as project memory and scratch data.
@@ -64,7 +75,7 @@ func DefaultEnvironmentPolicy() EnvironmentPolicy {
 // the user's privileges, so they keep the credentials the default policy removes.
 func environmentForTools(opts *Options, escalated bool) []string {
 	policy := DefaultEnvironmentPolicy()
-	if escalated {
+	if escalated || (opts != nil && opts.ReadCredentials) {
 		policy.Deny = nil
 	}
 	for pattern := range strings.SplitSeq(os.Getenv("WINGMAN_ENV_ALLOW"), ",") {
@@ -85,6 +96,30 @@ func environmentWithTemp(environment []string, tempDir string) []string {
 	if tempDir != "" {
 		for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
 			environment = setEnvironment(environment, key, tempDir)
+		}
+	}
+	return environment
+}
+
+// offlineDefaults stop package managers from retrying when the sandbox has no
+// outside network. npm otherwise takes over a minute to report the failure
+// that tells the harness, and the model, that the command needs network access.
+// pip keeps one retry: without any it no longer prints the connection error.
+var offlineDefaults = [][2]string{
+	{"npm_config_fetch_retries", "0"},
+	{"PIP_RETRIES", "1"},
+	{"CARGO_NET_RETRY", "0"},
+}
+
+// environmentOffline adds offlineDefaults, keeping values the user configured.
+func environmentOffline(environment []string) []string {
+	for _, entry := range offlineDefaults {
+		key := entry[0]
+		if !slices.ContainsFunc(environment, func(existing string) bool {
+			name, _, _ := strings.Cut(existing, "=")
+			return strings.EqualFold(name, key)
+		}) {
+			environment = append(environment, key+"="+entry[1])
 		}
 	}
 	return environment

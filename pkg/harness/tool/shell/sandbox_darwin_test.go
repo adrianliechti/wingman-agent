@@ -176,7 +176,8 @@ func TestScopedPermissionsRetainSeatbeltBoundaries(t *testing.T) {
 					args["writable_roots"] = []any{extra}
 				}
 			}
-			opts, _, err := executionOptions(f.workspace, args, &Options{TempDir: t.TempDir()})
+			// Loopback is forced off so the fixture server stands for an outside host.
+			opts, _, err := executionOptions(f.workspace, args, &Options{TempDir: t.TempDir(), DisableLoopback: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -340,5 +341,18 @@ func TestSandboxPinsDirectoriesAboveNestedConfiguration(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.workspace, "moved", "file")); err != nil {
 		t.Errorf("ordinary directory did not move: %v", err)
+	}
+}
+
+// zsh lowers the priority of background jobs, which the sandbox refuses; the
+// warning it would print on every job also reads like a sandbox denial.
+func TestSandboxedZshBackgroundJobsStayQuiet(t *testing.T) {
+	if filepath.Base(os.Getenv("SHELL")) != "zsh" {
+		t.Skip("the user's shell is not zsh")
+	}
+	f := newEscapeFixture(t)
+	output, err := runSandboxed(t, f.workspace, "(sleep 0.1 &); echo done", nil)
+	if err != nil || strings.Contains(output, "nice(") || !strings.Contains(output, "done") {
+		t.Fatalf("background job output = %q, err = %v", output, err)
 	}
 }

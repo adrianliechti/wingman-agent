@@ -518,9 +518,10 @@ func TestSandboxNetworkGrantStillBlocksHostSockets(t *testing.T) {
 
 	for _, network := range []bool{false, true} {
 		t.Run(fmt.Sprintf("network=%t", network), func(t *testing.T) {
-			opts := &Options{}
+			// Loopback is forced off so the fixture server stands for an outside host.
+			opts := &Options{DisableLoopback: true}
 			if network {
-				if opts, _, err = executionOptions(f.workspace, map[string]any{"sandbox_permissions": "require_permissions", "network": true, "justification": "fixture"}, &Options{}); err != nil {
+				if opts, _, err = executionOptions(f.workspace, map[string]any{"sandbox_permissions": "require_permissions", "network": true, "justification": "fixture"}, opts); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -532,5 +533,121 @@ func TestSandboxNetworkGrantStillBlocksHostSockets(t *testing.T) {
 				t.Errorf("host Unix socket reachable:\n%s", output)
 			}
 		})
+	}
+}
+
+const loopbackProbeEnv = "WINGMAN_LOOPBACK_PROBE"
+
+// Commands can run their own servers and tests on loopback. On macOS that is
+// the host's loopback, so it can be switched off; Linux commands have a
+// loopback of their own, which cannot reach the host's services.
+func TestSandboxAllowsLoopbackUnlessDisabled(t *testing.T) {
+	f := newEscapeFixture(t)
+	host := httptest.NewServer(http.NotFoundHandler())
+	defer host.Close()
+	_, port, _ := net.SplitHostPort(host.Listener.Addr().String())
+	command := fmt.Sprintf("%s=%s %s -test.run='^TestSandboxLoopbackProbe$' -test.v", loopbackProbeEnv, port, escapeQuote(os.Args[0]))
+	probe := func(opts *Options) (own, hostService bool) {
+		output, _ := runSandboxed(t, f.workspace, command, opts)
+		return strings.Contains(output, "own server: ok"), strings.Contains(output, "port "+port+": ok")
+	}
+	shared := runtime.GOOS == "darwin"
+
+	if own, hostService := probe(nil); !own || hostService != shared {
+		t.Errorf("default: own server = %v, host service = %v", own, hostService)
+	}
+	if own, hostService := probe(&Options{DisableLoopback: true}); own == shared || hostService {
+		t.Errorf("disabled: own server = %v, host service = %v", own, hostService)
+	}
+}
+
+// TestSandboxLoopbackProbe is the child process of TestSandboxAllowsLoopbackUnlessDisabled.
+func TestSandboxLoopbackProbe(t *testing.T) {
+	spec := os.Getenv(loopbackProbeEnv)
+	if spec == "" {
+		t.Skip("runs only as the child of TestSandboxAllowsLoopbackUnlessDisabled")
+	}
+	report := func(name string, address string) {
+		conn, err := net.DialTimeout("tcp", address, 2*time.Second)
+		if err != nil {
+			fmt.Printf("%s: blocked (%v)\n", name, err)
+			return
+		}
+		conn.Close()
+		fmt.Printf("%s: ok\n", name)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Printf("own server: blocked (%v)\n", err)
+	} else {
+		defer listener.Close()
+		go func() {
+			if conn, err := listener.Accept(); err == nil {
+				conn.Close()
+			}
+		}()
+		report("own server", listener.Addr().String())
+	}
+	for _, port := range strings.Split(spec, ",") {
+		report("port "+port, net.JoinHostPort("127.0.0.1", port))
+	}
+}
+
+// The host decides whether shared temporary directories are writable, for
+// tools that ignore TMPDIR. The home directory stays closed either way.
+func TestSandboxSharedTempFollowsOption(t *testing.T) {
+	t.Setenv(workspaceSandboxActiveEnv, "")
+	workspace := canonicalPath(t.TempDir())
+	if output, err := runSandboxed(t, workspace, "true", nil); err != nil {
+		t.Skipf("sandbox backend unavailable: %v %s", err, output)
+	}
+	shared := filepath.Join("/tmp", fmt.Sprintf("wingman-shared-temp-%d", os.Getpid()))
+	outside := filepath.Join(sandboxTestHome(t), fmt.Sprintf(".wingman-shared-temp-%d", os.Getpid()))
+	t.Cleanup(func() { os.Remove(shared); os.Remove(outside) })
+	command := "echo x > " + escapeQuote(shared) + " && echo TMP_OK; f=$(mktemp) && rm -f \"$f\" && echo MKTEMP_OK; touch " + escapeQuote(outside)
+
+	output, _ := runSandboxed(t, workspace, command, &Options{TempDir: canonicalPath(t.TempDir())})
+	if strings.Contains(output, "TMP_OK") {
+		t.Fatalf("shared temp is writable without the option:\n%s", output)
+	}
+	output, _ = runSandboxed(t, workspace, command, &Options{TempDir: canonicalPath(t.TempDir()), SharedTemp: true})
+	for _, want := range []string{"TMP_OK", "MKTEMP_OK"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("want %s with shared temp enabled:\n%s", want, output)
+		}
+	}
+	if _, err := os.Stat(outside); err == nil {
+		t.Error("shared temp also opened the home directory")
+	}
+
+	// A command may also start in a shared temporary directory.
+	for shared, want := range map[bool]bool{true: true, false: false} {
+		_, err := resolveWorkdir(workspace, map[string]any{"workdir": "/tmp"}, &Options{SharedTemp: shared})
+		if (err == nil) != want {
+			t.Errorf("workdir /tmp with shared temp %v: %v", shared, err)
+		}
+	}
+}
+
+// Commands use the user's credentials when the host allows it, as Codex does:
+// the stores are readable and authentication variables stay in the environment.
+func TestSandboxCredentialsFollowOption(t *testing.T) {
+	f := newEscapeFixture(t)
+	key := filepath.Join(f.home, ".ssh", "id_ed25519")
+	writeFixture(t, key, "fixture-key\n")
+	t.Setenv("GITHUB_TOKEN", "fixture-token")
+	command := "cat " + escapeQuote(key) + "; echo token=$GITHUB_TOKEN"
+
+	if output, _ := runSandboxed(t, f.workspace, command, nil); strings.Contains(output, "fixture-key") || strings.Contains(output, "fixture-token") {
+		t.Errorf("credentials reached a command without the option:\n%s", output)
+	}
+	output, _ := runSandboxed(t, f.workspace, command, &Options{ReadCredentials: true})
+	if !strings.Contains(output, "fixture-key") || !strings.Contains(output, "token=fixture-token") {
+		t.Errorf("credentials are withheld although the option allows them:\n%s", output)
+	}
+	// Reading them does not make them writable.
+	runSandboxed(t, f.workspace, "echo pwned >> "+escapeQuote(key), &Options{ReadCredentials: true})
+	if data, _ := os.ReadFile(key); string(data) != "fixture-key\n" {
+		t.Errorf("a sandboxed command changed a credential file: %q", data)
 	}
 }

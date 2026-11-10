@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -24,8 +25,20 @@ func safetyGuardLine(elicit *tool.Elicitation) string {
 
 func sandboxGuideLine(opts *Options) string {
 	network := "IP network access is blocked by default"
-	if opts != nil && opts.Network {
+	switch {
+	case opts != nil && opts.Network:
 		network = "IP network access is enabled by host configuration"
+	case runtime.GOOS == "darwin" && (opts == nil || !opts.DisableLoopback):
+		network = "IP network access is blocked by default except loopback, so local servers and tests work"
+	case runtime.GOOS == "linux":
+		network = "IP network access is blocked by default; each command has a private loopback, so start a server and its client in the same command"
+	}
+	temp := "do not assume /tmp is writable"
+	switch {
+	case opts != nil && opts.SharedTemp && runtime.GOOS != "windows":
+		temp = "/tmp and the user's temporary directory are writable too"
+	case runtime.GOOS == "darwin":
+		temp += `; mktemp ignores TMPDIR on macOS unless given a template such as "$TMPDIR/x.XXXXXX"`
 	}
 	protection := "Read-only in project roots: " + protectedPathsText() + ". Private temp permits configuration fixtures."
 	if runtime.GOOS == "darwin" {
@@ -33,17 +46,21 @@ func sandboxGuideLine(opts *Options) string {
 	} else {
 		protection += " OS enforcement covers only existing protected paths at project roots; do not bypass this restriction with newly created or nested paths."
 	}
+	credentials := ""
+	if opts == nil || !opts.ReadCredentials {
+		credentials = " Commands cannot read the credential stores " + hiddenCredentialsText() + "."
+	}
 	cacheExample := `npm ci --cache "$TMPDIR/npm-cache"`
 	if runtime.GOOS == "windows" {
 		cacheExample = `npm ci --cache "$env:TEMP\npm-cache"`
 	}
 	return strings.Join([]string{
-		"- Commands run in an OS sandbox. Use the Shell writable roots in Environment context to choose output paths and workdir. Commands cannot read the credential stores " + hiddenCredentialsText() + ". " + protection,
-		"- Use private TMPDIR/TEMP/TMP for temporary files; do not assume /tmp is writable. Expand environment variables inside command using the host shell's syntax. In workdir and writable_roots, supply literal paths, not environment-variable references.",
+		"- Commands run in an OS sandbox. Use the Shell writable roots in Environment context to choose output paths and workdir." + credentials + " " + protection,
+		"- Use private TMPDIR/TEMP/TMP for temporary files; " + temp + ". Expand environment variables inside command using the host shell's syntax. In workdir and writable_roots, supply literal paths, not environment-variable references.",
 		"- Preserve inherited tool/cache configuration; many tools still read a cache they cannot write. Set GODEBUG=goindex=0 for Go commands so they read the host build cache without writing its package index. Only if a command still fails writing a disposable cache, redirect that cache to private temp for the command, e.g. " + cacheExample + "; likewise PIP_CACHE_DIR, UV_CACHE_DIR or GOCACHE/GOTMPDIR. Do not reset HOME, GOPATH, GOMODCACHE, CARGO_HOME or XDG_CACHE_HOME to repair one cache error.",
 		"- " + network + ". Use default permissions when configured access suffices. For required network access or writes outside listed roots, request require_permissions with the needed network/writable_roots and justification. Grants retain the sandbox and apply to the launched command, not later exec calls.",
 		"- Request require_escalated only when the required operation cannot run with scoped grants. It removes the local sandbox for the launched command; supply justification and omit network/writable_roots.",
-		"- Run commands that need host credentials, such as git push, with default permissions. When a command that finishes within the wait fails with a likely sandbox denial, the harness requests approval and re-runs the whole command once outside the sandbox; the result says so. Keep such commands out of long or non-repeatable command chains. Validation runs are not re-run.",
+		"- Run commands that need host credentials, such as git push, with default permissions. When a command that finishes within the wait fails with a likely sandbox denial, the harness requests approval and re-runs the whole command, inside the sandbox with network access when only the network was missing and otherwise outside it; the result says so. Keep such commands out of long or non-repeatable command chains. Validation runs are not re-run.",
 	}, "\n")
 }
 
@@ -57,6 +74,23 @@ var offlineDenialHints = []string{"could not resolve host", "temporary failure i
 // sandboxLauncherPrefixes start the errors of a sandbox that failed to start;
 // the command never ran, so running it outside the sandbox is no remedy.
 var sandboxLauncherPrefixes = []string{"bwrap:", "sandbox-exec:", "wingman sandbox:"}
+
+// isOfflineDenial reports a denial line that shows only a missing network:
+// a name-resolution or routing failure, with no blocked file access.
+func isOfflineDenial(line string) bool {
+	lower := strings.ToLower(line)
+	contains := func(hint string) bool { return strings.Contains(lower, hint) }
+	return slices.ContainsFunc(offlineDenialHints, contains) && !slices.ContainsFunc(sandboxDenialHints, contains)
+}
+
+// hostCredentialCommand matches commands that authenticate as the user: Git
+// remote operations, gh, and the ssh family. The sandbox hides their keys and
+// tokens, so network access alone would only move the failure.
+var hostCredentialCommand = regexp.MustCompile(`(?:^|[;&|(])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:git\s+(?:[^;&|]*\s)?(?:push|pull|fetch|clone|ls-remote|submodule)|gh|ssh|scp|sftp|rsync)(?:\s|$)`)
+
+func usesHostCredentials(command string) bool {
+	return hostCredentialCommand.MatchString(command)
+}
 
 // sandboxDenial returns the first output line suggesting the sandbox blocked a failed command, or "".
 func sandboxDenial(output string, err error, network bool) string {
@@ -112,7 +146,11 @@ func resolveWorkdir(workDir string, args map[string]any, opts *Options) (string,
 	}
 	if workspaceSandboxEnabled(opts) && args["sandbox_permissions"] != "require_escalated" {
 		// executionOptions has already merged validated per-command grants into opts.
-		if !slices.ContainsFunc(opts.writableRoots(workDir), func(root string) bool { return pathWithin(root, value) }) {
+		roots := opts.writableRoots(workDir)
+		if opts != nil && opts.SharedTemp {
+			roots = append(roots, sharedTempDirs()...)
+		}
+		if !slices.ContainsFunc(roots, func(root string) bool { return pathWithin(root, canonicalPath(value)) || pathWithin(root, value) }) {
 			return "", fmt.Errorf("workdir %q is outside sandbox workspace %q and configured writable roots", value, workDir)
 		}
 	}
@@ -158,6 +196,9 @@ func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir str
 			sandbox.ExtraWritableRoots = append([]string(nil), opts.ExtraWritableRoots...)
 			sandbox.TempDir = opts.TempDir
 			sandbox.Network = opts.Network
+			sandbox.SharedTemp = opts.SharedTemp
+			sandbox.DisableLoopback = opts.DisableLoopback
+			sandbox.ReadCredentials = opts.ReadCredentials
 		}
 		// The native Windows sandbox assigns each environment private TEMP/TMP
 		// storage; a per-command root would also defeat environment reuse.
@@ -173,6 +214,9 @@ func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir str
 	environment := environmentForTools(opts, escalated)
 	if sandbox == nil && opts != nil {
 		environment = environmentWithTemp(environment, opts.TempDir)
+	}
+	if sandbox != nil && !sandbox.Network {
+		environment = environmentOffline(environment)
 	}
 	return buildCommandWithEnvironment(ctx, command, workingDir, environment, sandbox)
 }
@@ -230,6 +274,9 @@ type sandboxOptions struct {
 	ExtraWritableRoots []string
 	TempDir            string
 	Network            bool
+	SharedTemp         bool
+	DisableLoopback    bool
+	ReadCredentials    bool
 }
 
 func findPowerShell() string {
