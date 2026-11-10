@@ -144,15 +144,21 @@ def capture(provider, binary, root, model):
                 payload = json.dumps({"input_tokens": 1}).encode()
                 content_type = "application/json"
             else:
-                developer_messages = [
-                    text_blocks(item.get("content")) for item in data.get("input", [])
-                    if isinstance(item, dict) and item.get("role") in ("developer", "system") and item.get("content")
-                ]
-                developer = "\n\n".join(developer_messages)
-                system = "\n\n".join(part for part in (
-                    text_blocks(data.get("system", data.get("instructions", ""))), developer,
-                ) if part)
-                base = text_blocks(data.get("instructions", "")) or (developer_messages[0] if developer_messages else system)
+                def role_texts(items):
+                    return [
+                        text_blocks(item.get("content")) for item in items or []
+                        if isinstance(item, dict) and item.get("role") in ("developer", "system") and item.get("content")
+                    ]
+
+                # Responses carries role instructions in `input`; newer Claude
+                # requests put environment and catalog listings in a
+                # system-role entry of `messages`, after the top-level `system`.
+                developer_messages = role_texts(data.get("input"))
+                context_messages = role_texts(data.get("messages"))
+                developer = "\n\n".join(developer_messages + context_messages)
+                top_level = text_blocks(data.get("system", data.get("instructions", "")))
+                system = "\n\n".join(part for part in (top_level, developer) if part)
+                base = text_blocks(data.get("instructions", "")) or (developer_messages[0] if developer_messages else top_level or system)
                 declared_tools = list(data.get("tools", []))
                 for item in data.get("input", []):
                     if isinstance(item, dict) and item.get("type") == "additional_tools":
@@ -168,6 +174,8 @@ def capture(provider, binary, root, model):
                         "file": f"{stem}.json", "route": route, "model": data.get("model"),
                         "system_words": len(system.split()), "has_tools": bool(declared_tools),
                         "system_sha256": hashlib.sha256(system.encode()).hexdigest(),
+                        # The base excludes per-run paths carried by role messages.
+                        "base_sha256": hashlib.sha256(base.encode()).hexdigest(),
                     })
                 response, events = mock_response(provider, data.get("model", model))
                 if data.get("stream"):

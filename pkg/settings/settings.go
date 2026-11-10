@@ -41,6 +41,10 @@ type Settings struct {
 	WindowTerminalPosition WindowTerminalPosition `json:"window.terminal.position"`
 	WindowSidebarPosition  WindowSidebarPosition  `json:"window.sidebar.position"`
 	Workspaces             []string               `json:"workspaces,omitempty"`
+
+	// ReviewExtraPolicy adds the user's own rules, such as trusted destinations,
+	// to the automatic approval reviewer's policy.
+	ReviewExtraPolicy string `json:"review.extraPolicy,omitempty"`
 }
 
 func (s *Settings) AddWorkspace(path string) {

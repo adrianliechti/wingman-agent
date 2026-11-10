@@ -66,6 +66,12 @@ Available model settings, plan controls, forms, and approvals depend on the
 selected agent and the client's capabilities. Wingman's internal agent-host
 adapter continues to use v1.
 
+With Wingman's built-in agent, results of background subagents, background
+commands, and scheduled tasks reach the model inside a prompt. One that arrives
+during a turn joins that turn. One that arrives while the session is idle is
+held and delivered with your next prompt; the agent does not start a turn on
+its own, so a schedule that comes due while idle runs at the next prompt.
+
 If the client cannot launch Wingman, use an absolute executable path and check
 its working directory and environment. If cancelling a stalled turn closes the
 backend connection, reconnect before sending another prompt.

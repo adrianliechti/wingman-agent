@@ -30,6 +30,7 @@ func TestSeatbeltProfileUsesParameterizedWritableRoots(t *testing.T) {
 		`(param "WRITABLE_ROOT_0")`,
 		`(deny appleevent-send)`,
 		`(deny lsopen)`,
+		`(deny system-fcntl (fcntl-command 80 110))`,
 	} {
 		if !strings.Contains(profile, want) {
 			t.Errorf("profile missing %q", want)
@@ -273,5 +274,71 @@ func TestSeatbeltBlocksHostServiceEscapes(t *testing.T) {
 		if output, _ := runSandboxed(t, f.workspace, "pbpaste >/dev/null && echo CLIPBOARD_READ", nil); strings.Contains(output, "CLIPBOARD_READ") {
 			t.Error("sandboxed command read the clipboard")
 		}
+	}
+}
+
+func TestProtectedAncestorsFindsNestedConfiguration(t *testing.T) {
+	root := canonicalPath(t.TempDir())
+	for _, path := range []string{
+		".vscode/settings.json", // The workspace rule already pins the root.
+		"a/b/.claude/settings.json",
+		"a/b/.claude/nested/.envrc", // Inside a protected directory, which cannot move.
+		"a/c/.envrc",
+		"a/d/plain",
+		"node_modules/pkg/.vscode/settings.json",
+		".git/modules/dep/.envrc",
+	} {
+		writeFixture(t, filepath.Join(root, path), "x\n")
+	}
+	if err := os.Symlink(filepath.Join(root, "a"), filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	got := protectedAncestors(root)
+	slices.Sort(got)
+	want := []string{filepath.Join(root, "a"), filepath.Join(root, "a", "b"), filepath.Join(root, "a", "c")}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ancestors = %q, want %q", got, want)
+	}
+}
+
+func TestProtectedAncestorsAreBounded(t *testing.T) {
+	root := canonicalPath(t.TempDir())
+	for i := range protectedAncestorLimit + 40 {
+		writeFixture(t, filepath.Join(root, fmt.Sprintf("dir%04d", i), ".envrc"), "x\n")
+	}
+	if got := len(protectedAncestors(root)); got != protectedAncestorLimit {
+		t.Fatalf("ancestors = %d, want the limit of %d", got, protectedAncestorLimit)
+	}
+}
+
+// The name rules follow a path. A directory renamed into private temp takes
+// its protected descendants along, where they could be edited and moved back.
+func TestSandboxPinsDirectoriesAboveNestedConfiguration(t *testing.T) {
+	f := newEscapeFixture(t)
+	sub := filepath.Join(f.workspace, "sub")
+	writeFixture(t, filepath.Join(sub, ".vscode", "settings.json"), "{}\n")
+	writeFixture(t, filepath.Join(sub, "deep", ".envrc"), "export SAFE=1\n")
+	writeFixture(t, filepath.Join(f.workspace, "plain", "file"), "x\n")
+	before := treeDigest(t, sub)
+	opts := &Options{TempDir: canonicalPath(t.TempDir())}
+
+	for _, attack := range []string{
+		`mv sub "$TMPDIR/moved" && echo pwned > "$TMPDIR/moved/.vscode/settings.json"; mv "$TMPDIR/moved" sub`,
+		`mv sub/deep "$TMPDIR/deep" && echo pwned >> "$TMPDIR/deep/.envrc"; mv "$TMPDIR/deep" sub/deep`,
+		`mv sub renamed`,
+	} {
+		runSandboxed(t, f.workspace, attack, opts)
+	}
+	if treeDigest(t, sub) != before {
+		t.Error("a sandboxed command moved or changed nested protected configuration")
+	}
+
+	// Directories without protected descendants still move freely.
+	if output, err := runSandboxed(t, f.workspace, `mv plain "$TMPDIR/plain" && mv "$TMPDIR/plain" moved`, opts); err != nil {
+		t.Fatalf("moving an ordinary directory failed: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(f.workspace, "moved", "file")); err != nil {
+		t.Errorf("ordinary directory did not move: %v", err)
 	}
 }

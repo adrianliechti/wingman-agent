@@ -5,7 +5,9 @@ package shell
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -32,6 +34,9 @@ func platformSandboxCommand(shell, command, _ string, policy sandboxPolicy) (str
 // blocked because either can ask an unsandboxed GUI process to act on behalf
 // of the sandboxed command. Host Unix sockets stay unreachable, including
 // sockets inside writable roots; IP networking only adds the DNS service.
+// F_MAKECOMPRESSED (80) and F_TRANSFEREXTENTS (110) change a file through a
+// read-only descriptor, which neither file-write* nor file-ioctl covers, so
+// they need their own deny even under deny default.
 func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 	var definitions []string
 	paramRules := func(prefix string, paths []string) string {
@@ -104,6 +109,7 @@ func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 (allow pseudo-tty)
 (deny appleevent-send)
 (deny lsopen)
+(deny system-fcntl (fcntl-command 80 110))
 `)
 	if policy.Network {
 		profile.WriteString(seatbeltNetwork)
@@ -112,6 +118,9 @@ func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 	for _, root := range sandboxProtectedRoots(policy) {
 		profile.WriteString(seatbeltProtectedRules(root))
 		protectedPaths = append(protectedPaths, existingProtectedPaths(root)...)
+		for _, dir := range protectedAncestors(root) {
+			profile.WriteString("(deny file-write-unlink (literal " + seatbeltString(dir) + "))\n")
+		}
 	}
 	if rules := paramRules("PROTECTED_PATH", protectedPaths); rules != "" {
 		profile.WriteString("(deny file-write*" + rules + ")\n")
@@ -156,6 +165,58 @@ func seatbeltProtectedRules(root string) string {
 	}
 	return "(deny file-write*\n " + strings.Join(filters, "\n ") + ")\n" +
 		"(deny file-write-unlink (literal " + seatbeltString(root) + "))\n"
+}
+
+const (
+	// The scan runs before every command, so it reads a bounded number of
+	// directory entries, nearest the root first.
+	protectedScanEntries = 20000
+	// The profile travels as a command-line argument.
+	protectedAncestorLimit = 512
+)
+
+// Dependency and version-control trees are large and hold no configuration
+// of the user's.
+var protectedScanSkips = []string{".git", ".hg", ".svn", ".jj", "node_modules"}
+
+// protectedAncestors lists the directories between root and the protected
+// paths that exist beneath it. The name rules follow a path, not a file:
+// renaming such a directory into another writable root, such as private temp,
+// would carry its protected descendants out from under them, to be edited and
+// moved back. The scan does not follow links and is bounded; a protected path
+// it does not reach keeps its write protection but not this one. Only existing
+// configuration is pinned: a directory staged in private temp can still be
+// moved in with new protected names inside it.
+func protectedAncestors(root string) []string {
+	root = filepath.Clean(root)
+	var ancestors []string
+	queue := []string{root}
+	for budget := protectedScanEntries; len(queue) > 0 && budget > 0; {
+		dir := queue[0]
+		queue = queue[1:]
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		budget -= len(entries)
+		pinned := false
+		for _, entry := range entries {
+			name := entry.Name()
+			switch {
+			case slices.Contains(protectedDirs, name) || slices.Contains(protectedFiles, name):
+				pinned = true
+			case entry.IsDir() && !slices.Contains(protectedScanSkips, name):
+				queue = append(queue, filepath.Join(dir, name))
+			}
+		}
+		for ; pinned && len(dir) > len(root) && !slices.Contains(ancestors, dir); dir = filepath.Dir(dir) {
+			if len(ancestors) == protectedAncestorLimit {
+				return ancestors
+			}
+			ancestors = append(ancestors, dir)
+		}
+	}
+	return ancestors
 }
 
 func seatbeltRegex(pattern string) string {

@@ -440,7 +440,7 @@ func lineContaining(lineStarts []int, offset int) int {
 	return max(0, i)
 }
 
-func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, onFile func(path, relPath string, d fs.DirEntry) error) error {
+func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, hidden credentialFilter, onFile func(path, relPath string, d fs.DirEntry) error) error {
 	for component := range strings.SplitSeq(root, "/") {
 		if vcsDirs[component] {
 			return nil
@@ -472,6 +472,13 @@ func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, onFile func(pat
 		}
 
 		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		// The starting path was checked when the search target was resolved.
+		if hidden != nil && path != root && hidden(pathpkg.Dir(path), d.Name(), d.Info) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 

@@ -9,7 +9,10 @@ come from skills. See [customization](../../../README.md#customize-your-workflow
 
 Model-specific instructions live in `models/<variant>/mode_agent.txt`. Routing
 uses the longest normalized model-name prefix, with shared instructions as the
-fallback. Shared Plan and unattended templates control those modes.
+fallback. Shared Plan and unattended templates control those modes. Prefix
+routing gives a new minor version an older sibling's prompt without any error,
+so `routing_test.go` lists the directory every Claude and GPT catalog model
+must use; a new catalog model fails that test until its routing is decided.
 
 `BuildBaseInstructions` composes the model template, shared runtime/tool
 fragments, and finally the active mode restrictions. `section_runtime.txt` owns
@@ -30,7 +33,9 @@ contracts into each model template or assume a tool is present from the model ID
 `BuildSessionContext` adds project instructions, skills, memory, and environment
 context as a replaceable session-context message. `BuildAgentContext` supplies
 shared runtime/tool guidance, project/environment context, and active mode
-restrictions to the child's role prompt. It uses the child's filtered tools, so
+restrictions to the child's role prompt. It opens with `section_subagent.txt`,
+which tells every child role who reads its result and that the workspace is
+shared. It uses the child's filtered tools, so
 children do not receive delegation instructions. This scoped context is saved
 with the durable child specification at launch. Keep shared sections in their
 existing templates when adapting a model prompt.
@@ -46,12 +51,18 @@ tool contracts, identity, authorization, and mode handling to Wingman.
 
 ### GPT / Codex and Claude / Claude Code
 
-Refreshed from local request captures on 2026-10-16:
+The GPT templates were refreshed from local request captures on 2026-10-16;
+GPT-6.1 Terra was added from a capture on 2026-11-10 and the other GPT
+templates were not re-adapted then. The Claude templates were adapted on
+2026-10-16, and on 2026-11-10 all eleven Claude models in the command below
+were captured again and each template was compared with its capture:
 
-| CLI | Version | Executable SHA-256 |
-| --- | --- | --- |
-| Codex | `0.163.0` | `8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31` |
-| Claude Code | `2.1.301` | `1f04c69e1c24e4d0a716a863af0aad8fc64d49a499334c29701f073700276b99` |
+| CLI | Version | Executable SHA-256 | Captured | Templates |
+| --- | --- | --- | --- | --- |
+| Codex | `0.163.0` | `8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31` | 2026-10-16 | GPT, except GPT-6.1 Terra |
+| Codex | `0.167.0` | `030316ecfbb41f4e7946e584b0063ef333b7a36cd312ba349f2f6869e39b62cc` | 2026-11-10 | GPT-6.1 Terra |
+| Claude Code | `2.1.301` | `1f04c69e1c24e4d0a716a863af0aad8fc64d49a499334c29701f073700276b99` | 2026-10-16 | Claude, first adaptation |
+| Claude Code | `2.1.319` | `1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd` | 2026-11-10 | Claude, current; Fable 5.2 added |
 
 `scripts/capture-code-prompts.py` points each CLI's API provider at a localhost
 mock with dummy credentials and returns synthetic text without tool calls.
@@ -67,13 +78,13 @@ Reproduce from the repository root (Python standard library and the CLI required
 
 ```bash
 python3 scripts/capture-code-prompts.py codex \
-  --model gpt-6.1-sol --model gpt-6-astra --model gpt-6-sol \
-  --model gpt-6-luna --model gpt-5.6-sol --model gpt-5.5
+  --model gpt-6.1-sol --model gpt-6.1-terra --model gpt-6-astra \
+  --model gpt-6-sol --model gpt-6-luna --model gpt-5.6-sol --model gpt-5.5
 
 python3 scripts/capture-code-prompts.py claude \
   --model claude-sonnet-5-5 --model claude-haiku-5-5 \
   --model claude-opus-5-5 --model claude-opus-5 --model claude-opus-4-8 \
-  --model claude-fable-5-1 --model claude-fable-5 \
+  --model claude-fable-5-2 --model claude-fable-5-1 --model claude-fable-5 \
   --model claude-mythos-5-1 --model claude-mythos-5 --model claude-sonnet-5
 ```
 
@@ -95,9 +106,21 @@ explicit restriction on unsolicited delegation. Reviewing Codex source at
 by configuration/catalog overrides and reasoning effort, not an intrinsic model
 trait. Wingman uses one shared default: delegate bounded independent work when
 useful, subject to user/project/skill restrictions, independent of model or
-effort. GPT-5.5's small checklist wording difference from the embedded catalog
+effort. From Codex's delegation guidance at `1885417cd4` (2026-11-09) the shared
+policy takes three rules: keep urgent work that blocks the next step, give each
+editing agent ownership of files or a responsibility, and review a child's
+edits and load-bearing claims. The child context carries the other two: the
+workspace is shared, and the result goes to the launching agent.
+GPT-5.5's small checklist wording difference from the embedded catalog
 was already reflected in Wingman's template. The newer source retains the same
 base prompts for these six captured model IDs.
+
+GPT-6.1 Terra entered the Codex catalog in `126a0ee92e` (2026-10-26) with an
+instruction template byte-identical to GPT-6 Astra's. The 0.167.0 capture
+completed without fallback metadata and confirmed identical base instructions,
+so `models/gpt-6-1-terra` is a copy of the Astra template. The capture's only
+Terra-specific runtime text prefers reasonable assumptions over questions in
+the default mode; the template's autonomy guidance already covers it.
 
 This Codex version reports fallback metadata for GPT-5.4, GPT-5.4 Mini, GPT-5.2,
 and GPT-5.1. The script marks those runs unsuccessful even when the mock response
@@ -106,13 +129,46 @@ runtime improvements; generic fallback captures are not model-specific source
 evidence. All older GPT models remain in the catalog. GPT-5.6 Terra/Luna and other
 IDs sharing a family template were not separately captured.
 
-Claude Sonnet/Opus 5.5 and Opus 4.8 use lean prompts; Haiku 5.5, Opus 5,
-Fable/Mythos, and general Sonnet 5 retain their respective longer structures.
-The refresh removes a stale pre-mutation stop rule from Opus 4.8 and Fable/Mythos
-5 and replaces Opus 5's delegation restriction with Wingman's shared policy. The general Claude
-template no longer treats arbitrary reminder tags in tool output as trusted
-instructions. Shared family routing does not imply every older Claude ID was
-captured.
+Claude Sonnet/Opus 5.5, Opus 4.8, and Fable 5.2 use lean prompts; Haiku 5.5,
+Opus 5, Fable/Mythos 5 and 5.1, and general Sonnet 5 retain their respective
+longer structures.
+The 2026-10-16 refresh removed a stale pre-mutation stop rule from Opus 4.8 and
+Fable/Mythos 5 and replaced Opus 5's delegation restriction with Wingman's
+shared policy. The general Claude template no longer treats arbitrary reminder
+tags in tool output as trusted instructions. Shared family routing does not
+imply every older Claude ID was captured.
+
+The 2.1.319 comparison found one change in agent guidance. No 2.1.319 request
+carries the sentence about matching the surrounding code's comment density,
+naming, and idiom, in the base prompt, the context entry, or a tool
+description. It was removed from the Sonnet/Opus 5.5, Opus 4.8, Haiku 5.5,
+Opus 5, and Fable/Mythos 5 templates; Fable/Mythos 5 keep their separate rule
+on when to write a comment. Fable/Mythos 5.1 and the general Claude template
+did not have the sentence and match their captures in substance, so they are
+unchanged. After adaptation the Sonnet 5.5, Opus 5.5, and Opus 4.8 templates
+remain identical.
+
+Other 2.1.319 differences are deliberately not adapted. A paragraph on default
+pronouns, sent to every model, and a paragraph on recreating existing games,
+sent only to Opus 5.5, are vendor content policy; `TestAgentPromptPolicy`
+keeps that kind of text out. The reworded harness bullet about mid-conversation
+system turns describes Claude Code's delivery mechanism, where the templates
+keep Wingman's session-context sentence. The "operating autonomously" paragraph
+appears because the capture runs non-interactively and belongs to the shared
+unattended mode. The dedicated-tool and parallel-call bullet is owned by the
+shared runtime.
+
+Claude Code 2.1.319 sends Fable 5.2 the lean prompt plus the Fable/Mythos
+distinction. It sends the same system text for an unrecognized `claude-fable-*`
+ID and reports no display name or knowledge cutoff for 5.2, so this is the
+CLI's default for the Fable line, not a prompt tuned to 5.2; re-capture when a
+release adds 5.2 metadata.
+
+That version also moves environment, deferred-tool, agent-type, and skill
+listings into a `system`-role entry in `messages`. The script extracts that
+entry as the developer text and appends it to the system text. The base text,
+and the manifest's `base_sha256`, cover only the top-level `system`, which does
+not contain per-run paths.
 
 ### Fallback (Gemini, Qwen, Nemotron, GLM, Kimi, MiniMax, Grok, DeepSeek, Mistral)
 
@@ -137,7 +193,10 @@ such as GLM 4.x's capitalized MUST rules and section names were not kept.
 
 All model variants and the fallback receive the same shared runtime contract.
 Templates do not restate rules it already covers, such as commit limits,
-preserving user changes, parallel reads, and claims about checks.
+preserving user changes, and claims about checks;
+`TestTemplatesLeaveRuntimeRulesToSharedSection` checks this for the fallback
+and generic GPT templates. The GPT-5.x, generic GPT, and general Claude
+templates keep their own emphasis on batching independent tool calls.
 GPT-5.1/5.2 no longer suggest asking to run validation that the task already
 authorizes. The fallback also clarifies action requests, persistent authorization,
 task steering, and completion checks. Shared Plan mode follows the same
@@ -145,7 +204,10 @@ delegation policy, restricted to read-only roles. Wingman's Plan mode forbids
 builds and tests; this is intentionally stricter than Codex's allowance for
 checks that do not mutate repository files. Vendor skills, permission
 mechanisms, token budgets, environment data, and marketing copy are not imported
-as Wingman runtime instructions.
+as Wingman runtime instructions. Neither are vendor limits on what the agent
+may create, such as rules about copyrighted material or recreating existing
+games: Wingman does not restrict that, and `TestAgentPromptPolicy` rejects the
+wording when a refreshed capture brings it in.
 
 ### Gemini / Antigravity
 

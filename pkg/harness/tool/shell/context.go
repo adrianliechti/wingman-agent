@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
 )
 
 // ExecutionContext states the configured shell boundary for the prompt, not
@@ -30,6 +32,22 @@ func ExecutionContext(workspace string, opts *Options) string {
 		b.WriteString("- Use the command's private TMPDIR/TEMP/TMP for temporary files and caches; inspect their values in the shell.")
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// hiddenCredentialsText and protectedPathsText name what the sandbox denies.
+// Both render the lists the backends enforce, so the model-facing description
+// cannot drift from the policy.
+func hiddenCredentialsText() string {
+	text := "~/{" + strings.Join(sandboxpolicy.CredentialHomePaths, ",") + "}"
+	if len(sandboxpolicy.CredentialStateFiles) > 0 {
+		text += " and Wingman's " + strings.Join(sandboxpolicy.CredentialStateFiles, ", ")
+	}
+	return text
+}
+
+func protectedPathsText() string {
+	return fmt.Sprintf("{%s} and %s at any depth, plus root-level {%s}",
+		strings.Join(protectedDirs, ","), strings.Join(protectedFiles, ", "), strings.Join(protectedRootFiles, ","))
 }
 
 func formatPaths(paths []string) string {

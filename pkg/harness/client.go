@@ -1,22 +1,27 @@
 package harness
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/ssestream"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
+	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 // streamIdleTimeout bounds the wait for the next stream event; reasoning
@@ -110,13 +115,106 @@ type responseFailure struct {
 }
 
 func (e *responseFailure) Error() string {
-	if e.message != "" {
+	switch {
+	case e.code != "" && e.message != "":
 		return fmt.Sprintf("response failed (%s): %s", e.code, e.message)
-	}
-	if e.code != "" {
+	case e.message != "":
+		return "response failed: " + e.message
+	case e.code != "":
 		return fmt.Sprintf("response failed (%s)", e.code)
 	}
 	return "response failed"
+}
+
+// streamedProviderFailure recovers the provider's error from the generic
+// stream error openai-go returns for any event with a top-level "error"
+// member. The Responses API nests its error object there, and some gateways
+// send a bare string. Without a code or message there is nothing to classify,
+// so the caller keeps treating the event as a broken stream.
+func streamedProviderFailure(err error) *responseFailure {
+	streamErr, ok := errors.AsType[*ssestream.StreamError](err)
+	if !ok {
+		return nil
+	}
+	var event struct {
+		Code    json.RawMessage `json:"code"`
+		Message json.RawMessage `json:"message"`
+		Error   json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(streamErr.Event.Data, &event) != nil {
+		return nil
+	}
+	var detail struct {
+		Code    json.RawMessage `json:"code"`
+		Type    json.RawMessage `json:"type"`
+		Message json.RawMessage `json:"message"`
+		Headers json.RawMessage `json:"headers"`
+	}
+	failure := &responseFailure{}
+	if json.Unmarshal(event.Error, &detail) == nil {
+		// Providers without a code name the failure class in type.
+		failure.code = cmp.Or(jsonText(detail.Code), jsonText(detail.Type))
+		failure.message = jsonText(detail.Message)
+		failure.retryAfter = streamedRetryAfter(string(detail.Headers))
+	} else {
+		failure.message = jsonText(event.Error)
+	}
+	failure.code = cmp.Or(failure.code, jsonText(event.Code))
+	failure.message = strings.TrimSpace(cmp.Or(failure.message, jsonText(event.Message)))
+	if failure.code == "" && failure.message == "" {
+		return nil
+	}
+	return failure
+}
+
+// jsonText returns a JSON string's value or a number's literal. Providers
+// disagree on whether an error code is a name or an HTTP status.
+func jsonText(raw json.RawMessage) string {
+	var value string
+	if json.Unmarshal(raw, &value) == nil {
+		return value
+	}
+	var number json.Number
+	if json.Unmarshal(raw, &number) == nil {
+		return number.String()
+	}
+	return ""
+}
+
+const maxErrorBodyMessageBytes = 2048
+
+// httpStatusError rebuilds the API error openai-go drops when an error
+// response's "error" member is not an object, such as {"error":"unauthorized"}.
+// The SDK then returns its JSON decoding error, which would be retried as a
+// transport failure and hide both the status and the provider's text.
+func httpStatusError(err error, res *http.Response) error {
+	if err == nil || res == nil || res.StatusCode < 400 || res.Body == nil {
+		return err
+	}
+	if _, ok := errors.AsType[*openai.Error](err); ok {
+		return err
+	}
+	// The SDK restores a body it could read. When this read fails, the
+	// transport broke while delivering the body and err already says so.
+	body, readErr := io.ReadAll(res.Body)
+	if readErr != nil {
+		return err
+	}
+	res.Body = io.NopCloser(bytes.NewReader(body))
+
+	apiErr := &openai.Error{StatusCode: res.StatusCode, Request: res.Request, Response: res}
+	var payload struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(body, &payload) == nil {
+		message := jsonText(payload.Error)
+		if message == "" && string(payload.Error) != "null" {
+			// Any other non-object value is still the provider's explanation.
+			message = string(payload.Error)
+		}
+		apiErr.Message = text.HeadBytes(strings.TrimSpace(message), maxErrorBodyMessageBytes)
+	}
+	return apiErr
 }
 
 type request struct {
@@ -244,7 +342,8 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 	defer idle.Stop()
 
 	// The harness owns retries and their visible recovery boundaries.
-	stream := c.client.Responses.NewStreaming(streamCtx, params, option.WithMaxRetries(0))
+	var httpResponse *http.Response
+	stream := c.client.Responses.NewStreaming(streamCtx, params, option.WithMaxRetries(0), option.WithResponseInto(&httpResponse))
 	defer stream.Close()
 
 	var outputItems []responses.ResponseInputItemUnionParam
@@ -463,8 +562,14 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 	}
 
 	if err := stream.Err(); err != nil {
+		if failure := streamedProviderFailure(err); failure != nil {
+			failure.outputStarted = outputStarted
+			return nil, failure
+		}
 		if streamCtx.Err() != nil && ctx.Err() == nil {
 			err = fmt.Errorf("stream stalled: no events for %s", streamIdleTimeout)
+		} else {
+			err = httpStatusError(err, httpResponse)
 		}
 		return nil, &streamFailure{err: withProviderDetails(err), outputStarted: outputStarted}
 	}

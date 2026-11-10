@@ -1130,7 +1130,7 @@ func (s *execSession) result(content string) tool.Result {
 	}
 }
 
-const sandboxDenialNotice = "Possible sandbox denial; this output alone does not establish the cause. For an unwritable disposable cache or temp path, redirect only that path to private temp as described in exec. Do not bypass approval denials."
+const sandboxDenialNotice = "Possible sandbox denial; this output alone does not establish the cause. If the command needs network access or a write outside the writable roots, retry it with sandbox_permissions: \"require_permissions\" plus network: true or writable_roots for that specific access. Commands that need host credentials keep default permissions. For an unwritable disposable cache or temp path, redirect only that path to private temp as described in exec. Do not bypass approval denials."
 
 func completedSessionResult(s *execSession) tool.Result {
 	result, denial := completedRun(s)

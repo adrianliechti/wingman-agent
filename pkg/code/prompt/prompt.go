@@ -84,6 +84,16 @@ func loadVariants() map[string]Variant {
 }
 
 func VariantFor(id string) Variant {
+	if variant, ok := variants[variantKey(id)]; ok {
+		return variant
+	}
+
+	return Variant{Agent: modeAgent, Plan: modePlan, Unattended: modeUnattended}
+}
+
+// variantKey returns the models/ directory whose prompt id uses, or "" for
+// the shared fallback.
+func variantKey(id string) string {
 	id = model.Normalize(model.CanonicalID(id))
 	if _, suffix, ok := strings.Cut(id, "/"); ok {
 		id = suffix
@@ -96,11 +106,7 @@ func VariantFor(id string) Variant {
 		}
 	}
 
-	if variant, ok := variants[match]; ok {
-		return variant
-	}
-
-	return Variant{Agent: modeAgent, Plan: modePlan, Unattended: modeUnattended}
+	return match
 }
 
 func hasVariantPrefix(id, prefix string) bool {
@@ -135,6 +141,9 @@ var sectionRuntime string
 
 //go:embed section_delegation.txt
 var sectionDelegation string
+
+//go:embed section_subagent.txt
+var sectionSubagent string
 
 //go:embed section_web.txt
 var sectionWeb string
@@ -215,7 +224,10 @@ func renderSections(templates []namedTemplate, data SectionData) []Section {
 }
 
 func BuildAgentContext(data SectionData) string {
-	sections := sharedRuntimeSections(data)
+	// Every child role, built-in or user-defined, needs to know who reads its
+	// result and that the workspace is shared; role prompts do not repeat it.
+	sections := []Section{{Title: "Working as a subagent", Content: renderBase(sectionSubagent, data)}}
+	sections = append(sections, sharedRuntimeSections(data)...)
 	sections = append(sections, renderSections([]namedTemplate{tmplProject, tmplEnvironment}, data)...)
 	sections = append(sections, Section{Content: renderBase(data.ModeInstructions, data)})
 	return composeSections(sections)

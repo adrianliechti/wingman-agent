@@ -36,6 +36,33 @@ func TestIsRecoverableError(t *testing.T) {
 		{"thinking signature rejected", &responseFailure{code: "invalid_request_error", message: "Invalid `signature` in `thinking` block"}, true},
 		{"unrelated signature", &openai.Error{StatusCode: 400, Message: "invalid signature on request"}, false},
 		{"output limit configuration", &openai.Error{StatusCode: 400, Message: "max_output_tokens exceeds the maximum allowed"}, false},
+		// Gateways forward the upstream provider's own transient codes.
+		{"in-band Anthropic overload", &responseFailure{code: "overloaded_error"}, true},
+		{"in-band Anthropic api error", &responseFailure{code: "api_error"}, true},
+		{"in-band Anthropic rate limit", &responseFailure{code: "rate_limit_error"}, true},
+		{"in-band Anthropic timeout", &responseFailure{code: "timeout_error"}, true},
+		{"in-band Anthropic overload after output", &responseFailure{code: "overloaded_error", outputStarted: true}, true},
+		{"in-band service unavailable", &responseFailure{code: "service_unavailable_error"}, true},
+		{"in-band Bedrock throttling", &responseFailure{code: "throttlingException"}, true},
+		{"in-band Bedrock model timeout", &responseFailure{code: "ModelTimeoutException"}, true},
+		{"in-band Google unavailable", &responseFailure{code: "UNAVAILABLE"}, true},
+		{"in-band Google resource exhausted", &responseFailure{code: "RESOURCE_EXHAUSTED"}, true},
+		{"in-band status 429", &responseFailure{code: "429"}, true},
+		{"in-band status 503", &responseFailure{code: "503"}, true},
+		{"in-band status 400", &responseFailure{code: "400"}, false},
+		{"in-band status 401", &responseFailure{code: "401"}, false},
+		{"in-band number that is no status", &responseFailure{code: "1234"}, false},
+		{"in-band authentication", &responseFailure{code: "authentication_error"}, false},
+		{"in-band invalid request", &responseFailure{code: "invalid_request_error", message: "tool_choice is invalid"}, false},
+		{"in-band content policy", &responseFailure{code: "content_policy_violation"}, false},
+		{"in-band model not found", &responseFailure{code: "model_not_found"}, false},
+		{"in-band unknown code", &responseFailure{code: "unknown_failure"}, false},
+		{"in-band message without code", &responseFailure{message: "upstream closed the response"}, false},
+		{"in-band usage limit", &responseFailure{code: "organization_usage_limit_exceeded"}, false},
+		// 413 is an overflow by status, with or without a body.
+		{"payload too large without body", &openai.Error{StatusCode: 413}, true},
+		{"payload too large with quota code", &openai.Error{StatusCode: 413, Code: "insufficient_quota"}, false},
+		{"unprocessable without body", &openai.Error{StatusCode: 422}, false},
 	}
 
 	for _, tc := range tests {
@@ -47,8 +74,119 @@ func TestIsRecoverableError(t *testing.T) {
 	}
 }
 
+func TestContextOverflowWordings(t *testing.T) {
+	for _, tc := range []struct {
+		name, message string
+		want          bool
+	}{
+		{"Anthropic window", "input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000, decrease input length or `max_tokens` and try again", true},
+		{"Anthropic prompt", "prompt is too long: 213462 tokens > 200000 maximum", true},
+		{"Gemini", "The input token count (1196265) exceeds the maximum number of tokens allowed (1048575).", true},
+		{"xAI", "This model's maximum prompt length is 131072 but the request contains 537812 tokens.", true},
+		{"llama.cpp", "the request exceeds the available context size, try increasing it", true},
+		{"Bedrock tokens", "Too many input tokens", true},
+		{"Bedrock length", "Input is too long for requested model.", true},
+		{"OpenAI", "Your input exceeds the context window of this model. Please adjust your input and try again.", true},
+		{"OpenRouter", "This endpoint's maximum context length is 200000 tokens. However, you requested about 250000 tokens.", true},
+
+		{"output limit configuration", "max_output_tokens exceeds the maximum allowed", false},
+		{"output limit above model maximum", "max_tokens: 100000 > 64000, which is the maximum allowed number of output tokens for this model", false},
+		{"output count above allowed", "The max_output_tokens value (70000) exceeds the maximum number of tokens allowed (65536).", false},
+		{"token rate limit", "This request would exceed the rate limit for your organization of 400,000 input tokens per minute.", false},
+		{"unknown context parameter", "Unknown parameter: 'context_limit'.", false},
+		{"limit named before the excess", "The context limit option cannot exceed 10.", false},
+		{"prompt parameter", "Invalid value for 'prompt_cache_key': maximum length is 64.", false},
+		{"image limit", "Too many images: the maximum number of images allowed is 100.", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, err := range []error{
+				&openai.Error{StatusCode: 400, Message: tc.message},
+				&streamFailure{err: &providerError{err: &openai.Error{StatusCode: 400, Code: "invalid_request_error", Message: tc.message}}},
+				&responseFailure{code: "invalid_request_error", message: tc.message},
+				&responseFailure{message: tc.message},
+			} {
+				if got := isContextOverflowError(err); got != tc.want {
+					t.Errorf("%T: isContextOverflowError() = %v, want %v", err, got, tc.want)
+				}
+				// Overflow is recovered by compaction; any other input rejection is final.
+				if got := isRecoverableError(err); got != tc.want {
+					t.Errorf("%T: isRecoverableError() = %v, want %v", err, got, tc.want)
+				}
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"413 without body", &openai.Error{StatusCode: 413}, true},
+		{"413 with unrelated message", &openai.Error{StatusCode: 413, Message: "Request exceeds the maximum size"}, true},
+		{"400 without body", &openai.Error{StatusCode: 400}, false},
+		{"overflow wording on a rate limit status", &openai.Error{StatusCode: 429, Message: "too many tokens per minute"}, false},
+		{"overflow wording on a server error", &openai.Error{StatusCode: 500, Message: "context window service failed"}, false},
+		{"transport failure", &streamFailure{err: errors.New("context window")}, false},
+		{"in-band status code", &responseFailure{code: "413"}, false},
+		{"in-band throttling that counts tokens", &responseFailure{code: "ThrottlingException", message: "Too many tokens, please wait before trying again."}, false},
+		{"in-band rate limit that counts tokens", &responseFailure{code: "rate_limit_error", message: "too many tokens per minute"}, false},
+	} {
+		if got := isContextOverflowError(tc.err); got != tc.want {
+			t.Errorf("%s: isContextOverflowError() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestTerminalProviderErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"quota", &responseFailure{code: "insufficient_quota"}, true},
+		{"usage limit over HTTP", &openai.Error{StatusCode: 429, Code: "organization_usage_limit_exceeded"}, true},
+		{"unauthorized", &streamFailure{err: &openai.Error{StatusCode: 401}}, true},
+		{"forbidden", &openai.Error{StatusCode: 403}, true},
+		{"in-band authentication", &responseFailure{code: "authentication_error"}, true},
+		{"content policy", &openai.Error{StatusCode: 400, Code: "content_policy_violation"}, true},
+		{"in-band content filter", &responseFailure{code: "content_filter"}, true},
+		{"invalid prompt", &responseFailure{code: "invalid_prompt"}, true},
+		// These may be an overflow in unrecognized wording or a history item
+		// the briefing transcript omits, so compaction still degrades.
+		{"invalid request", &openai.Error{StatusCode: 400, Code: "invalid_request_error"}, false},
+		{"in-band invalid request", &responseFailure{code: "invalid_request_error"}, false},
+		{"model not found", &openai.Error{StatusCode: 404, Code: "model_not_found"}, false},
+		{"context overflow", &openai.Error{StatusCode: 400, Code: "context_length_exceeded"}, false},
+		{"rate limit", &openai.Error{StatusCode: 429}, false},
+		{"server error", &responseFailure{code: "server_error"}, false},
+		{"transport failure", &streamFailure{err: errors.New("connection reset")}, false},
+		{"local failure", errors.New("summary response was incomplete"), false},
+		{"no error", nil, false},
+	} {
+		if got := isTerminalProviderError(tc.err); got != tc.want {
+			t.Errorf("%s: isTerminalProviderError() = %v, want %v", tc.name, got, tc.want)
+		}
+		if tc.want && isRecoverableError(tc.err) {
+			t.Errorf("%s: terminal error is also retryable", tc.name)
+		}
+	}
+}
+
+func TestRetryAllowedBoundsAttempts(t *testing.T) {
+	transient := &responseFailure{code: "server_error"}
+	if !retryAllowed(transient, 0) || !retryAllowed(transient, maxStreamRetries-1) {
+		t.Fatal("transient failure was not retried within the attempt budget")
+	}
+	if retryAllowed(transient, maxStreamRetries) {
+		t.Fatal("retried beyond the attempt budget")
+	}
+	if retryAllowed(&responseFailure{code: "invalid_prompt"}, 0) {
+		t.Fatal("retried a terminal failure")
+	}
+}
+
 func TestQuotaFailuresAreTerminalAcrossTransports(t *testing.T) {
-	for _, code := range []string{"insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded"} {
+	for _, code := range []string{"insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "organization_usage_limit_exceeded"} {
 		for _, err := range []error{
 			&responseFailure{code: code},
 			&openai.Error{StatusCode: 429, Code: code},

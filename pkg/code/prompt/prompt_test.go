@@ -34,8 +34,8 @@ func TestVariantFor(t *testing.T) {
 	}
 
 	for _, id := range []string{
-		"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "gpt-5.1", "gpt-4o",
-		"claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-6", "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+		"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "gpt-5.1", "gpt-4o",
+		"claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-6", "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-fable-5-2", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
 	} {
 		v := VariantFor(id)
 
@@ -51,7 +51,7 @@ func TestVariantFor(t *testing.T) {
 	if VariantFor("gpt-5.6-sol").Agent != VariantFor("gpt-5.3-codex").Agent {
 		t.Error("gpt-5.6 and GPT-5.3 models should share the default GPT prompt")
 	}
-	for _, id := range []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"} {
+	for _, id := range []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"} {
 		variant := VariantFor(id)
 		if variant.Agent == VariantFor("gpt-5.6-sol").Agent {
 			t.Errorf("%s should use its model-specific prompt", id)
@@ -67,6 +67,22 @@ func TestVariantFor(t *testing.T) {
 		if VariantFor("gpt-6.1-sol").Agent == VariantFor(previous).Agent {
 			t.Errorf("GPT-6.1 Sol should keep its distinct prompt from %s", previous)
 		}
+	}
+	terra := VariantFor("gpt-6.1-terra")
+	if own, ok := variants["gpt-6-1-terra"]; !ok || terra != own {
+		t.Error("GPT-6.1 Terra should resolve to its own prompt directory")
+	}
+	if terra.Agent != VariantFor("gpt-6-astra").Agent {
+		t.Error("GPT-6.1 Terra should share the GPT-6 Astra reference prompt")
+	}
+	if terra.Agent == VariantFor("gpt-6.1-sol").Agent {
+		t.Error("GPT-6.1 Terra should not inherit the GPT-6.1 Sol prompt")
+	}
+	if VariantFor("~openai/GPT-6.1-TERRA:latest") != terra {
+		t.Error("tagged GPT-6.1 Terra alias should resolve to GPT-6.1 Terra")
+	}
+	if VariantFor("gpt-6.1-terraform") != VariantFor("gpt") {
+		t.Error("GPT-6.1 Terra prompt should not match a partial model name")
 	}
 	for _, id := range []string{"gpt-5.6-terra", "gpt-5.6-luna", "openai/gpt-5.6", "gpt-5.6-sol:latest"} {
 		if VariantFor(id) != VariantFor("gpt-5.6-sol") {
@@ -152,6 +168,24 @@ func TestVariantFor(t *testing.T) {
 		t.Error("Claude Fable and Mythos should keep their distinct captured prompts")
 	}
 
+	fable52 := VariantFor("claude-fable-5-2")
+	if own, ok := variants["claude-fable-5-2"]; !ok || fable52 != own {
+		t.Error("Claude Fable 5.2 should resolve to its own prompt directory")
+	}
+	for _, previous := range []string{"claude-fable-5", "claude-fable-5-1"} {
+		if fable52.Agent == VariantFor(previous).Agent {
+			t.Errorf("Claude Fable 5.2 should keep its distinct captured prompt from %s", previous)
+		}
+	}
+	for _, id := range []string{"CLAUDE-FABLE-5-2", "claude-fable-5.2", "anthropic/claude-fable-5-2", "~anthropic/CLAUDE-FABLE-5-2:latest", "claude-fable-5-2-20261101"} {
+		if VariantFor(id) != fable52 {
+			t.Errorf("VariantFor(%s) should resolve to Claude Fable 5.2", id)
+		}
+	}
+	if VariantFor("claude-fable-5-2ish") != VariantFor("claude-fable-5") {
+		t.Error("Claude Fable 5.2 prompt should not match a partial model name")
+	}
+
 	if VariantFor("gpt-5.5").Agent == VariantFor("gpt-5.6-sol").Agent {
 		t.Error("GPT-5.5 should keep its model-specific prompt")
 	}
@@ -165,7 +199,7 @@ func TestVariantFor(t *testing.T) {
 }
 
 func TestTaggedModelVariants(t *testing.T) {
-	for _, id := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "gpt-5.4-mini"} {
+	for _, id := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-5.4-mini"} {
 		t.Run(id, func(t *testing.T) {
 			if got := VariantFor(id + ":latest"); got != VariantFor(id) {
 				t.Fatalf("tagged %s lost its model-specific instructions", id)
@@ -251,6 +285,23 @@ func TestClaudePromptFamilies(t *testing.T) {
 		t.Error("Opus 4.8 prompt contains a state check absent from the current capture")
 	}
 
+	fable52 := VariantFor("claude-fable-5-2").Agent
+	for _, unwanted := range []string{"# Communicating with the user", "# Delivering work", "# Writing for the user", "# Corrections"} {
+		if strings.Contains(fable52, unwanted) {
+			t.Errorf("Fable 5.2 prompt contains guidance absent from its lean captured prompt %q", unwanted)
+		}
+	}
+	if !strings.Contains(fable52, "Fable and Mythos share the same underlying model") {
+		t.Error("Fable 5.2 prompt missing the captured Fable and Mythos distinction")
+	}
+
+	// Claude Code 2.1.319 sends this sentence to no model.
+	for name, variant := range variants {
+		if strings.HasPrefix(name, "claude") && strings.Contains(variant.Agent, "reads like the surrounding code") {
+			t.Errorf("%s prompt keeps a code-style sentence absent from its current capture", name)
+		}
+	}
+
 	general := VariantFor("claude-sonnet-5").Agent
 	for _, want := range []string{"# Doing tasks", "# Executing actions with care", "# Text output"} {
 		if !strings.Contains(general, want) {
@@ -258,7 +309,7 @@ func TestClaudePromptFamilies(t *testing.T) {
 		}
 	}
 
-	for _, id := range []string{"claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-fable-5-1", "claude-mythos-5-1"} {
+	for _, id := range []string{"claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-fable-5-2", "claude-fable-5-1", "claude-mythos-5-1"} {
 		agent := VariantFor(id).Agent
 		for _, vendorOnly := range []string{"# Environment", "<total_tokens>", "gitStatus:", "TaskCreate", "https://github.com/anthropics/claude-code"} {
 			if strings.Contains(agent, vendorOnly) {
@@ -276,12 +327,14 @@ func TestBuildInstructionsRendersModelTemplate(t *testing.T) {
 		"claude-opus-5-5",
 		"claude-opus-5",
 		"claude-opus-4-8",
+		"claude-fable-5-2",
 		"claude-fable-5-1",
 		"claude-fable-5",
 		"claude-mythos-5-1",
 		"claude-mythos-5",
 		"gpt-6-astra",
 		"gpt-6.1-sol",
+		"gpt-6.1-terra",
 		"gpt-6-sol",
 		"gpt-6-luna",
 		"gpt-5.6-sol",
@@ -426,12 +479,14 @@ func TestAgentPromptPolicy(t *testing.T) {
 		"claude-opus-5-5",
 		"claude-opus-5",
 		"claude-opus-4-8",
+		"claude-fable-5-2",
 		"claude-fable-5-1",
 		"claude-fable-5",
 		"claude-mythos-5-1",
 		"claude-mythos-5",
 		"gpt-6-astra",
 		"gpt-6.1-sol",
+		"gpt-6.1-terra",
 		"gpt-6-sol",
 		"gpt-6-luna",
 		"gpt-5.6-sol",
@@ -457,7 +512,9 @@ func TestAgentPromptPolicy(t *testing.T) {
 				}
 			}
 
-			for _, unwanted := range []string{"they/them", "misgender", "intellectual property"} {
+			// Wingman does not restrict what the agent may create; vendor
+			// content limits stay out when a template is refreshed.
+			for _, unwanted := range []string{"they/them", "misgender", "intellectual property", "copyrighted", "existing game"} {
 				if strings.Contains(agent, unwanted) {
 					t.Errorf("agent prompt contains unwanted policy %q", unwanted)
 				}
@@ -475,10 +532,12 @@ func TestAgentPromptsExcludeRemovedTools(t *testing.T) {
 		"claude-opus-5-5",
 		"claude-opus-5",
 		"claude-opus-4-8",
+		"claude-fable-5-2",
 		"claude-fable-5-1",
 		"claude-mythos-5-1",
 		"gpt-6-astra",
 		"gpt-6.1-sol",
+		"gpt-6.1-terra",
 		"gpt-6-sol",
 		"gpt-6-luna",
 		"gpt-5.6-sol",
@@ -517,7 +576,7 @@ func TestReferenceSpecificCopyrightHeaderGuidance(t *testing.T) {
 		})
 	}
 
-	for _, id := range []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"} {
+	for _, id := range []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"} {
 		t.Run(id+"/absent", func(t *testing.T) {
 			if agent := strings.ToLower(VariantFor(id).Agent); strings.Contains(agent, guidance) {
 				t.Errorf("agent prompt contains guidance absent from its reference: %q", guidance)
@@ -534,10 +593,13 @@ func TestFallbackAgentContract(t *testing.T) {
 		"answer, explain, review, diagnose, plan, or report status",
 		"change, build, or fix",
 		"destructive, difficult to reverse, externally visible",
-		"preserve the user's work",
+		// The shared runtime owns these four; the fallback template must not restate them.
+		"preserve unrelated user changes",
+		"do not commit, create branches, publish, or deploy unless authorized",
+		"claim checks passed without observing their completion",
+		"avoid asking again about settled choices",
 		"available tool descriptions define supported names, parameters, and capabilities",
 		"run the narrowest relevant validation",
-		"never claim a check passed unless you ran it",
 		"authorization persists",
 		"`edits` array",
 		"`exec_session`",
@@ -610,5 +672,85 @@ func TestNewModelPromptsExcludeVendorHarnessInstructions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The shared runtime section owns these rules. Templates that also state them
+// drift apart from it; both the main agent and delegated agents must still
+// receive each rule exactly through that section.
+func TestTemplatesLeaveRuntimeRulesToSharedSection(t *testing.T) {
+	restated := []string{
+		"Preserve the user's work",
+		"Never claim a check passed",
+		"Do not create branches, commits",
+		"Do not repeatedly ask about settled choices",
+		"you preserve them, ignore unrelated edits",
+	}
+	for name, agent := range map[string]string{"fallback": VariantFor("").Agent, "gpt": VariantFor("gpt").Agent} {
+		for _, sentence := range restated {
+			if strings.Contains(agent, sentence) {
+				t.Errorf("%s template restates shared runtime rule %q", name, sentence)
+			}
+		}
+	}
+	if strings.Count(VariantFor("gpt").Agent, "repurpose `$HOME`") != 1 {
+		t.Error("generic GPT template should state the $HOME variable rule once")
+	}
+
+	data := SectionData{ToolNames: allPromptTools()}
+	for name, got := range map[string]string{
+		"fallback": BuildBaseInstructions(VariantFor("").Agent, data),
+		"gpt":      BuildBaseInstructions(VariantFor("gpt").Agent, data),
+		"plan":     BuildBaseInstructions(VariantFor("").Agent, SectionData{ToolNames: allPromptTools(), ModeInstructions: modePlan}),
+		"subagent": BuildAgentContext(data),
+	} {
+		for _, rule := range []string{
+			"Preserve unrelated user changes. Do not discard, revert, stash, or overwrite work outside the assigned scope.",
+			"Do not commit, create branches, publish, or deploy unless authorized.",
+			"Never invent tool results or claim checks passed without observing their completion.",
+			"avoid asking again about settled choices",
+			"Explicit Plan mode, unattended instructions, and the delegated role's access restrictions take precedence over implementation defaults.",
+		} {
+			if strings.Count(got, rule) != 1 {
+				t.Errorf("%s instructions should carry runtime rule %q exactly once", name, rule)
+			}
+		}
+	}
+}
+
+func TestSubagentContextExplainsRoleAndSharedWorkspace(t *testing.T) {
+	const shared = "The user and other agents may be changing this workspace"
+
+	working := BuildAgentContext(SectionData{ToolNames: allPromptTools()})
+	reading := BuildAgentContext(SectionData{ToolNames: []string{"read", "glob", "grep"}})
+	for name, got := range map[string]string{"working": working, "reading": reading} {
+		if !strings.HasPrefix(got, "# Working as a subagent\n") || !strings.Contains(got, "returned to the agent that launched you, not shown to the user") {
+			t.Errorf("%s child context does not open by saying who reads its result", name)
+		}
+	}
+	if !strings.Contains(working, shared) {
+		t.Error("child that can change the workspace is not told it is shared")
+	}
+	if strings.Contains(reading, shared) {
+		t.Error("child without edit or shell tools received shared-workspace editing guidance")
+	}
+
+	if main := BuildBaseInstructions(VariantFor("").Agent, SectionData{ToolNames: allPromptTools()}); strings.Contains(main, "Working as a subagent") || strings.Contains(main, shared) {
+		t.Error("main agent received child-only guidance")
+	}
+}
+
+func TestDelegationPolicyCoversBlockingWorkOwnershipAndReview(t *testing.T) {
+	got := renderBase(sectionDelegation, SectionData{ToolNames: allPromptTools()})
+	for _, want := range []string{
+		"Delegate bounded independent work",
+		"do not hand off urgent work that blocks your next step",
+		"ownership of specific files or one responsibility",
+		"review an agent's edits before building on them",
+		"check for yourself any finding your result depends on",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("delegation policy missing %q", want)
+		}
 	}
 }

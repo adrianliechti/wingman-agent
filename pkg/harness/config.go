@@ -120,6 +120,13 @@ type Config struct {
 
 	Hooks hook.Hooks
 
+	// ReviewExtraPolicy is the user's own policy text for ReviewAction. It is
+	// rendered in a delimited section that the built-in rules still bound: it
+	// can name trusted destinations and tighten rules, not unblock critical risk.
+	// Hosts must take it from user-level settings, never from a workspace, so
+	// a repository cannot loosen the review of its own actions.
+	ReviewExtraPolicy string
+
 	// MaxTurns caps successful model invocations in one Send run. Stream
 	// retries and tool calls do not consume turns. Zero uses the default;
 	// negative disables the safety bound.

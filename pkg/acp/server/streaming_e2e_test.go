@@ -42,9 +42,16 @@ func (c *streamingClient) receivedText() string {
 	return c.text.String()
 }
 
+func streamingE2EConnection(t *testing.T, respond func(http.ResponseWriter, *http.Request)) (*acpsdk.ClientSideConnection, acpsdk.SessionId, *streamingClient) {
+	t.Helper()
+	client := &streamingClient{}
+	_, conn, id := e2eConnection(t, client, respond)
+	return conn, id, client
+}
+
 // Crosses both ACP SDK connections, the real Wingman session/harness, and
 // Responses HTTP/SSE. Only the model service is replaced by a local server.
-func streamingE2EConnection(t *testing.T, respond func(http.ResponseWriter, *http.Request)) (*acpsdk.ClientSideConnection, acpsdk.SessionId, *streamingClient) {
+func e2eConnection(t *testing.T, client acpsdk.Client, respond func(http.ResponseWriter, *http.Request)) (*Server, *acpsdk.ClientSideConnection, acpsdk.SessionId) {
 	t.Helper()
 	testenv.UserHome(t)
 	testenv.WingmanHome(t)
@@ -77,7 +84,6 @@ func streamingE2EConnection(t *testing.T, respond func(http.ResponseWriter, *htt
 	serverIO, clientIO := net.Pipe()
 	t.Cleanup(func() { _ = serverIO.Close(); _ = clientIO.Close() })
 	s.SetAgentConnection(acpsdk.NewAgentSideConnection(s, serverIO, serverIO))
-	client := &streamingClient{}
 	conn := acpsdk.NewClientSideConnection(client, clientIO, clientIO)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -88,7 +94,7 @@ func streamingE2EConnection(t *testing.T, respond func(http.ResponseWriter, *htt
 	if err != nil {
 		t.Fatal(err)
 	}
-	return conn, session.SessionId, client
+	return s.Server, conn, session.SessionId
 }
 
 func streamingTextItem(parts ...string) map[string]any {

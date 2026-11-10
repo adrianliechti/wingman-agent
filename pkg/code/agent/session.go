@@ -132,6 +132,9 @@ func (s *sessionState) configureHarness() {
 	if sessionCfg.RequireFinish == nil {
 		sessionCfg.RequireFinish = requiresFinish
 	}
+	if policy := reviewExtraPolicy(); policy != "" {
+		sessionCfg.ReviewExtraPolicy = policy
+	}
 	sessionCfg.Model = func() string {
 		option, _ := a.roleModel(s, "")
 		return option.ID

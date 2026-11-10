@@ -130,7 +130,7 @@ func executeGrep(ctx context.Context, root *os.Root, cfg *grepArgs, allowedReadR
 		return nil
 	}
 	if info.IsDir() {
-		err = walkGrepFiles(ctx, fsys, target.SearchDirFS, func(path, relative string, d fs.DirEntry) error {
+		err = walkGrepFiles(ctx, fsys, target.SearchDirFS, target.hiddenCredentials("."), func(path, relative string, d fs.DirEntry) error {
 			err := visit(path, relative, d)
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil

@@ -13,6 +13,7 @@ import (
 	"go.yaml.in/yaml/v4"
 
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
+	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
 )
 
@@ -81,7 +82,9 @@ func (s *Skill) GetContent(workingDir string) (string, error) {
 	} else {
 		path = filepath.Join(workingDir, s.Location, "SKILL.md")
 	}
-	return readSkillContent(path)
+	// Checked on every read: the file or its directory may have become a link
+	// since the skill was discovered.
+	return readSkillContent(path, sandboxpolicy.NewCredentialGuard(workingDir))
 }
 
 // ApplySubstitutions renders Wingman's body-only skill extensions. The neutral
@@ -348,12 +351,16 @@ func projectDiscoveryRoots(root string) []string {
 // Symbolic links and Windows junctions are followed once, with their resolved
 // paths used to prevent cycles.
 func LoadDir(dir string) []Skill {
-	return loadDir(dir, true, "")
+	return loadDir(dir, true, "", "")
 }
 
-func loadDir(dir string, report bool, excludedRoot string) []Skill {
+// loadDir skips directories and SKILL.md files that resolve into a credential
+// store: a repository controls its skill links, and loaded text reaches the
+// prompt. workspace keeps a project located inside such a store usable.
+func loadDir(dir string, report bool, excludedRoot, workspace string) []Skill {
 	var skills []Skill
 	visited := make(map[string]bool)
+	credentials := sandboxpolicy.NewCredentialGuard(workspace)
 	var excludedInfo fs.FileInfo
 	if excludedRoot != "" {
 		excludedRoot = filepath.Clean(excludedRoot)
@@ -377,10 +384,16 @@ func loadDir(dir string, report bool, excludedRoot string) []Skill {
 			return
 		}
 		visited[resolved] = true
+		if err := credentials.Check(current); err != nil {
+			if report {
+				fmt.Fprintf(os.Stderr, "skill: skipped %s: %v\n", current, err)
+			}
+			return
+		}
 
 		skillFile := filepath.Join(current, "SKILL.md")
 		if info, err := os.Stat(skillFile); err == nil && info.Mode().IsRegular() {
-			sk, err := LoadFile(skillFile)
+			sk, err := loadFile(skillFile, credentials)
 			if err != nil {
 				if report {
 					fmt.Fprintf(os.Stderr, "skill: skipped %s: %v\n", skillFile, err)
@@ -415,7 +428,11 @@ func loadDir(dir string, report bool, excludedRoot string) []Skill {
 
 // LoadFile parses one SKILL.md and records its containing directory.
 func LoadFile(path string) (Skill, error) {
-	skill, err := parseSkillFile(path)
+	return loadFile(path, sandboxpolicy.NewCredentialGuard(""))
+}
+
+func loadFile(path string, credentials sandboxpolicy.CredentialGuard) (Skill, error) {
+	skill, err := parseSkillFile(path, credentials)
 	if err != nil {
 		return Skill{}, err
 	}
@@ -450,7 +467,7 @@ func discover(sources []string, relativeTo string, report bool, excludedRoot str
 	seen := make(map[string]string)
 
 	for _, source := range sources {
-		for _, sk := range loadDir(source, report, excludedRoot) {
+		for _, sk := range loadDir(source, report, excludedRoot, relativeTo) {
 			key := strings.ToLower(sk.Name)
 
 			if winner, ok := seen[key]; ok {
@@ -682,8 +699,16 @@ func displayLocation(loc string) string {
 	return filepath.ToSlash(loc)
 }
 
-func parseSkillFile(path string) (Skill, error) {
-	data, err := os.ReadFile(path)
+// readSkillFile reads a SKILL.md unless it resolves into a credential store.
+func readSkillFile(path string, credentials sandboxpolicy.CredentialGuard) ([]byte, error) {
+	if err := credentials.Check(path); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+}
+
+func parseSkillFile(path string, credentials sandboxpolicy.CredentialGuard) (Skill, error) {
+	data, err := readSkillFile(path, credentials)
 	if err != nil {
 		return Skill{}, err
 	}
@@ -898,8 +923,8 @@ func validateSkill(skill Skill, present map[string]any) error {
 	return nil
 }
 
-func readSkillContent(path string) (string, error) {
-	data, err := os.ReadFile(path)
+func readSkillContent(path string, credentials sandboxpolicy.CredentialGuard) (string, error) {
+	data, err := readSkillFile(path, credentials)
 	if err != nil {
 		return "", err
 	}

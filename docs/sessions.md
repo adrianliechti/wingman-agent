@@ -109,6 +109,24 @@ and scheduled pre-checks do not wait for you; their denials stand. After
 repeated denials in one turn, the turn stops. Unattended mode runs every action
 without review.
 
+The reviewer reads the whole action or none of it. An action too large for the
+utility model is not reviewed in part: during a turn Wingman asks you instead,
+and in background tasks it is denied. Your instructions stay available to the
+reviewer after the conversation is compacted.
+
+To add your own rules, such as repositories or services the agent may send
+data to, set `review.extraPolicy` in `~/.wingman/config.json`:
+
+```json
+{
+  "review.extraPolicy": "Pushing to github.com/acme/* is a trusted destination."
+}
+```
+
+It applies to sessions started after the change. Wingman reads it from your
+user settings only, never from a workspace, and it cannot allow critical-risk
+actions.
+
 Wingman also asks you when the reviewer fails, and for trust prompts such as
 running hooks from a cloned repository. Answer the prompt shown for the
 relevant session. In the browser, `Alt+A`

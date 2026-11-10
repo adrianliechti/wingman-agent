@@ -182,9 +182,11 @@ func TestContextModelDownshiftE2ECompactsBeforeSmallerModelRequest(t *testing.T)
 }
 
 func TestContextRecoveryE2ERejectedSignatureRetriesOnce(t *testing.T) {
-	for _, inBand := range []bool{false, true} {
+	// "nested" is the error event with an error object, which openai-go
+	// reports as a generic stream error instead of a typed event.
+	for _, transport := range []string{"http", "error", "nested"} {
 		for _, persist := range []bool{false, true} {
-			t.Run(fmt.Sprintf("sse=%t/persistent=%t", inBand, persist), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/persistent=%t", transport, persist), func(t *testing.T) {
 				var calls atomic.Int64
 				p := newContextProvider(t, func(w http.ResponseWriter, req contextRequest) {
 					if !req.Stream {
@@ -197,9 +199,12 @@ func TestContextRecoveryE2ERejectedSignatureRetriesOnce(t *testing.T) {
 						return
 					}
 					if n == 2 || persist {
-						if inBand {
+						switch transport {
+						case "error":
 							fmt.Fprint(w, "data: {\"type\":\"error\",\"code\":\"invalid_request_error\",\"message\":\"Invalid `signature` in `thinking` block\"}\n\n")
-						} else {
+						case "nested":
+							fmt.Fprint(w, "data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Invalid `signature` in `thinking` block\"}}\n\n")
+						default:
 							w.Header().Set("Content-Type", "application/json")
 							w.WriteHeader(http.StatusBadRequest)
 							fmt.Fprint(w, `{"error":{"code":"invalid_encrypted_content","message":"encrypted content could not be verified"}}`)
@@ -229,26 +234,53 @@ func TestContextRecoveryE2ERejectedSignatureRetriesOnce(t *testing.T) {
 }
 
 func TestContextRecoveryE2EInBandOverflow(t *testing.T) {
-	var requests, summaries atomic.Int64
-	p := newContextProvider(t, func(w http.ResponseWriter, req contextRequest) {
-		if isCheckpointRequest(req) {
-			summaries.Add(1)
-			fmt.Fprint(w, completedText("Earlier work preserved"))
-			return
-		}
-		if requests.Add(1) == 1 {
-			fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"prompt is too long\"}}}\n\n")
-			return
-		}
-		fmt.Fprint(w, completedText("continued"))
-	})
-	cfg := e2eConfig(t)
-	cfg.ContextWindow = -1
-	a := &harness.Agent{Config: cfg, Messages: []harness.Message{{Role: harness.RoleAssistant, Content: []harness.Content{{Text: strings.Repeat("observed progress ", 1000)}}}}}
-	if err := drain(t, a, "continue the task"); err != nil {
-		t.Fatal(err)
-	}
-	if requests.Load() != 2 || summaries.Load() != 1 || !bytes.Contains(p.snapshot()[2].Input, []byte("Earlier work preserved")) {
-		t.Fatal("in-band context overflow did not recover through compaction")
+	for _, tc := range []struct{ name, event string }{
+		{"response.failed", `{"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"prompt is too long"}}}`},
+		{"error event with code", `{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model.","headers":{"retry-after":"300"}}}`},
+		{"error event with provider wording", "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000, decrease input length or `max_tokens` and try again\"}}"},
+		{"error event with string", `{"error":"prompt is too long: 250000 tokens > 200000 maximum"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests, summaries atomic.Int64
+			p := newContextProvider(t, func(w http.ResponseWriter, req contextRequest) {
+				if isCheckpointRequest(req) {
+					summaries.Add(1)
+					fmt.Fprint(w, completedText("Earlier work preserved"))
+					return
+				}
+				if requests.Add(1) == 1 {
+					// A completion after the failure must not be consumed.
+					fmt.Fprintf(w, "data: %s\n\n%s", tc.event, completedText("ignored"))
+					return
+				}
+				fmt.Fprint(w, completedText("continued"))
+			})
+			cfg := e2eConfig(t)
+			cfg.ContextWindow = -1
+			a := &harness.Agent{Config: cfg, Messages: []harness.Message{{Role: harness.RoleAssistant, Content: []harness.Content{{Text: strings.Repeat("observed progress ", 1000)}}}}}
+			var retries []harness.RetryInfo
+			ctx := harness.WithStreamEventHandlers(t.Context(), harness.StreamEventHandlers{Retry: func(info harness.RetryInfo) {
+				retries = append(retries, info)
+			}})
+			stream, err := a.Send(ctx, []harness.Content{{Text: "continue the task"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, err := range stream {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if requests.Load() != 2 || summaries.Load() != 1 || !bytes.Contains(p.snapshot()[2].Input, []byte("Earlier work preserved")) {
+				t.Fatal("in-band context overflow did not recover through compaction")
+			}
+			// Compaction, not a backoff wait, is the recovery.
+			if len(retries) != 1 || retries[0].DelayMillis != 0 || !strings.Contains(retries[0].Reason, "Context window full") {
+				t.Fatalf("retries = %+v", retries)
+			}
+			if messages := a.MessagesSnapshot(); messages[len(messages)-1].Content[0].Text != "continued" {
+				t.Fatalf("turn did not continue after recovery: %+v", messages[len(messages)-1])
+			}
+		})
 	}
 }

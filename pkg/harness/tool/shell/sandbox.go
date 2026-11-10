@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
-	"github.com/adrianliechti/wingman-agent/pkg/layout"
 )
 
 const (
@@ -87,25 +86,10 @@ func CheckSandbox(workspace string) error {
 	return platformSandboxCheck(workspace, sandboxPolicy{WritableRoots: []string{workspace}, ProtectedRoot: workspace})
 }
 
-// credentialPaths returns the existing credential stores sandboxed commands must not read.
+// credentialPaths returns the existing credential stores sandboxed commands
+// must not read. File tools refuse the same list through sandboxpolicy.CheckRead.
 func credentialPaths() []string {
-	var candidates []string
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		for _, rel := range []string{".ssh", ".aws", ".gnupg", ".azure", ".kube", ".netrc", ".git-credentials", ".docker/config.json", ".config/gh", ".config/gcloud"} {
-			candidates = append(candidates, filepath.Join(home, rel))
-		}
-	}
-	if path, err := layout.WingmanPath("mcp-credentials.json"); err == nil {
-		candidates = append(candidates, path)
-	}
-	var paths []string
-	for _, path := range candidates {
-		path = canonicalPath(path)
-		if _, err := os.Lstat(path); err == nil && !slices.Contains(paths, path) {
-			paths = append(paths, path)
-		}
-	}
-	return paths
+	return sandboxpolicy.CredentialPaths()
 }
 
 // Normal mode uses an OS boundary. Disabling it is an explicit host setting.

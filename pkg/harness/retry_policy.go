@@ -50,7 +50,7 @@ func retryPolicy(err error, attempt int, now time.Time) (string, time.Duration) 
 		delay = max(delay, headerDelay)
 	}
 	code, message := providerErrorDetails(err)
-	if code == "rate_limit_exceeded" || code == "slow_down" {
+	if isRateLimitCode(code) {
 		reason = "Provider rate limit"
 		// Valid HTTP or streamed headers take precedence over message advice.
 		// Only throttling messages supply fallback hints; backoff stays a floor.

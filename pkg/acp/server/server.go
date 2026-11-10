@@ -97,6 +97,10 @@ type sessionEntry struct {
 	promptDone chan struct{}
 	closing    bool
 	lastTitle  string
+
+	// tasks delivers background results to the model for the lifetime of this
+	// entry. Whoever removes the entry stops it.
+	tasks *taskPump
 }
 
 type workspaceEntry struct {
@@ -582,7 +586,7 @@ func (s *Server) registerSession(id acpsdk.SessionId, w *workspaceEntry) error {
 	s.sessionDirs[id] = w.agent.SessionsDir()
 	_, exists := s.sessions[id]
 	if !exists {
-		s.sessions[id] = &sessionEntry{id: id, agent: w.agent, workspace: w}
+		s.sessions[id] = &sessionEntry{id: id, agent: w.agent, workspace: w, tasks: startTaskPump(w.agent, id)}
 	}
 	s.mu.Unlock()
 
@@ -607,10 +611,13 @@ func (s *Server) replaceLoadedSession(id acpsdk.SessionId, w *workspaceEntry) er
 		s.sessionDirs = map[acpsdk.SessionId]string{}
 	}
 	s.sessionDirs[id] = w.agent.SessionsDir()
-	s.sessions[id] = &sessionEntry{id: id, agent: w.agent, workspace: w}
+	sess := &sessionEntry{id: id, agent: w.agent, workspace: w, tasks: startTaskPump(w.agent, id)}
+	s.sessions[id] = sess
 	s.mu.Unlock()
 
 	if old != nil {
+		// Results the replaced entry was still holding move to its successor.
+		sess.tasks.restore(old.tasks.stop())
 		s.releaseWorkspace(old.workspace)
 	}
 	return nil
@@ -639,6 +646,7 @@ func (s *Server) CloseSession(_ context.Context, params acpsdk.CloseSessionReque
 	if cancel != nil {
 		cancel()
 	}
+	sess.tasks.close()
 	s.releaseWorkspace(sess.workspace)
 	return acpsdk.CloseSessionResponse{}, nil
 }
@@ -673,6 +681,8 @@ func (s *Server) UnstableDeleteSession(ctx context.Context, params acpsdk.Unstab
 		cancel()
 	}
 	if removeWorkspaceRef {
+		// The session is gone; so is anything it had not delivered.
+		sess.tasks.stop()
 		s.releaseWorkspace(sess.workspace)
 	}
 	if err != nil && !os.IsNotExist(err) {
@@ -843,10 +853,20 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (respo
 	if params.MessageId != nil {
 		ctx = harness.WithInputID(ctx, *params.MessageId)
 	}
-	stream, err := sess.agent.Send(ctx, string(sess.id), acp.ContentFromBlocks(params.Prompt))
+	input := acp.ContentFromBlocks(params.Prompt)
+	// Background results that arrived while no turn was running could not
+	// start one. They reach the model with this prompt instead.
+	held := sess.tasks.take()
+	if len(input) > 0 && len(held) > 0 {
+		input = append(input, taskContent(held))
+	}
+	stream, err := sess.agent.Send(ctx, string(sess.id), input)
 	if err != nil {
+		sess.tasks.restore(held)
 		return acpsdk.PromptResponse{}, err
 	}
+	// The turn accepts steering from here on; pick up what arrived meanwhile.
+	sess.tasks.flush()
 	acp.PromptAccepted(ctx, "")
 	for msg, err := range stream {
 		if notifyErr != nil {
@@ -1044,6 +1064,10 @@ func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messa
 			continue
 		}
 		for _, c := range m.Content {
+			// Injected context sent along with a prompt is not user input.
+			if c.Hidden {
+				continue
+			}
 			notifyContent(notify, m.Role, c)
 			if notifyErr != nil {
 				return notifyErr

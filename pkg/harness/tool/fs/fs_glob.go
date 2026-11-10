@@ -106,7 +106,7 @@ func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 				return tool.Result{}, fmt.Errorf("open search directory: %w", err)
 			}
 			defer searchRoot.Close()
-			fsys := globSearchFS{root: searchRoot, ctx: ctx}
+			fsys := globSearchFS{root: searchRoot, ctx: ctx, hidden: target.hiddenCredentials(target.SearchDirFS)}
 			results := make(globResults, 0, DefaultGlobLimit)
 			totalMatches := 0
 
@@ -224,7 +224,13 @@ func (r *globResults) Pop() any {
 type globSearchFS struct {
 	root *os.Root
 	ctx  context.Context
+	// hidden reports credential stores inside the searched directory.
+	hidden credentialFilter
 }
+
+// errCredentialStore answers a pattern that names a credential store. A
+// recursive walk never reaches it: ReadDir omits such entries.
+var errCredentialStore = errors.New("protected credential location; file tools do not access credential stores")
 
 func (f globSearchFS) Stat(name string) (fs.FileInfo, error) {
 	if !fs.ValidPath(name) {
@@ -236,6 +242,7 @@ func (f globSearchFS) Stat(name string) (fs.FileInfo, error) {
 		if err := f.ctx.Err(); err != nil {
 			return nil, err
 		}
+		parent := prefix
 		prefix = path.Join(prefix, component)
 		var err error
 		info, err = f.root.Lstat(prefix)
@@ -244,6 +251,9 @@ func (f globSearchFS) Stat(name string) (fs.FileInfo, error) {
 		}
 		if info.Mode()&fs.ModeSymlink != 0 || (info.IsDir() && vcsDirs[component]) {
 			return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
+		}
+		if f.hidden != nil && f.hidden(parent, component, func() (os.FileInfo, error) { return info, nil }) {
+			return nil, &fs.PathError{Op: "stat", Path: prefix, Err: errCredentialStore}
 		}
 	}
 	return info, nil
@@ -270,6 +280,9 @@ func (f globSearchFS) ReadDir(name string) ([]fs.DirEntry, error) {
 			return nil, err
 		}
 		if e.Type()&fs.ModeSymlink != 0 || (e.IsDir() && vcsDirs[e.Name()]) {
+			continue
+		}
+		if f.hidden != nil && f.hidden(name, e.Name(), e.Info) {
 			continue
 		}
 		filtered = append(filtered, e)

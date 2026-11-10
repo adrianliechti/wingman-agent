@@ -27,8 +27,10 @@ func sandboxGuideLine(opts *Options) string {
 	if opts != nil && opts.Network {
 		network = "IP network access is enabled by host configuration"
 	}
-	protection := "Editor settings and agent configuration in project roots are read-only inside the sandbox. Private temp permits configuration fixtures."
-	if runtime.GOOS != "darwin" {
+	protection := "Read-only in project roots: " + protectedPathsText() + ". Private temp permits configuration fixtures."
+	if runtime.GOOS == "darwin" {
+		protection += " A directory that contains one cannot be renamed or removed."
+	} else {
 		protection += " OS enforcement covers only existing protected paths at project roots; do not bypass this restriction with newly created or nested paths."
 	}
 	cacheExample := `npm ci --cache "$TMPDIR/npm-cache"`
@@ -36,7 +38,7 @@ func sandboxGuideLine(opts *Options) string {
 		cacheExample = `npm ci --cache "$env:TEMP\npm-cache"`
 	}
 	return strings.Join([]string{
-		"- Commands run in an OS sandbox. Use the Shell writable roots in Environment context to choose output paths and workdir. Known credential stores are hidden. " + protection,
+		"- Commands run in an OS sandbox. Use the Shell writable roots in Environment context to choose output paths and workdir. Commands cannot read the credential stores " + hiddenCredentialsText() + ". " + protection,
 		"- Use private TMPDIR/TEMP/TMP for temporary files; do not assume /tmp is writable. Expand environment variables inside command using the host shell's syntax. In workdir and writable_roots, supply literal paths, not environment-variable references.",
 		"- Preserve inherited tool/cache configuration; many tools still read a cache they cannot write. Set GODEBUG=goindex=0 for Go commands so they read the host build cache without writing its package index. Only if a command still fails writing a disposable cache, redirect that cache to private temp for the command, e.g. " + cacheExample + "; likewise PIP_CACHE_DIR, UV_CACHE_DIR or GOCACHE/GOTMPDIR. Do not reset HOME, GOPATH, GOMODCACHE, CARGO_HOME or XDG_CACHE_HOME to repair one cache error.",
 		"- " + network + ". Use default permissions when configured access suffices. For required network access or writes outside listed roots, request require_permissions with the needed network/writable_roots and justification. Grants retain the sandbox and apply to the launched command, not later exec calls.",

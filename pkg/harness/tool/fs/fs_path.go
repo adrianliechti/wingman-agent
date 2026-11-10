@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	pathpkg "path"
@@ -12,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
+	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
 )
 
 func expandHome(path string) string {
@@ -291,10 +293,31 @@ func matchFileTarget(pathArg, workingDir string, allowedRoots []string, action s
 	return fileTarget{RootPath: rootClean, RelPath: sub, AbsPath: filepath.Join(rootClean, sub)}, nil
 }
 
+// checkCredentialTarget refuses a target that resolves into a credential store,
+// whichever root admitted it. The check runs per call: a link can be created or
+// retargeted long after the roots were granted.
+func checkCredentialTarget(guard sandboxpolicy.CredentialGuard, target fileTarget, pathArg, action string) error {
+	err := guard.Check(target.AbsPath)
+	if denied, ok := errors.AsType[*sandboxpolicy.CredentialError](err); ok {
+		denied.Path = pathArg
+	}
+	if err != nil {
+		return fmt.Errorf("cannot %s: %w; file tools do not access credential stores", action, err)
+	}
+	return nil
+}
+
 func resolveFileTarget(pathArg, workingDir string, allowedRoots []string, action string) (fileTarget, error) {
 	target, err := matchFileTarget(pathArg, workingDir, allowedRoots, action)
-	if err != nil || target.RootPath == "" {
+	if err != nil {
 		return target, err
+	}
+	guard := sandboxpolicy.NewCredentialGuard(workingDir)
+	if target.RootPath == "" {
+		if err := checkCredentialTarget(guard, target, pathArg, action); err != nil {
+			return fileTarget{}, err
+		}
+		return target, nil
 	}
 	target.RootPath = resolveForCompare(target.RootPath)
 	target.AbsPath = filepath.Join(target.RootPath, target.RelPath)
@@ -309,6 +332,10 @@ func resolveFileTarget(pathArg, workingDir string, allowedRoots []string, action
 	if err != nil {
 		return fileTarget{}, fmt.Errorf("cannot %s: stat allowed root %q: %w", action, target.RootPath, err)
 	}
+	// Checked after binding, so the vetted directory is the one later opened.
+	if err := checkCredentialTarget(guard, target, pathArg, action); err != nil {
+		return fileTarget{}, err
+	}
 	return target, nil
 }
 
@@ -318,6 +345,21 @@ type searchTarget struct {
 	close       func()
 
 	reportPrefix string
+
+	// credentials prunes stores that lie inside the searched directory.
+	credentials sandboxpolicy.CredentialGuard
+}
+
+// credentialFilter is the per-entry test for a walk beneath base, a
+// slash-separated directory relative to Root. It reports whether the entry
+// name in the directory dir (relative to base) is a credential store.
+type credentialFilter func(dir, name string, info func() (os.FileInfo, error)) bool
+
+func (st *searchTarget) hiddenCredentials(base string) credentialFilter {
+	resolved := sandboxpolicy.Canonical(filepath.Join(st.Root.Name(), filepath.FromSlash(base)))
+	return func(dir, name string, info func() (os.FileInfo, error)) bool {
+		return st.credentials.Named(name) && st.credentials.Hides(filepath.Join(resolved, filepath.FromSlash(dir), name), info)
+	}
 }
 
 func (st *searchTarget) Close() {
@@ -338,9 +380,13 @@ func resolveSearchTarget(pathArg, workingDir string, workspaceRoot *os.Root, all
 	if err != nil {
 		return nil, err
 	}
+	credentials := sandboxpolicy.NewCredentialGuard(workingDir)
+	if err := checkCredentialTarget(credentials, target, pathArg, action); err != nil {
+		return nil, err
+	}
 	if target.InWorkspace {
 		searchDirFS := pathpkg.Clean(filepath.ToSlash(target.RelPath))
-		return (&searchTarget{Root: workspaceRoot, SearchDirFS: searchDirFS}).resolveLinks(), nil
+		return (&searchTarget{Root: workspaceRoot, SearchDirFS: searchDirFS, credentials: credentials}).resolveLinks(), nil
 	}
 
 	rootClean, sub := target.RootPath, target.RelPath
@@ -374,6 +420,7 @@ func resolveSearchTarget(pathArg, workingDir string, workspaceRoot *os.Root, all
 		SearchDirFS:  filepath.ToSlash(sub),
 		reportPrefix: reportPrefix,
 		close:        func() { r.Close() },
+		credentials:  credentials,
 	}).resolveLinks(), nil
 }
 
@@ -415,6 +462,7 @@ func (st *searchTarget) resolveLinks() *searchTarget {
 		SearchDirFS:  filepath.ToSlash(sub),
 		reportPrefix: prefix,
 		close:        func() { r.Close() },
+		credentials:  st.credentials,
 	}
 }
 

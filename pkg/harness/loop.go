@@ -98,17 +98,14 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 		if ctx.Err() != nil {
 			return resp, ctx.Err()
 		}
-		if attempt >= maxStreamRetries || !isRecoverableError(err) {
+		if !retryAllowed(err, attempt) {
 			return resp, err
 		}
 		if streamOutputStarted(err) && !EmitStreamEvent(ctx, StreamEventReset) {
 			// Retry only when the consumer can retract the failed attempt.
 			return resp, err
 		}
-		reason, delay := retryPolicy(err, attempt, time.Now())
-		if handlers, ok := ctx.Value(streamEventHandlersKey{}).(StreamEventHandlers); ok && handlers.Retry != nil {
-			handlers.Retry(RetryInfo{Attempt: attempt + 1, Reason: reason, DelayMillis: delay.Milliseconds()})
-		}
+		delay := announceRetry(ctx, err, attempt)
 
 		if isContextOverflowError(err) {
 			if err := a.compactWithHooks(ctx, req, "auto", ""); err != nil {
@@ -138,6 +135,22 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 			return resp, ctx.Err()
 		}
 	}
+}
+
+// retryAllowed and announceRetry are the one retry policy for provider
+// requests: turn requests and compaction's summary request both use them.
+func retryAllowed(err error, attempt int) bool {
+	return attempt < maxStreamRetries && isRecoverableError(err)
+}
+
+// announceRetry tells the consumer why the request is retried and returns how
+// long to wait first.
+func announceRetry(ctx context.Context, err error, attempt int) time.Duration {
+	reason, delay := retryPolicy(err, attempt, time.Now())
+	if handlers, ok := ctx.Value(streamEventHandlersKey{}).(StreamEventHandlers); ok && handlers.Retry != nil {
+		handlers.Retry(RetryInfo{Attempt: attempt + 1, Reason: reason, DelayMillis: delay.Milliseconds()})
+	}
+	return delay
 }
 
 // Manual, proactive and overflow compaction run the same hook lifecycle.

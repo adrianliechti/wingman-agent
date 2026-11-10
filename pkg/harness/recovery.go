@@ -2,7 +2,9 @@ package harness
 
 import (
 	"errors"
+	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
@@ -24,8 +26,7 @@ func isRecoverableError(err error) bool {
 		return true
 	}
 	code, _ := providerErrorDetails(err)
-	switch code {
-	case "insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded":
+	if isQuotaCode(code) {
 		return false
 	}
 
@@ -37,29 +38,91 @@ func isRecoverableError(err error) bool {
 	errors.As(err, &streamErr)
 
 	if responseErr, ok := errors.AsType[*responseFailure](err); ok {
-		switch responseErr.code {
-		case string(responses.ResponseErrorCodeServerError),
-			string(responses.ResponseErrorCodeRateLimitExceeded),
-			string(responses.ResponseErrorCodeVectorStoreTimeout), "slow_down", "server_is_overloaded":
-			return true
-		default:
-			return false
-		}
+		return isTransientProviderCode(responseErr.code)
 	}
 
 	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
-		switch apiErr.StatusCode {
-		case 408, 409, 429:
-			return true
-		default:
-			return apiErr.StatusCode >= 500
-		}
+		return isRetryableStatus(apiErr.StatusCode)
 	}
 
 	// Other non-API failures are retryable only when complete marked them as a
 	// stream transport failure. Retries include completed items and their
 	// tool results; incomplete items are discarded.
 	return streamErr != nil
+}
+
+// Spend and usage limits do not clear by waiting.
+func isQuotaCode(code string) bool {
+	switch code {
+	case "insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded",
+		"project_spend_limit_exceeded", "organization_usage_limit_exceeded":
+		return true
+	}
+	return false
+}
+
+func isRetryableStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests:
+		return true
+	}
+	return status >= 500
+}
+
+// In-band failures retry only for codes known to be transient; an unknown
+// code fails the turn. Gateways forward the upstream provider's vocabulary,
+// so this covers more than the Responses API's own closed set.
+func isTransientProviderCode(code string) bool {
+	switch strings.ToLower(code) {
+	case string(responses.ResponseErrorCodeServerError),
+		string(responses.ResponseErrorCodeRateLimitExceeded),
+		string(responses.ResponseErrorCodeVectorStoreTimeout),
+		"slow_down", "server_is_overloaded", "service_unavailable_error":
+		return true
+	// Anthropic error types, and the exception names of its Bedrock transport.
+	case "overloaded_error", "api_error", "rate_limit_error", "timeout_error",
+		"throttlingexception", "serviceunavailableexception", "modeltimeoutexception", "internalserverexception":
+		return true
+	// google.rpc status names.
+	case "resource_exhausted", "unavailable", "deadline_exceeded", "internal":
+		return true
+	}
+	// Some providers report the HTTP status as the code.
+	if status, err := strconv.Atoi(code); err == nil && status < 600 {
+		return isRetryableStatus(status)
+	}
+	return false
+}
+
+// isRateLimitCode reports in-band codes that mean the provider is throttling
+// the account, as opposed to failing or being overloaded.
+func isRateLimitCode(code string) bool {
+	switch strings.ToLower(code) {
+	case string(responses.ResponseErrorCodeRateLimitExceeded), "slow_down",
+		"rate_limit_error", "throttlingexception", "resource_exhausted", "429":
+		return true
+	}
+	return false
+}
+
+// isTerminalProviderError reports rejections that neither a smaller input nor
+// another model can fix: the account is out of quota or unauthorized, or the
+// provider refused the content.
+func isTerminalProviderError(err error) bool {
+	code, _ := providerErrorDetails(err)
+	if isQuotaCode(code) {
+		return true
+	}
+	switch strings.ToLower(code) {
+	case "authentication_error", "permission_error",
+		"content_policy_violation", "content_filter", "invalid_prompt",
+		"cyber_policy", "bio_policy", "misalignment_policy_violation":
+		return true
+	}
+	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
+		return apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden
+	}
+	return false
 }
 
 func providerErrorDetails(err error) (code, message string) {
@@ -82,15 +145,28 @@ func streamOutputStarted(err error) bool {
 	return false
 }
 
-var contextOverflowMarkers = []string{
-	"context length",
-	"context_length",
-	"context window",
-	"context_window",
-	"maximum context",
-	"too many tokens",
-	"prompt is too long",
-	"input is too long",
+// Each marker lists fragments that must appear in order; providers put the
+// measured token counts between them. Keep them specific to input size: an
+// output-limit rejection must not trigger compaction.
+var contextOverflowMarkers = [][]string{
+	{"context length"},
+	{"context_length"},
+	{"context window"},
+	{"context_window"},
+	{"maximum context"},
+	{"too many tokens"},
+	{"prompt is too long"},
+	{"input is too long"},
+	// Anthropic: input length and `max_tokens` exceed context limit: N + M > W
+	{"exceed", "context limit"},
+	// Gemini: The input token count (N) exceeds the maximum number of tokens allowed (W)
+	{"input token count", "exceeds the maximum"},
+	// xAI: This model's maximum prompt length is W but the request contains N tokens
+	{"maximum prompt length"},
+	// llama.cpp: the request exceeds the available context size
+	{"exceeds the available context size"},
+	// Bedrock: Too many input tokens
+	{"too many input tokens"},
 }
 
 // Providers can reject input either as HTTP errors or terminal SSE events.
@@ -110,14 +186,36 @@ func providerInputError(err error) string {
 }
 
 func isContextOverflowError(err error) bool {
+	// 413 names the failure by status: the request is too large. Proxies and
+	// some providers send it without a body to match, and sending less is the
+	// only remedy either way.
+	if apiErr, ok := errors.AsType[*openai.Error](err); ok && apiErr.StatusCode == http.StatusRequestEntityTooLarge {
+		return true
+	}
+	// Throttling messages count tokens too (Bedrock: "Too many tokens, please
+	// wait before trying again"). Waiting is the remedy, not a smaller context.
+	if responseErr, ok := errors.AsType[*responseFailure](err); ok && isRateLimitCode(responseErr.code) {
+		return false
+	}
 	msg := providerInputError(err)
 	for _, marker := range contextOverflowMarkers {
-		if strings.Contains(msg, marker) {
+		if containsInOrder(msg, marker) {
 			return true
 		}
 	}
 
 	return false
+}
+
+func containsInOrder(s string, fragments []string) bool {
+	for _, fragment := range fragments {
+		_, after, found := strings.Cut(s, fragment)
+		if !found {
+			return false
+		}
+		s = after
+	}
+	return true
 }
 
 func isReasoningReplayError(err error) bool {

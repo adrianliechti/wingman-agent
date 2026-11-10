@@ -3,25 +3,30 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
 	"sync"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/settings"
 )
 
 const (
 	reviewConsecutiveDenials = 3
 	reviewRecentDenials      = 10
 	reviewRecentWindow       = 50
-	reviewArgumentBytes      = 8 * 1024
 )
 
+const reviewTooLarge = "This action is too large for automatic review"
+
 // review decides approvals: permission hooks, then the reviewer; the user when
-// review fails, or declines in a foreground turn.
+// review fails, or in a foreground turn when it declines or cannot read the
+// whole action.
 func (a *Agent) review(ctx context.Context, req tool.Approval) (tool.Verdict, error) {
 	ctx = a.promptContext(ctx)
 	s := a.session(code.SessionIDFromContext(ctx))
@@ -36,6 +41,7 @@ func (a *Agent) review(ctx context.Context, req tool.Approval) (tool.Verdict, er
 		return tool.Verdict{Allowed: true}, nil
 	}
 
+	// The reviewer reads the exact action or nothing; arguments are never shortened.
 	action := maps.Clone(req.Action)
 	if action == nil {
 		action = map[string]any{}
@@ -44,8 +50,6 @@ func (a *Agent) review(ctx context.Context, req tool.Approval) (tool.Verdict, er
 	if call, ok := hook.ToolCallFromContext(ctx); ok {
 		action["tool"] = call.Name
 		switch {
-		case len(call.Args) > reviewArgumentBytes:
-			action["arguments"] = call.Args[:reviewArgumentBytes] + "\n[... arguments truncated ...]"
 		case json.Valid([]byte(call.Args)):
 			action["arguments"] = json.RawMessage(call.Args)
 		case call.Args != "":
@@ -54,24 +58,30 @@ func (a *Agent) review(ctx context.Context, req tool.Approval) (tool.Verdict, er
 	}
 
 	review, err := s.harness.ReviewAction(ctx, action)
-	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return tool.Verdict{}, ctxErr
-		}
+	turn := s.reviewTurn(ctx)
+	var notice, reason string
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return tool.Verdict{}, ctx.Err()
+	case errors.Is(err, harness.ErrReviewActionTooLarge):
+		notice = reviewTooLarge + "."
+		reason = reviewTooLarge + " and was not run. Use smaller actions that can each be reviewed in full."
+	case err != nil:
 		ok, err := a.confirm(ctx, fmt.Sprintf("%s\n\nAutomatic review failed: %v", req.Message, err))
 		return tool.Verdict{Allowed: ok}, err
-	}
-	turn := s.reviewTurn(ctx)
-	if review.Allowed() {
+	case review.Allowed():
 		s.reviews.record(turn, false)
 		return tool.Verdict{Allowed: true}, nil
+	default:
+		notice = fmt.Sprintf("Automatic review declined (risk: %s): %s", review.RiskLevel, strings.TrimSpace(review.Rationale))
+		reason = review.Rejection()
 	}
 	// The reviewer only approves on the user's behalf; in a foreground turn, what
-	// it declines is the user's call. Background work and schedule gates would wait
-	// for an answer nobody is there to give.
+	// it declines or cannot read is the user's call. Background work and schedule
+	// gates would wait for an answer nobody is there to give.
 	ask := turn != "" && tool.BackgroundOrigin(ctx) == "" && a.currentUI() != nil
 	if ask {
-		ok, err := a.confirm(ctx, fmt.Sprintf("%s\n\nAutomatic review declined (risk: %s): %s", req.Message, review.RiskLevel, strings.TrimSpace(review.Rationale)))
+		ok, err := a.confirm(ctx, req.Message+"\n\n"+notice)
 		if err != nil {
 			return tool.Verdict{}, err
 		}
@@ -79,9 +89,6 @@ func (a *Agent) review(ctx context.Context, req tool.Approval) (tool.Verdict, er
 			s.reviews.record(turn, false)
 			return tool.Verdict{Allowed: true}, nil
 		}
-	}
-	reason := review.Rejection()
-	if ask {
 		reason += "\nThe user also declined it when asked."
 	}
 	if consecutive, recent, tripped := s.reviews.record(turn, true); tripped {
@@ -93,6 +100,17 @@ func (a *Agent) review(ctx context.Context, req tool.Approval) (tool.Verdict, er
 		}
 	}
 	return tool.Verdict{Reason: reason}, nil
+}
+
+// reviewExtraPolicy reads the user's own review policy. It comes from user-level
+// settings alone and is never layered with workspace files: a repository must
+// not be able to loosen the review of its own actions.
+func reviewExtraPolicy() string {
+	user, err := settings.Load()
+	if err != nil {
+		return ""
+	}
+	return user.ReviewExtraPolicy
 }
 
 func (s *sessionState) reviewTurn(ctx context.Context) string {

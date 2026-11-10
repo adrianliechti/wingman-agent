@@ -76,7 +76,7 @@ func TestRetryPolicyStreamDelayHints(t *testing.T) {
 		{"Try again in 9m.", 0},
 		{"Try again in 999999999999999999s.", 0},
 	} {
-		for _, code := range []string{"rate_limit_exceeded", "slow_down"} {
+		for _, code := range []string{"rate_limit_exceeded", "slow_down", "rate_limit_error", "ThrottlingException", "RESOURCE_EXHAUSTED", "429"} {
 			err := fmt.Errorf("wrapped: %w", &responseFailure{code: code, message: tc.message})
 			reason, delay := retryPolicy(err, 0, time.Now())
 			if reason != "Provider rate limit" || (tc.want > 0 && delay != tc.want) || (tc.want == 0 && (delay < time.Second || delay > 2*time.Second)) {

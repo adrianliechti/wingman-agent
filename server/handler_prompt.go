@@ -35,6 +35,20 @@ func (b *backendRuntime) Confirm(ctx context.Context, message string) (bool, err
 	return reply.Action == string(tool.ElicitAccept), nil
 }
 
+// Warn shows a non-fatal agent warning, such as truncated project
+// instructions, as a notice in the session's transcript.
+func (b *backendRuntime) Warn(sessionID, message string) {
+	if sessionID == "" {
+		return
+	}
+	c := b.session(sessionID)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state.Status != "deleted" {
+		c.warnLocked(message)
+	}
+}
+
 func (b *backendRuntime) prompt(ctx context.Context, kind, message string, fields []tool.ElicitField) (Command, error) {
 	sid := code.SessionIDFromContext(ctx)
 	if sid == "" {

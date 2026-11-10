@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 
@@ -83,9 +85,10 @@ func (c *Config) Generate(ctx context.Context, opts GenerateOptions) (GenerateRe
 		params.Reasoning.Effort = shared.ReasoningEffort(effort)
 	}
 
-	resp, err := c.client.Responses.New(ctx, params)
+	var httpResponse *http.Response
+	resp, err := c.client.Responses.New(ctx, params, option.WithResponseInto(&httpResponse))
 	if err != nil {
-		err = withProviderDetails(err)
+		err = withProviderDetails(httpStatusError(err, httpResponse))
 		operation.End(telemetry.InferenceResult{Outcome: telemetryOutcome(err)})
 		return GenerateResult{}, err
 	}
