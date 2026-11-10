@@ -43,6 +43,9 @@ archives:
 checksum:
   name_template: "{{ .ProjectName }}_checksums.txt"
 
+changelog:
+  disable: true
+
 # The cask is rendered + pushed to the tap by the script: GoReleaser's OSS cask
 # pipe only emits CLI `binary` stanzas (the `app "X.app"` stanza is Pro-only).
 publishers:

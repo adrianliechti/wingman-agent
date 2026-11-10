@@ -7,13 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 )
 
 func platformSandboxCommand(shell, command, workingDir string, policy sandboxPolicy) (string, []string, error) {
-	if _, err := sandboxSeccompFilter(policy.Network); err != nil {
+	if _, err := sandboxSeccompFilter(); err != nil {
 		return "", nil, err
 	}
-	bwrap, err := findBubblewrap(policy.WritableRoots)
+	bwrap, err := findBubblewrap(slices.Concat(policy.WritableRoots, policy.SharedTemp))
 	if err != nil {
 		return "", nil, err
 	}
@@ -49,6 +50,10 @@ func bubblewrapArgs(shell, command, workingDir string, policy sandboxPolicy) []s
 		"--dev", "/dev",
 		"--proc", "/proc",
 	)
+	// Shared temp goes first so the binds below stay on top of it.
+	for _, dir := range policy.SharedTemp {
+		args = append(args, "--bind", dir, dir)
+	}
 	for _, root := range policy.WritableRoots {
 		args = append(args, "--bind", root, root)
 	}

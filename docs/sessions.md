@@ -100,7 +100,8 @@ restarts, preserve unsent drafts and editor buffers before reloading.
 ## Approvals and questions
 
 In Agent mode, a reviewer model checks risky actions, such as destructive
-shell commands, fetches from new sites, and scheduled scripts, before they run.
+shell commands and scheduled scripts, requests for more sandbox access, and
+fetches from new sites, before they run.
 It uses the utility model and the conversation to judge whether you asked for
 the action. What it approves runs. What it declines during a turn, including
 destructive and critical-risk actions, is shown to you with its risk and
@@ -146,46 +147,74 @@ Set `WINGMAN_SANDBOX=off` to explicitly disable shell OS isolation; file and
 search tools (`read`, `edit`, `glob`, `grep`) keep their workspace roots and
 protected-configuration checks regardless.
 
-- Commands can read most files, but not credentials such as `~/.ssh`,
-  `~/.aws`, `~/.gnupg`, `~/.kube`, or Wingman's MCP tokens. Common authentication
-  environment variables, including GitHub and cloud tokens and the SSH agent,
-  are removed; commands approved to run outside the sandbox keep them.
-- They write only to the workspace, project memory, and private temporary
-  storage (`$TMPDIR`/`$TEMP`). The shared host temporary directory is read-only.
+- Commands can read your files, including credentials such as `~/.ssh` and
+  `~/.aws`, and keep authentication environment variables such as GitHub and
+  cloud tokens. They cannot change those files. `WINGMAN_SANDBOX_CREDENTIALS=off`
+  hides the credential stores and removes the variables; commands approved to
+  run outside the sandbox always have both.
+- They write only to the workspace, project memory, and temporary storage:
+  a private directory (`$TMPDIR`/`$TEMP`) and, on macOS and Linux, `/tmp` and
+  your per-user temporary directory, which tools such as `mktemp` on macOS use
+  whatever `$TMPDIR` says. `WINGMAN_SANDBOX_TEMP=off` limits commands to the
+  private directory.
 - Editor settings, `.envrc`, and agent configuration are protected. The edit
   tool checks the same protected names, including files that do not exist yet.
 - Git metadata is writable, so commands can stage, commit and switch branches.
   The sandbox guards against mistakes, not a hostile command: a hook written
   into `.git` runs unsandboxed whenever Git runs outside the sandbox, such as
   your own commands or an approved escalation.
-- IP network access is off. A command can request `sandbox_permissions:
-  "require_permissions"` with `network: true` and/or `writable_roots`, plus a
-  justification. Reviewed grants apply to one execution and keep the sandbox.
-  `WINGMAN_SANDBOX_NETWORK=on` enables IP networking globally instead.
+- Network access to other hosts is off. A command can request
+  `sandbox_permissions: "require_permissions"` with `network: true` and/or
+  `writable_roots`, plus a justification. Reviewed grants apply to one execution
+  and keep the sandbox. `WINGMAN_SANDBOX_NETWORK=on` enables IP networking
+  globally instead. Without network access npm, pip, and Cargo are told not to
+  retry, so a missing network shows within seconds.
+- Loopback stays available, so commands can run local servers and tests. On
+  Linux each command has a private loopback. On macOS it is the host's, so
+  commands also reach other services listening on your machine, including
+  Wingman's own web UI, which trusts local clients. `WINGMAN_SANDBOX_LOOPBACK=off`
+  blocks loopback on macOS.
 - Host Unix sockets, including Docker and SSH agents, stay blocked on macOS
   and Linux, even with IP networking enabled. macOS allows its DNS service.
 - When a command that finishes within its wait fails with a likely sandbox
-  denial, such as `git push` resolving its remote or reading `~/.ssh`, Wingman
-  asks to re-run the whole command once outside the sandbox. Validation runs
-  such as tests are not re-run, since their output often quotes such errors.
+  denial, Wingman asks to re-run the whole command. A command that only lacked
+  the network runs again inside the sandbox with network access. One that needs
+  your credentials, such as `git push`, or was blocked for another reason runs
+  outside the sandbox. Validation runs such as tests are not re-run, since
+  their output often quotes such errors.
   The model can also request `sandbox_permissions: "require_escalated"` up front.
 
-Routine commands run without review. The shell classifier still identifies
-destructive intent and supplies Plan mode, read-only subagent, and parallel
-execution decisions. The sandbox limits capabilities; it does not prevent all
-data loss inside writable directories or make every network transfer safe.
+Inside the sandbox, routine commands run without review, as do scheduled
+scripts and input sent to a running command. Only clearly destructive ones are
+reviewed first:
 
-Read-only classification is conservative: output-file operands, dynamically
+- Git commands that discard work across the repository: `git reset --hard`,
+  `git clean -f`, whole-tree restores such as `git restore .` or
+  `git checkout -f`, and forced pushes.
+- Privilege elevation with `sudo`, `doas`, or `su`.
+- A download run by a shell, such as `curl ... | sh`.
+- Recursive deletion of the workspace, a wider directory such as your home, or
+  `.git`: `rm -rf .`, `rm -rf ~`, `find . -delete`.
+
+Deleting a named directory such as `node_modules`, restoring a named file, or
+deleting a branch is not reviewed. The sandbox limits capabilities; it does not
+prevent all data loss inside writable directories or make every network
+transfer safe. With `WINGMAN_SANDBOX=off`, and for input to a command running
+outside the sandbox, a stricter classifier applies: it also reviews any
+recursive deletion, writes to protected configuration, and commands it cannot
+fully read.
+
+Plan mode, read-only subagents, and parallel execution rely on a separate
+read-only classification. It is conservative: output-file operands, dynamically
 supplied options, and build tools that execute project code do not qualify as
-inspection commands. They remain available in normal Agent mode. Losing the
-read-only classification alone does not trigger approval; destructive actions
-such as recursive `find -delete`, forced Git updates, and protected configuration
-writes receive automatic review.
+inspection commands. They remain available in normal Agent mode; losing the
+read-only classification alone does not trigger review.
 
 Your own `!` commands and hooks run unsandboxed. On Linux and Windows, native
 protected-path rules cover existing paths at each writable root; paths that
-do not exist yet, or sit below those roots, are not covered. The classifier
-remains a supplementary check, not a complete security boundary for those gaps.
+do not exist yet, or sit below those roots, are not covered. There, commands
+that name protected configuration are still reviewed by the stricter classifier;
+it is a supplementary check, not a complete security boundary for those gaps.
 
 On Windows the sandbox attaches filesystem and network policy to the processes.
 Wingman does not change existing host ACLs, integrity labels, or ownership, and

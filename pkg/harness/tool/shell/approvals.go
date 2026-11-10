@@ -62,5 +62,6 @@ func ConfirmCommand(ctx context.Context, command, workdir string, elicit *tool.E
 	if len(options) > 0 && options[0] != nil {
 		opts = options[0]
 	}
-	return confirmExecution(ctx, elicit, command, workdir, workdir, "use_default", "", "", opts)
+	_, err := confirmExecution(ctx, elicit, command, workdir, workdir, "use_default", "", "", opts, approveThisRun)
+	return err
 }

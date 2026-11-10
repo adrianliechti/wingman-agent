@@ -185,6 +185,9 @@ func (s *sessionState) configureTools() error {
 		TempDir:            privateTemp,
 		DisableSandbox:     a.cfg.DisableSandbox,
 		Network:            a.cfg.SandboxNetwork,
+		SharedTemp:         a.cfg.SandboxTemp,
+		DisableLoopback:    a.cfg.DisableSandboxLoopback,
+		ReadCredentials:    a.cfg.SandboxCredentials,
 		ExtraWritableRoots: []string{ws.MemoryPath},
 	}
 	allowedReadRoots = append(allowedReadRoots, privateTemp)

@@ -270,103 +270,123 @@ func TestExecSessionDangerousInputConfirmed(t *testing.T) {
 	}
 }
 
+// sessionInputGates pairs each execution mode with a line it reviews: inside the
+// sandbox only a destructive one, outside it any recursive removal.
+var sessionInputGates = map[string]struct {
+	opts *Options
+	line string
+}{
+	"sandboxed":   {nil, "rm -rf ./*"},
+	"unsandboxed": {&Options{DisableSandbox: true}, "rm -rf /tmp/wingman-marker"},
+}
+
 func TestExecSessionDangerousInputCannotBeSplitAcrossWrites(t *testing.T) {
-	m := NewExecManager(nil)
-	defer m.Close()
+	for name, tc := range sessionInputGates {
+		t.Run(name, func(t *testing.T) {
+			m := NewExecManager(nil)
+			defer m.Close()
 
-	ctx := context.Background()
-	confirmCalls := 0
-	var approvalMessage string
-	elicit := &tool.Elicitation{
-		Confirm: func(ctx context.Context, message string) (bool, error) {
-			confirmCalls++
-			approvalMessage = message
-			return false, nil
-		},
-	}
+			ctx := context.Background()
+			confirmCalls := 0
+			var approvalMessage string
+			elicit := &tool.Elicitation{
+				Confirm: func(ctx context.Context, message string) (bool, error) {
+					confirmCalls++
+					approvalMessage = message
+					return false, nil
+				},
+			}
 
-	out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, nil, map[string]any{
-		"command": "cat",
-		"wait":    1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.Content, "session_id 1") {
-		t.Fatalf("output = %q", out.Content)
-	}
+			out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, tc.opts, map[string]any{
+				"command": "cat",
+				"wait":    1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out.Content, "session_id 1") {
+				t.Fatalf("output = %q", out.Content)
+			}
 
-	if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": "r", "wait": 0}); err != nil {
-		t.Fatalf("partial input failed: %v", err)
-	}
-	if confirmCalls != 0 {
-		t.Fatalf("partial input prompted before submission (%d calls)", confirmCalls)
-	}
+			if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": tc.line[:1], "wait": 0}); err != nil {
+				t.Fatalf("partial input failed: %v", err)
+			}
+			if confirmCalls != 0 {
+				t.Fatalf("partial input prompted before submission (%d calls)", confirmCalls)
+			}
 
-	_, err = executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": "m -rf /tmp/x\n"})
-	if err == nil || !strings.Contains(err.Error(), "denied") {
-		t.Fatalf("split dangerous stdin not denied: %v", err)
-	}
-	if confirmCalls != 1 {
-		t.Fatalf("confirm called %d times, want 1", confirmCalls)
-	}
-	if !strings.Contains(approvalMessage, "rm -rf /tmp/x") {
-		t.Fatalf("approval did not show combined input: %q", approvalMessage)
+			_, err = executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": tc.line[1:] + "\n"})
+			if err == nil || !strings.Contains(err.Error(), "denied") {
+				t.Fatalf("split dangerous stdin not denied: %v", err)
+			}
+			if confirmCalls != 1 {
+				t.Fatalf("confirm called %d times, want 1", confirmCalls)
+			}
+			if !strings.Contains(approvalMessage, tc.line) {
+				t.Fatalf("approval did not show combined input: %q", approvalMessage)
+			}
+		})
 	}
 }
 
 func TestExecSessionPendingInputCheckedBeforeEOFOrCtrlD(t *testing.T) {
-	m := NewExecManager(nil)
-	defer m.Close()
+	for name, tc := range sessionInputGates {
+		t.Run(name, func(t *testing.T) {
+			m := NewExecManager(nil)
+			defer m.Close()
 
-	ctx := context.Background()
-	confirmCalls := 0
-	var approvalMessage string
-	elicit := &tool.Elicitation{
-		Confirm: func(ctx context.Context, message string) (bool, error) {
-			confirmCalls++
-			approvalMessage = message
-			return false, nil
-		},
-	}
+			ctx := context.Background()
+			confirmCalls := 0
+			var approvalMessage string
+			elicit := &tool.Elicitation{
+				Confirm: func(ctx context.Context, message string) (bool, error) {
+					confirmCalls++
+					approvalMessage = message
+					return false, nil
+				},
+			}
 
-	out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, nil, map[string]any{
-		"command": "cat",
-		"wait":    1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.Content, "session_id 1") {
-		t.Fatalf("output = %q", out.Content)
-	}
+			out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, tc.opts, map[string]any{
+				"command": "cat",
+				"wait":    1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out.Content, "session_id 1") {
+				t.Fatalf("output = %q", out.Content)
+			}
 
-	if _, err := executeExecSession(ctx, m, elicit, map[string]any{
-		"session_id": 1,
-		"input":      "rm -rf /tmp/wingman-marker",
-		"wait":       0,
-	}); err != nil {
-		t.Fatalf("buffering input failed: %v", err)
-	}
-	if confirmCalls != 0 {
-		t.Fatalf("unsubmitted input prompted early (%d calls)", confirmCalls)
-	}
+			if _, err := executeExecSession(ctx, m, elicit, map[string]any{
+				"session_id": 1,
+				"input":      tc.line,
+				"wait":       0,
+			}); err != nil {
+				t.Fatalf("buffering input failed: %v", err)
+			}
+			if confirmCalls != 0 {
+				t.Fatalf("unsubmitted input prompted early (%d calls)", confirmCalls)
+			}
 
-	if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "eof": true}); err == nil || !strings.Contains(err.Error(), "denied") {
-		t.Fatalf("dangerous pending input was not denied before EOF: %v", err)
-	}
-	if confirmCalls != 1 || !strings.Contains(approvalMessage, "rm -rf /tmp/wingman-marker") {
-		t.Fatalf("EOF approval = %q (%d calls)", approvalMessage, confirmCalls)
-	}
+			if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "eof": true}); err == nil || !strings.Contains(err.Error(), "denied") {
+				t.Fatalf("dangerous pending input was not denied before EOF: %v", err)
+			}
+			if confirmCalls != 1 || !strings.Contains(approvalMessage, tc.line) {
+				t.Fatalf("EOF approval = %q (%d calls)", approvalMessage, confirmCalls)
+			}
 
-	if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": "\x04"}); err == nil || !strings.Contains(err.Error(), "denied") {
-		t.Fatalf("raw Ctrl-D was not denied: %v", err)
-	}
-	if confirmCalls != 2 {
-		t.Fatalf("Ctrl-D confirm called %d times, want 2 total", confirmCalls)
+			if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": "\x04"}); err == nil || !strings.Contains(err.Error(), "denied") {
+				t.Fatalf("raw Ctrl-D was not denied: %v", err)
+			}
+			if confirmCalls != 2 {
+				t.Fatalf("Ctrl-D confirm called %d times, want 2 total", confirmCalls)
+			}
+		})
 	}
 }
 
+// Expansion tricks are the full classifier's business: it reviews them when
+// nothing else confines the session.
 func TestExecSessionPromptTransformationAcrossStateAndWrites(t *testing.T) {
 	m := NewExecManager(nil)
 	defer m.Close()
@@ -382,7 +402,7 @@ func TestExecSessionPromptTransformationAcrossStateAndWrites(t *testing.T) {
 		},
 	}
 
-	out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, nil, map[string]any{
+	out, err := executeExecCommand(ctx, m, t.TempDir(), elicit, &Options{DisableSandbox: true}, map[string]any{
 		"command": "cat",
 		"wait":    1,
 	})

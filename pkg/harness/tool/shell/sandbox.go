@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -28,6 +29,13 @@ type sandboxPolicy struct {
 	// DenyRead hides existing credential paths.
 	DenyRead []string
 	Network  bool
+	// Loopback lets commands without Network use the host's loopback
+	// interface, so their own servers and tests work. Only macOS consults it:
+	// Linux commands without Network have a loopback of their own.
+	Loopback bool
+	// SharedTemp lists the host's shared temporary directories when they are
+	// writable. Like TempDir they carry no protected-configuration rules.
+	SharedTemp []string
 }
 
 // Writes here would later run code outside the sandbox: through editors, direnv, shells, or agent config.
@@ -131,7 +139,11 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 		}
 	}
 	roots := writableRootsFor(workspaceDir, opts.ExtraWritableRoots, opts.TempDir)
-	if !slices.ContainsFunc(roots, func(root string) bool { return pathWithin(root, workingDir) }) {
+	var sharedTemp []string
+	if opts.SharedTemp {
+		sharedTemp = sharedTempDirs()
+	}
+	if !slices.ContainsFunc(slices.Concat(roots, sharedTemp), func(root string) bool { return pathWithin(root, workingDir) }) {
 		return nil, fmt.Errorf("workdir %q is outside sandbox workspace %q", workingDir, workspaceDir)
 	}
 
@@ -152,8 +164,12 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 		WritableRoots: roots,
 		TempDir:       tempDir,
 		ProtectedRoot: workspaceDir,
-		DenyRead:      credentialPaths(),
 		Network:       opts.Network,
+		Loopback:      !opts.DisableLoopback,
+		SharedTemp:    sharedTemp,
+	}
+	if !opts.ReadCredentials {
+		policy.DenyRead = credentialPaths()
 	}
 	for _, root := range policy.WritableRoots {
 		if tempDir != "" && (root == tempDir || strings.EqualFold(root, tempDir)) {
@@ -168,6 +184,22 @@ func buildSandboxedCommand(ctx context.Context, shell, command, workingDir strin
 		return nil, err
 	}
 	return exec.CommandContext(ctx, path, args...), nil
+}
+
+// sharedTempDirs returns the temporary directories every program of the user
+// shares: /tmp and the per-user directory that TMPDIR names outside the sandbox.
+func sharedTempDirs() []string {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	var dirs []string
+	for _, dir := range []string{"/tmp", os.TempDir()} {
+		dir = canonicalPath(dir)
+		if info, err := os.Stat(dir); err == nil && info.IsDir() && !slices.Contains(dirs, dir) {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
 }
 
 // writableRootsFor lists the workspace, extra roots and private temp; missing extra roots are skipped.

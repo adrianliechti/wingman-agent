@@ -20,7 +20,13 @@ func platformSandboxCommand(shell, command, _ string, policy sandboxPolicy) (str
 	profile, definitions := seatbeltProfile(policy)
 	args := []string{"-p", profile}
 	args = append(args, definitions...)
-	args = append(args, "--", shell, "-c", command)
+	args = append(args, "--", shell)
+	// zsh lowers the priority of background jobs, which the sandbox refuses;
+	// without this every `&` prints "nice(5) failed: operation not permitted".
+	if filepath.Base(shell) == "zsh" {
+		args = append(args, "-o", "nobgnice")
+	}
+	args = append(args, "-c", command)
 	return sandboxExecPath, args, nil
 }
 
@@ -48,7 +54,7 @@ func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 		}
 		return rules.String()
 	}
-	writeRules := paramRules("WRITABLE_ROOT", policy.WritableRoots)
+	writeRules := paramRules("WRITABLE_ROOT", policy.WritableRoots) + paramRules("SHARED_TEMP", policy.SharedTemp)
 
 	var profile strings.Builder
 	profile.WriteString(`(version 1)
@@ -113,6 +119,8 @@ func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 `)
 	if policy.Network {
 		profile.WriteString(seatbeltNetwork)
+	} else if policy.Loopback {
+		profile.WriteString(seatbeltLoopback)
 	}
 	var protectedPaths []string
 	for _, root := range sandboxProtectedRoots(policy) {
@@ -134,6 +142,15 @@ func seatbeltProfile(policy sandboxPolicy) (string, []string) {
 	}
 	return profile.String(), definitions
 }
+
+// seatbeltLoopback lets commands run their own servers and tests on loopback
+// while outside hosts stay unreachable. It also reaches every other service
+// listening on this machine, the agent's own web UI included: Seatbelt cannot
+// exclude single ports reliably.
+const seatbeltLoopback = `(allow network-bind (local ip "localhost:*"))
+(allow network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))
+`
 
 // seatbeltNetwork allows IP traffic plus the DNS and TLS trust services it needs, following Codex.
 const seatbeltNetwork = `(allow network-outbound (remote ip "*:*"))

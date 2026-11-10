@@ -53,6 +53,57 @@ func TestScheduleScriptsRequireTheExecutionPolicy(t *testing.T) {
 	}
 }
 
+// Scripts run in the same sandbox as exec, so the same rule picks what is
+// reviewed, when the task is created and again at each run.
+func TestSandboxDecidesWhichScheduledScriptsAreReviewed(t *testing.T) {
+	t.Setenv("WINGMAN_SANDBOX_ACTIVE", "")
+	for _, tc := range []struct {
+		script                 string
+		sandboxed, unsandboxed bool
+	}{
+		{"rm -rf cache", false, true},
+		{"git branch -D stale", false, true},
+		{"git clean -fdx", true, true},
+		{"rm -rf ./*", true, true},
+	} {
+		for _, disabled := range []bool{false, true} {
+			want := tc.sandboxed
+			if disabled {
+				want = tc.unsandboxed
+			}
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "cache")
+			if err := os.WriteFile(marker, []byte("user work"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			asked := 0
+			opts := &Options{WorkDir: dir, Shell: &shell.Options{DisableSandbox: disabled}, Elicitation: &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) {
+				asked++
+				return false, nil
+			}}}
+			store := NewMemoryStore()
+			_, err := Tools(store, opts)[0].Execute(t.Context(), map[string]any{"action": "create", "prompt": "check", "schedule": "every 1h", "script": tc.script})
+			tasks, _ := store.List()
+			if (err != nil) != want || (asked == 1) != want || (len(tasks) == 0) != want {
+				t.Errorf("create %q with the sandbox disabled=%t: err=%v, asked=%d, saved=%d, want reviewed=%t", tc.script, disabled, err, asked, len(tasks), want)
+			}
+			asked = 0
+			if err := approveScript(t.Context(), dir, tc.script, opts); (err != nil) != want || (asked == 1) != want {
+				t.Errorf("run %q with the sandbox disabled=%t: err=%v, asked=%d, want reviewed=%t", tc.script, disabled, err, asked, want)
+			}
+			if !want {
+				continue
+			}
+			if _, out, err := RunTaskGate(t.Context(), dir, Task{Script: tc.script}, opts); err == nil || !strings.Contains(out, "did not run") {
+				t.Errorf("denied %q ran: %q, %v", tc.script, out, err)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Errorf("denied %q removed user work", tc.script)
+			}
+		}
+	}
+}
+
 func TestGateFiltersSecretsAndHonorsEnvironmentPolicy(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX script")
@@ -79,16 +130,18 @@ func TestChangedOrLegacyDangerousGateCannotExecuteWithoutApproval(t *testing.T) 
 		t.Fatal(err)
 	}
 	store := NewFileStore(t.TempDir())
+	// Destructive with or without the sandbox, so the gate applies in both.
+	const script = "rm -rf ./*"
 	// Old approval hashes remain readable but confer no authorization.
-	legacyHash := fmt.Sprintf("%x", sha256.Sum256([]byte(filepath.Clean(dir)+"\x00rm -rf preserve-me")))
-	if err := os.WriteFile(store.Path(), []byte("tasks:\n  - script: rm -rf preserve-me\n    script_approval: "+legacyHash+"\n"), 0600); err != nil {
+	legacyHash := fmt.Sprintf("%x", sha256.Sum256([]byte(filepath.Clean(dir)+"\x00"+script)))
+	if err := os.WriteFile(store.Path(), []byte("tasks:\n  - script: "+script+"\n    script_approval: "+legacyHash+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	legacy, err := store.List()
-	if err != nil || len(legacy) != 1 {
+	if err != nil || len(legacy) != 1 || legacy[0].Script != script {
 		t.Fatalf("load legacy schedule: %v, %v", legacy, err)
 	}
-	for _, task := range []Task{{Script: "rm -rf preserve-me"}, legacy[0]} {
+	for _, task := range []Task{{Script: script}, legacy[0]} {
 		_, out, err := RunTaskGate(t.Context(), dir, task, nil)
 		if err == nil || !strings.Contains(out, "approval") {
 			t.Fatalf("unapproved gate: %q, %v", out, err)

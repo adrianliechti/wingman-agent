@@ -40,6 +40,11 @@ func (a *Agent) review(ctx context.Context, req tool.Approval) (tool.Verdict, er
 	if s.unattended.Load() {
 		return tool.Verdict{Allowed: true}, nil
 	}
+	// The approval of this call already covered its re-run after a sandbox
+	// denial; the host tool sets the mark, never the model.
+	if covered, _ := req.Action["covered_by_review"].(bool); covered {
+		return tool.Verdict{Allowed: true}, nil
+	}
 
 	// The reviewer reads the exact action or nothing; arguments are never shortened.
 	action := maps.Clone(req.Action)

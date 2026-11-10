@@ -62,6 +62,40 @@ func TestOptionsFromEnvironment(t *testing.T) {
 	}
 }
 
+// Shared temp, loopback and credentials are available to sandboxed commands
+// unless the user switches them off.
+func TestSandboxSwitchesAreOnUnlessTurnedOff(t *testing.T) {
+	for value, on := range map[string]bool{"": true, "typo": true, "on": true, "1": true, "off": false, " OFF ": false, "false": false} {
+		for _, name := range []string{"WINGMAN_SANDBOX_TEMP", "WINGMAN_SANDBOX_LOOPBACK", "WINGMAN_SANDBOX_CREDENTIALS"} {
+			t.Setenv(name, value)
+		}
+		resolved := optionsFromEnvironment()
+		if resolved.SandboxTemp != on || resolved.DisableSandboxLoopback == on || resolved.SandboxCredentials != on {
+			t.Errorf("value %q: temp = %v, loopback disabled = %v, credentials = %v", value, resolved.SandboxTemp, resolved.DisableSandboxLoopback, resolved.SandboxCredentials)
+		}
+	}
+}
+
+// A session's commands get shared temp, loopback and credentials unless the
+// user switched them off.
+func TestSessionsApplySandboxSwitches(t *testing.T) {
+	for value, on := range map[string]bool{"": true, "off": false} {
+		workspace := newOptionsTestWorkspace(t)
+		for _, name := range []string{"WINGMAN_SANDBOX_TEMP", "WINGMAN_SANDBOX_LOOPBACK", "WINGMAN_SANDBOX_CREDENTIALS"} {
+			t.Setenv(name, value)
+		}
+		a := New(workspace, Config{Options: optionsFromEnvironment()}, nil)
+		id, err := a.NewSession(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if shell := a.session(id).scriptOptions.Shell; shell.SharedTemp != on || shell.DisableLoopback == on || shell.ReadCredentials != on {
+			t.Errorf("switches %q: shared temp = %v, loopback disabled = %v, credentials = %v", value, shell.SharedTemp, shell.DisableLoopback, shell.ReadCredentials)
+		}
+		a.Close()
+	}
+}
+
 func TestOptionsFromEnvironmentIgnoresSeparatedWebEnvironmentNames(t *testing.T) {
 	t.Setenv("WINGMAN_DISABLE_WEBSEARCH", "")
 	t.Setenv("WINGMAN_DISABLE_WEBFETCH", "")
@@ -248,6 +282,9 @@ func newOptionsTestWorkspace(t *testing.T) *code.Workspace {
 		"WINGMAN_DISABLE_SHELL",
 		"WINGMAN_SANDBOX",
 		"WINGMAN_SANDBOX_NETWORK",
+		"WINGMAN_SANDBOX_TEMP",
+		"WINGMAN_SANDBOX_LOOPBACK",
+		"WINGMAN_SANDBOX_CREDENTIALS",
 		"WINGMAN_DISABLE_WEBSEARCH",
 		"WINGMAN_DISABLE_WEBFETCH",
 	} {
