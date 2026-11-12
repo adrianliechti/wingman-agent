@@ -139,6 +139,12 @@ func mergeTypes(custom []Definition) (types map[string]subagentType, names []str
 	return types, names, blurbs
 }
 
+// agentIdleTimeout bounds how long a run may go without streaming output, a
+// tool call or a tool result. Elapsed time alone never ends an active agent;
+// turn limits and task budgets bound total work. It must stay above the
+// longest single child step (a tool call at harness.DefaultToolTimeout).
+var agentIdleTimeout = 20 * time.Minute
+
 const durableSpecVersion = 1
 
 // durableSpec contains only stable, serializable construction inputs. Tool
@@ -230,6 +236,14 @@ func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Ta
 			}
 		},
 	})
+	// Every streamed message pushes the deadline out again, so only a child
+	// that has gone quiet is aborted.
+	stalled := fmt.Errorf("idle time limit reached: no output or tool activity for %s", agentIdleTimeout)
+	execCtx, cancelIdle := context.WithCancelCause(execCtx)
+	defer cancelIdle(nil)
+	idle := time.AfterFunc(agentIdleTimeout, func() { cancelIdle(stalled) })
+	defer idle.Stop()
+
 	started := time.Now()
 	before := r.sub.UsageSnapshot()
 	startIdx := len(r.sub.MessagesSnapshot())
@@ -241,6 +255,7 @@ func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Ta
 				runErr = err
 				break
 			}
+			idle.Reset(agentIdleTimeout)
 			if tk != nil {
 				updateTaskActivity(tk, msg)
 			}
@@ -271,6 +286,11 @@ func (r *subagentRunner) runTurn(execCtx, reportCtx context.Context, tk *task.Ta
 				break
 			}
 		}
+	}
+	// Name the cause instead of the bare cancellation it produced. A run that
+	// completed while the timer fired stays successful.
+	if runErr != nil && context.Cause(execCtx) == stalled {
+		runErr = stalled
 	}
 	runMessages := state.Messages
 	if startIdx <= len(runMessages) {
@@ -412,7 +432,9 @@ func Tools(cfg *harness.Config, sharedContext func([]tool.Tool) string, tasks *t
 		Name:        "agent",
 		Description: description,
 		Effect:      effectClassifier(types),
-		Timeout:     20 * time.Minute,
+		// No wall-clock deadline: runTurn aborts a child that goes quiet for
+		// agentIdleTimeout and keeps its partial output and follow-up id.
+		Timeout: -1,
 
 		Parameters: map[string]any{
 			"type": "object",

@@ -29,10 +29,6 @@ const (
 	// runs are IO-bound model streams, so CPU count is irrelevant.
 	MaxConcurrent = 16
 	MaxPerSession = 50
-
-	// MaxRunDuration bounds one background run so a hung model stream cannot
-	// occupy a concurrency slot forever.
-	MaxRunDuration = 30 * time.Minute
 )
 
 type Task struct {
@@ -444,7 +440,7 @@ func (r *Registry) Launch(description, agentType string, run func(ctx context.Co
 // LaunchAgent is Launch with a stable child identity and a preparation step
 // that is persisted before the goroutine can start.
 func (r *Registry) LaunchAgent(agentID, description, agentType string, prepare func(*Task) error, run func(ctx context.Context, t *Task) (string, error)) (*Task, error) {
-	ctx, cancel := context.WithTimeout(r.ctx, MaxRunDuration)
+	ctx, cancel := context.WithCancel(r.ctx)
 	t, err := r.start(agentID, description, agentType, cancel, true, prepare)
 	if err != nil {
 		cancel()
@@ -678,7 +674,7 @@ func (r *Registry) Relaunch(t *Task, run func(ctx context.Context, t *Task) (str
 	prevFinished := t.finished
 	prevStarted := t.Started
 	prevSeq := t.seq
-	ctx, cancel := context.WithTimeout(r.ctx, MaxRunDuration)
+	ctx, cancel := context.WithCancel(r.ctx)
 	ctx = tool.WithBackgroundOrigin(ctx, t.AgentID)
 	t.status = StatusRunning
 	t.stopped = false
