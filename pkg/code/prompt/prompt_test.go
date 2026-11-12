@@ -26,7 +26,7 @@ func TestVariantFor(t *testing.T) {
 	for _, id := range []string{
 		"nemotron-3.5-bolt", "nvidia/nemotron-3-ultra-550b-a55b", "deepseek-v4-pro", "mistral-large-4",
 		"qwen3.8-max", "qwen/qwen3.8-27b", "glm-5.3", "kimi-k3", "MiniMax-M3", "grok-4.6",
-		"gemini-4-argon", "google/gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.1-pro",
+		"gemini-4-carbon", "google/gemini-4-carbon", "gemini-4-argon", "google/gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.1-pro",
 	} {
 		if v := VariantFor(id); v != def {
 			t.Errorf("VariantFor(%s) = distinct variant, want default", id)

@@ -303,6 +303,49 @@ func TestFable52ModelSelectionAndEfforts(t *testing.T) {
 	}
 }
 
+func TestGemini4CarbonModelSelectionAndEfforts(t *testing.T) {
+	for _, id := range []string{"gemini-4-carbon", "~google/GEMINI-4-CARBON:latest"} {
+		t.Run(id, func(t *testing.T) {
+			a := upstreamAgent(id)
+			models, current := a.Models("")
+			if current != id || len(models) != 1 || models[0].Name != "Gemini 4 Carbon" {
+				t.Fatalf("model selection = %q/%+v", current, models)
+			}
+			want := []string{"auto", "low", "medium", "high"}
+			if effort, values := a.Effort(""); effort != "auto" || !slices.Equal(values, want) {
+				t.Fatalf("effort selector = %q/%v, want auto/%v", effort, values, want)
+			}
+			// Unset effort sends no thinking level, leaving the API default.
+			if got := a.effortFor(nil); got != "" {
+				t.Fatalf("default effort = %q, want none sent", got)
+			}
+			for _, effort := range []string{"none", "xhigh", "max"} {
+				if err := a.SetEffort(t.Context(), "", effort); err == nil {
+					t.Fatalf("SetEffort accepted unsupported thinking level %q", effort)
+				}
+			}
+			for _, effort := range want[1:] {
+				if err := a.SetEffort(t.Context(), "", effort); err != nil {
+					t.Fatal(err)
+				}
+				if got := a.effortFor(nil); got != effort {
+					t.Fatalf("effective effort = %q, want %q", got, effort)
+				}
+			}
+		})
+	}
+}
+
+func TestGemini4CarbonIsPreferredComplexModel(t *testing.T) {
+	a := upstreamAgent("gemini-3.8-flash", "gemini-4-argon", "google/gemini-4-carbon")
+	if got := roleModelID(t, a, nil, "main"); got != "gemini-3.8-flash" {
+		t.Fatalf("main model = %q", got)
+	}
+	if got := roleModelID(t, a, nil, "complex"); got != "google/gemini-4-carbon" {
+		t.Fatalf("complex model = %q, want Carbon ahead of Argon", got)
+	}
+}
+
 func TestQwen38EffortDefaultsAndClampsOverrides(t *testing.T) {
 	a := upstreamAgent("qwen3.8:27b-mlx")
 	s := &sessionState{}

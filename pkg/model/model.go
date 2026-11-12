@@ -98,7 +98,7 @@ var qwen38Efforts = []string{"none", "low", "medium", "xhigh"}
 var nemotronEfforts = []string{"none", "medium", "high"}
 var nemotron3SuperEfforts = []string{"none", "low", "high"}
 var nemotronThinkingEfforts = []string{"none", "high"}
-var gemini4ArgonEfforts = []string{"low", "medium", "high"}
+var gemini4Efforts = []string{"low", "medium", "high"}
 
 // Models lists every known model in preference order: the first entry of a
 // family, filter or class is the one picked automatically.
@@ -806,6 +806,23 @@ var Models = []Model{
 		ContextThreshold: 200_000,
 	},
 	{
+		ID: "gemini-4-carbon",
+
+		Namespace: "google",
+
+		Name: "Gemini 4 Carbon",
+
+		Class: ClassLarge,
+
+		// Input, thinking, and output share one window.
+		Context: 1048576,
+		Output:  65536,
+
+		ContextThreshold: 200_000,
+
+		Efforts: gemini4Efforts,
+	},
+	{
 		ID: "gemini-4-argon",
 
 		Namespace: "google",
@@ -820,7 +837,7 @@ var Models = []Model{
 
 		ContextThreshold: 200_000,
 
-		Efforts: gemini4ArgonEfforts,
+		Efforts: gemini4Efforts,
 	},
 	{
 		ID: "gemini-3.1-flash-lite",

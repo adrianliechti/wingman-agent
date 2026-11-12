@@ -85,6 +85,7 @@ func TestContextWindowFor(t *testing.T) {
 		{"gpt-5.2-codex", 400_000},
 		{"gpt-4.1-mini", DefaultContextWindow},
 		{"gemini-2.5-pro", DefaultContextWindow},
+		{"gemini-4-carbon", 200_000},
 		{"glm-5.3", 1_000_000},
 		{"glm-5.2", 1_000_000},
 		{"kimi-k3", 1_048_576},

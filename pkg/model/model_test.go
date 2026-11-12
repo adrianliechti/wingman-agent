@@ -19,6 +19,7 @@ func TestCurrentProviderModels(t *testing.T) {
 		{"glm-5.3", "GLM 5.3", ClassMedium, 1_000_000, 131_072},
 		{"gemini-3.7-flash", "Gemini 3.7 Flash", ClassMedium, 1_114_112, 65_536},
 		{"gemini-4-argon", "Gemini 4 Argon", ClassLarge, 1_048_576, 65_536},
+		{"gemini-4-carbon", "Gemini 4 Carbon", ClassLarge, 1_048_576, 65_536},
 		{"minimax-m3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"MiniMax-M3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"grok-4.6", "Grok 4.6", ClassLarge, 500_000, 500_000},
@@ -139,18 +140,39 @@ func TestGPT6Verbosity(t *testing.T) {
 	}
 }
 
-// Gemini 4 Argon shares one window between input, thinking, and output, and
-// offers three thinking levels.
-func TestGemini4ArgonLimitsAndEfforts(t *testing.T) {
-	got, ok := Find("gemini-4-argon")
-	if !ok {
-		t.Fatal("Find(gemini-4-argon) failed")
+// Gemini 4 models share one window between input, thinking, and output, and
+// offer three thinking levels.
+func TestGemini4LimitsAndEfforts(t *testing.T) {
+	for _, id := range []string{"gemini-4-carbon", "gemini-4-argon", "~google/GEMINI-4-CARBON:latest"} {
+		t.Run(id, func(t *testing.T) {
+			got, ok := Find(id)
+			if !ok {
+				t.Fatalf("Find(%q) failed", id)
+			}
+			if got.InputTokens() != 1_048_576-65_536 {
+				t.Fatalf("InputTokens() = %d, want the shared window minus output", got.InputTokens())
+			}
+			if want := []string{"low", "medium", "high"}; !slices.Equal(got.Efforts, want) {
+				t.Fatalf("Efforts = %v, want %v", got.Efforts, want)
+			}
+		})
 	}
-	if got.InputTokens() != 1_048_576-65_536 {
-		t.Fatalf("InputTokens() = %d, want the shared window minus output", got.InputTokens())
+}
+
+// Carbon is the stronger reasoning model, so it is the preferred Gemini 4 pick.
+func TestGemini4ModelAvailability(t *testing.T) {
+	available := Available(map[string]bool{
+		"gemini-4-argon":         true,
+		"google/gemini-4-carbon": true,
+		"gemini-3.8-flash":       true,
+	})
+	ids := make([]string, 0, len(available))
+	for _, m := range available {
+		ids = append(ids, m.ID)
 	}
-	if want := []string{"low", "medium", "high"}; !slices.Equal(got.Efforts, want) {
-		t.Fatalf("Efforts = %v, want %v", got.Efforts, want)
+	want := []string{"gemini-3.8-flash", "google/gemini-4-carbon", "gemini-4-argon"}
+	if !slices.Equal(ids, want) {
+		t.Fatalf("Available() ids = %v, want %v", ids, want)
 	}
 }
 
@@ -313,6 +335,7 @@ func TestProviderPrefixedModelMapping(t *testing.T) {
 		"openai/gpt-6-sol":            "GPT 6 Sol",
 		"openai/gpt-6-luna":           "GPT 6 Luna",
 		"google/gemini-3.1-pro":       "Gemini 3.1 Pro",
+		"google/gemini-4-carbon":      "Gemini 4 Carbon",
 		"z-ai/glm-5.3":                "GLM 5.3",
 		"deepseek/deepseek-v4-pro":    "DeepSeek V4 Pro",
 		"mistralai/mistral-medium":    "Mistral Medium 3.5",
@@ -354,6 +377,7 @@ func TestCurrentProviderModelClassification(t *testing.T) {
 		{"anthropic/claude-sonnet-5-5", "claude", ClassMedium},
 		{"~openai/GPT-6-ASTRA:latest", "gpt", ClassLarge},
 		{"google/gemini-3.7-flash", "gemini", ClassMedium},
+		{"google/gemini-4-carbon", "gemini", ClassLarge},
 		{"qwen/qwen3.8-27b:latest", "qwen3", ClassMedium},
 	}
 
