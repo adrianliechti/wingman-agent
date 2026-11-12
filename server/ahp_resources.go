@@ -30,7 +30,7 @@ func (h *ahpHost) resourcePath(uri string) (string, error) {
 	if err != nil || u.Scheme != "file" || u.Host != "" && u.Host != "localhost" || u.RawQuery != "" || u.Fragment != "" {
 		return "", ahpInvalid("local file URI required")
 	}
-	path := filepath.FromSlash(u.Path)
+	path, _ := fileuri.Path(uri)
 	if !filepath.IsAbs(path) {
 		return "", ahpInvalid("absolute file URI required")
 	}

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/changes"
+	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
@@ -503,11 +503,11 @@ func (h *ahpHost) editingFilesLocked() map[string]bool {
 				if !ok {
 					continue
 				}
-				u, err := url.Parse(string(resource.Uri))
-				if err != nil || u.Scheme != "file" {
+				native, ok := fileuri.Path(string(resource.Uri))
+				if !ok {
 					continue
 				}
-				path, err := filepath.Rel(h.server.workspace.RootPath, filepath.FromSlash(u.Path))
+				path, err := filepath.Rel(h.server.workspace.RootPath, native)
 				if err != nil {
 					continue
 				}

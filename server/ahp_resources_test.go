@@ -6,6 +6,7 @@ import (
 	"mime"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -53,6 +54,24 @@ func TestAHPResourceContentTypeDistinguishesTextFromMedia(test *testing.T) {
 				test.Fatalf("encoding = %q, want %q", result.Encoding, tt.encoding)
 			}
 		})
+	}
+}
+
+// On Windows a drive path must encode as file:///C:/..., not file://C:/...
+// (which makes the drive the URI host) and must decode back into the workspace.
+func TestAHPFileURIsRoundTripThroughResourcePath(test *testing.T) {
+	_, host, _ := reviewWorkspaceResourceHost(test)
+	dir := host.directoryURI()
+	if !strings.HasPrefix(dir, "file:///") {
+		test.Fatalf("directoryURI() = %q, want file:/// prefix", dir)
+	}
+	if err := host.validateDirectory(dir); err != nil {
+		test.Fatalf("validateDirectory(%q) = %v", dir, err)
+	}
+	uri := host.fileURI(filepath.Join("sub dir", "a.go"))
+	rel, err := host.resourcePath(uri)
+	if err != nil || rel != filepath.Join("sub dir", "a.go") {
+		test.Fatalf("resourcePath(%q) = (%q, %v)", uri, rel, err)
 	}
 }
 

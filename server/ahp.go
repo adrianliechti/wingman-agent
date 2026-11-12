@@ -25,6 +25,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agents"
+	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/coder/websocket"
@@ -650,7 +651,7 @@ func (h *ahpHost) directoryURI() string {
 	if h.server.workspace != nil {
 		root = h.server.workspace.RootPath
 	}
-	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(root)}).String()
+	return fileuri.FromPath(root)
 }
 
 func (h *ahpHost) root() (t.RootState, error) {

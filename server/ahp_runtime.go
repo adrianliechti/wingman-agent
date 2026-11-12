@@ -3,12 +3,12 @@ package server
 import (
 	"encoding/base64"
 	"fmt"
-	"net/url"
 	"path/filepath"
 	"reflect"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
@@ -21,7 +21,7 @@ func (h *ahpHost) fileURI(path string) string {
 		}
 		path = filepath.Join(root, path)
 	}
-	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
+	return fileuri.FromPath(path)
 }
 
 func (h *ahpHost) message(text string, files, images []string) t.Message {

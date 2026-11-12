@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"unicode/utf8"
 
+	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
 	"github.com/go-chi/chi/v5"
 	"github.com/microsoft/agent-host-protocol/clients/go/ahp"
@@ -151,7 +151,7 @@ func (h *ahpHost) attachTerminal(session *terminal.Session, resource string, cla
 		claim = ahpHostTerminalClaim()
 	}
 	cols, rows := session.Size()
-	cwd := (&url.URL{Scheme: "file", Path: filepath.ToSlash(session.Cwd())}).String()
+	cwd := fileuri.FromPath(session.Cwd())
 	a := &ahpTerminal{resource: resource, session: session, state: t.TerminalState{Title: session.Title(), Cwd: &cwd, Cols: ahpPtr(int64(cols)), Rows: ahpPtr(int64(rows)), Content: []t.TerminalContentPart{}, Claim: claim, IsPty: ahpPtr(true), SupportsCommandDetection: ahpPtr(false), Lifecycle: t.TerminalLifecycleState{Value: &t.TerminalRunningLifecycleState{Status: t.TerminalLifecycleStatusRunning}}}}
 	snapshot, offset, output, cancel := session.SubscribeAt()
 	h.mu.Lock()
