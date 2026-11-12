@@ -1,1 +1,1 @@
-import"./chunk-NGNAAXSQ.js";export{M as createArchitectureServices}from"./mermaid-parser.core.js";
+export{M as createArchitectureServices}from"./mermaid-parser.core.js";import"./chunk-NGNAAXSQ.js";
