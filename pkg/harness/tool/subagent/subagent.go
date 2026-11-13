@@ -159,6 +159,15 @@ type durableSpec struct {
 	Schema       map[string]any `json:"schema,omitempty"`
 }
 
+// Options extends subagent coordination with optional parent-context forking
+// while preserving Tools(...) compatibility.
+type Options struct {
+	SharedContext  func([]tool.Tool) string
+	Tasks          *task.Registry
+	Custom         []Definition
+	ParentMessages func() []harness.Message
+}
+
 type subagentRunner struct {
 	spec      durableSpec
 	sub       *harness.Agent
@@ -183,6 +192,7 @@ func newSubagentRunner(parent *harness.Config, typ subagentType, spec durableSpe
 	subcfg.Instructions = func() string { return spec.Instructions }
 	// The durable specification already contains the child's scoped context.
 	subcfg.ContextInstructions = nil
+	subcfg.ContextSections = nil
 	if spec.Model != "" {
 		subcfg.Model = func() string { return spec.Model }
 	}
@@ -366,16 +376,63 @@ func bindRestoredTasks(parent *harness.Config, types map[string]subagentType, ta
 }
 
 func Tools(cfg *harness.Config, sharedContext func([]tool.Tool) string, tasks *task.Registry, custom ...Definition) []tool.Tool {
+	return ToolsWithOptions(cfg, Options{
+		SharedContext: sharedContext,
+		Tasks:         tasks,
+		Custom:        custom,
+	})
+}
+
+func sanitizeForkedMessages(messages []harness.Message) []harness.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	answered := make(map[string]bool)
+	for _, m := range messages {
+		for _, c := range m.Content {
+			if c.ToolResult != nil && c.ToolResult.ID != "" {
+				answered[c.ToolResult.ID] = true
+			}
+		}
+	}
+	out := make([]harness.Message, 0, len(messages))
+	for _, m := range harness.CloneMessages(messages) {
+		cloned := m
+		cloned.Content = nil
+		for _, c := range m.Content {
+			if c.ToolCall != nil {
+				if c.ToolCall.Partial || !answered[c.ToolCall.ID] {
+					continue
+				}
+			}
+			if c.Reasoning != nil {
+				// Provider-encrypted reasoning items are bound to parent turn state;
+				// omit them when seeding forked child history.
+				continue
+			}
+			cloned.Content = append(cloned.Content, c)
+		}
+		if len(cloned.Content) > 0 {
+			out = append(out, cloned)
+		}
+	}
+	return out
+}
+
+func ToolsWithOptions(cfg *harness.Config, opts Options) []tool.Tool {
 	if cfg == nil {
 		cfg = &harness.Config{}
 	}
+	sharedContext := opts.SharedContext
+	tasks := opts.Tasks
+	custom := opts.Custom
 	types, names, blurbs := mergeTypes(custom)
 	if tasks != nil {
 		bindRestoredTasks(cfg, types, tasks)
 	}
 
 	lines := []string{
-		"Launch a subagent for a bounded task. It runs in a separate context with a filtered toolset, does not see your conversation, and returns one final report to you, not the user. Only the report enters your context.",
+		"Launch a subagent for a bounded task. It runs in a separate context with a filtered toolset, does not see your conversation unless `fork_context: true` is set, and returns one final report to you, not the user. Only the report enters your context.",
 		"",
 		"Agent types:",
 	}
@@ -390,8 +447,8 @@ func Tools(cfg *harness.Config, sharedContext func([]tool.Tool) string, tasks *t
 	if tasks != nil {
 		lines = append(lines,
 			"",
-			"`background: true` returns a task id immediately and delivers the result later as a task notification. Use it for work you can overlap with your own; if your next step depends on the result, run synchronously. Never assume a running agent's result or start work that overlaps its scope. Give background editing agents a file scope disjoint from yours, and tell them to leave changes outside their scope alone.",
-			"Tracked runs carry a task id: `agent_output` checks status, `agent_stop` requests cancellation, and `agent_send` continues a finished agent with its context intact. At the session tracking limit, synchronous runs still work but have no task id or follow-up support.",
+			"`background: true` returns a task id immediately and delivers the result later as a task notification. Use `agent_wait` to block on one (`mode: \"any\"`) or all (`mode: \"all\"`) background agents when your next step depends on their results. Never assume a running agent's result or start work that overlaps its scope. Give background editing agents a file scope disjoint from yours, and tell them to leave changes outside their scope alone.",
+			"Tracked runs carry a task id: `agent_output` checks status, `agent_wait` waits for completion, `agent_stop` requests cancellation, and `agent_send` continues a finished agent with its context intact. At the session tracking limit, synchronous runs still work but have no task id or follow-up support.",
 		)
 	}
 
@@ -418,6 +475,10 @@ func Tools(cfg *harness.Config, sharedContext func([]tool.Tool) string, tasks *t
 			"type":        "string",
 			"description": "Optional reasoning-effort override for this agent, clamped to what the chosen model supports. Omit to inherit.",
 			"enum":        []string{"none", "low", "medium", "high", "xhigh", "max"},
+		},
+		"fork_context": map[string]any{
+			"type":        "boolean",
+			"description": "When true, seed the subagent with a read-only copy of the parent's completed conversation history so it has full prior context without re-reading everything.",
 		},
 	}
 
@@ -482,6 +543,13 @@ func Tools(cfg *harness.Config, sharedContext func([]tool.Tool) string, tasks *t
 			}
 			if background && tasks == nil {
 				return tool.Result{}, fmt.Errorf("background agents are not available in this session; run the agent synchronously")
+			}
+			forkContext := false
+			if raw, present := args["fork_context"]; present {
+				forkContext, ok = raw.(bool)
+				if !ok {
+					return tool.Result{}, fmt.Errorf("fork_context must be a boolean")
+				}
 			}
 			var schemaMap map[string]any
 			if raw, present := args["schema"]; present {
@@ -553,7 +621,11 @@ func Tools(cfg *harness.Config, sharedContext func([]tool.Tool) string, tasks *t
 			if err := ctx.Err(); err != nil {
 				return tool.Result{}, err
 			}
-			runner, err := newSubagentRunner(cfg, typ, spec, harness.State{})
+			var initialState harness.State
+			if forkContext && opts.ParentMessages != nil {
+				initialState.Messages = sanitizeForkedMessages(opts.ParentMessages())
+			}
+			runner, err := newSubagentRunner(cfg, typ, spec, initialState)
 			if err != nil {
 				return tool.Result{}, err
 			}
@@ -880,7 +952,7 @@ func readOnlyDynamicTool(t tool.Tool) tool.Tool {
 // Scheduling belongs to the session: a delegated task must not wake it later.
 func allowNonAgentTool(t tool.Tool) bool {
 	switch t.Name {
-	case "agent", "agent_output", "agent_stop", "agent_send", "task_output", "task_stop", "task_send", "schedule":
+	case "agent", "agent_output", "agent_stop", "agent_send", "agent_wait", "task_output", "task_stop", "task_send", "schedule":
 		return false
 	}
 	return !t.Hidden

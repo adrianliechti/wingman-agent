@@ -111,13 +111,13 @@ func TestGrepDoesNotReadIgnoredDirectoryRules(t *testing.T) {
 	}
 	defer root.Chmod("ignored/.gitignore", 0644)
 	result, err := GrepTool(root).Execute(t.Context(), map[string]any{"pattern": "needle"})
-	if err != nil || !strings.Contains(result.Content, "keep") || strings.Contains(result.Content, "ignored") {
-		t.Fatalf("result = %q, %v", result.Content, err)
+	if err != nil || !strings.Contains(result.Content.Text(), "keep") || strings.Contains(result.Content.Text(), "ignored") {
+		t.Fatalf("result = %q, %v", result.Content.Text(), err)
 	}
 	for _, searchPath := range []string{"ignored", "ignored/sub"} {
 		subResult, err := GrepTool(root).Execute(t.Context(), map[string]any{"path": searchPath, "pattern": "needle"})
-		if err != nil || subResult.Content != "No files found" {
-			t.Fatalf("search %s = %q, %v", searchPath, subResult.Content, err)
+		if err != nil || subResult.Content.Text() != "No files found" {
+			t.Fatalf("search %s = %q, %v", searchPath, subResult.Content.Text(), err)
 		}
 	}
 }
@@ -126,8 +126,8 @@ func TestGrepSkipsVCSNestedSubdirectorySearch(t *testing.T) {
 	root := grepReviewRoot(t, map[string]string{".git/objects/pack": "needle", "src/.svn/pristine/blob": "needle"})
 	for _, searchPath := range []string{".git", ".git/objects", "src/.svn/pristine"} {
 		result, err := GrepTool(root).Execute(t.Context(), map[string]any{"path": searchPath, "pattern": "needle"})
-		if err != nil || result.Content != "No files found" {
-			t.Fatalf("search %s = %q, %v", searchPath, result.Content, err)
+		if err != nil || result.Content.Text() != "No files found" {
+			t.Fatalf("search %s = %q, %v", searchPath, result.Content.Text(), err)
 		}
 	}
 }
@@ -135,24 +135,24 @@ func TestGrepSkipsVCSNestedSubdirectorySearch(t *testing.T) {
 func TestGrepGlobRelativeDepthFilter(t *testing.T) {
 	root := grepReviewRoot(t, map[string]string{"file.go": "needle", "nested/file.go": "needle"})
 	result, err := GrepTool(root).Execute(t.Context(), map[string]any{"pattern": "needle", "glob": "./file.go"})
-	if err != nil || result.Content != "Found 1 file\nfile.go" {
-		t.Fatalf("result = %q, %v", result.Content, err)
+	if err != nil || result.Content.Text() != "Found 1 file\nfile.go" {
+		t.Fatalf("result = %q, %v", result.Content.Text(), err)
 	}
 }
 
 func TestGrepRootIgnoreRulesCanReincludeFiles(t *testing.T) {
 	root := grepReviewRoot(t, map[string]string{".gitignore": "*\n!keep\n", "keep": "needle", "ignored": "needle"})
 	result, err := GrepTool(root).Execute(t.Context(), map[string]any{"pattern": "needle"})
-	if err != nil || !strings.Contains(result.Content, "keep") || strings.Contains(result.Content, "ignored") {
-		t.Fatalf("result = %q, %v", result.Content, err)
+	if err != nil || !strings.Contains(result.Content.Text(), "keep") || strings.Contains(result.Content.Text(), "ignored") {
+		t.Fatalf("result = %q, %v", result.Content.Text(), err)
 	}
 }
 
 func TestGrepIgnoreRuleWithLeadingSpaceIsNotAComment(t *testing.T) {
 	root := grepReviewRoot(t, map[string]string{".gitignore": " #literal\n", " #literal": "needle"})
 	result, err := GrepTool(root).Execute(t.Context(), map[string]any{"pattern": "needle"})
-	if err != nil || result.Content != "No files found" {
-		t.Fatalf("result = %q, %v", result.Content, err)
+	if err != nil || result.Content.Text() != "No files found" {
+		t.Fatalf("result = %q, %v", result.Content.Text(), err)
 	}
 }
 
@@ -168,11 +168,11 @@ func TestGrepBytePaginationHasNoGaps(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(result.Content) > tool.MaxGrepResultBytes {
-			t.Fatalf("output exceeds byte budget: %d", len(result.Content))
+		if len(result.Content.Text()) > tool.MaxGrepResultBytes {
+			t.Fatalf("output exceeds byte budget: %d", len(result.Content.Text()))
 		}
 		count := 0
-		for line := range strings.SplitSeq(result.Content, "\n") {
+		for line := range strings.SplitSeq(result.Content.Text(), "\n") {
 			if strings.HasPrefix(line, "file:") {
 				want := fmt.Sprintf("file:%d:needle %03d ", skip+count+1, skip+count)
 				if !strings.HasPrefix(line, want) {
@@ -188,8 +188,8 @@ func TestGrepBytePaginationHasNoGaps(t *testing.T) {
 		if skip == 150 {
 			return
 		}
-		if !strings.Contains(result.Content, fmt.Sprintf("continue with skip: %d", skip)) {
-			t.Fatalf("missing next page: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), fmt.Sprintf("continue with skip: %d", skip)) {
+			t.Fatalf("missing next page: %s", result.Content.Text())
 		}
 	}
 	t.Fatalf("did not retrieve all entries: %d", skip)
@@ -210,10 +210,10 @@ func TestGrepContextPaginationMatchesFullOutput(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Content == "No matches found" {
+		if result.Content.Text() == "No matches found" {
 			break
 		}
-		body, _, _ := strings.Cut(result.Content, "\n\n[")
+		body, _, _ := strings.Cut(result.Content.Text(), "\n\n[")
 		entries := strings.Split(body, "\n")
 		if len(entries) > 2 {
 			t.Fatalf("context exceeded entry limit: %q", body)
@@ -221,8 +221,8 @@ func TestGrepContextPaginationMatchesFullOutput(t *testing.T) {
 		collected = append(collected, entries...)
 		skip += len(entries)
 	}
-	if got := strings.Join(collected, "\n"); got != full.Content {
-		t.Fatalf("pagination = %q, want %q", got, full.Content)
+	if got := strings.Join(collected, "\n"); got != full.Content.Text() {
+		t.Fatalf("pagination = %q, want %q", got, full.Content.Text())
 	}
 }
 
@@ -241,8 +241,8 @@ func TestGrepMultilinePreservesInput(t *testing.T) {
 				}()
 				root := grepReviewRoot(t, map[string]string{"file": tc.data})
 				result, err := GrepTool(root).Execute(t.Context(), map[string]any{"path": "file", "pattern": tc.pattern, "multiline": true, "output_mode": mode})
-				if err != nil || !strings.Contains(result.Content, "file") || strings.HasPrefix(result.Content, "No ") {
-					t.Fatalf("result = %q, %v", result.Content, err)
+				if err != nil || !strings.Contains(result.Content.Text(), "file") || strings.HasPrefix(result.Content.Text(), "No ") {
+					t.Fatalf("result = %q, %v", result.Content.Text(), err)
 				}
 			})
 		}
@@ -307,8 +307,8 @@ func TestGrepLargeNumericOptionsDoNotOverflow(t *testing.T) {
 			}()
 			tc.args["pattern"] = "needle"
 			result, err := GrepTool(root).Execute(t.Context(), tc.args)
-			if err != nil || result.Content == "" || strings.HasPrefix(result.Content, "No ") {
-				t.Fatalf("result = %q, %v", result.Content, err)
+			if err != nil || result.Content.Text() == "" || strings.HasPrefix(result.Content.Text(), "No ") {
+				t.Fatalf("result = %q, %v", result.Content.Text(), err)
 			}
 		})
 	}
@@ -317,16 +317,16 @@ func TestGrepLargeNumericOptionsDoNotOverflow(t *testing.T) {
 func TestGrepTruncatesUTF8AtCharacterBoundaries(t *testing.T) {
 	root := grepReviewRoot(t, map[string]string{"file": "needle" + strings.Repeat("x", 490) + "é" + strings.Repeat("z", 20)})
 	result, err := GrepTool(root).Execute(t.Context(), map[string]any{"pattern": "needle", "output_mode": "content"})
-	if err != nil || !utf8.ValidString(result.Content) {
-		t.Fatalf("invalid UTF-8 output: %q, %v", result.Content, err)
+	if err != nil || !utf8.ValidString(result.Content.Text()) {
+		t.Fatalf("invalid UTF-8 output: %q, %v", result.Content.Text(), err)
 	}
 }
 
 func TestGrepSniffsTheFullBinaryWindow(t *testing.T) {
 	root := grepReviewRoot(t, map[string]string{"file": strings.Repeat("x", 6000) + "\x00needle"})
 	result, err := GrepTool(root).Execute(t.Context(), map[string]any{"pattern": "needle"})
-	if err != nil || result.Content != "No files found" {
-		t.Fatalf("binary search = %q, %v", result.Content, err)
+	if err != nil || result.Content.Text() != "No files found" {
+		t.Fatalf("binary search = %q, %v", result.Content.Text(), err)
 	}
 }
 
@@ -337,11 +337,11 @@ func TestGrepCombinesBraceAndCommaGlobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"a.go", "b.ts", "c.md"} {
-		if !strings.Contains(result.Content, want) {
-			t.Errorf("missing %s in %q", want, result.Content)
+		if !strings.Contains(result.Content.Text(), want) {
+			t.Errorf("missing %s in %q", want, result.Content.Text())
 		}
 	}
-	if strings.Contains(result.Content, "d.txt") {
-		t.Fatalf("unexpected match: %q", result.Content)
+	if strings.Contains(result.Content.Text(), "d.txt") {
+		t.Fatalf("unexpected match: %q", result.Content.Text())
 	}
 }

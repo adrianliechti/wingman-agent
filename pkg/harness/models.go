@@ -22,6 +22,11 @@ const (
 	PhaseFinalAnswer   MessagePhase = "final_answer"
 )
 
+type ContextSection struct {
+	Title   string `json:"title"`
+	Content string `json:"content"`
+}
+
 type Message struct {
 	InputID string      `json:"input_id,omitempty"`
 	Role    MessageRole `json:"role"`
@@ -32,6 +37,10 @@ type Message struct {
 
 	Content []Content `json:"content"`
 	Hidden  bool      `json:"hidden,omitempty"`
+
+	// ContextSections records the complete effective session-context sections at
+	// this snapshot or delta so later updates and compaction remain lossless.
+	ContextSections []ContextSection `json:"context_sections,omitempty"`
 }
 
 type Content struct {
@@ -117,7 +126,7 @@ type ToolResult struct {
 	Locations    []ToolLocation    `json:"locations,omitempty"`
 	Presentation *ToolPresentation `json:"presentation,omitempty"`
 
-	Content  string         `json:"content,omitempty"`
+	Content  tool.Content   `json:"content,omitempty"`
 	IsError  bool           `json:"is_error,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
 }

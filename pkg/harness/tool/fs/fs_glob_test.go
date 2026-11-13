@@ -40,16 +40,16 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "main.go") {
-			t.Errorf("expected main.go, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "main.go") {
+			t.Errorf("expected main.go, got: %s", result.Content.Text())
 		}
 
-		if !strings.Contains(result.Content, "app.go") {
-			t.Errorf("expected app.go, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "app.go") {
+			t.Errorf("expected app.go, got: %s", result.Content.Text())
 		}
 
-		if !strings.Contains(result.Content, "util.go") {
-			t.Errorf("expected util.go, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "util.go") {
+			t.Errorf("expected util.go, got: %s", result.Content.Text())
 		}
 	})
 
@@ -62,8 +62,8 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "node_modules") {
-			t.Errorf("expected node_modules like reference Glob, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "node_modules") {
+			t.Errorf("expected node_modules like reference Glob, got: %s", result.Content.Text())
 		}
 	})
 
@@ -76,12 +76,12 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "debug.log") {
-			t.Errorf("expected gitignored file in result, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "debug.log") {
+			t.Errorf("expected gitignored file in result, got: %s", result.Content.Text())
 		}
 
-		if !strings.Contains(result.Content, ".hidden.go") {
-			t.Errorf("expected hidden file in result, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), ".hidden.go") {
+			t.Errorf("expected hidden file in result, got: %s", result.Content.Text())
 		}
 	})
 
@@ -95,16 +95,16 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if strings.Contains(result.Content, "main.go") {
-			t.Errorf("should not include files outside src, got: %s", result.Content)
+		if strings.Contains(result.Content.Text(), "main.go") {
+			t.Errorf("should not include files outside src, got: %s", result.Content.Text())
 		}
 
-		if !strings.Contains(result.Content, filepath.Join("src", "app.go")) {
-			t.Errorf("expected app.go, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), filepath.Join("src", "app.go")) {
+			t.Errorf("expected app.go, got: %s", result.Content.Text())
 		}
 
-		if !strings.Contains(result.Content, filepath.Join("src", "pkg", "util.go")) {
-			t.Errorf("pattern without slash should match recursively under path, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), filepath.Join("src", "pkg", "util.go")) {
+			t.Errorf("pattern without slash should match recursively under path, got: %s", result.Content.Text())
 		}
 	})
 
@@ -118,11 +118,11 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, filepath.Join("src", "pkg", "util.go")) {
-			t.Errorf("expected workspace-relative path, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), filepath.Join("src", "pkg", "util.go")) {
+			t.Errorf("expected workspace-relative path, got: %s", result.Content.Text())
 		}
-		if strings.Contains(result.Content, "\nutil.go") || result.Content == "util.go" {
-			t.Errorf("did not expect path-relative-only result, got: %s", result.Content)
+		if strings.Contains(result.Content.Text(), "\nutil.go") || result.Content.Text() == "util.go" {
+			t.Errorf("did not expect path-relative-only result, got: %s", result.Content.Text())
 		}
 	})
 
@@ -135,8 +135,8 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "No files found") {
-			t.Errorf("expected 'No files found', got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "No files found") {
+			t.Errorf("expected 'No files found', got: %s", result.Content.Text())
 		}
 	})
 
@@ -158,20 +158,20 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "WorkspaceSelector.tsx") {
-			t.Errorf("expected WorkspaceSelector.tsx, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "WorkspaceSelector.tsx") {
+			t.Errorf("expected WorkspaceSelector.tsx, got: %s", result.Content.Text())
 		}
 
-		if !strings.Contains(result.Content, "workspace_selector.tsx") {
-			t.Errorf("expected workspace_selector.tsx, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "workspace_selector.tsx") {
+			t.Errorf("expected workspace_selector.tsx, got: %s", result.Content.Text())
 		}
 
-		if strings.Contains(result.Content, "Workspace.tsx") && !strings.Contains(result.Content, "WorkspaceSelector.tsx") {
-			t.Errorf("Workspace.tsx alone should not match pattern requiring elector, got: %s", result.Content)
+		if strings.Contains(result.Content.Text(), "Workspace.tsx") && !strings.Contains(result.Content.Text(), "WorkspaceSelector.tsx") {
+			t.Errorf("Workspace.tsx alone should not match pattern requiring elector, got: %s", result.Content.Text())
 		}
 
-		if strings.Contains(result.Content, "\nSelector.tsx") || strings.HasPrefix(result.Content, "Selector.tsx") {
-			t.Errorf("Selector.tsx should not match pattern requiring orkspace, got: %s", result.Content)
+		if strings.Contains(result.Content.Text(), "\nSelector.tsx") || strings.HasPrefix(result.Content.Text(), "Selector.tsx") {
+			t.Errorf("Selector.tsx should not match pattern requiring orkspace, got: %s", result.Content.Text())
 		}
 	})
 
@@ -189,8 +189,8 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "No files found") {
-			t.Errorf("expected case-sensitive miss, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "No files found") {
+			t.Errorf("expected case-sensitive miss, got: %s", result.Content.Text())
 		}
 
 		result, err = GlobTool(newRoot).Execute(context.Background(), map[string]any{
@@ -201,8 +201,8 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "WorkspaceSelector.tsx") {
-			t.Errorf("expected match on exact case, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "WorkspaceSelector.tsx") {
+			t.Errorf("expected match on exact case, got: %s", result.Content.Text())
 		}
 	})
 
@@ -226,12 +226,12 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "main.go") {
-			t.Errorf("expected main.go, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "main.go") {
+			t.Errorf("expected main.go, got: %s", result.Content.Text())
 		}
 
-		if !strings.Contains(result.Content, "app.go") {
-			t.Errorf("expected app.go, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "app.go") {
+			t.Errorf("expected app.go, got: %s", result.Content.Text())
 		}
 	})
 
@@ -245,12 +245,12 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if strings.Contains(result.Content, "main.go") || strings.Contains(result.Content, "node_modules") {
-			t.Errorf("absolute pattern should override path, got: %s", result.Content)
+		if strings.Contains(result.Content.Text(), "main.go") || strings.Contains(result.Content.Text(), "node_modules") {
+			t.Errorf("absolute pattern should override path, got: %s", result.Content.Text())
 		}
 
-		if !strings.Contains(result.Content, "app.go") {
-			t.Errorf("expected app.go, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "app.go") {
+			t.Errorf("expected app.go, got: %s", result.Content.Text())
 		}
 	})
 
@@ -272,14 +272,14 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, filepath.Join("src", "main.txt")) {
-			t.Errorf("expected src/main.txt in results, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), filepath.Join("src", "main.txt")) {
+			t.Errorf("expected src/main.txt in results, got: %s", result.Content.Text())
 		}
-		if strings.Contains(result.Content, ".git") {
-			t.Errorf(".git contents must be skipped, got: %s", result.Content)
+		if strings.Contains(result.Content.Text(), ".git") {
+			t.Errorf(".git contents must be skipped, got: %s", result.Content.Text())
 		}
-		if strings.Contains(result.Content, ".svn") {
-			t.Errorf(".svn contents must be skipped, got: %s", result.Content)
+		if strings.Contains(result.Content.Text(), ".svn") {
+			t.Errorf(".svn contents must be skipped, got: %s", result.Content.Text())
 		}
 	})
 
@@ -334,12 +334,12 @@ func TestGlobTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		want := filepath.Join(outside, "note.md")
-		if !strings.Contains(result.Content, want) {
-			t.Errorf("expected %s in result, got: %s", want, result.Content)
+		if !strings.Contains(result.Content.Text(), want) {
+			t.Errorf("expected %s in result, got: %s", want, result.Content.Text())
 		}
 		wantInner := filepath.Join(outside, "sub", "inner.md")
-		if !strings.Contains(result.Content, wantInner) {
-			t.Errorf("expected %s in result, got: %s", wantInner, result.Content)
+		if !strings.Contains(result.Content.Text(), wantInner) {
+			t.Errorf("expected %s in result, got: %s", wantInner, result.Content.Text())
 		}
 
 		_, err = toolWithRoot.Execute(context.Background(), map[string]any{
@@ -372,15 +372,15 @@ func TestGlobTool(t *testing.T) {
 		}
 
 		for _, want := range []string{"f119.tmp", "f118.tmp", "f117.tmp"} {
-			if !strings.Contains(result.Content, want) {
-				t.Errorf("expected newest file %s in result, got: %s", want, result.Content)
+			if !strings.Contains(result.Content.Text(), want) {
+				t.Errorf("expected newest file %s in result, got: %s", want, result.Content.Text())
 			}
 		}
-		if strings.Contains(result.Content, "f000.tmp") || strings.Contains(result.Content, "f001.tmp") {
-			t.Errorf("oldest files leaked in despite limit, got: %s", result.Content)
+		if strings.Contains(result.Content.Text(), "f000.tmp") || strings.Contains(result.Content.Text(), "f001.tmp") {
+			t.Errorf("oldest files leaked in despite limit, got: %s", result.Content.Text())
 		}
-		if !strings.Contains(result.Content, "(Results are truncated. Consider using a more specific path or pattern.)") {
-			t.Errorf("expected truncation notice, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "(Results are truncated. Consider using a more specific path or pattern.)") {
+			t.Errorf("expected truncation notice, got: %s", result.Content.Text())
 		}
 	})
 }
@@ -412,8 +412,8 @@ func TestGlobSkipsSymlinks(t *testing.T) {
 		t.Fatalf("glob should not fail with symlinks: %v", err)
 	}
 
-	if !strings.Contains(result.Content, "root.txt") && !strings.Contains(result.Content, "file.txt") {
-		t.Errorf("expected txt files in results, got: %s", result.Content)
+	if !strings.Contains(result.Content.Text(), "root.txt") && !strings.Contains(result.Content.Text(), "file.txt") {
+		t.Errorf("expected txt files in results, got: %s", result.Content.Text())
 	}
 }
 

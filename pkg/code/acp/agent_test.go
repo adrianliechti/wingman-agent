@@ -422,7 +422,7 @@ func TestTranslateUpdateRetainsStartDiffForStatusOnlyCompletion(t *testing.T) {
 	if !ok || len(result.Content) != 1 || result.Content[0].ToolResult == nil {
 		t.Fatalf("translated result = %+v, ok=%v", result, ok)
 	}
-	if body := result.Content[0].ToolResult.Content; !strings.Contains(body, "-before") || !strings.Contains(body, "+after") {
+	if body := result.Content[0].ToolResult.Content.Text(); !strings.Contains(body, "-before") || !strings.Contains(body, "+after") {
 		t.Fatalf("retained diff = %q", body)
 	}
 }

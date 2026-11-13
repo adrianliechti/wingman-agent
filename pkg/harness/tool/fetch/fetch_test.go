@@ -17,7 +17,7 @@ func fetchTool(t *testing.T) func(map[string]any) (string, error) {
 	tl := Tools(nil)[0]
 	return func(args map[string]any) (string, error) {
 		result, err := tl.Execute(t.Context(), args)
-		return result.Content, err
+		return result.Content.Text(), err
 	}
 }
 
@@ -163,8 +163,8 @@ func TestFetchHostApprovalGate(t *testing.T) {
 	}
 
 	allow = true
-	if result, err := tl.Execute(t.Context(), map[string]any{"url": server.URL}); err != nil || result.Content != "ok" {
-		t.Fatalf("approved fetch = %q, %v", result.Content, err)
+	if result, err := tl.Execute(t.Context(), map[string]any{"url": server.URL}); err != nil || result.Content.Text() != "ok" {
+		t.Fatalf("approved fetch = %q, %v", result.Content.Text(), err)
 	}
 	if _, err := tl.Execute(t.Context(), map[string]any{"url": server.URL + "/again"}); err != nil {
 		t.Fatalf("remembered approval fetch err = %v", err)

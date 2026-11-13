@@ -28,8 +28,8 @@ func TestReadToolReadsDocumentAsMarkdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Content, "1\tAlpha") || !strings.Contains(result.Content, "3\tBeta") {
-		t.Fatalf("content = %q", result.Content)
+	if !strings.Contains(result.Content.Text(), "1\tAlpha") || !strings.Contains(result.Content.Text(), "3\tBeta") {
+		t.Fatalf("content = %q", result.Content.Text())
 	}
 	if result.Metadata["format"] != "docx" || result.Metadata["file_path"] != "report.docx" {
 		t.Fatalf("metadata = %#v", result.Metadata)
@@ -46,8 +46,8 @@ func TestReadToolReadsDocumentAsMarkdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(window.Content, "3\tBeta") || strings.Contains(window.Content, "Alpha") {
-		t.Fatalf("window = %q", window.Content)
+	if !strings.HasPrefix(window.Content.Text(), "3\tBeta") || strings.Contains(window.Content.Text(), "Alpha") {
+		t.Fatalf("window = %q", window.Content.Text())
 	}
 }
 
@@ -73,7 +73,7 @@ func TestReadToolKeepsEmbeddedPDFSignaturesAsText(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(result.Content, tc.want) || result.Metadata["format"] != nil {
+			if !strings.Contains(result.Content.Text(), tc.want) || result.Metadata["format"] != nil {
 				t.Fatalf("read text = %+v", result)
 			}
 		})
@@ -102,8 +102,8 @@ func TestReadToolReadsPDFAsMarkdown(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(result.Content, "1\tPDF report text") {
-				t.Fatalf("content = %q", result.Content)
+			if !strings.Contains(result.Content.Text(), "1\tPDF report text") {
+				t.Fatalf("content = %q", result.Content.Text())
 			}
 			if result.Metadata["format"] != "pdf" {
 				t.Fatalf("metadata = %#v", result.Metadata)
@@ -123,7 +123,7 @@ func TestReadToolSniffsDocumentsBeforeTextSizeThreshold(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := readTool(root, nil, 1).Execute(t.Context(), map[string]any{"file_path": "report"})
-	if err != nil || result.Metadata["format"] != "pdf" || !strings.Contains(result.Content, "PDF report text") {
+	if err != nil || result.Metadata["format"] != "pdf" || !strings.Contains(result.Content.Text(), "PDF report text") {
 		t.Fatalf("document read = %+v, err = %v", result, err)
 	}
 }
@@ -159,8 +159,8 @@ func TestReadToolReadsRTFAsMarkdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Content, "1\tRTF report") || !strings.Contains(result.Content, "2\tSecond line") {
-		t.Fatalf("content = %q", result.Content)
+	if !strings.Contains(result.Content.Text(), "1\tRTF report") || !strings.Contains(result.Content.Text(), "2\tSecond line") {
+		t.Fatalf("content = %q", result.Content.Text())
 	}
 	if result.Metadata["format"] != "rtf" {
 		t.Fatalf("metadata = %#v", result.Metadata)
@@ -181,8 +181,8 @@ func TestReadToolReadsOfficeTemplateAsMarkdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Content, "1\tTemplate text") {
-		t.Fatalf("content = %q", result.Content)
+	if !strings.Contains(result.Content.Text(), "1\tTemplate text") {
+		t.Fatalf("content = %q", result.Content.Text())
 	}
 	if result.Metadata["format"] != "docx" || result.Metadata["media_type"] != "application/vnd.openxmlformats-officedocument.wordprocessingml.template" {
 		t.Fatalf("metadata = %#v", result.Metadata)
@@ -203,11 +203,11 @@ func TestReadToolCapsDocumentOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Content, "48KB cap reached") {
-		t.Fatalf("result was not capped: %d bytes", len(result.Content))
+	if !strings.Contains(result.Content.Text(), "48KB cap reached") {
+		t.Fatalf("result was not capped: %d bytes", len(result.Content.Text()))
 	}
-	if len(result.Content) > DefaultMaxBytes+256 {
-		t.Fatalf("capped result is unexpectedly large: %d bytes", len(result.Content))
+	if len(result.Content.Text()) > DefaultMaxBytes+256 {
+		t.Fatalf("capped result is unexpectedly large: %d bytes", len(result.Content.Text()))
 	}
 }
 

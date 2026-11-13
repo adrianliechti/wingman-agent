@@ -126,14 +126,20 @@ func TestSharedPromptReferencesRegisteredToolSchemas(t *testing.T) {
 		}
 	}
 
-	// Use the real question tool rather than a fixture that can retain an old name.
+	// Base instructions and tool schemas stay invariant across unattended/plan
+	// mode switches to preserve prompt-cache prefixes; active restrictions move
+	// to session context and tool execution guards.
+	baseBefore := s.instructions()
 	assertTools(t, a, id, nil, []string{"elicit"})
 	if err := a.SetUnattended(t.Context(), id, true); err != nil {
 		t.Fatal(err)
 	}
-	assertTools(t, a, id, []string{"elicit"}, []string{"read"})
-	if strings.Contains(s.instructions(), "`elicit`") {
-		t.Fatal("unattended prompt still advertises elicit")
+	assertTools(t, a, id, nil, []string{"elicit", "read"})
+	if s.instructions() != baseBefore {
+		t.Fatal("toggling unattended mutated cached base instructions")
+	}
+	if !strings.Contains(s.contextInstructions(), "# Unattended operation") {
+		t.Fatal("unattended session context missing unattended policy")
 	}
 }
 
@@ -157,13 +163,19 @@ func TestPromptGuidanceFollowsConfiguredTools(t *testing.T) {
 				t.Fatal(err)
 			}
 			s := a.session(id)
+			var baseline string
 			for _, unattended := range []bool{false, true} {
 				s.unattended.Store(unattended)
 				got := s.instructions()
+				if baseline == "" {
+					baseline = got
+				} else if got != baseline {
+					t.Error("unattended toggle invalidated base instructions cache prefix")
+				}
 				for name, want := range map[string]bool{
 					"exec": !tc.options.DisableShell, "exec_session": !tc.options.DisableShell,
 					"search_web": !tc.options.DisableWebSearch, "fetch": !tc.options.DisableWebFetch,
-					"elicit": !unattended, "agent": true,
+					"elicit": true, "agent": true,
 				} {
 					if strings.Contains(got, "`"+name+"`") != want {
 						t.Errorf("prompt guidance for %s does not match configuration (unattended=%v)", name, unattended)

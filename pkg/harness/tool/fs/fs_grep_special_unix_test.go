@@ -20,7 +20,7 @@ func TestGrepRejectsExplicitPipesAndSkipsThemDuringTraversal(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 	result, err := GrepTool(root).Execute(t.Context(), map[string]any{"pattern": "needle"})
-	if err != nil || result.Content != "Found 1 file\nfile" {
-		t.Fatalf("result = %q, %v", result.Content, err)
+	if err != nil || result.Content.Text() != "Found 1 file\nfile" {
+		t.Fatalf("result = %q, %v", result.Content.Text(), err)
 	}
 }

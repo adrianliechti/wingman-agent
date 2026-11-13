@@ -432,7 +432,7 @@ func TestCompactionKeepsRecentWindowVerbatim(t *testing.T) {
 	got := a.requestMessages()
 	text := func(i int) string { return contentText(got[i].Content) }
 	if len(got) != 8 || text(0) != "original task" || !isCompactionSummary(got[1]) || text(2) != "next step: verify" ||
-		got[3].Content[0].ToolCall == nil || got[4].Content[0].ToolResult == nil || got[4].Content[0].ToolResult.Content != observed ||
+		got[3].Content[0].ToolCall == nil || got[4].Content[0].ToolResult == nil || got[4].Content[0].ToolResult.Content.Text() != observed ||
 		text(5) != "recent progress" || text(6) != "continue" || got[7].Role != RoleAssistant {
 		for i := range got {
 			t.Logf("%d %s hidden=%t %q", i, got[i].Role, got[i].Hidden, strings.Repeat(" ", 0)+summarizeForLog(got[i]))

@@ -686,10 +686,15 @@ func convertMessages(messages []harness.Message) []ConversationMessage {
 					Kind:      display.kind,
 					Args:      display.args,
 					Locations: display.locations,
-					Content:   c.ToolResult.Content,
+					Content:   c.ToolResult.Content.Text(),
 				}
 			}
 			cm.Content = append(cm.Content, cc)
+			if c.ToolResult != nil {
+				for _, url := range c.ToolResult.Content.ImageURLs() {
+					cm.Content = append(cm.Content, ConversationContent{Image: &ConversationImage{Data: url}})
+				}
+			}
 		}
 		result = append(result, cm)
 	}

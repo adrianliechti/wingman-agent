@@ -3,7 +3,6 @@ package tool
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"image"
@@ -12,7 +11,6 @@ import (
 	"image/png"
 	"io"
 	"net/http"
-	"strings"
 
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/webp" // Register WebP decoding for image resizing.
@@ -52,7 +50,7 @@ func ImageMIME(data []byte) string {
 	return ""
 }
 
-// ReadImage bounds source reads and returns an image data URL. Images that fit
+// ReadImage bounds source reads and returns a typed image block. Images that fit
 // the attachment limits retain their bytes (including animation). Larger images
 // become a PNG, preserving transparency and aspect ratio. GIF resizing uses the
 // first frame; animated WebP must already fit the attachment limits.
@@ -130,7 +128,7 @@ func ReadImage(ctx context.Context, source io.Reader) (Result, error) {
 		return Result{}, err
 	}
 	return Result{
-		Content: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data),
+		Content: Content{{Image: &ImageContent{MIMEType: mime, Data: data}}},
 		Metadata: map[string]any{
 			"media_type": mime, "width": width, "height": height,
 			"original_width": originalWidth, "original_height": originalHeight,
@@ -142,30 +140,8 @@ func ReadImage(ctx context.Context, source io.Reader) (Result, error) {
 // safe to send as an input image: declared type matches the decoded bytes, so
 // a tool echoing an arbitrary data:-prefixed string cannot poison the request.
 func IsImageResult(s string) bool {
-	if len(s) > MaxImageResultBytes || strings.ContainsAny(s, " \t\r\n") {
-		return false
-	}
-
-	rest, ok := strings.CutPrefix(s, "data:")
-	if !ok {
-		return false
-	}
-
-	mime, encoded, ok := strings.Cut(rest, ";base64,")
-	if !ok || !imageResultMimes[mime] || encoded == "" {
-		return false
-	}
-
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || len(decoded) > MaxImageBytes {
-		return false
-	}
-
-	if http.DetectContentType(decoded) != mime {
-		return false
-	}
-	width, height, err := ImageDimensions(decoded, mime)
-	return err == nil && width <= MaxImageDimension && height <= MaxImageDimension
+	_, ok := ParseImageDataURL(s)
+	return ok
 }
 
 // ImageDimensions reads image dimensions without decoding the full bitmap.

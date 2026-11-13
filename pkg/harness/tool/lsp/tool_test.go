@@ -162,8 +162,8 @@ func TestLSPToolResolvesSymbolOnLine(t *testing.T) {
 		"line":      1,
 		"symbol":    "main",
 	})
-	if err != nil || !strings.Contains(result.Content, "Tree-sitter fallback (no language server for this file)") {
-		t.Fatalf("expected symbol to resolve and fall back to tree-sitter, got: %q %v", result.Content, err)
+	if err != nil || !strings.Contains(result.Content.Text(), "Tree-sitter fallback (no language server for this file)") {
+		t.Fatalf("expected symbol to resolve and fall back to tree-sitter, got: %q %v", result.Content.Text(), err)
 	}
 }
 

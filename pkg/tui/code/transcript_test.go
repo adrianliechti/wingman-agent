@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
@@ -14,7 +15,7 @@ func TestTranscriptInspectorSearchAndExpansion(t *testing.T) {
 	messages := []harness.Message{
 		{Role: harness.RoleUser, Content: []harness.Content{{Text: "find the needle"}}},
 		{Role: harness.RoleAssistant, Content: []harness.Content{
-			{ToolResult: &harness.ToolResult{ID: "tool-1", Name: "read", Args: `{"path":"file.go"}`, Content: "one\ntwo\nthree\nfour\nfive"}},
+			{ToolResult: &harness.ToolResult{ID: "tool-1", Name: "read", Args: `{"path":"file.go"}`, Content: tool.TextContent("one\ntwo\nthree\nfour\nfive")}},
 			{Reasoning: &harness.Reasoning{ID: "reason-1", Summary: "checking the needle carefully"}},
 			{Text: "done"},
 		}},
@@ -118,7 +119,7 @@ func TestTranscriptTallEntryLineScroll(t *testing.T) {
 	messages := []harness.Message{
 		{Role: harness.RoleUser, Content: []harness.Content{{Text: "run it"}}},
 		{Role: harness.RoleAssistant, Content: []harness.Content{
-			{ToolResult: &harness.ToolResult{ID: "tool-1", Name: "shell", Args: `{"command":"seq 60"}`, Content: output}},
+			{ToolResult: &harness.ToolResult{ID: "tool-1", Name: "shell", Args: `{"command":"seq 60"}`, Content: tool.TextContent(output)}},
 			{Text: "done"},
 		}},
 	}

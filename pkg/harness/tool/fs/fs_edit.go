@@ -17,15 +17,84 @@ type editOp struct {
 	oldText    string
 	newText    string
 	replaceAll bool
+	hasEdit    bool
+	deleteFile bool
+	moveTo     string
 }
 
 func newEditOp(entry map[string]any) (editOp, error) {
-	oldText, ok := entry["old_string"].(string)
+	// Models routinely fill optional fields with null, false, or "". Those all
+	// mean "not set"; only a meaningful value selects a delete or a move.
+	field := func(key string) (any, bool) {
+		value, exists := entry[key]
+		return value, exists && value != nil
+	}
+	blank := func(value any, present bool) bool {
+		text, isText := value.(string)
+		return !present || (isText && text == "")
+	}
+
+	deleteFile := false
+	if value, exists := field("delete"); exists {
+		var ok bool
+		deleteFile, ok = value.(bool)
+		if !ok {
+			return editOp{}, fmt.Errorf("delete must be a boolean")
+		}
+	}
+
+	moveTo := ""
+	if value, exists := field("move_to"); exists {
+		text, ok := value.(string)
+		if !ok {
+			return editOp{}, fmt.Errorf("move_to must be a string")
+		}
+		moveTo = strings.TrimSpace(text)
+	}
+
+	oldVal, hasOld := field("old_string")
+	newVal, hasNew := field("new_string")
+
+	replaceAll := false
+	if value, exists := field("replace_all"); exists {
+		var ok bool
+		replaceAll, ok = value.(bool)
+		if !ok {
+			return editOp{}, fmt.Errorf("replace_all must be a boolean")
+		}
+	}
+
+	if deleteFile {
+		if moveTo != "" {
+			return editOp{}, fmt.Errorf("delete cannot be combined with move_to")
+		}
+		if replaceAll {
+			return editOp{}, fmt.Errorf("delete cannot be combined with replace_all")
+		}
+		if !blank(oldVal, hasOld) {
+			return editOp{}, fmt.Errorf("delete cannot be combined with old_string")
+		}
+		if !blank(newVal, hasNew) {
+			return editOp{}, fmt.Errorf("delete cannot be combined with new_string")
+		}
+		return editOp{deleteFile: true}, nil
+	}
+
+	// A move without replacement text relocates the file unchanged, whether the
+	// text fields were omitted or sent empty.
+	if moveTo != "" && blank(oldVal, hasOld) && blank(newVal, hasNew) {
+		if replaceAll {
+			return editOp{}, fmt.Errorf("replace_all requires old_string and new_string")
+		}
+		return editOp{moveTo: moveTo}, nil
+	}
+
+	oldText, ok := oldVal.(string)
 	if !ok {
 		return editOp{}, fmt.Errorf("old_string is required")
 	}
 
-	newText, ok := entry["new_string"].(string)
+	newText, ok := newVal.(string)
 	if !ok {
 		return editOp{}, fmt.Errorf("new_string is required")
 	}
@@ -37,19 +106,12 @@ func newEditOp(entry map[string]any) (editOp, error) {
 		return editOp{}, fmt.Errorf("old_string and new_string are identical")
 	}
 
-	replaceAll := false
-	if value, exists := entry["replace_all"]; exists {
-		var ok bool
-		replaceAll, ok = value.(bool)
-		if !ok {
-			return editOp{}, fmt.Errorf("replace_all must be a boolean")
-		}
-	}
-
 	return editOp{
 		oldText:    normalizeToLF(oldText),
 		newText:    normalizeToLF(newText),
 		replaceAll: replaceAll,
+		hasEdit:    true,
+		moveTo:     moveTo,
 	}, nil
 }
 

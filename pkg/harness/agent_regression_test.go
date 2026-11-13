@@ -40,7 +40,7 @@ func TestCompletedEditMetadataSurvivesPostToolFailure(t *testing.T) {
 		return hook.Outcome{}, errors.New("hook failed")
 	}}}}}
 	result := a.runSingleToolCall(t.Context(), ToolCall{Name: "edit"}, []tool.Tool{{Name: "edit", Execute: func(context.Context, map[string]any) (tool.Result, error) {
-		return tool.Result{Content: "edited", Metadata: map[string]any{tool.FileChangesMetadata: []tool.FileChange{{Path: "file", Before: "user", After: "agent"}}}}, nil
+		return tool.Result{Content: tool.TextContent("edited"), Metadata: map[string]any{tool.FileChangesMetadata: []tool.FileChange{{Path: "file", Before: "user", After: "agent"}}}}, nil
 	}}})
 	changes, err := tool.ResultFileChanges(result.Metadata)
 	if !result.IsError || err != nil || len(changes) != 1 || changes[0].Before != "user" {

@@ -75,7 +75,7 @@ func TestReviewAgentPartialFailureRemainsFailure(t *testing.T) {
 				if err == nil && !out.IsError {
 					t.Fatalf("partial failure returned success: %#v", out)
 				}
-				if !strings.Contains(out.Content, "partial report") || !strings.Contains(out.Content, registry.List()[0].ID) {
+				if !strings.Contains(out.Content.Text(), "partial report") || !strings.Contains(out.Content.Text(), registry.List()[0].ID) {
 					t.Fatalf("failure lost output or follow-up id: %#v, %v", out, err)
 				}
 			}

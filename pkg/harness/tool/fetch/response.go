@@ -95,7 +95,7 @@ func readResponse(ctx context.Context, resp *http.Response) (tool.Result, error)
 		content += "\n\n" + warning
 	}
 	metadata["truncated"] = bodyTruncated || outputTruncated
-	return tool.Result{Content: content, Metadata: metadata}, nil
+	return tool.Result{Content: tool.TextContent(content), Metadata: metadata}, nil
 }
 
 func decodeFetchedText(body []byte, contentType string, truncated bool) (string, error) {

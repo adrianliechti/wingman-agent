@@ -3,6 +3,8 @@ package harness
 import (
 	"strings"
 	"testing"
+
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 func trimTestAgent(messages []Message) *Agent {
@@ -12,7 +14,7 @@ func trimTestAgent(messages []Message) *Agent {
 func toolExchange(id, result string) []Message {
 	return []Message{
 		{Role: RoleAssistant, Content: []Content{{ToolCall: &ToolCall{ID: id, Name: "read"}}}},
-		{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{ID: id, Name: "read", Content: result}}}},
+		{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{ID: id, Name: "read", Content: tool.TextContent(result)}}}},
 	}
 }
 
@@ -44,9 +46,9 @@ func TestTrimStaleToolResults(t *testing.T) {
 			if c.ToolResult == nil {
 				continue
 			}
-			if strings.Contains(c.ToolResult.Content, "trimmed to reclaim context") {
+			if strings.Contains(c.ToolResult.Content.Text(), "trimmed to reclaim context") {
 				trimmed++
-			} else if len(c.ToolResult.Content) == len(big) {
+			} else if len(c.ToolResult.Content.Text()) == len(big) {
 				intact++
 			}
 		}
@@ -59,14 +61,14 @@ func TestTrimStaleToolResults(t *testing.T) {
 	}
 
 	last := context[len(context)-1]
-	if got := last.Content[0].ToolResult.Content; len(got) != len(big) {
+	if got := last.Content[0].ToolResult.Content.Text(); len(got) != len(big) {
 		t.Fatalf("newest tool result was trimmed (len %d)", len(got))
 	}
 
 	if freed, err := a.compressContext(0); err != nil || freed != 0 {
 		t.Fatal("second trim should be a no-op")
 	}
-	if strings.Contains(a.Messages[2].Content[0].ToolResult.Content, "trimmed to reclaim context") {
+	if strings.Contains(a.Messages[2].Content[0].ToolResult.Content.Text(), "trimmed to reclaim context") {
 		t.Fatal("trimming model context must not rewrite canonical history")
 	}
 }
@@ -76,7 +78,7 @@ func TestTrimStaleToolResultsDropsImages(t *testing.T) {
 
 	var messages []Message
 	messages = append(messages, Message{Role: RoleAssistant, Content: []Content{
-		{ToolResult: &ToolResult{ID: "img", Name: "view_image", Content: "[image attached below]"}},
+		{ToolResult: &ToolResult{ID: "img", Name: "view_image", Content: tool.TextContent("[image attached below]")}},
 		{File: &File{Data: strings.Repeat("A", 64*1024)}},
 	}})
 	for range 20 {
@@ -94,15 +96,15 @@ func TestTrimStaleToolResultsDropsImages(t *testing.T) {
 			t.Fatal("old image data must be dropped")
 		}
 	}
-	if !strings.Contains(first.Content[0].ToolResult.Content, "image result trimmed") {
-		t.Fatalf("image tool result = %q", first.Content[0].ToolResult.Content)
+	if !strings.Contains(first.Content[0].ToolResult.Content.Text(), "image result trimmed") {
+		t.Fatalf("image tool result = %q", first.Content[0].ToolResult.Content.Text())
 	}
 }
 
 func TestTrimStaleToolResultsCheckpointsEmptyImage(t *testing.T) {
 	var messages []Message
 	messages = append(messages, Message{Role: RoleAssistant, Content: []Content{
-		{ToolResult: &ToolResult{ID: "img", Name: "view_image", Content: "[image attached below]"}},
+		{ToolResult: &ToolResult{ID: "img", Name: "view_image", Content: tool.TextContent("[image attached below]")}},
 		{File: &File{}},
 	}})
 	for range 20 {
@@ -124,7 +126,7 @@ func TestTrimStaleToolResultsCheckpointsEmptyImage(t *testing.T) {
 	if len(first.Content) != 1 || first.Content[0].File != nil {
 		t.Fatalf("empty image was not dropped: %#v", first.Content)
 	}
-	if got := first.Content[0].ToolResult.Content; !strings.Contains(got, trimImageMarker) {
+	if got := first.Content[0].ToolResult.Content.Text(); !strings.Contains(got, trimImageMarker) {
 		t.Fatalf("tool result = %q, want %q", got, trimImageMarker)
 	}
 	if freed, err := a.compressContext(0); err != nil || freed != 0 {
@@ -151,7 +153,7 @@ func TestCompressionPreservesEvidenceWhenInsufficient(t *testing.T) {
 	if freed, err := a.compressContext(1_000_000); err != nil || freed != 0 {
 		t.Fatalf("compression=%d,%v", freed, err)
 	}
-	if a.StateSnapshot().ContextRevision != 0 || a.requestMessages()[1].Content[0].ToolResult.Content != messages[1].Content[0].ToolResult.Content {
+	if a.StateSnapshot().ContextRevision != 0 || a.requestMessages()[1].Content[0].ToolResult.Content.Text() != messages[1].Content[0].ToolResult.Content.Text() {
 		t.Fatal("insufficient compression rewrote the summary source")
 	}
 }
@@ -167,7 +169,7 @@ func TestCompressionReclaimsOnlySupersededHostContextWhenEnough(t *testing.T) {
 		t.Fatalf("compression=%d,%v", freed, err)
 	}
 	got := a.requestMessages()
-	if len(got) != len(messages)-1 || got[1].Content[0].ToolResult.Content != result || contentText(got[2].Content) != contentText(current.Content) {
+	if len(got) != len(messages)-1 || got[1].Content[0].ToolResult.Content.Text() != result || contentText(got[2].Content) != contentText(current.Content) {
 		t.Fatal("snapshot reclamation changed the current context or tool evidence")
 	}
 	if contentText(a.MessagesSnapshot()[0].Content) != contentText(old.Content) {
@@ -184,10 +186,24 @@ func TestCompressionKeepsImageResultTextAndFullOutputReference(t *testing.T) {
 	if _, err := a.compressContext(1000); err != nil {
 		t.Fatal(err)
 	}
-	got := a.requestMessages()[1].Content[0].ToolResult.Content
+	got := a.requestMessages()[1].Content[0].ToolResult.Content.Text()
 	for _, expected := range []string{"Important observation", "Full output saved to: /tmp/evidence.txt", trimImageMarker} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("compressed image output lost %q: %q", expected, got)
 		}
+	}
+}
+
+func TestTrimTypedImagesPreservesCanonicalHistory(t *testing.T) {
+	original := Message{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{Content: append(tool.TextContent("caption"), imageContentFixture(t)...)}}}}
+	messages := CloneMessages([]Message{original})
+	if !trimStaleEvidence(messages) {
+		t.Fatal("image not trimmed")
+	}
+	if len(messages[0].Content[0].ToolResult.Content.ImageURLs()) != 0 || !strings.Contains(messages[0].Content[0].ToolResult.Content.Text(), trimImageMarker) {
+		t.Fatal("trimmed output missing image marker")
+	}
+	if len(original.Content[0].ToolResult.Content.ImageURLs()) != 1 {
+		t.Fatal("canonical image was removed")
 	}
 }

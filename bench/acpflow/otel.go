@@ -32,12 +32,17 @@ type otlpExport struct {
 }
 
 type otlpSummary struct {
-	ExportBatches map[string]int `json:"export_batches,omitempty"`
-	Resources     map[string]int `json:"resources_by_service,omitempty"`
-	Spans         map[string]int `json:"spans,omitempty"`
-	MetricExports map[string]int `json:"metric_exports,omitempty"`
-	LogEvents     map[string]int `json:"log_events,omitempty"`
-	LogRecords    int            `json:"log_records,omitempty"`
+	ExportBatches     map[string]int `json:"export_batches,omitempty"`
+	Resources         map[string]int `json:"resources_by_service,omitempty"`
+	Spans             map[string]int `json:"spans,omitempty"`
+	MetricExports     map[string]int `json:"metric_exports,omitempty"`
+	LogEvents         map[string]int `json:"log_events,omitempty"`
+	LogRecords        int            `json:"log_records,omitempty"`
+	InputTokens       int64          `json:"input_tokens,omitempty"`
+	OutputTokens      int64          `json:"output_tokens,omitempty"`
+	CachedReadTokens  int64          `json:"cached_read_tokens,omitempty"`
+	CachedWriteTokens int64          `json:"cached_write_tokens,omitempty"`
+	TokenSource       string         `json:"token_source,omitempty"`
 }
 
 type otlpArtifact struct {
@@ -217,6 +222,11 @@ func (s *otlpSummary) add(signal string, message proto.Message) {
 			for _, scopeSpans := range resourceSpans.ScopeSpans {
 				for _, span := range scopeSpans.Spans {
 					s.Spans[span.Name]++
+					// Agent spans contain rollups of the same inference usage.
+					if (attributeValue(span.Attributes, "gen_ai.operation.name") == "chat" || span.Name == "claude_code.llm_request") && s.TokenSource != "logs" {
+						s.TokenSource = "spans"
+						s.accumulateTokenAttributes(span.Attributes)
+					}
 				}
 			}
 		}
@@ -249,10 +259,65 @@ func (s *otlpSummary) add(signal string, message proto.Message) {
 						name = "<unnamed>"
 					}
 					s.LogEvents[name]++
+					// Prefer one inference event per request over duplicate trace
+					// attributes and cumulative agent/session rollups.
+					if name == "gen_ai.client.inference.operation.details" || name == "codex.sse_event" || name == "claude_code.api_request" {
+						if s.TokenSource != "logs" {
+							s.InputTokens, s.OutputTokens, s.CachedReadTokens, s.CachedWriteTokens = 0, 0, 0, 0
+							s.TokenSource = "logs"
+						}
+						s.accumulateTokenAttributes(record.Attributes)
+					}
 				}
 			}
 		}
 	}
+}
+
+func (s *otlpSummary) accumulateTokenAttributes(attributes []*commonv1.KeyValue) {
+	s.InputTokens += attributeIntValue(attributes,
+		"gen_ai.usage.input_tokens",
+		"input_token_count",
+		"input_tokens",
+	)
+	s.OutputTokens += attributeIntValue(attributes,
+		"gen_ai.usage.output_tokens",
+		"output_token_count",
+		"output_tokens",
+	)
+	s.CachedReadTokens += attributeIntValue(attributes,
+		"gen_ai.usage.cache_read.input_tokens",
+		"cached_token_count",
+		"cached_input_tokens",
+		"cache_read_input_tokens",
+	)
+	s.CachedWriteTokens += attributeIntValue(attributes,
+		"gen_ai.usage.cache_write.input_tokens",
+		"gen_ai.usage.cache_creation.input_tokens",
+		"cache_write_input_tokens",
+		"cache_creation_input_tokens",
+	)
+}
+
+func attributeIntValue(attributes []*commonv1.KeyValue, keys ...string) int64 {
+	for _, key := range keys {
+		for _, candidate := range attributes {
+			if candidate.Key != key || candidate.Value == nil {
+				continue
+			}
+			switch v := candidate.Value.Value.(type) {
+			case *commonv1.AnyValue_IntValue:
+				if v.IntValue > 0 {
+					return v.IntValue
+				}
+			case *commonv1.AnyValue_DoubleValue:
+				if v.DoubleValue > 0 {
+					return int64(v.DoubleValue)
+				}
+			}
+		}
+	}
+	return 0
 }
 
 func cloneOTLPSummary(source otlpSummary) otlpSummary {

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -383,6 +384,7 @@ func (s *Server) NewSession(ctx context.Context, params acpsdk.NewSessionRequest
 		return acpsdk.NewSessionResponse{}, err
 	}
 
+	s.pushAvailableCommandsAfterResponse(ctx, acpSid, w.agent)
 	return acpsdk.NewSessionResponse{
 		SessionId:     acpSid,
 		Modes:         modeState(w.agent, sid),
@@ -773,6 +775,58 @@ func (s *Server) Cancel(_ context.Context, params acpsdk.CancelNotification) err
 	return nil
 }
 
+// newSessionCommandsDelay gives the client time to register a session ID it
+// learns from the response. Clients drop updates for sessions they do not know
+// yet, so a new or forked session must not be announced ahead of its response.
+const newSessionCommandsDelay = 200 * time.Millisecond
+
+// pushAvailableCommandsAfterResponse publishes the command list for a session
+// the client is only now being told about. Loaded and resumed sessions are
+// already known to the client and publish directly.
+func (s *Server) pushAvailableCommandsAfterResponse(ctx context.Context, sid acpsdk.SessionId, ag *agent.Agent) {
+	ctx = context.WithoutCancel(ctx)
+	time.AfterFunc(newSessionCommandsDelay, func() {
+		s.mu.Lock()
+		_, live := s.sessions[sid]
+		live = live && !s.closing
+		s.mu.Unlock()
+		if live {
+			s.pushAvailableCommands(ctx, sid, ag)
+		}
+	})
+}
+
+func (s *Server) pushAvailableCommands(ctx context.Context, sid acpsdk.SessionId, ag *agent.Agent) {
+	if s.conn == nil || ag == nil {
+		return
+	}
+	cmds := ag.Commands(string(sid))
+	if len(cmds) == 0 {
+		return
+	}
+	available := make([]acpsdk.AvailableCommand, 0, len(cmds))
+	for _, cmd := range cmds {
+		ac := acpsdk.AvailableCommand{
+			Name:        strings.TrimPrefix(cmd.Name, "/"),
+			Description: cmd.Description,
+		}
+		if cmd.InputHint != "" {
+			ac.Input = &acpsdk.AvailableCommandInput{
+				Unstructured: &acpsdk.UnstructuredCommandInput{Hint: cmd.InputHint},
+			}
+		}
+		available = append(available, ac)
+	}
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	_ = acp.Notify(sendCtx, s.conn, sid, acpsdk.SessionUpdate{
+		AvailableCommandsUpdate: &acpsdk.SessionAvailableCommandsUpdate{
+			SessionUpdate:     "available_commands_update",
+			AvailableCommands: available,
+		},
+	})
+}
+
 // pushSessionInfo reports the title the agent derived for this session, so the
 // client can replace its placeholder thread name.
 func (s *Server) pushSessionInfo(ctx context.Context, sess *sessionEntry) {
@@ -973,6 +1027,7 @@ func (s *Server) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionR
 	if err != nil {
 		return acpsdk.ResumeSessionResponse{}, err
 	}
+	s.pushAvailableCommands(ctx, params.SessionId, w.agent)
 	return acpsdk.ResumeSessionResponse{
 		Modes:         modeState(w.agent, string(params.SessionId)),
 		ConfigOptions: sessionConfigOptions(w.agent, string(params.SessionId)),
@@ -1005,6 +1060,7 @@ func (s *Server) UnstableForkSession(ctx context.Context, params acpsdk.Unstable
 		s.releaseWorkspace(w)
 		return acpsdk.UnstableForkSessionResponse{}, err
 	}
+	s.pushAvailableCommandsAfterResponse(ctx, acpSid, w.agent)
 	return acpsdk.UnstableForkSessionResponse{
 		SessionId:     acpSid,
 		Modes:         modeState(w.agent, sid),
@@ -1020,6 +1076,7 @@ func (s *Server) LoadSession(ctx context.Context, params acpsdk.LoadSessionReque
 	if err := s.replayMessages(ctx, params.SessionId, messages); err != nil {
 		return acpsdk.LoadSessionResponse{}, err
 	}
+	s.pushAvailableCommands(ctx, params.SessionId, w.agent)
 	return acpsdk.LoadSessionResponse{
 		Modes:         modeState(w.agent, string(params.SessionId)),
 		ConfigOptions: sessionConfigOptions(w.agent, string(params.SessionId)),
@@ -1121,6 +1178,15 @@ func notifyContent(notify func(acpsdk.SessionUpdate), role harness.MessageRole, 
 		))
 		return
 	case c.ToolResult != nil:
+		var content []acpsdk.ToolCallContent
+		for _, block := range c.ToolResult.Content {
+			if block.Text != nil {
+				content = append(content, acpsdk.ToolContent(acpsdk.TextBlock(*block.Text)))
+			}
+			if block.Image != nil && block.Image.Valid() {
+				content = append(content, acpsdk.ToolContent(acpsdk.ImageBlock(base64.StdEncoding.EncodeToString(block.Image.Data), block.Image.MIMEType)))
+			}
+		}
 		status := acpsdk.ToolCallStatusCompleted
 		if c.ToolResult.IsError {
 			status = acpsdk.ToolCallStatusFailed
@@ -1128,9 +1194,7 @@ func notifyContent(notify func(acpsdk.SessionUpdate), role harness.MessageRole, 
 		notify(acpsdk.UpdateToolCall(
 			acpsdk.ToolCallId(c.ToolResult.ID),
 			acpsdk.WithUpdateStatus(status),
-			acpsdk.WithUpdateContent([]acpsdk.ToolCallContent{
-				acpsdk.ToolContent(acpsdk.TextBlock(c.ToolResult.Content)),
-			}),
+			acpsdk.WithUpdateContent(content),
 		))
 		return
 	}

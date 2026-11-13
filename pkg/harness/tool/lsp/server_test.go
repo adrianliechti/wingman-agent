@@ -160,7 +160,7 @@ func TestUnsupportedCapabilityDoesNotIssueRPC(t *testing.T) {
 	for _, operation := range []string{"findReferences", "goToTypeDefinition", "previewRename"} {
 		result, err := NewTools(service)[0].Execute(t.Context(), map[string]any{"operation": operation, "file_path": path, "line": 1, "column": 1, "new_name": "renamed"})
 		if err == nil || !strings.Contains(err.Error(), "unsupported") || !strings.Contains(err.Error(), "grep") {
-			t.Fatalf("%s: %s %v", operation, result.Content, err)
+			t.Fatalf("%s: %s %v", operation, result.Content.Text(), err)
 		}
 	}
 	log, _ := os.ReadFile(logs[0])
@@ -213,12 +213,12 @@ func TestWorkspaceSymbolFailuresAreNotEmptySuccess(t *testing.T) {
 			result, err := NewTools(service)[0].Execute(t.Context(), map[string]any{"operation": "workspaceSymbol", "query": "Found"})
 			if len(modes) == 1 {
 				if err == nil || !strings.Contains(err.Error(), "fixture search failed") {
-					t.Fatalf("%s %v", result.Content, err)
+					t.Fatalf("%s %v", result.Content.Text(), err)
 				}
-			} else if err != nil || !strings.Contains(result.Content, "Partial workspace results") || !strings.Contains(result.Content, "FoundSymbol") {
-				t.Fatalf("%s %v", result.Content, err)
+			} else if err != nil || !strings.Contains(result.Content.Text(), "Partial workspace results") || !strings.Contains(result.Content.Text(), "FoundSymbol") {
+				t.Fatalf("%s %v", result.Content.Text(), err)
 			}
-			if strings.Contains(result.Content, "No symbols found") {
+			if strings.Contains(result.Content.Text(), "No symbols found") {
 				t.Fatal("server failure reported as empty success")
 			}
 		})
@@ -231,8 +231,8 @@ func TestSymbolLookupFailureFallsBackToTreeSitter(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := NewTools(service)[0].Execute(t.Context(), map[string]any{"operation": "hover", "file_path": path, "symbol": "run"})
-	if err != nil || !strings.Contains(result.Content, "Tree-sitter fallback") || !strings.Contains(result.Content, "func run() {}") {
-		t.Fatalf("result = %q, err = %v, want syntax fallback after symbol RPC failure", result.Content, err)
+	if err != nil || !strings.Contains(result.Content.Text(), "Tree-sitter fallback") || !strings.Contains(result.Content.Text(), "func run() {}") {
+		t.Fatalf("result = %q, err = %v, want syntax fallback after symbol RPC failure", result.Content.Text(), err)
 	}
 }
 
@@ -240,7 +240,7 @@ func TestCodeActionPreviewNeverExecutesCommands(t *testing.T) {
 	service, path, logs := fixtureService(t, "good")
 	result, err := NewTools(service)[0].Execute(t.Context(), map[string]any{"operation": "codeActions", "file_path": path, "action_title": "Run command"})
 	if err == nil || !strings.Contains(err.Error(), "requires command") {
-		t.Fatalf("%s %v", result.Content, err)
+		t.Fatalf("%s %v", result.Content.Text(), err)
 	}
 	log, _ := os.ReadFile(logs[0])
 	if strings.Contains(string(log), "workspace/executeCommand") {
@@ -253,16 +253,16 @@ func TestMissingDiagnosticsAreUnknown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	result, err := NewTools(service)[0].Execute(ctx, map[string]any{"operation": "diagnostics", "file_path": path})
-	if err != nil || !strings.Contains(result.Content, "No diagnostics data") || strings.Contains(result.Content, "No diagnostics found") {
-		t.Fatalf("%s %v", result.Content, err)
+	if err != nil || !strings.Contains(result.Content.Text(), "No diagnostics data") || strings.Contains(result.Content.Text(), "No diagnostics found") {
+		t.Fatalf("%s %v", result.Content.Text(), err)
 	}
 }
 
 func TestStatusDoesNotStartDetectedServer(t *testing.T) {
 	service, path, logs := fixtureService(t, "good")
 	result, err := NewTools(service)[0].Execute(t.Context(), map[string]any{"operation": "status", "file_path": path})
-	if err != nil || !strings.Contains(result.Content, "not running") {
-		t.Fatalf("%s %v", result.Content, err)
+	if err != nil || !strings.Contains(result.Content.Text(), "not running") {
+		t.Fatalf("%s %v", result.Content.Text(), err)
 	}
 	if _, err := os.Stat(logs[0]); !os.IsNotExist(err) {
 		t.Fatal("status started a server")

@@ -439,7 +439,7 @@ func (snapshot streamSnapshot) toolLines(width int, expanded bool) []string {
 func (snapshot streamSnapshot) toolText() string {
 	if snapshot.toolResult != nil {
 		result := snapshot.toolResult
-		return result.Name + " " + tool.ExtractHint(result.Args, result.Name) + "\n" + result.Content
+		return result.Name + " " + tool.ExtractHint(result.Args, result.Name) + "\n" + result.Content.Text()
 	}
 	return snapshot.toolName + " " + snapshot.toolHint + "\n" + snapshot.toolProgress
 }

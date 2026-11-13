@@ -33,12 +33,12 @@ func TestReadTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "line1") || !strings.Contains(result.Content, "line5") {
-			t.Errorf("expected full content, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "line1") || !strings.Contains(result.Content.Text(), "line5") {
+			t.Errorf("expected full content, got: %s", result.Content.Text())
 		}
 
-		if !strings.Contains(result.Content, "1\tline1") {
-			t.Errorf("expected compact cat -n style line numbers, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "1\tline1") {
+			t.Errorf("expected compact cat -n style line numbers, got: %s", result.Content.Text())
 		}
 	})
 
@@ -52,16 +52,16 @@ func TestReadTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if strings.Contains(result.Content, "line1") || strings.Contains(result.Content, "line2") {
-			t.Errorf("offset should skip first lines, got: %s", result.Content)
+		if strings.Contains(result.Content.Text(), "line1") || strings.Contains(result.Content.Text(), "line2") {
+			t.Errorf("offset should skip first lines, got: %s", result.Content.Text())
 		}
 
-		if !strings.Contains(result.Content, "line3") {
-			t.Errorf("should contain line3, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "line3") {
+			t.Errorf("should contain line3, got: %s", result.Content.Text())
 		}
 
-		if !strings.Contains(result.Content, "3\tline3") {
-			t.Errorf("expected offset to start at 1-based line 3, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "3\tline3") {
+			t.Errorf("expected offset to start at 1-based line 3, got: %s", result.Content.Text())
 		}
 	})
 
@@ -75,15 +75,15 @@ func TestReadTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "line1") {
-			t.Errorf("should contain line1, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "line1") {
+			t.Errorf("should contain line1, got: %s", result.Content.Text())
 		}
 
-		if strings.Contains(result.Content, "line3") {
-			t.Errorf("limit should cap returned lines, got: %s", result.Content)
+		if strings.Contains(result.Content.Text(), "line3") {
+			t.Errorf("limit should cap returned lines, got: %s", result.Content.Text())
 		}
-		if !strings.Contains(result.Content, "offset=3") {
-			t.Errorf("expected continuation offset, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "offset=3") {
+			t.Errorf("expected continuation offset, got: %s", result.Content.Text())
 		}
 	})
 
@@ -104,11 +104,11 @@ func TestReadTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "2500\tL2500") {
-			t.Errorf("expected line 2500 in output (DefaultMaxLines was 2000), got: %s", result.Content[max(0, len(result.Content)-200):])
+		if !strings.Contains(result.Content.Text(), "2500\tL2500") {
+			t.Errorf("expected line 2500 in output (DefaultMaxLines was 2000), got: %s", result.Content.Text()[max(0, len(result.Content.Text())-200):])
 		}
-		if strings.Contains(result.Content, "2501\tL2501") {
-			t.Errorf("limit=2500 should stop at line 2500, got: %s", result.Content[max(0, len(result.Content)-200):])
+		if strings.Contains(result.Content.Text(), "2501\tL2501") {
+			t.Errorf("limit=2500 should stop at line 2500, got: %s", result.Content.Text()[max(0, len(result.Content.Text())-200):])
 		}
 	})
 
@@ -154,8 +154,8 @@ func TestReadTool(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(result.Content, "shorter than the provided offset (99)") {
-			t.Errorf("expected offset reminder, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "shorter than the provided offset (99)") {
+			t.Errorf("expected offset reminder, got: %s", result.Content.Text())
 		}
 	})
 
@@ -181,13 +181,13 @@ func TestReadTool(t *testing.T) {
 		if err != nil {
 			t.Fatalf("windowed read failed: %v", err)
 		}
-		if !strings.Contains(result.Content, "5000\t") || !strings.Contains(result.Content, "5001\t") {
-			t.Fatalf("missing windowed lines, got: %.200s", result.Content)
+		if !strings.Contains(result.Content.Text(), "5000\t") || !strings.Contains(result.Content.Text(), "5001\t") {
+			t.Fatalf("missing windowed lines, got: %.200s", result.Content.Text())
 		}
-		if !strings.Contains(result.Content, "use offset=5002 to continue") {
-			t.Fatalf("missing continuation notice, got: %s", result.Content[len(result.Content)-200:])
+		if !strings.Contains(result.Content.Text(), "use offset=5002 to continue") {
+			t.Fatalf("missing continuation notice, got: %s", result.Content.Text()[len(result.Content.Text())-200:])
 		}
-		output, _, _ := strings.Cut(result.Content, "\n\n[")
+		output, _, _ := strings.Cut(result.Content.Text(), "\n\n[")
 		if len(output) > DefaultMaxBytes {
 			t.Fatalf("windowed output exceeded %d-byte cap: %d", DefaultMaxBytes, len(output))
 		}
@@ -238,8 +238,8 @@ func TestReadTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "line1") {
-			t.Errorf("expected content, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "line1") {
+			t.Errorf("expected content, got: %s", result.Content.Text())
 		}
 	})
 
@@ -269,8 +269,8 @@ func TestReadTool(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(result.Content, "<system-reminder>") || !strings.Contains(result.Content, "empty") {
-			t.Errorf("expected empty-file system-reminder, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "<system-reminder>") || !strings.Contains(result.Content.Text(), "empty") {
+			t.Errorf("expected empty-file system-reminder, got: %s", result.Content.Text())
 		}
 	})
 
@@ -285,8 +285,8 @@ func TestReadTool(t *testing.T) {
 			t.Fatalf("unexpected error reading svg: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "<title>Logo</title>") {
-			t.Errorf("expected svg text, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "<title>Logo</title>") {
+			t.Errorf("expected svg text, got: %s", result.Content.Text())
 		}
 	})
 }
@@ -304,11 +304,11 @@ func TestReadToolConfigurableSizeLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("windowed read failed: %v", err)
 	}
-	if !strings.Contains(result.Content, "1\t12345") {
-		t.Fatalf("expected windowed content, got: %s", result.Content)
+	if !strings.Contains(result.Content.Text(), "1\t12345") {
+		t.Fatalf("expected windowed content, got: %s", result.Content.Text())
 	}
-	if !strings.Contains(result.Content, "too large to read fully") {
-		t.Fatalf("expected size notice, got: %s", result.Content)
+	if !strings.Contains(result.Content.Text(), "too large to read fully") {
+		t.Fatalf("expected size notice, got: %s", result.Content.Text())
 	}
 }
 
@@ -342,8 +342,8 @@ func TestReadAllowedReadRoots(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(result.Content, "allowed content") {
-			t.Errorf("expected allowed content, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "allowed content") {
+			t.Errorf("expected allowed content, got: %s", result.Content.Text())
 		}
 	})
 

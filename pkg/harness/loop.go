@@ -67,6 +67,37 @@ func (a *Agent) appendInputs(ctx context.Context, inputs ...Message) error {
 	return errors.Join(inputErrors, a.appendMessages(messages...))
 }
 
+func (a *Agent) hasPendingSteering() bool {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+	for _, m := range a.pendingInput {
+		if !m.Hidden {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Agent) registerSteerNotify() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	a.queueMu.Lock()
+	a.steerNotify = ch
+	for _, m := range a.pendingInput {
+		if !m.Hidden {
+			ch <- struct{}{}
+			break
+		}
+	}
+	a.queueMu.Unlock()
+	return ch, func() {
+		a.queueMu.Lock()
+		if a.steerNotify == ch {
+			a.steerNotify = nil
+		}
+		a.queueMu.Unlock()
+	}
+}
+
 func (a *Agent) takePendingInput() []Message {
 	a.queueMu.Lock()
 	defer a.queueMu.Unlock()
@@ -92,7 +123,7 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 	for attempt := 0; ; attempt++ {
 		resp, err = a.completeRun(ctx, inferenceCtx, turnID, req, yield)
 		_, hookStopped := errors.AsType[hookStopError](err)
-		if err == nil || errors.Is(err, errYieldStopped) || hookStopped {
+		if err == nil || errors.Is(err, errYieldStopped) || errors.Is(err, errSteerPreempt) || hookStopped {
 			return resp, err
 		}
 		if ctx.Err() != nil {

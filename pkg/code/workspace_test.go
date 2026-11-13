@@ -478,7 +478,7 @@ func TestWithEditDiagnosticsPassesThroughWithoutLanguageService(t *testing.T) {
 	w := &Workspace{RootPath: t.TempDir()}
 
 	execute := func(ctx context.Context, args map[string]any) (tool.Result, error) {
-		return tool.Result{Content: "diff output", Metadata: map[string]any{
+		return tool.Result{Content: tool.TextContent("diff output"), Metadata: map[string]any{
 			tool.FileChangesMetadata: []tool.FileChange{{Path: "main.go", AfterExists: true}},
 		}}, nil
 	}
@@ -492,8 +492,8 @@ func TestWithEditDiagnosticsPassesThroughWithoutLanguageService(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tl.Name, err)
 		}
-		if out.Content != "diff output" {
-			t.Fatalf("%s output = %q, want passthrough with no LSP manager", tl.Name, out.Content)
+		if out.Content.Text() != "diff output" {
+			t.Fatalf("%s output = %q, want passthrough with no LSP manager", tl.Name, out.Content.Text())
 		}
 	}
 }

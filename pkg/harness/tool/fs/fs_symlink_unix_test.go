@@ -44,8 +44,8 @@ func TestReadThroughAbsoluteInRootSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read through in-root absolute symlink failed: %v", err)
 	}
-	if !strings.Contains(result.Content, "hello") {
-		t.Fatalf("unexpected content: %q", result.Content)
+	if !strings.Contains(result.Content.Text(), "hello") {
+		t.Fatalf("unexpected content: %q", result.Content.Text())
 	}
 }
 
@@ -196,8 +196,8 @@ func TestAllowedRootFileToolsAcceptAbsoluteInRootSymlink(t *testing.T) {
 	linkedFile := filepath.Join(allowed, "link", "file.txt")
 
 	result, err := ReadTool(root, allowed).Execute(context.Background(), map[string]any{"file_path": linkedFile})
-	if err != nil || !strings.Contains(result.Content, "alpha beta") {
-		t.Fatalf("read through allowed in-root symlink: %v %q", err, result.Content)
+	if err != nil || !strings.Contains(result.Content.Text(), "alpha beta") {
+		t.Fatalf("read through allowed in-root symlink: %v %q", err, result.Content.Text())
 	}
 	if _, err := EditTool(root, allowed).Execute(context.Background(), map[string]any{
 		"file_path": linkedFile, "old_string": "beta", "new_string": "gamma",
@@ -248,8 +248,8 @@ func TestReadAcceptsAliasSpellingOfWorkspacePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("alias spelling of a workspace path rejected: %v", err)
 	}
-	if !strings.Contains(result.Content, "aliased") {
-		t.Fatalf("unexpected content: %q", result.Content)
+	if !strings.Contains(result.Content.Text(), "aliased") {
+		t.Fatalf("unexpected content: %q", result.Content.Text())
 	}
 }
 
@@ -283,7 +283,7 @@ func TestGrepThroughAbsoluteInRootSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grep through symlinked path failed: %v", err)
 	}
-	if !strings.Contains(result.Content, "needlepkg") || !strings.Contains(result.Content, "link") {
-		t.Fatalf("unexpected grep output: %q", result.Content)
+	if !strings.Contains(result.Content.Text(), "needlepkg") || !strings.Contains(result.Content.Text(), "link") {
+		t.Fatalf("unexpected grep output: %q", result.Content.Text())
 	}
 }

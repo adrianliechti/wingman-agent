@@ -11,6 +11,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
@@ -331,5 +334,71 @@ func TestSendDoesNotCompactAfterReachingTurnLimit(t *testing.T) {
 	}
 	if !errors.Is(turnErr, ErrMaxTurnsExceeded) || requests != 1 || compactions != 0 {
 		t.Fatalf("error=%v requests=%d compactions=%d", turnErr, requests, compactions)
+	}
+}
+
+func TestMidTurnSteeringPreemptsActiveStreamBeforeToolDispatch(t *testing.T) {
+	var requests atomic.Int32
+	streamCanceled := make(chan struct{})
+	var secondReqBody string
+
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		n := requests.Add(1)
+		if n == 1 {
+			pr, pw := io.Pipe()
+			go func() {
+				defer pw.Close()
+				_, _ = io.WriteString(pw, "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_partial\",\"content_index\":0,\"delta\":\"Starting initial approach...\"}\n\n")
+				<-r.Context().Done()
+				close(streamCanceled)
+			}()
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       pr,
+				Request:    r,
+			}, nil
+		}
+		raw, _ := io.ReadAll(r.Body)
+		secondReqBody = string(raw)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(phaseTestResponse(false, finalAnswerOutput))),
+			Request:    r,
+		}, nil
+	})}
+	client := openai.NewClient(
+		option.WithBaseURL("http://agent.test"),
+		option.WithAPIKey("test"),
+		option.WithHTTPClient(httpClient),
+	)
+
+	a := &Agent{Config: &Config{client: &client, MaxTurns: 1}}
+	stream, err := a.Send(t.Context(), []Content{{Text: "write a REST handler"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	steered := false
+	for msg, err := range stream {
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+		if !steered && strings.Contains(contentText(msg.Content), "Starting initial approach") {
+			steered = true
+			if !a.QueueInputWithID([]Content{{Text: "actually use gRPC instead"}}, "steer-grpc") {
+				t.Fatal("QueueInput rejected mid-stream steering")
+			}
+		}
+	}
+	<-streamCanceled
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("expected 2 requests (preempted + steered), got %d", got)
+	}
+	if !strings.Contains(secondReqBody, "Starting initial approach...") {
+		t.Fatalf("second request lost partial assistant output before preemption: %s", secondReqBody)
+	}
+	if !strings.Contains(secondReqBody, "actually use gRPC instead") {
+		t.Fatalf("second request missing steered user input: %s", secondReqBody)
 	}
 }

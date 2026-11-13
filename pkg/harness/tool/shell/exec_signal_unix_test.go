@@ -12,7 +12,7 @@ import (
 // termination instead of inventing an exit code.
 func TestExecCommandReportsSignalTerminationWithPartialOutput(t *testing.T) {
 	result := runExec(t, `printf 'before-kill\n'; kill -KILL $$`)
-	if !result.IsError || !strings.Contains(result.Content, "before-kill") || !strings.Contains(result.Content, "Command terminated (signal: killed)") {
+	if !result.IsError || !strings.Contains(result.Content.Text(), "before-kill") || !strings.Contains(result.Content.Text(), "Command terminated (signal: killed)") {
 		t.Fatalf("signal-killed result = %+v", result)
 	}
 	if code, ok := result.Metadata["exit_code"].(int); !ok || code >= 0 {

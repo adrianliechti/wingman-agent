@@ -130,6 +130,111 @@ func taskTools(tasks *task.Registry) []tool.Tool {
 				return tool.Text(fmt.Sprintf("Stop requested for agent %s.", id)), nil
 			},
 		},
+		{
+			Name:        "agent_wait",
+			Description: "Block until one (`mode: \"any\"`) or all (`mode: \"all\"`, default) of the specified background agent ids finish, or until `timeout_seconds` elapses. Returns each agent's status and completed result inline without polling loops. A result returned here is final and is not delivered again as a task notification; agents still running when the call returns notify you later as usual.",
+			Effect:      tool.StaticEffect(tool.EffectReadOnly),
+			Timeout:     -1,
+
+			Parameters: map[string]any{
+				"type": "object",
+
+				"properties": map[string]any{
+					"ids": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"minItems":    1,
+						"description": "Task ids of tracked agents to wait on.",
+					},
+					"mode": map[string]any{
+						"type":        "string",
+						"enum":        []string{"all", "any"},
+						"description": "`all` (default) waits for every listed agent to finish; `any` returns as soon as at least one listed agent is finished.",
+					},
+					"timeout_seconds": map[string]any{
+						"type":        "integer",
+						"minimum":     1,
+						"maximum":     600,
+						"description": "Maximum seconds to wait before returning current statuses (default 120, max 600).",
+					},
+				},
+
+				"required":             []string{"ids"},
+				"additionalProperties": false,
+			},
+
+			Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
+				if err := ctx.Err(); err != nil {
+					return tool.Result{}, err
+				}
+				rawIDs, ok := args["ids"].([]any)
+				if !ok || len(rawIDs) == 0 {
+					return tool.Result{}, fmt.Errorf("ids must be a non-empty array of task id strings")
+				}
+				ids := make([]string, 0, len(rawIDs))
+				seen := make(map[string]bool, len(rawIDs))
+				for _, raw := range rawIDs {
+					s, ok := raw.(string)
+					s = strings.TrimSpace(s)
+					if !ok || s == "" {
+						return tool.Result{}, fmt.Errorf("each entry in ids must be a non-empty string")
+					}
+					if !seen[s] {
+						seen[s] = true
+						ids = append(ids, s)
+					}
+				}
+
+				waitAll := true
+				if rawMode, present := args["mode"]; present {
+					m, ok := rawMode.(string)
+					if !ok {
+						return tool.Result{}, fmt.Errorf("mode must be \"all\" or \"any\"")
+					}
+					switch strings.ToLower(strings.TrimSpace(m)) {
+					case "all", "":
+						waitAll = true
+					case "any":
+						waitAll = false
+					default:
+						return tool.Result{}, fmt.Errorf("unknown mode %q (use \"all\" or \"any\")", m)
+					}
+				}
+
+				timeoutSec := 120
+				if rawTimeout, hasTimeout := tool.IntArg(args, "timeout_seconds"); hasTimeout {
+					if rawTimeout < 1 || rawTimeout > 600 {
+						return tool.Result{}, fmt.Errorf("timeout_seconds must be between 1 and 600")
+					}
+					timeoutSec = rawTimeout
+				}
+
+				infos, timedOut, err := tasks.Wait(ctx, ids, waitAll, time.Duration(timeoutSec)*time.Second)
+				if err != nil {
+					return tool.Result{}, err
+				}
+
+				var b strings.Builder
+				if timedOut {
+					fmt.Fprintf(&b, "Timed out after %ds waiting for agents; some are still running:\n\n", timeoutSec)
+				}
+				for i, info := range infos {
+					if i > 0 {
+						b.WriteString("\n\n---\n\n")
+					}
+					if info.Status == task.StatusRunning {
+						line := fmt.Sprintf("%s — still running.", formatTaskLine(info))
+						if info.Activity != "" {
+							line += fmt.Sprintf(" Currently: %s.", info.Activity)
+						}
+						b.WriteString(line)
+						continue
+					}
+					fmt.Fprintf(&b, "%s\n\n%s", formatTaskLine(info), info.Result)
+				}
+				return tool.Text(b.String()), nil
+			},
+		},
 	}
 }
 

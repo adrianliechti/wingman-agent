@@ -106,7 +106,7 @@ type toolCall struct {
 	kind      string
 	args      string
 	locations []harness.ToolLocation
-	content   string
+	content   tool.Content
 	rawOutput string
 }
 
@@ -178,7 +178,7 @@ func (s *sessionState) cancelOutstandingToolCalls(t *turn) []harness.Message {
 			Presentation: harness.NewToolPresentation(
 				call.name, call.kind, call.args, call.locations,
 			),
-			Content: "tool call cancelled",
+			Content: tool.TextContent("tool call cancelled"),
 			IsError: true,
 		}}}}
 		t.mu.Lock()
@@ -1339,7 +1339,7 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		sess.toolCallsMu.Lock()
 		sess.toolCalls[string(tc.ToolCallId)] = toolCall{
 			name: name, kind: kind, args: args, locations: locations,
-			content: toolCallContentText(tc.Content), rawOutput: rawValueToString(tc.RawOutput),
+			content: toolCallContentBlocks(tc.Content), rawOutput: rawValueToString(tc.RawOutput),
 		}
 		sess.toolCallsMu.Unlock()
 		callMsg := emit(harness.RoleAssistant, harness.Content{ToolCall: &harness.ToolCall{
@@ -1357,16 +1357,13 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 			delete(sess.toolCalls, string(tc.ToolCallId))
 			sess.toolCallsMu.Unlock()
 
-			body := toolCallContentText(tc.Content)
-			if body == "" {
-				body = toolCallDiffText(tc.Content)
-			}
-			if body == "" && tc.RawOutput != nil {
-				body = rawValueToString(tc.RawOutput)
+			body := toolCallContentBlocks(tc.Content)
+			if toolContentEmpty(body) && tc.RawOutput != nil {
+				body = tool.TextContent(rawValueToString(tc.RawOutput))
 			}
 			failed := tc.Status == acpsdk.ToolCallStatusFailed
-			if body == "" && failed {
-				body = "tool call failed"
+			if toolContentEmpty(body) && failed {
+				body = tool.TextContent("tool call failed")
 			}
 			t.send(callMsg)
 			return emit(harness.RoleAssistant, harness.Content{ToolResult: &harness.ToolResult{
@@ -1403,7 +1400,7 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		if tu.Content != nil {
 			// Updates replace content when present; omitted content retains the
 			// latest snapshot, including on a status-only completion.
-			prior.content = toolCallContentText(tu.Content)
+			prior.content = toolCallContentBlocks(tu.Content)
 		}
 		if tu.RawOutput != nil {
 			prior.rawOutput = rawValueToString(tu.RawOutput)
@@ -1424,11 +1421,11 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		delete(sess.toolCalls, string(tu.ToolCallId))
 		sess.toolCallsMu.Unlock()
 		body := prior.content
-		if body == "" {
-			body = prior.rawOutput
+		if toolContentEmpty(body) {
+			body = tool.TextContent(prior.rawOutput)
 		}
-		if body == "" && status == acpsdk.ToolCallStatusFailed {
-			body = "tool call failed"
+		if toolContentEmpty(body) && status == acpsdk.ToolCallStatusFailed {
+			body = tool.TextContent("tool call failed")
 		}
 		return emit(harness.RoleAssistant, harness.Content{ToolResult: &harness.ToolResult{
 			ID:        string(tu.ToolCallId),
@@ -2000,19 +1997,46 @@ func blockText(b acpsdk.ContentBlock) string {
 func toolCallContentText(items []acpsdk.ToolCallContent) string {
 	var parts []string
 	for _, item := range items {
-		switch {
-		case item.Content != nil:
-			if t := blockText(item.Content.Content); t != "" {
-				parts = append(parts, t)
-			}
-		case item.Diff != nil:
-
-			if t := diffBlockText(item.Diff); t != "" {
-				parts = append(parts, t)
+		if item.Content != nil && item.Content.Content.Text != nil {
+			parts = append(parts, item.Content.Content.Text.Text)
+		} else if item.Diff != nil {
+			if text := diffBlockText(item.Diff); text != "" {
+				parts = append(parts, text)
 			}
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func toolContentEmpty(content tool.Content) bool {
+	return !slices.ContainsFunc(content, func(block tool.ContentBlock) bool {
+		return block.Image != nil || (block.Text != nil && *block.Text != "")
+	})
+}
+
+func toolCallContentBlocks(items []acpsdk.ToolCallContent) tool.Content {
+	var blocks tool.Content
+	for _, item := range items {
+		switch {
+		case item.Content != nil:
+			content := item.Content.Content
+			if content.Text != nil {
+				blocks = append(blocks, tool.TextBlock(content.Text.Text))
+			}
+			if content.Image != nil {
+				if img, ok := tool.ParseImageDataURL(fmt.Sprintf("data:%s;base64,%s", content.Image.MimeType, content.Image.Data)); ok {
+					blocks = append(blocks, tool.ContentBlock{Image: img})
+				} else {
+					blocks = append(blocks, tool.TextBlock("[invalid image attachment]"))
+				}
+			}
+		case item.Diff != nil:
+			if text := diffBlockText(item.Diff); text != "" {
+				blocks = append(blocks, tool.TextBlock(text))
+			}
+		}
+	}
+	return blocks
 }
 
 func toolCallDiffText(items []acpsdk.ToolCallContent) string {

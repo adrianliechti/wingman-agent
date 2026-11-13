@@ -42,8 +42,8 @@ func TestHookContextOverflowPersistsCompleteResult(t *testing.T) {
 					return tool.Text(original), nil
 				},
 			}})
-			if result.IsError || len(result.Content) > tool.MaxInlineResultBytes || !strings.Contains(result.Content, "Full output saved to:") || strings.Contains(result.Content, "<truncated-output>") {
-				t.Fatalf("invalid final output: %d bytes, error=%t", len(result.Content), result.IsError)
+			if result.IsError || len(result.Content.Text()) > tool.MaxInlineResultBytes || !strings.Contains(result.Content.Text(), "Full output saved to:") || strings.Contains(result.Content.Text(), "<truncated-output>") {
+				t.Fatalf("invalid final output: %d bytes, error=%t", len(result.Content.Text()), result.IsError)
 			}
 			files, err := os.ReadDir(dir)
 			if err != nil || len(files) != 1 {
@@ -79,20 +79,20 @@ func TestReadPaginationSurvivesFullOutputPipeline(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(out.Content) > tool.MaxInlineResultBytes || !utf8.ValidString(out.Content) {
-					t.Fatalf("invalid read result: %d bytes", len(out.Content))
+				if len(out.Content.Text()) > tool.MaxInlineResultBytes || !utf8.ValidString(out.Content.Text()) {
+					t.Fatalf("invalid read result: %d bytes", len(out.Content.Text()))
 				}
-				hooked, err := persist(t.Context(), tool.ToolCall{Name: "read"}, out.Content)
+				hooked, err := persist(t.Context(), tool.ToolCall{Name: "read"}, out.Content.Text())
 				if err != nil {
 					t.Fatal(err)
 				}
 				if hooked.UpdatedResult != nil {
 					t.Fatal("read required a second truncation")
 				}
-				if boundToolResult(out.Content) != out.Content {
+				if boundToolResult(out.Content.Text()) != out.Content.Text() {
 					t.Fatal("harness removed read content")
 				}
-				body, _, _ := strings.Cut(out.Content, "\n\n[Showing")
+				body, _, _ := strings.Cut(out.Content.Text(), "\n\n[Showing")
 				for row := range strings.SplitSeq(body, "\n") {
 					number, value, ok := strings.Cut(row, "\t")
 					if !ok {
@@ -107,7 +107,7 @@ func TestReadPaginationSurvivesFullOutputPipeline(t *testing.T) {
 					}
 					next++
 				}
-				if next <= 2301 && !strings.Contains(out.Content, fmt.Sprintf("offset=%d", next)) {
+				if next <= 2301 && !strings.Contains(out.Content.Text(), fmt.Sprintf("offset=%d", next)) {
 					t.Fatalf("bad continuation at %d", next)
 				}
 			}

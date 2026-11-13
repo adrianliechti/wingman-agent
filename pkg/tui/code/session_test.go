@@ -8,6 +8,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
@@ -44,7 +45,7 @@ func TestSyncMessagesReconcilesNativeCommittedStream(t *testing.T) {
 	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
 		ToolCall: &harness.ToolCall{ID: "call-1", Name: "read", Args: `{"path":"main.go"}`},
 	}}})
-	result := &harness.ToolResult{ID: "call-1", Name: "read", Args: `{"path":"main.go"}`, Content: "package main"}
+	result := &harness.ToolResult{ID: "call-1", Name: "read", Args: `{"path":"main.go"}`, Content: tool.TextContent("package main")}
 	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: result}}})
 	testAgent.messages = append(testAgent.messages, harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: result}}})
 	a.syncMessages()
@@ -152,7 +153,7 @@ func TestToolResultMakesPartialSnapshotAuthoritative(t *testing.T) {
 		ToolCall: &harness.ToolCall{ID: "call-1", Name: "shell", Args: `{"command":"go test"}`, Partial: true},
 	}}})
 	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
-		ToolResult: &harness.ToolResult{ID: "call-1", Name: "shell", Content: "ok"},
+		ToolResult: &harness.ToolResult{ID: "call-1", Name: "shell", Content: tool.TextContent("ok")},
 	}}})
 	a.commitStreamAttempt()
 
@@ -267,7 +268,7 @@ func TestReleaseToolCellKeepsLiveCellUntilMatchingResult(t *testing.T) {
 
 func TestReleaseToolCellRemovesArchivedCompletedTool(t *testing.T) {
 	a := &App{queue: make(chan func(), 8), quit: make(chan struct{})}
-	result := &harness.ToolResult{ID: "call-1", Name: "read", Args: `{"path":"one.go"}`, Content: "ok"}
+	result := &harness.ToolResult{ID: "call-1", Name: "read", Args: `{"path":"one.go"}`, Content: tool.TextContent("ok")}
 	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
 		ToolCall: &harness.ToolCall{ID: result.ID, Name: result.Name, Args: result.Args},
 	}}})
@@ -297,7 +298,7 @@ func TestParallelArchivedToolReceivesProgressAndCompletion(t *testing.T) {
 	}
 
 	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
-		ToolResult: &harness.ToolResult{ID: "call-1", Name: "read", Content: "ok"},
+		ToolResult: &harness.ToolResult{ID: "call-1", Name: "read", Content: tool.TextContent("ok")},
 	}}})
 	if a.streamHistory[0].toolResult == nil || a.streamHistory[0].toolResult.Args == "" {
 		t.Fatalf("archived tool did not retain its completed result: %+v", a.streamHistory[0])

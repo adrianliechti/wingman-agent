@@ -1132,7 +1132,7 @@ func (w *Workspace) WithEditDiagnostics(tools []tool.Tool) []tool.Tool {
 				return out, err
 			}
 			if note := w.postEditDiagnostics(ctx, editedPaths(out)); note != "" {
-				out.Content += "\n\n" + note
+				out.Content.AppendText("\n\n" + note)
 			}
 			return out, nil
 		}

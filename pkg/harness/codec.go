@@ -38,10 +38,11 @@ func toTools(tools []tool.Tool) []responses.ToolUnionParam {
 func toInput(messages []Message) []responses.ResponseInputItemUnionParam {
 	var items []responses.ResponseInputItemUnionParam
 
-	// Images attached to tool results travel as a user input message, since
-	// function call outputs are string-only on the wire. They are flushed
-	// only after a contiguous run of tool-result messages so strict backends
-	// never see a user message between function call outputs.
+	// A tool result carries its own attachments (see toolOutput). Journals
+	// written before that stored an image as a File entry next to the result;
+	// those still travel as a user input message, flushed only after a
+	// contiguous run of tool-result messages so strict backends never see a
+	// user message between function call outputs.
 	var images []responses.ResponseInputContentUnionParam
 
 	flushImages := func() {
@@ -109,9 +110,7 @@ func userToInput(m Message) []responses.ResponseInputItemUnionParam {
 			items = append(items, responses.ResponseInputItemUnionParam{
 				OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
 					CallID: openai.String(c.ToolResult.ID),
-					Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
-						OfString: openai.String(c.ToolResult.Content),
-					},
+					Output: toolOutput(c.ToolResult.Content),
 				},
 			})
 		}
@@ -170,9 +169,7 @@ func assistantToInput(m Message) ([]responses.ResponseInputItemUnionParam, []res
 			items = append(items, responses.ResponseInputItemUnionParam{
 				OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
 					CallID: openai.String(c.ToolResult.ID),
-					Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
-						OfString: openai.String(c.ToolResult.Content),
-					},
+					Output: toolOutput(c.ToolResult.Content),
 				},
 			})
 		}
@@ -266,7 +263,7 @@ func toMessages(items []responses.ResponseInputItemUnionParam) []Message {
 				ID:      item.OfFunctionCallOutput.CallID.Value,
 				Name:    tc.Name,
 				Args:    tc.Args,
-				Content: item.OfFunctionCallOutput.Output.OfString.Value,
+				Content: fromToolOutput(item.OfFunctionCallOutput.Output),
 			}
 			messages = append(messages, Message{
 				Role:    RoleAssistant,
@@ -398,4 +395,50 @@ func fromReasoning(r *responses.ResponseReasoningItemParam) (Message, bool) {
 	}
 
 	return Message{Role: RoleAssistant, Content: []Content{c}}, true
+}
+
+// toolOutput encodes a tool result for the wire. Plain text stays a string. A
+// result with attachments becomes an ordered list of parts, so every image
+// stays inside the call that produced it and keeps its place among the text.
+func toolOutput(content tool.Content) responses.ResponseInputItemFunctionCallOutputOutputUnionParam {
+	var parts responses.ResponseFunctionCallOutputItemListParam
+	attached := false
+	for _, block := range content {
+		switch {
+		case block.Image != nil && block.Image.Valid():
+			attached = true
+			parts = append(parts, responses.ResponseFunctionCallOutputItemUnionParam{
+				OfInputImage: &responses.ResponseInputImageContentParam{
+					ImageURL: openai.String(block.Image.DataURL()),
+					Detail:   responses.ResponseInputImageContentDetailAuto,
+				},
+			})
+		case block.Text != nil && *block.Text != "":
+			parts = append(parts, responses.ResponseFunctionCallOutputItemUnionParam{
+				OfInputText: &responses.ResponseInputTextContentParam{Text: *block.Text},
+			})
+		}
+	}
+	if !attached {
+		return responses.ResponseInputItemFunctionCallOutputOutputUnionParam{OfString: openai.String(content.Text())}
+	}
+	return responses.ResponseInputItemFunctionCallOutputOutputUnionParam{OfResponseFunctionCallOutputItemArray: parts}
+}
+
+func fromToolOutput(output responses.ResponseInputItemFunctionCallOutputOutputUnionParam) tool.Content {
+	if len(output.OfResponseFunctionCallOutputItemArray) == 0 {
+		return tool.TextContent(output.OfString.Value)
+	}
+	var content tool.Content
+	for _, part := range output.OfResponseFunctionCallOutputItemArray {
+		switch {
+		case part.OfInputText != nil:
+			content = append(content, tool.TextBlock(part.OfInputText.Text))
+		case part.OfInputImage != nil:
+			if img, ok := tool.ParseImageDataURL(part.OfInputImage.ImageURL.Value); ok {
+				content = append(content, tool.ContentBlock{Image: img})
+			}
+		}
+	}
+	return content
 }

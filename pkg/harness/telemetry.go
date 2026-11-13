@@ -206,7 +206,7 @@ func telemetryMessageParts(contents []Content) (parts []attribute.Value, onlyToo
 				attribute.String("type", "tool_call_response"),
 				attribute.String("id", content.ToolResult.ID),
 			}
-			if response, ok := telemetryJSONOrString(content.ToolResult.Content); ok {
+			if response, ok := telemetryJSONOrString(content.ToolResult.Content.Text()); ok {
 				attrs = append(attrs, attribute.KeyValue{Key: "response", Value: response})
 			}
 			parts = append(parts, attribute.MapValue(attrs...))

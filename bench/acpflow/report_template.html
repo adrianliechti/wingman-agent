@@ -419,7 +419,24 @@
         codex: { label: "Codex", color: "var(--codex)" },
         claude: { label: "Claude", color: "var(--claude)" },
       };
-      const scenarioLabel = { invoice: "Invoice fix", invoice_dense: "Dense invoice", dashboard: "Finance dashboard" };
+      const scenarioLabel = {
+        invoice: "Invoice fix",
+        invoice_dense: "Dense invoice",
+        refactor_move: "Refactor & move",
+        concurrency_bug: "Concurrency race",
+        plan_then_build: "Plan → Build",
+        bug_review: "Bug review",
+        dashboard: "Finance dashboard",
+      };
+      const scenarioOrder = {
+        invoice: 0,
+        invoice_dense: 1,
+        refactor_move: 2,
+        concurrency_bug: 3,
+        plan_then_build: 4,
+        bug_review: 5,
+        dashboard: 6,
+      };
       const escapeHTML = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
       const seconds = (value) => value >= 1000 ? `${(value / 1000).toFixed(value >= 100000 ? 1 : 2)}s` : `${value}ms`;
       const shortModel = (model) => String(model).replace(/^claude-/, "");
@@ -428,7 +445,7 @@
       const safeArtifact = (name) => `./${String(name).split("/").map(encodeURIComponent).join("/")}`;
       const sum = (values) => values.reduce((total, value) => total + value, 0);
       const topEntries = (values, limit = 6) => Object.entries(values ?? {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, limit);
-      const scenarios = [...new Set(report.runs.map((run) => run.scenario))].sort((a, b) => ({ invoice: 0, invoice_dense: 1, dashboard: 2 }[a] - ({ invoice: 0, invoice_dense: 1, dashboard: 2 }[b])));
+      const scenarios = [...new Set(report.runs.map((run) => run.scenario))].sort((a, b) => ((scenarioOrder[a] ?? 99) - (scenarioOrder[b] ?? 99)) || a.localeCompare(b));
 
       document.getElementById("effort-label").textContent = `${report.effort || "mixed"} effort · local gateway`;
       document.getElementById("generated-at").textContent = `Generated ${new Date(report.generated_at).toLocaleString()} · schema v${report.schema_version} · n=1 per case`;
@@ -468,7 +485,7 @@
         const maximum = Math.max(...runs.map((run) => run.duration_ms), 1);
         document.getElementById("duration-chart").innerHTML = runs.length ? runs.map((run) => `
           <div class="bar-row">
-            <div class="bar-label"><strong>${escapeHTML(agentLabel(run))}</strong><small>${escapeHTML(run.model)}</small><div class="chips"><span class="chip">${run.tool_calls} tools</span><span class="chip">${run.model_requests} model requests</span></div></div>
+            <div class="bar-label"><strong>${escapeHTML(agentLabel(run))}</strong><small>${escapeHTML(run.model)}</small><div class="chips"><span class="chip">${run.tool_calls} tools</span><span class="chip">${run.model_requests} model requests</span>${run.cache_hit_ratio ? `<span class="chip">${Math.round(run.cache_hit_ratio * 100)}% cache hit</span>` : ""}</div></div>
             <div class="bar-track"><div class="bar-fill ${run.success ? "" : "failed"}" style="--width:${Math.max(1.5, run.duration_ms / maximum * 100)}%;--agent-color:${color(run.agent)}"></div></div>
             <div class="bar-value">${seconds(run.duration_ms)}</div>
           </div>`).join("") : `<div class="empty">No runs for this scenario.</div>`;

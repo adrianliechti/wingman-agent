@@ -25,7 +25,7 @@ func TestContextEstimateImagesAndUsage(t *testing.T) {
 	if got := a.requestTokens(req); got != 2323 {
 		t.Fatalf("measured input + output = %d, want 2323 (including cached tokens)", got)
 	}
-	result := Message{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{ID: "c", Content: strings.Repeat("x", 8000)}}}}
+	result := Message{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{ID: "c", Content: tool.TextContent(strings.Repeat("x", 8000))}}}}
 	req.messages = append(req.messages, result)
 	if got, want := a.requestTokens(req), int64(2323+messageTokens(result)); got != want {
 		t.Fatalf("new tool result accounting = %d, want %d", got, want)
@@ -104,5 +104,16 @@ func TestContextStatsShowsCurrentUsageAfterCompaction(t *testing.T) {
 	}
 	if got := a.ContextStats().CurrentTokens; got >= 1000 {
 		t.Fatalf("stale context display after compaction: %d", got)
+	}
+}
+
+func TestTypedImageTokenEstimate(t *testing.T) {
+	content := imageContentFixture(t)
+	m := Message{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{Content: content}}}}
+	if got := messageTokens(m); got != 4+estimatedImageTokens {
+		t.Fatalf("image tokens=%d", got)
+	}
+	if messageBytes(m) < len(content[0].Image.Data) {
+		t.Fatal("missing image byte accounting")
 	}
 }

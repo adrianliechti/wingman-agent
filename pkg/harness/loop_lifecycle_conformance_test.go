@@ -83,12 +83,12 @@ func TestLoopToolFailuresStillCompleteTheBatch(t *testing.T) {
 					if call.ID == "good" {
 						return tool.Text("sibling succeeded"), nil
 					}
-					result := tool.Result{Content: "raw output", Metadata: map[string]any{"observed": true}}
+					result := tool.Result{Content: tool.TextContent("raw output"), Metadata: map[string]any{"observed": true}}
 					switch tc.name {
 					case "executor error":
 						return result, errors.New("executor failed")
 					case "reported error":
-						result.Content, result.IsError = "reported failure", true
+						result.Content, result.IsError = tool.TextContent("reported failure"), true
 					case "executor panic":
 						panic("executor failed")
 					}
@@ -128,7 +128,7 @@ func TestLoopToolFailuresStillCompleteTheBatch(t *testing.T) {
 			if requests != 2 || executions != tc.wantExecutions || len(starts) != 2 || len(terminals) != 2 {
 				t.Errorf("requests=%d executions=%d starts=%d terminals=%d", requests, executions, len(starts), len(terminals))
 			}
-			if bad == nil || !bad.IsError || !strings.Contains(bad.Content, tc.message) {
+			if bad == nil || !bad.IsError || !strings.Contains(bad.Content.Text(), tc.message) {
 				t.Fatalf("bad call result=%+v", bad)
 			}
 			if tc.wantMetadata && bad.Metadata["observed"] != true {

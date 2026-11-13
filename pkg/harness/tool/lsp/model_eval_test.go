@@ -107,7 +107,7 @@ func TestLiveLSPToolSelection(t *testing.T) {
 					}
 					if content.ToolResult != nil && content.ToolResult.IsError {
 						failures++
-						t.Logf("TOOL_ERROR name=%s content=%s", content.ToolResult.Name, content.ToolResult.Content)
+						t.Logf("TOOL_ERROR name=%s content=%s", content.ToolResult.Name, content.ToolResult.Content.Text())
 					}
 					if message.Role == harness.RoleAssistant {
 						text.WriteString(content.Text)
@@ -219,9 +219,9 @@ func TestLiveLSPRenamePreview(t *testing.T) {
 			}
 			if content.ToolResult != nil && content.ToolResult.IsError {
 				failures++
-				t.Logf("RENAME_ERROR name=%s content=%s", content.ToolResult.Name, content.ToolResult.Content)
+				t.Logf("RENAME_ERROR name=%s content=%s", content.ToolResult.Name, content.ToolResult.Content.Text())
 				if content.ToolResult.Name == "lsp" || content.ToolResult.Name == "edit" {
-					t.Errorf("preview/apply failed: %s", content.ToolResult.Content)
+					t.Errorf("preview/apply failed: %s", content.ToolResult.Content.Text())
 				}
 			}
 		}

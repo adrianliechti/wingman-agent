@@ -90,7 +90,7 @@ func TestBriefingMultipartUserMessageLeavesRoomForEvidence(t *testing.T) {
 		{Text: strings.Repeat("third attachment ", 1000) + " Preserve the API."},
 	}}
 	messages := []Message{
-		{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{Content: "RECENT_TEST_RESULT: regression failed; repair pending."}}}},
+		{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{Content: tool.TextContent("RECENT_TEST_RESULT: regression failed; repair pending.")}}}},
 		message,
 	}
 	for _, budget := range []int{1024, 4096} {

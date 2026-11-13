@@ -56,8 +56,8 @@ func TestCancelledLSPRequestsReturnContextError(t *testing.T) {
 	ctx, cancel = context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	result, err := inspect.Execute(ctx, map[string]any{"operation": "diagnostics", "file_path": path})
-	if !errors.Is(err, context.DeadlineExceeded) || result.Content != "" {
-		t.Fatalf("cancelled diagnostics returned success: %q %v", result.Content, err)
+	if !errors.Is(err, context.DeadlineExceeded) || result.Content.Text() != "" {
+		t.Fatalf("cancelled diagnostics returned success: %q %v", result.Content.Text(), err)
 	}
 }
 

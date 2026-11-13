@@ -28,6 +28,9 @@ func (a *Agent) compressContext(requiredTokens int64) (int, error) {
 	if latest := lastSessionContextIndex(messages); latest > 0 {
 		older := slices.DeleteFunc(messages[:latest], isSessionContext)
 		rewritten = len(older) < latest
+		if rewritten {
+			messages[latest] = fullSessionContextMessage(messages[latest])
+		}
 		messages = append(older, messages[latest:]...)
 	}
 
@@ -83,12 +86,16 @@ func trimStaleEvidence(messages []Message) bool {
 		m.Content = content
 		for _, c := range content {
 			if result := c.ToolResult; result != nil {
-				if len(result.Content) > trimResultThreshold {
-					result.Content = trimmedToolOutput(result.Content)
+				textOnly := slices.DeleteFunc(result.Content, func(b tool.ContentBlock) bool { return b.Image != nil })
+				removedImage := len(textOnly) != len(result.Content)
+				result.Content = textOnly
+				rewritten = rewritten || removedImage
+				if len(result.Content.Text()) > trimResultThreshold {
+					result.Content = tool.TextContent(trimmedToolOutput(result.Content.Text()))
 					rewritten = true
 				}
-				if imageDropped {
-					result.Content += "\n" + trimImageMarker
+				if imageDropped || removedImage {
+					result.Content.AppendText("\n" + trimImageMarker)
 				}
 			}
 		}

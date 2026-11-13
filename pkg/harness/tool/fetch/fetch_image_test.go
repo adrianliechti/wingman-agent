@@ -32,8 +32,8 @@ func TestFetchImagesByContent(t *testing.T) {
 			defer server.Close()
 
 			result, err := Tools(nil)[0].Execute(t.Context(), map[string]any{"url": server.URL + "/redirect"})
-			if err != nil || !tool.IsImageResult(result.Content) {
-				t.Fatalf("image = %.60s, err = %v", result.Content, err)
+			if err != nil || len(result.Content.ImageURLs()) != 1 {
+				t.Fatalf("image = %.60s, err = %v", result.Content.Text(), err)
 			}
 			if result.Metadata["url"] != server.URL+"/image" || result.Metadata["width"] != tool.MaxImageDimension {
 				t.Fatalf("metadata = %v", result.Metadata)
@@ -56,8 +56,8 @@ func TestFetchImageUsesLargerSourceBudget(t *testing.T) {
 	}))
 	defer server.Close()
 	result, err := Tools(nil)[0].Execute(t.Context(), map[string]any{"url": server.URL})
-	if err != nil || !tool.IsImageResult(result.Content) {
-		t.Fatalf("large image = %.60s, err = %v", result.Content, err)
+	if err != nil || len(result.Content.ImageURLs()) != 1 {
+		t.Fatalf("large image = %.60s, err = %v", result.Content.Text(), err)
 	}
 }
 

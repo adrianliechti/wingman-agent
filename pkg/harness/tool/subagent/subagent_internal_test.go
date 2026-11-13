@@ -143,8 +143,8 @@ func TestExploreWrapsDynamicToolsAsReadOnly(t *testing.T) {
 	wrapped := filtered[0]
 
 	out, err := wrapped.Execute(context.Background(), map[string]any{"safe": true})
-	if err != nil || out.Content != "ran" {
-		t.Fatalf("read-only call: got (%q, %v), want (ran, nil)", out.Content, err)
+	if err != nil || out.Content.Text() != "ran" {
+		t.Fatalf("read-only call: got (%q, %v), want (ran, nil)", out.Content.Text(), err)
 	}
 	if !called {
 		t.Error("original executor must have run on read-only path")
@@ -265,7 +265,7 @@ func TestFinalTextIgnoresHiddenFinishMarker(t *testing.T) {
 		{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: &harness.ToolResult{ID: "1"}}}},
 		{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "the report"}}},
 		{Role: harness.RoleAssistant, Hidden: true, Content: []harness.Content{{ToolCall: &harness.ToolCall{ID: "2", Name: "finish_turn"}}}},
-		{Role: harness.RoleAssistant, Hidden: true, Content: []harness.Content{{ToolResult: &harness.ToolResult{ID: "2", Content: "Turn finished."}}}},
+		{Role: harness.RoleAssistant, Hidden: true, Content: []harness.Content{{ToolResult: &harness.ToolResult{ID: "2", Content: tool.TextContent("Turn finished.")}}}},
 	}
 
 	if got := finalText(messages); got != "the report" {

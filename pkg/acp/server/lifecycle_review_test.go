@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -199,4 +200,51 @@ func TestHistoryReplaySurfacesStalledClientWrite(t *testing.T) {
 			t.Fatal("stalled transport remained open")
 		}
 	})
+}
+
+type recordingWriter struct {
+	mu   sync.Mutex
+	data strings.Builder
+}
+
+func (w *recordingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.data.Write(p)
+}
+
+func (w *recordingWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.data.String()
+}
+
+// A client learns a new session's ID from the response, and drops updates for
+// IDs it does not know. The command list must therefore follow the response.
+func TestNewSessionAnnouncesCommandsAfterResponse(t *testing.T) {
+	s := newContractServer(t).(*contractServer)
+	t.Cleanup(func() { _ = s.Close() })
+	reader, peer := net.Pipe()
+	t.Cleanup(func() { _ = reader.Close(); _ = peer.Close() })
+	writer := &recordingWriter{}
+	s.SetAgentConnection(acpsdk.NewAgentSideConnection(s, writer, reader))
+
+	response, err := s.NewSession(t.Context(), acpsdk.NewSessionRequest{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent := writer.String(); strings.Contains(sent, "available_commands_update") {
+		t.Fatalf("commands announced before the session response:\n%s", sent)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(writer.String(), "available_commands_update") {
+		if time.Now().After(deadline) {
+			t.Fatalf("commands never announced:\n%s", writer.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	sent := writer.String()
+	if !strings.Contains(sent, string(response.SessionId)) || !strings.Contains(sent, `"review"`) {
+		t.Fatalf("command update lacks the session or the review command:\n%s", sent)
+	}
 }

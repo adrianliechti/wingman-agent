@@ -123,7 +123,7 @@ func transcriptMarkdown(messages []harness.Message, isToolHidden func(string) bo
 				if result.Args != "" {
 					body.WriteString(exportFence(result.Args, "json"))
 				}
-				body.WriteString(exportFence(result.Content, "text"))
+				body.WriteString(exportFence(result.Content.Text(), "text"))
 			case content.ToolCall != nil:
 				// Completed tool results carry both the arguments and output.
 				continue

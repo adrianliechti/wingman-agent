@@ -22,6 +22,7 @@ import (
 )
 
 var errYieldStopped = errors.New("yield stopped")
+var errSteerPreempt = errors.New("preempted by user steering")
 
 // ErrTurnInProgress means Send was called while another turn was active.
 var ErrTurnInProgress = errors.New("agent turn already in progress")
@@ -73,6 +74,7 @@ type Agent struct {
 	turnTools     []tool.Tool
 	toolsPinned   bool
 	pendingInput  []Message
+	steerNotify   chan struct{}
 	started       bool // Only accessed by the operation owner.
 
 	backgroundCtx    context.Context
@@ -114,6 +116,12 @@ func (a *Agent) QueueInputWithID(input []Content, id string) bool {
 	message := userMessage(input)
 	message.InputID = id
 	a.pendingInput = append(a.pendingInput, message)
+	if !message.Hidden && a.steerNotify != nil {
+		select {
+		case a.steerNotify <- struct{}{}:
+		default:
+		}
+	}
 	return true
 }
 
@@ -130,7 +138,15 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 		return nil, ErrEmptyInput
 	}
 	input = CloneContent(input)
+	return a.RunExclusiveStream(ctx, func(ctx context.Context) (iter.Seq2[Message, error], error) {
+		return a.send(ctx, input)
+	})
+}
 
+// RunExclusiveStream reserves the session for a host-provided stream, including
+// its preparation and finalization. It shares Send's cancellation, task budget,
+// and single-consumer rules. Prepare must not start another parent operation.
+func (a *Agent) RunExclusiveStream(ctx context.Context, prepare func(context.Context) (iter.Seq2[Message, error], error)) (iter.Seq2[Message, error], error) {
 	ctx, endOperation, err := a.beginOperation(ctx)
 	if err != nil {
 		return nil, err
@@ -146,7 +162,7 @@ func (a *Agent) Send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			release()
 		}
 	}()
-	stream, err := a.send(ctx, input)
+	stream, err := prepare(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +325,7 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 		}
 
 		turns := 0
+		firstRequest := true
 		var completion completionState
 		nativeContinuation := false
 		stopHookActive := false
@@ -319,7 +336,7 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			}
 			// Give the original prompt its own first request. Later requests
 			// consume steering, including input received during Stop hooks.
-			if turns > 0 {
+			if !firstRequest {
 				pending := a.takePendingInput()
 				if len(pending) > 0 {
 					completion = completionState{}
@@ -361,7 +378,14 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				continue
 			}
 
+			firstRequest = false
 			resp, err := a.completeWithRetry(stepCtx, runtime.TurnID, req, yield)
+			if errors.Is(err, errSteerPreempt) {
+				// User steering preempted an in-flight stream before any tool ran.
+				// Drain pendingInput on the next iteration without consuming a turn.
+				EmitStreamEvent(ctx, StreamEventCommit)
+				continue
+			}
 			if err != nil {
 				stop(err)
 				return
@@ -558,18 +582,59 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 
 	toolCtx, cancelTools := withToolStop(ctx)
 	defer cancelTools()
-	inferenceCtx, cancelInference := context.WithCancel(inferenceCtx)
-	defer cancelInference()
+	inferenceCtx, cancelInference := context.WithCancelCause(inferenceCtx)
+	defer cancelInference(nil)
 	stopInference := context.AfterFunc(toolCtx, func() {
 		if _, stopped := errors.AsType[hookStopError](context.Cause(toolCtx)); stopped {
-			cancelInference()
+			cancelInference(context.Canceled)
 		}
 	})
 	defer stopInference()
 	round := streamToolRound{agent: a, ctx: toolCtx, tools: req.tools}
+	var toolStarted bool
+	var streamOutputStarted bool
+	var steerMu sync.Mutex
+	preempted := false
+	var partialOrder []string
+	partialTexts := make(map[string]*strings.Builder)
 	var committed []Message
 	consumerOpen := true
+	trySteerPreempt := func() {
+		steerMu.Lock()
+		defer steerMu.Unlock()
+		if streamOutputStarted && !toolStarted && a.hasPendingSteering() {
+			preempted = true
+			cancelInference(errSteerPreempt)
+		}
+	}
 	emit := func(message Message, err error) bool {
+		if err == nil && message.Role == RoleAssistant {
+			steerMu.Lock()
+			if preempted {
+				steerMu.Unlock()
+				return false
+			}
+			for _, c := range message.Content {
+				if c.ToolCall != nil {
+					toolStarted = true
+				}
+				if c.Text != "" || c.Reasoning != nil || c.Refusal != "" {
+					streamOutputStarted = true
+				}
+				if c.Text != "" {
+					key := c.TextID
+					b, ok := partialTexts[key]
+					if !ok {
+						b = &strings.Builder{}
+						partialTexts[key] = b
+						partialOrder = append(partialOrder, key)
+					}
+					b.WriteString(c.Text)
+				}
+			}
+			steerMu.Unlock()
+			trySteerPreempt()
+		}
 		if consumerOpen {
 			consumerOpen = yield(message, err)
 		}
@@ -578,6 +643,26 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 		}
 		return consumerOpen
 	}
+
+	steerCh, unregisterSteer := a.registerSteerNotify()
+	streamDone := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-steerCh:
+				trySteerPreempt()
+			case <-streamDone:
+				return
+			case <-inferenceCtx.Done():
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(streamDone)
+		unregisterSteer()
+	}()
+
 	defer func() {
 		if p := recover(); p != nil {
 			cancelTools()
@@ -590,7 +675,7 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 			runErr = nil
 		}
 		runErr = errors.Join(runErr, drainErr)
-		if runErr != nil {
+		if runErr != nil && !errors.Is(runErr, errSteerPreempt) {
 			// A finish marker is only valid after the response completes. Give
 			// retained markers a rejected result before retrying a failed stream.
 			_, _, _, finishErr := a.resolveFinishCalls(req, &response{messages: committed, incomplete: true}, extractToolCalls(committed), "", emit)
@@ -602,12 +687,28 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 	}()
 	streamReq := *req
 	streamReq.onOutputItem = func(messages []Message) error {
+		steerMu.Lock()
+		if preempted {
+			steerMu.Unlock()
+			return errSteerPreempt
+		}
+		calls := extractToolCalls(messages)
+		for _, call := range calls {
+			if !req.handlesFinishTool(call.Name) {
+				toolStarted = true
+				break
+			}
+		}
+		if len(messages) > 0 {
+			streamOutputStarted = true
+		}
+		steerMu.Unlock()
 		if err := a.appendMessages(messages...); err != nil {
 			return err
 		}
 		committed = append(committed, messages...)
 		EmitStreamEvent(ctx, StreamEventCommit)
-		for _, call := range extractToolCalls(messages) {
+		for _, call := range calls {
 			if req.handlesFinishTool(call.Name) {
 				continue
 			}
@@ -620,6 +721,9 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 		return nil
 	}
 	resp, runErr = a.complete(inferenceCtx, &streamReq, emit)
+	if errors.Is(context.Cause(inferenceCtx), errSteerPreempt) && !toolStarted && ctx.Err() == nil {
+		runErr = errSteerPreempt
+	}
 	if _, stopped := errors.AsType[hookStopError](context.Cause(toolCtx)); stopped && inferenceCtx.Err() != nil {
 		// Cancellation can close the transport as EOF before its context error
 		// is delivered. Normalize only the inference error, retaining any later
@@ -637,7 +741,7 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 	}
 	status := RuntimeCompleted
 	if runErr != nil {
-		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, errYieldStopped) {
+		if errors.Is(runErr, errSteerPreempt) || errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, errYieldStopped) {
 			status = RuntimeInterrupted
 		} else {
 			status = RuntimeFailed
@@ -657,8 +761,29 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 		}
 		event.Usage = &usage
 	}
-	events := make([]RuntimeEvent, 0, 1)
-	if runErr == nil && resp != nil {
+	events := make([]RuntimeEvent, 0, 2)
+	if errors.Is(runErr, errSteerPreempt) {
+		committedIDs := make(map[string]bool)
+		for _, m := range committed {
+			for _, c := range m.Content {
+				if c.TextID != "" {
+					committedIDs[c.TextID] = true
+				}
+			}
+		}
+		for _, id := range partialOrder {
+			if id != "" && committedIDs[id] {
+				continue
+			}
+			if text := partialTexts[id].String(); text != "" {
+				events = append(events, messageEvents(Message{
+					Role:    RoleAssistant,
+					Phase:   PhasePartialAnswer,
+					Content: []Content{{Text: text, TextID: id}},
+				})...)
+			}
+		}
+	} else if runErr == nil && resp != nil {
 		events = append(events, messageEvents(resp.messages[len(committed):]...)...)
 	}
 	events = append(events, event)
@@ -895,19 +1020,14 @@ const (
 )
 
 func toolResultMessage(tc ToolCall, result tool.Result) Message {
-	message := Message{
+	return Message{
 		Role: RoleAssistant,
 		Content: []Content{{ToolResult: &ToolResult{
 			ID: tc.ID, Name: tc.Name, Kind: tc.Kind, Args: tc.Args,
 			Locations: tc.Locations, Presentation: NewToolPresentation(tc.Name, tc.Kind, tc.Args, tc.Locations),
-			Content: result.Content, IsError: result.IsError, Metadata: result.Metadata,
+			Content: result.Content.Clone(), IsError: result.IsError, Metadata: result.Metadata,
 		}}},
 	}
-	if tool.IsImageResult(result.Content) {
-		message.Content[0].ToolResult.Content = imageResultPlaceholder
-		message.Content = append(message.Content, Content{File: &File{Data: result.Content}})
-	}
-	return message
 }
 
 func (a *Agent) runSingleToolCall(ctx context.Context, tc ToolCall, tools []tool.Tool) tool.Result {
@@ -1013,14 +1133,14 @@ func (a *Agent) executeToolOperation(ctx context.Context, tc ToolCall, tools []t
 	toolOutcome := telemetry.Outcome{}
 	if result.IsError {
 		toolOutcome.ErrorType = "_OTHER"
-		if result.Content == interruptedToolResult || result.Content == interruptedWaitResult {
+		if result.Content.Text() == interruptedToolResult || result.Content.Text() == interruptedWaitResult {
 			toolOutcome.ErrorType = "canceled"
-		} else if strings.Contains(result.Content, "time limit") || strings.Contains(result.Content, "deadline") {
+		} else if strings.Contains(result.Content.Text(), "time limit") || strings.Contains(result.Content.Text(), "deadline") {
 			toolOutcome.ErrorType = "timeout"
 		}
 	}
 	if mcpMethod == "" {
-		telemetryExecution.SetResult(genericToolResultTelemetryValue(result.Content))
+		telemetryExecution.SetResult(genericToolResultTelemetryValue(result.Content.Text()))
 	}
 	telemetryExecution.End(toolOutcome)
 	telemetryEnded = true
@@ -1053,12 +1173,12 @@ func toolOutcomeEvents(tc ToolCall, result tool.Result, commit toolCommit) []Run
 	if result.IsError {
 		status = RuntimeFailed
 	}
-	if result.Content == interruptedToolResult || result.Content == interruptedWaitResult {
+	if result.Content.Text() == interruptedToolResult || result.Content.Text() == interruptedWaitResult {
 		status = RuntimeInterrupted
 	}
 	terminal := &RuntimeTerminal{Status: status}
 	if result.IsError {
-		terminal.Error = result.Content
+		terminal.Error = result.Content.Text()
 	}
 	resultMessage := toolResultMessage(tc, result)
 	return append(messageEvents(resultMessage), RuntimeEvent{
@@ -1116,13 +1236,23 @@ func (a *Agent) retainedToolResult(tc ToolCall) (tool.Result, bool) {
 			if result.Name != tc.Name || result.Args != tc.Args {
 				return tool.Error(fmt.Sprintf("error: tool call ID %s was reused with different arguments", tc.ID)), true
 			}
-			if result.Content == interruptedToolResult || result.Content == interruptedWaitResult {
+			if result.Content.Text() == interruptedToolResult || result.Content.Text() == interruptedWaitResult {
 				return tool.Result{}, false
 			}
-			content := result.Content
-			if content == imageResultPlaceholder && j+1 < len(message.Content) {
-				if file := message.Content[j+1].File; file != nil {
-					content = file.Data
+			content := result.Content.Clone()
+			// Older journals stored images as adjacent File entries. Decode only
+			// those explicit attachments, never ordinary tool-output text.
+			for k := j + 1; k < len(message.Content); k++ {
+				if message.Content[k].ToolResult != nil {
+					break
+				}
+				if file := message.Content[k].File; file != nil {
+					if img, ok := tool.ParseImageDataURL(file.Data); ok {
+						if len(content) == 1 && content.Text() == imageResultPlaceholder {
+							content = nil
+						}
+						content = append(content, tool.ContentBlock{Image: img})
+					}
 				}
 			}
 			return tool.Result{Content: content, IsError: result.IsError, Metadata: maps.Clone(result.Metadata)}, true
@@ -1133,6 +1263,7 @@ func (a *Agent) retainedToolResult(tc ToolCall) (tool.Result, bool) {
 
 func cloneToolResult(result tool.Result) tool.Result {
 	result.Metadata = maps.Clone(result.Metadata)
+	result.Content = result.Content.Clone()
 	return result
 }
 
@@ -1142,7 +1273,7 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 	// already completed before a post-tool hook panicked.
 	defer func() {
 		if r := recover(); r != nil {
-			result.Content = fmt.Sprintf("error: tool %s panicked: %v", tc.Name, r)
+			result.Content = tool.TextContent(fmt.Sprintf("error: tool %s panicked: %v", tc.Name, r))
 			result.IsError = true
 		}
 	}()
@@ -1223,15 +1354,15 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 	}
 
 	for i, h := range a.Hooks.PostToolUse {
-		outcome, err := h(ctx, hc, result.Content)
+		outcome, err := h(ctx, hc, result.Content.Text())
 
 		if err != nil {
 			hook.ReportError(ctx, "PostToolUse", "", i, err)
-			result.Content, result.IsError = fmt.Sprintf("error: %v", err), true
+			result.Content, result.IsError = tool.TextContent(fmt.Sprintf("error: %v", err)), true
 			break
 		}
 		if outcome.UpdatedResult != nil {
-			result.Content = *outcome.UpdatedResult
+			result.Content = tool.TextContent(*outcome.UpdatedResult)
 		}
 		hookContext = append(hookContext, outcome.AdditionalContext...)
 		if outcome.Block || outcome.Stop {
@@ -1242,7 +1373,7 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 			// Codex replaces the completed tool result with hook feedback. The
 			// side effect has already happened, but the original output must not
 			// continue into the next model request.
-			result.Content = reason
+			result.Content = tool.TextContent(reason)
 			result.IsError = true
 			if outcome.Stop {
 				stopToolTurn(ctx, reason)
@@ -1250,26 +1381,26 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 			}
 		}
 	}
-	if len(hookContext) > 0 && !tool.IsImageResult(result.Content) {
-		result.Content += "\n\n<hook-context>\n" + strings.Join(hookContext, "\n\n") + "\n</hook-context>"
+	if len(hookContext) > 0 {
+		result.Content.AppendText("\n\n<hook-context>\n" + strings.Join(hookContext, "\n\n") + "\n</hook-context>")
 	}
-	if !tool.IsImageResult(result.Content) {
+	if result.Content.Text() != "" {
 		for i, transform := range a.Hooks.TransformToolResult {
-			content, err := transform(ctx, hc, result.Content)
+			content, err := transform(ctx, hc, result.Content.Text())
 			if err != nil {
 				hook.ReportError(ctx, "TransformToolResult", "", i, err)
-				result.Content, result.IsError = fmt.Sprintf("error: %v", err), true
+				result.Content, result.IsError = tool.TextContent(fmt.Sprintf("error: %v", err)), true
 				break
 			}
-			result.Content = content
+			result.Content = result.Content.WithText(content)
 		}
-		result.Content = boundToolResult(result.Content)
+		result.Content = result.Content.WithText(boundToolResult(result.Content.Text()))
 	}
 	usageMu.Lock()
 	deferredUsageErr := usageErr
 	usageMu.Unlock()
 	if deferredUsageErr != nil {
-		result.Content, result.IsError = fmt.Sprintf("error: tool usage could not be persisted: %v", deferredUsageErr), true
+		result.Content, result.IsError = tool.TextContent(fmt.Sprintf("error: tool usage could not be persisted: %v", deferredUsageErr)), true
 	}
 
 	return result
@@ -1305,6 +1436,10 @@ func (a *Agent) executeTool(ctx context.Context, tc ToolCall, t *tool.Tool, time
 		return failure
 	}
 
+	if err := result.Content.Validate(); err != nil {
+		return tool.Result{Content: tool.TextContent("error: invalid tool output: " + err.Error()), IsError: true, Metadata: result.Metadata}
+	}
+	result.Content = result.Content.Clone()
 	return result
 }
 

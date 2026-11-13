@@ -441,6 +441,10 @@ func lineContaining(lineStarts []int, offset int) int {
 }
 
 func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, hidden credentialFilter, onFile func(path, relPath string, d fs.DirEntry) error) error {
+	return walkGrepFilesWithSkipped(ctx, fsys, root, hidden, onFile, func(string) {})
+}
+
+func walkGrepFilesWithSkipped(ctx context.Context, fsys fs.FS, root string, hidden credentialFilter, onFile func(path, relPath string, d fs.DirEntry) error, skipped func(string)) error {
 	for component := range strings.SplitSeq(root, "/") {
 		if vcsDirs[component] {
 			return nil
@@ -465,6 +469,7 @@ func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, hidden credenti
 		default:
 		}
 		if errors.Is(err, fs.ErrNotExist) {
+			skipped(path)
 			return nil
 		}
 		if err != nil {
@@ -472,10 +477,12 @@ func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, hidden credenti
 		}
 
 		if d.Type()&fs.ModeSymlink != 0 {
+			skipped(path)
 			return nil
 		}
 		// The starting path was checked when the search target was resolved.
 		if hidden != nil && path != root && hidden(pathpkg.Dir(path), d.Name(), d.Info) {
+			skipped(path)
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -484,6 +491,7 @@ func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, hidden credenti
 
 		if d.IsDir() {
 			if vcsDirs[d.Name()] {
+				skipped(path)
 				return filepath.SkipDir
 			}
 			// The starting directory must be traversed so its own rules can
@@ -496,12 +504,14 @@ func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, hidden credenti
 				return err
 			}
 			if ignored {
+				skipped(path)
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
 		if !d.Type().IsRegular() {
+			skipped(path)
 			return nil
 		}
 		ignored, err := cache.matches(path, false)
@@ -509,6 +519,7 @@ func walkGrepFiles(ctx context.Context, fsys fs.FS, root string, hidden credenti
 			return err
 		}
 		if ignored {
+			skipped(path)
 			return nil
 		}
 

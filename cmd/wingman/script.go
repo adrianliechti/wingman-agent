@@ -547,7 +547,7 @@ func (r *scriptReporter) writeToolArgs(args string) {
 func (r *scriptReporter) writeToolResult(result *harness.ToolResult) {
 	_, err := fmt.Fprintf(r.errOut, "✓ %s\n", scriptToolLabel(result.Name, result.Args))
 	r.setErr(err)
-	r.writeIndented(result.Content)
+	r.writeIndented(result.Content.Text())
 	_, err = fmt.Fprintln(r.errOut)
 	r.setErr(err)
 }

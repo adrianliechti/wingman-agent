@@ -54,7 +54,7 @@ func TestSearchRejectsIncompleteOrUnexpectedResponses(t *testing.T) {
 			mockSearch(t, func(*http.Request) (*http.Response, error) { return searchResponse(tc.status, tc.body), nil })
 			result, err := Tools(nil)[0].Execute(t.Context(), map[string]any{"query": "test"})
 			if err == nil {
-				t.Fatalf("response treated as successful: %.200s", result.Content)
+				t.Fatalf("response treated as successful: %.200s", result.Content.Text())
 			}
 		})
 	}
@@ -65,7 +65,7 @@ func TestSearchTrueNoResults(t *testing.T) {
 		return searchResponse(200, `<div class="result result--no-result"><div class="no-results">No results found</div></div>`), nil
 	})
 	result, err := Tools(nil)[0].Execute(t.Context(), map[string]any{"query": "unlikely query"})
-	if err != nil || !strings.Contains(result.Content, "No results") {
+	if err != nil || !strings.Contains(result.Content.Text(), "No results") {
 		t.Fatalf("result = %#v, %v", result, err)
 	}
 }
@@ -80,8 +80,8 @@ func TestSearchSnippetsStayWithTheirResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(result.Content, "Wrong ad snippet") || strings.Contains(result.Content, "Duplicate") || !strings.Contains(result.Content, "Second snippet") {
-		t.Fatalf("misassociated or duplicate results: %s", result.Content)
+	if strings.Contains(result.Content.Text(), "Wrong ad snippet") || strings.Contains(result.Content.Text(), "Duplicate") || !strings.Contains(result.Content.Text(), "Second snippet") {
+		t.Fatalf("misassociated or duplicate results: %s", result.Content.Text())
 	}
 }
 
@@ -179,11 +179,11 @@ func TestSearchOutputBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Content) > tool.MaxInlineResultBytes || !utf8.ValidString(result.Content) || !strings.Contains(result.Content, "truncated") {
-		t.Fatalf("unbounded or unmarked search output: bytes=%d", len(result.Content))
+	if len(result.Content.Text()) > tool.MaxInlineResultBytes || !utf8.ValidString(result.Content.Text()) || !strings.Contains(result.Content.Text(), "truncated") {
+		t.Fatalf("unbounded or unmarked search output: bytes=%d", len(result.Content.Text()))
 	}
 	for i := range 10 {
-		if !strings.Contains(result.Content, fmt.Sprintf("https://example.com/%d", i)) {
+		if !strings.Contains(result.Content.Text(), fmt.Sprintf("https://example.com/%d", i)) {
 			t.Errorf("lost result %d", i)
 		}
 	}
@@ -209,7 +209,7 @@ func TestSearchRequestAndLimits(t *testing.T) {
 				want = min(limit, maxResults)
 			}
 			result, err := Tools(nil)[0].Execute(t.Context(), args)
-			if err != nil || strings.Count(result.Content, "https://example.com/") != want {
+			if err != nil || strings.Count(result.Content.Text(), "https://example.com/") != want {
 				t.Fatalf("limit=%d result=%#v err=%v", limit, result, err)
 			}
 		})
@@ -260,7 +260,7 @@ func TestSearchCharsetAndContentType(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || !strings.Contains(result.Content, tc.want) {
+			if err != nil || !strings.Contains(result.Content.Text(), tc.want) {
 				t.Fatalf("result=%#v err=%v", result, err)
 			}
 		})
@@ -292,7 +292,7 @@ func TestSearchLongURLsStayCompleteOrAreOmitted(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || !strings.Contains(result.Content, "https://example.com/fits") || !strings.Contains(result.Content, "1 results omitted") || len(result.Content) > tool.MaxInlineResultBytes {
+			if err != nil || !strings.Contains(result.Content.Text(), "https://example.com/fits") || !strings.Contains(result.Content.Text(), "1 results omitted") || len(result.Content.Text()) > tool.MaxInlineResultBytes {
 				t.Fatalf("result=%#v err=%v", result, err)
 			}
 		})

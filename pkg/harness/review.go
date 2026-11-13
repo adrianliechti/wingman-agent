@@ -230,9 +230,9 @@ func reviewRecords(messages []Message) []reviewRecord {
 			switch {
 			case c.ToolResult != nil:
 				if c.ToolResult.Name == "elicit" && !c.ToolResult.IsError {
-					add("user_answer", "", c.ToolResult.Content, false, 2000)
+					add("user_answer", "", c.ToolResult.Content.Text(), false, 2000)
 				} else {
-					add("tool_result", c.ToolResult.Name, c.ToolResult.Content, c.ToolResult.IsError, 1500)
+					add("tool_result", c.ToolResult.Name, c.ToolResult.Content.Text(), c.ToolResult.IsError, 1500)
 				}
 			case c.ToolCall != nil:
 				add("tool_call", c.ToolCall.Name, c.ToolCall.Args, false, 2000)

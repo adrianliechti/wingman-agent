@@ -36,9 +36,6 @@ func budgetFor(name string) int {
 // when persistence must include context added by lifecycle hooks.
 func New(scratchDir string) hook.PostToolUse {
 	return func(_ context.Context, call tool.ToolCall, result string) (hook.Outcome, error) {
-		if tool.IsImageResult(result) {
-			return hook.Outcome{}, nil
-		}
 		budget := budgetFor(call.Name)
 		if len(result) <= budget {
 			return hook.Outcome{}, nil

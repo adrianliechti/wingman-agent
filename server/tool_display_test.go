@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 func TestDisplayToolKeepsFilePathOnlyAsChip(t *testing.T) {
@@ -108,7 +109,7 @@ func TestConvertMessagesUsesSameCompactPresentation(t *testing.T) {
 				ID: "read-1", Name: "read", Args: `{"file_path":"main.go"}`,
 			}},
 			{ToolResult: &harness.ToolResult{
-				ID: "read-1", Name: "read", Args: `{"file_path":"main.go"}`, Content: "contents",
+				ID: "read-1", Name: "read", Args: `{"file_path":"main.go"}`, Content: tool.TextContent("contents"),
 			}},
 		},
 	}})

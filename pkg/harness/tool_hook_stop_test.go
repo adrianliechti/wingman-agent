@@ -34,7 +34,7 @@ func TestPostToolStopEndsTurnAndAllowsNextTurn(t *testing.T) {
 					Tools: func() []tool.Tool {
 						return []tool.Tool{{Name: "probe", Effect: tool.StaticEffect(effect), Execute: func(context.Context, map[string]any) (tool.Result, error) {
 							executions.Add(1)
-							return tool.Result{Content: "executed", Metadata: map[string]any{"completed": true}}, nil
+							return tool.Result{Content: tool.TextContent("executed"), Metadata: map[string]any{"completed": true}}, nil
 						}}}
 					},
 				}}
@@ -61,7 +61,7 @@ func TestPostToolStopEndsTurnAndAllowsNextTurn(t *testing.T) {
 					for _, content := range message.Content {
 						if result := content.ToolResult; result != nil {
 							results++
-							if result.ID == "1-first" && (result.Metadata["completed"] != true || result.Content != "stop requested") {
+							if result.ID == "1-first" && (result.Metadata["completed"] != true || result.Content.Text() != "stop requested") {
 								t.Fatalf("completed tool result lost: %+v", result)
 							}
 						}

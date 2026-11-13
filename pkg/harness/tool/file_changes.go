@@ -10,12 +10,21 @@ const FileChangesMetadata = "file_changes"
 // FileChange is an exact, structured edit baseline. It is durable tool
 // metadata; it is never included in the model-visible result or prompt.
 type FileChange struct {
-	Path         string `json:"path"`
-	Before       string `json:"before"`
-	After        string `json:"after"`
-	BeforeExists bool   `json:"beforeExists"`
-	AfterExists  bool   `json:"afterExists"`
-	Mode         uint32 `json:"mode"`
+	Path         string  `json:"path"`
+	Before       string  `json:"before"`
+	After        string  `json:"after"`
+	BeforeExists bool    `json:"beforeExists"`
+	AfterExists  bool    `json:"afterExists"`
+	Mode         uint32  `json:"mode"`
+	AfterMode    *uint32 `json:"afterMode,omitempty"`
+}
+
+// ResultMode is the post-edit mode; older records preserve Mode throughout.
+func (c FileChange) ResultMode() uint32 {
+	if c.AfterMode != nil {
+		return *c.AfterMode
+	}
+	return c.Mode
 }
 
 // NetFileChanges folds each file's edits into one change, from the version the
@@ -27,10 +36,15 @@ func NetFileChanges(changes []FileChange) (net []FileChange, gap string) {
 		path := filepath.Clean(filepath.FromSlash(change.Path))
 		if index, ok := indexes[path]; ok {
 			previous := &net[index]
-			if gap == "" && (previous.After != change.Before || previous.AfterExists != change.BeforeExists || previous.Mode != change.Mode) {
+			if gap == "" && (previous.After != change.Before || previous.AfterExists != change.BeforeExists || (change.BeforeExists && previous.ResultMode() != change.Mode)) {
 				gap = path
 			}
 			previous.After, previous.AfterExists = change.After, change.AfterExists
+			mode := change.ResultMode()
+			previous.AfterMode = nil
+			if mode != previous.Mode {
+				previous.AfterMode = &mode
+			}
 			continue
 		}
 		indexes[path] = len(net)

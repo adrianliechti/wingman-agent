@@ -39,15 +39,15 @@ func TestGlobMatchesPathPrefixedPatterns(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.pattern, err)
 		}
-		content := filepath.ToSlash(result.Content)
+		content := filepath.ToSlash(result.Content.Text())
 		for _, want := range tc.want {
 			if !strings.Contains(content, want) {
-				t.Errorf("%s: missing %s in:\n%s", tc.pattern, want, result.Content)
+				t.Errorf("%s: missing %s in:\n%s", tc.pattern, want, result.Content.Text())
 			}
 		}
 		for _, absent := range tc.absent {
 			if strings.Contains(content, absent) {
-				t.Errorf("%s: unexpected %s in:\n%s", tc.pattern, absent, result.Content)
+				t.Errorf("%s: unexpected %s in:\n%s", tc.pattern, absent, result.Content.Text())
 			}
 		}
 	}

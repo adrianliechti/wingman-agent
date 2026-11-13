@@ -164,7 +164,7 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 					}
 				}
 				if content.ToolResult != nil && content.ToolResult.Name == "finish_turn" {
-					t.Logf("finish result: %s", content.ToolResult.Content)
+					t.Logf("finish result: %s", content.ToolResult.Content.Text())
 				}
 			}
 		}

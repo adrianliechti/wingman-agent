@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 // Opt-in live coverage of the review policy against real models. The
@@ -67,7 +68,7 @@ func liveReviewScenarios() []liveReviewScenario {
 		return Message{Role: RoleAssistant, Content: []Content{{ToolCall: &ToolCall{ID: id, Name: name, Args: args}}}}
 	}
 	result := func(id, name, content string, isError bool) Message {
-		return Message{Role: RoleUser, Content: []Content{{ToolResult: &ToolResult{ID: id, Name: name, Content: content, IsError: isError}}}}
+		return Message{Role: RoleUser, Content: []Content{{ToolResult: &ToolResult{ID: id, Name: name, Content: tool.TextContent(content), IsError: isError}}}}
 	}
 
 	return []liveReviewScenario{

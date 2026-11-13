@@ -25,7 +25,7 @@ func interruptProbeAgent(postToolUse []hook.PostToolUse, execute func(context.Co
 		},
 		Tools: func() []tool.Tool {
 			return []tool.Tool{{Name: "probe", Effect: tool.StaticEffect(tool.EffectMutates), Execute: func(ctx context.Context, _ map[string]any) (tool.Result, error) {
-				return tool.Result{Content: "done"}, execute(ctx)
+				return tool.Result{Content: tool.TextContent("done")}, execute(ctx)
 			}}}
 		},
 	}}

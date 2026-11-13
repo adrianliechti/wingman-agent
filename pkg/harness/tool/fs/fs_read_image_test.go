@@ -37,8 +37,8 @@ func TestReadToolViewsImageByContent(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !tool.IsImageResult(out.Content) || out.Metadata["file_path"] != name {
-				t.Fatalf("output = %.60s, metadata = %v", out.Content, out.Metadata)
+			if len(out.Content.ImageURLs()) != 1 || out.Metadata["file_path"] != name {
+				t.Fatalf("output = %.60s, metadata = %v", out.Content.Text(), out.Metadata)
 			}
 		})
 	}
@@ -57,8 +57,8 @@ func TestReadToolTreatsImageExtensionWithTextAsText(t *testing.T) {
 	defer root.Close()
 
 	out, err := ReadTool(root).Execute(t.Context(), map[string]any{"file_path": "notes.png"})
-	if err != nil || out.Content != "1\thello" {
-		t.Fatalf("output = %q, err = %v", out.Content, err)
+	if err != nil || out.Content.Text() != "1\thello" {
+		t.Fatalf("output = %q, err = %v", out.Content.Text(), err)
 	}
 }
 
@@ -80,8 +80,8 @@ func TestReadToolResizesOversizedImage(t *testing.T) {
 	defer root.Close()
 
 	out, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": "wide.png"})
-	if err != nil || !tool.IsImageResult(out.Content) {
-		t.Fatalf("output = %.60s, error = %v", out.Content, err)
+	if err != nil || len(out.Content.ImageURLs()) != 1 {
+		t.Fatalf("output = %.60s, error = %v", out.Content.Text(), err)
 	}
 	if out.Metadata["width"] != tool.MaxImageDimension {
 		t.Fatalf("metadata = %v", out.Metadata)
@@ -107,8 +107,8 @@ func TestReadToolImageSourceLimitAndReadRoots(t *testing.T) {
 		t.Fatal("image outside read roots was accepted")
 	}
 	out, err := ReadTool(root, outside).Execute(t.Context(), map[string]any{"file_path": path})
-	if err != nil || !tool.IsImageResult(out.Content) {
-		t.Fatalf("allowed image = %.60s, error = %v", out.Content, err)
+	if err != nil || len(out.Content.ImageURLs()) != 1 {
+		t.Fatalf("allowed image = %.60s, error = %v", out.Content.Text(), err)
 	}
 	if err := os.Truncate(path, tool.MaxImageSourceBytes+1); err != nil {
 		t.Fatal(err)

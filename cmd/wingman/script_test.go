@@ -13,6 +13,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
@@ -166,7 +167,7 @@ func TestScriptReporterShowsToolProgressOnlyInDebugMode(t *testing.T) {
 		ID: "call-1", Name: "read", Args: args,
 	}}}}
 	toolResult := harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: &harness.ToolResult{
-		ID: "call-1", Name: "read", Args: args, Content: "first line\nsecond line",
+		ID: "call-1", Name: "read", Args: args, Content: tool.TextContent("first line\nsecond line"),
 	}}}}
 
 	for _, tt := range []struct {
@@ -212,7 +213,7 @@ func TestScriptReporterDropsUncommittedPartialTool(t *testing.T) {
 		ToolCall: &harness.ToolCall{ID: "call-1", Name: "write", Args: `{"file_path":"main.go"}`},
 	}}})
 	reporter.add(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{
-		ToolResult: &harness.ToolResult{ID: "call-1", Name: "write", Args: `{"file_path":"main.go"}`, Content: "ok"},
+		ToolResult: &harness.ToolResult{ID: "call-1", Name: "write", Args: `{"file_path":"main.go"}`, Content: tool.TextContent("ok")},
 	}}})
 	if got := errOut.String(); strings.Count(got, "→ write /main.go") != 1 || !strings.Contains(got, "✓ write /main.go") {
 		t.Fatalf("definitive tool reporting = %q", got)

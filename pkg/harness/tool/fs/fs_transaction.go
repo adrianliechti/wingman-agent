@@ -26,6 +26,7 @@ type fileChange struct {
 	beforeMode    os.FileMode
 	after         []byte
 	afterPresent  bool
+	afterMode     *os.FileMode
 
 	root       *os.Root
 	path       string
@@ -109,7 +110,9 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 			return fmt.Errorf("stage %s: %w", change.displayPath, closeErr)
 		}
 		mode := change.beforeMode.Perm()
-		if mode == 0 {
+		if change.afterMode != nil {
+			mode = change.afterMode.Perm()
+		} else if mode == 0 {
 			mode = 0o644
 		}
 		if err := change.root.Chmod(change.tempPath, mode); err != nil {

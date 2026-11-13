@@ -663,7 +663,7 @@ func executeExecCommand(ctx context.Context, m *ExecManager, workDir string, eli
 	}
 	// Test and build output often quotes denials of its own; a check is not re-run.
 	if validation {
-		result.Content += "\n" + sandboxDenialNotice
+		result.Content.AppendText("\n" + sandboxDenialNotice)
 		return result, nil
 	}
 	return retryOutsideSandbox(ctx, m, elicit, workDir, run, args, result, denial)
@@ -721,7 +721,7 @@ func retryOutsideSandbox(ctx context.Context, m *ExecManager, elicit *tool.Elici
 		return tool.Result{}, ctxErr
 	}
 	if err != nil {
-		denied.Content += "\n" + sandboxDenialNotice + "\nRunning it outside the sandbox was not approved: " + err.Error()
+		denied.Content.AppendText("\n" + sandboxDenialNotice + "\nRunning it outside the sandbox was not approved: " + err.Error())
 		return denied, nil
 	}
 	run.escalated = true
@@ -729,7 +729,7 @@ func retryOutsideSandbox(ctx context.Context, m *ExecManager, elicit *tool.Elici
 	if err != nil {
 		return tool.Result{}, err
 	}
-	result.Content += "\nThe sandbox blocked the first run (" + denial + "); this result is from re-running the command outside the sandbox after approval."
+	result.Content.AppendText("\nThe sandbox blocked the first run (" + denial + "); this result is from re-running the command outside the sandbox after approval.")
 	return result, nil
 }
 
@@ -757,7 +757,7 @@ func retryWithNetwork(ctx context.Context, m *ExecManager, elicit *tool.Elicitat
 		return tool.Result{}, "", ctxErr
 	}
 	if err != nil {
-		denied.Content += "\n" + sandboxDenialNotice + "\nRunning it with network access was not approved: " + err.Error()
+		denied.Content.AppendText("\n" + sandboxDenialNotice + "\nRunning it with network access was not approved: " + err.Error())
 		return denied, "", nil
 	}
 	run.opts = opts
@@ -766,7 +766,7 @@ func retryWithNetwork(ctx context.Context, m *ExecManager, elicit *tool.Elicitat
 		return tool.Result{}, "", err
 	}
 	if again == "" {
-		result.Content += "\nThe sandbox blocked the first run (" + denial + "); this result is from re-running the command with network access after approval."
+		result.Content.AppendText("\nThe sandbox blocked the first run (" + denial + "); this result is from re-running the command with network access after approval.")
 	}
 	return result, again, nil
 }
@@ -978,7 +978,7 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 			m.remove(id)
 			result := completedSessionResult(s)
 			if !alreadyExited && s.exitErr != nil {
-				result.Content += fmt.Sprintf("\nSession %d killed", id)
+				result.Content.AppendText(fmt.Sprintf("\nSession %d killed", id))
 			}
 			return result, nil
 		}
@@ -993,7 +993,7 @@ func executeExecSession(ctx context.Context, m *ExecManager, elicit *tool.Elicit
 		m.remove(id)
 		result := completedSessionResult(s)
 		if input != "" {
-			result.Content += " (input was not delivered)"
+			result.Content.AppendText(" (input was not delivered)")
 		}
 		return result, nil
 	}
@@ -1099,7 +1099,7 @@ func writeSessionInputLocked(ctx context.Context, m *ExecManager, id int, s *exe
 		if s.exited() {
 			m.remove(id)
 			result := completedSessionResult(s)
-			result.Content += " (input was not delivered)"
+			result.Content.AppendText(" (input was not delivered)")
 			return &result, nil
 		}
 		return nil, fmt.Errorf("failed to write to stdin: %w", err)
@@ -1211,7 +1211,7 @@ func splitSubmittedInput(input string) (submitted, remainder string) {
 
 func (s *execSession) result(content string) tool.Result {
 	return tool.Result{
-		Content: content,
+		Content: tool.TextContent(content),
 		Metadata: map[string]any{
 			"session_id": s.id,
 			"validation": s.validation,
@@ -1226,7 +1226,7 @@ const sandboxDenialNotice = "Possible sandbox denial; this output alone does not
 func completedSessionResult(s *execSession) tool.Result {
 	result, denial := completedRun(s)
 	if denial != "" {
-		result.Content += "\n" + sandboxDenialNotice
+		result.Content.AppendText("\n" + sandboxDenialNotice)
 	}
 	return result
 }

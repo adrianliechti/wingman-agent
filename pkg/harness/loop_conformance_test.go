@@ -213,7 +213,8 @@ func TestLoopToolSetStaysWithIssuingRequest(t *testing.T) {
 
 // Codex stream_error_allows_next_turn.rs: continue_after_stream_error.
 // Pi agent.test.ts: full lifecycle events for failed runs. Also exercise retry
-// exhaustion and a partial tool call, preserving queued input across failure.
+// exhaustion and a partial tool call, preserving queued hidden notifications
+// across failure without triggering user-steering preemption.
 func TestLoopProviderFailureAllowsNextTurn(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -232,7 +233,7 @@ func TestLoopProviderFailureAllowsNextTurn(t *testing.T) {
 					requests++
 					req := readLoopRequest(t, r)
 					if requests <= tc.attempts {
-						if requests == 1 && !a.QueueInputWithID([]Content{{Text: "queued direction"}}, "queued") {
+						if requests == 1 && !a.QueueInputWithID([]Content{{Text: "queued direction", Hidden: true}}, "queued") {
 							t.Error("queued input was rejected")
 						}
 						if got := loopInputOrder(req.Input); !slices.Equal(got, []string{"user:first prompt"}) {

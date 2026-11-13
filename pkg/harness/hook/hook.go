@@ -55,7 +55,8 @@ type Outcome struct {
 	Reason            string
 	AdditionalContext []string
 	// UpdatedResult is an internal extension used by deterministic result
-	// transforms such as truncation. Codex command hooks leave it nil.
+	// transforms such as truncation. It replaces all result content, including
+	// attachments. Codex command hooks leave it nil.
 	UpdatedResult *string
 }
 
@@ -82,7 +83,8 @@ type PermissionRequest func(ctx context.Context, call tool.ToolCall) (Permission
 type PostToolUse func(ctx context.Context, call tool.ToolCall, result string) (Outcome, error)
 
 // TransformToolResult processes the final result, including hook context,
-// before the harness applies its fallback size limit. It is not a lifecycle event.
+// before the harness applies its fallback size limit. Only text is transformed;
+// image attachments are preserved. It is not a lifecycle event.
 type TransformToolResult func(ctx context.Context, call tool.ToolCall, result string) (string, error)
 type UserPromptSubmit func(ctx context.Context, prompt string) (Outcome, error)
 type SessionStart func(ctx context.Context, source string) (Outcome, error)

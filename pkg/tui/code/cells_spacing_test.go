@@ -9,6 +9,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 )
 
@@ -32,7 +33,7 @@ func TestThoughtCellsGetSurroundingBlankLines(t *testing.T) {
 
 	toolMsg := func(id string) harness.Message {
 		return harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
-			{ToolResult: &harness.ToolResult{ID: id, Name: "read", Content: "ok"}},
+			{ToolResult: &harness.ToolResult{ID: id, Name: "read", Content: tool.TextContent("ok")}},
 		}}
 	}
 	thoughtMsg := func(id, summary string) harness.Message {
@@ -191,7 +192,7 @@ func TestStreamTailRetainsIntermediateACPCells(t *testing.T) {
 		{ToolCall: &harness.ToolCall{ID: "call-1", Name: "read", Args: `{"path":"one.go"}`}},
 	}})
 	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
-		{ToolResult: &harness.ToolResult{ID: "call-1", Name: "read", Content: "ok"}},
+		{ToolResult: &harness.ToolResult{ID: "call-1", Name: "read", Content: tool.TextContent("ok")}},
 	}})
 	a.handleStreamMessage(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{
 		{ToolCall: &harness.ToolCall{ID: "call-2", Name: "read", Args: `{"path":"two.go"}`}},
