@@ -6,6 +6,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 func TestTurnQueueEntryPreservesEditableInput(t *testing.T) {
@@ -67,7 +68,7 @@ func TestConvertMessagesPreservesToolKind(t *testing.T) {
 		Role: harness.RoleAssistant,
 		Content: []harness.Content{
 			{ToolCall: &harness.ToolCall{ID: "edit-1", Name: "Editing files", Kind: "edit", Locations: []harness.ToolLocation{{Path: "/workspace/main.go"}}}},
-			{ToolResult: &harness.ToolResult{ID: "edit-1", Name: "Editing files", Kind: "edit", Locations: []harness.ToolLocation{{Path: "/workspace/main.go"}}, Content: "+new"}},
+			{ToolResult: &harness.ToolResult{ID: "edit-1", Name: "Editing files", Kind: "edit", Locations: []harness.ToolLocation{{Path: "/workspace/main.go"}}, Content: tool.TextContent("+new")}},
 		},
 	}})
 

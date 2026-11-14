@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
@@ -45,8 +46,8 @@ func TestTranscriptExportIncludesVisibleSourceAndOmitsHiddenContext(t *testing.T
 			{ToolCall: &harness.ToolCall{ID: "call1", Name: "shell", Args: "{}"}},
 		}},
 		{Role: harness.RoleUser, Content: []harness.Content{
-			{ToolResult: &harness.ToolResult{ID: "call1", Name: "shell", Args: "{}", Content: "```inside output\n\n"}},
-			{ToolResult: &harness.ToolResult{Name: "hidden_tool", Content: "hidden tool secret"}},
+			{ToolResult: &harness.ToolResult{ID: "call1", Name: "shell", Args: "{}", Content: tool.TextContent("```inside output\n\n")}},
+			{ToolResult: &harness.ToolResult{Name: "hidden_tool", Content: tool.TextContent("hidden tool secret")}},
 		}},
 		{Role: harness.RoleAssistant, Content: []harness.Content{{Refusal: "Cannot do that."}}},
 	}

@@ -40,7 +40,7 @@ func TestTurnReviewUsesDurableEditsAndActualValidationExits(t *testing.T) {
 func TestTurnReviewDoesNotTrustSuccessTextOrForeignMetadata(t *testing.T) {
 	for _, metadata := range []map[string]any{nil, {"exit_code": nil}, {"exit_code": "0"}, {"exit_code": 0.5}, {"exit_code": 1}} {
 		events := []RuntimeEvent{{Type: EventTurnStarted, TurnID: "turn"}, reviewResult(2, "exec", `{"command":"go test","validation":true}`, metadata)}
-		events[1].Message.Content[0].ToolResult.Content = "all tests passed"
+		events[1].Message.Content[0].ToolResult.Content = tool.TextContent("all tests passed")
 		if review := BuildTurnReviews(events)[0]; review.Validation == "passed" {
 			t.Fatalf("trusted text: %+v", review)
 		}

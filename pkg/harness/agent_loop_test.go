@@ -749,8 +749,8 @@ func TestParallelToolCallsRespectConcurrencyLimit(t *testing.T) {
 func TestToolWithoutExecutorReturnsError(t *testing.T) {
 	a := &Agent{Config: &Config{ToolTimeout: -1}}
 	got := a.runSingleToolCall(context.Background(), ToolCall{Name: "broken"}, []tool.Tool{{Name: "broken"}})
-	if !strings.Contains(got.Content, "no executor") {
-		t.Fatalf("result = %q", got.Content)
+	if !strings.Contains(got.Content.Text(), "no executor") {
+		t.Fatalf("result = %q", got.Content.Text())
 	}
 }
 
@@ -771,8 +771,8 @@ func TestToolTimeoutIncludesPreHooks(t *testing.T) {
 			return tool.Text("side effect"), nil
 		},
 	}})
-	if !strings.Contains(got.Content, "10ms time limit") {
-		t.Fatalf("result = %q", got.Content)
+	if !strings.Contains(got.Content.Text(), "10ms time limit") {
+		t.Fatalf("result = %q", got.Content.Text())
 	}
 }
 
@@ -822,8 +822,8 @@ func TestCodexPostToolBlockReplacesOriginalResult(t *testing.T) {
 			return tool.Text("original output that must be hidden"), nil
 		},
 	}})
-	if got.Content != "review the generated files" {
-		t.Fatalf("tool result = %q", got.Content)
+	if got.Content.Text() != "review the generated files" {
+		t.Fatalf("tool result = %q", got.Content.Text())
 	}
 }
 
@@ -836,14 +836,14 @@ func TestToolResultHasHarnessLevelSizeLimit(t *testing.T) {
 			return tool.Text(input), nil
 		},
 	}})
-	if !strings.Contains(got.Content, "truncated by the agent harness") {
+	if !strings.Contains(got.Content.Text(), "truncated by the agent harness") {
 		t.Fatalf("tool result did not report truncation")
 	}
-	if !strings.Contains(got.Content, "HEAD") || !strings.Contains(got.Content, "TAIL") {
+	if !strings.Contains(got.Content.Text(), "HEAD") || !strings.Contains(got.Content.Text(), "TAIL") {
 		t.Fatalf("tool result did not preserve head and tail")
 	}
-	if len(got.Content) >= len(input) {
-		t.Fatalf("bounded result length = %d, input length = %d", len(got.Content), len(input))
+	if len(got.Content.Text()) >= len(input) {
+		t.Fatalf("bounded result length = %d, input length = %d", len(got.Content.Text()), len(input))
 	}
 }
 

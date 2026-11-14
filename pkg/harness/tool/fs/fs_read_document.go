@@ -84,7 +84,7 @@ func readDocument(
 	if warning != "" {
 		content += "\n\n" + warning
 	}
-	return tool.Result{Content: content, Metadata: metadata}, true, nil
+	return tool.Result{Content: tool.TextContent(content), Metadata: metadata}, true, nil
 }
 
 func documentExtractionWarning(doc *extract.Document) string {

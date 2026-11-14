@@ -55,7 +55,7 @@ func TestFileToolsKeepOpenedWorkspaceBoundary(t *testing.T) {
 				{EditTool(root), map[string]any{"file_path": "linked/file.txt", "old_string": "outside", "new_string": "overwrite"}},
 			} {
 				if result, err := check.tool.Execute(context.Background(), check.args); err == nil {
-					t.Errorf("%s followed the replacement workspace: %q", check.tool.Name, result.Content)
+					t.Errorf("%s followed the replacement workspace: %q", check.tool.Name, result.Content.Text())
 				}
 			}
 			if data, err := os.ReadFile(filepath.Join(outside, "real", "file.txt")); err != nil || string(data) != "outside" {
@@ -65,8 +65,8 @@ func TestFileToolsKeepOpenedWorkspaceBoundary(t *testing.T) {
 				t.Fatalf("replacement workspace gained a file: %v", err)
 			}
 			result, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": "real/file.txt"})
-			if err != nil || !strings.Contains(result.Content, "original") {
-				t.Fatalf("original workspace is no longer readable: %q, %v", result.Content, err)
+			if err != nil || !strings.Contains(result.Content.Text(), "original") {
+				t.Fatalf("original workspace is no longer readable: %q, %v", result.Content.Text(), err)
 			}
 		})
 	}
@@ -116,10 +116,10 @@ func TestFileToolsDirectoryLinkPaths(t *testing.T) {
 					result, err := check.tool.Execute(context.Background(), check.args)
 					if err != nil {
 						t.Errorf("%s through link: %v", check.tool.Name, err)
-					} else if check.tool.Name == "read" && !strings.Contains(result.Content, "linked content") {
-						t.Errorf("read did not reach the linked file: %q", result.Content)
-					} else if check.tool.Name != "read" && !strings.Contains(result.Content, filepath.Join("link", "note.txt")) {
-						t.Errorf("%s lost the linked file's display path: %q", check.tool.Name, result.Content)
+					} else if check.tool.Name == "read" && !strings.Contains(result.Content.Text(), "linked content") {
+						t.Errorf("read did not reach the linked file: %q", result.Content.Text())
+					} else if check.tool.Name != "read" && !strings.Contains(result.Content.Text(), filepath.Join("link", "note.txt")) {
+						t.Errorf("%s lost the linked file's display path: %q", check.tool.Name, result.Content.Text())
 					}
 				}
 
@@ -139,7 +139,7 @@ func TestFileToolsDirectoryLinkPaths(t *testing.T) {
 					{EditTool(root, allowed...), createArgs(filepath.Join(escape, "missing", "output.txt"), "overwrite")},
 				} {
 					if result, err := check.tool.Execute(context.Background(), check.args); err == nil {
-						t.Errorf("%s followed an escaping directory link: %q", check.tool.Name, result.Content)
+						t.Errorf("%s followed an escaping directory link: %q", check.tool.Name, result.Content.Text())
 					}
 				}
 				if _, err := os.Stat(filepath.Join(outside, "missing")); !os.IsNotExist(err) {

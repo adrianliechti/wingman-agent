@@ -25,7 +25,7 @@ func TestExecSessionPollReturnsWhenOutputArrives(t *testing.T) {
 	defer timer.Stop()
 	started := time.Now()
 	result, err := executeExecSession(t.Context(), m, nil, map[string]any{"session_id": id, "wait": 2})
-	if err != nil || !strings.Contains(result.Content, "ready") {
+	if err != nil || !strings.Contains(result.Content.Text(), "ready") {
 		t.Fatalf("poll = %+v, %v", result, err)
 	}
 	if time.Since(started) > time.Second {
@@ -33,7 +33,7 @@ func TestExecSessionPollReturnsWhenOutputArrives(t *testing.T) {
 	}
 	started = time.Now()
 	result, err = executeExecSession(t.Context(), m, nil, map[string]any{"session_id": id, "wait": 1})
-	if err != nil || !strings.Contains(result.Content, "no new output") || time.Since(started) < 500*time.Millisecond {
+	if err != nil || !strings.Contains(result.Content.Text(), "no new output") || time.Since(started) < 500*time.Millisecond {
 		t.Fatalf("stale output woke a later poll: %+v, %v", result, err)
 	}
 }
@@ -49,7 +49,7 @@ func TestExecKillKeepsSessionUntilExit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 	defer cancel()
 	result, err := executeExecSession(ctx, m, nil, map[string]any{"session_id": id, "kill": true})
-	if err != nil || !strings.Contains(result.Content, "has not exited yet") {
+	if err != nil || !strings.Contains(result.Content.Text(), "has not exited yet") {
 		t.Fatalf("kill = %+v, %v", result, err)
 	}
 	if m.get(id) != s {

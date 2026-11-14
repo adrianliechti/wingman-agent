@@ -100,8 +100,11 @@ func isStepBoundary(m Message) bool {
 func recentWindow(tail []Message, latestSnapshot int) []Message {
 	window := make([]Message, 0, len(tail))
 	for i, m := range tail {
-		if isSessionContext(m) && i != latestSnapshot {
-			continue
+		if isSessionContext(m) {
+			if i != latestSnapshot {
+				continue
+			}
+			m = fullSessionContextMessage(m)
 		}
 		window = append(window, m)
 	}
@@ -133,7 +136,8 @@ func (a *Agent) compactMessages(ctx context.Context, req *request, focus string)
 	guidanceIndex := lastSessionContextIndex(messages)
 	var guidance *Message
 	if guidanceIndex >= 0 {
-		guidance = &messages[guidanceIndex]
+		expanded := fullSessionContextMessage(messages[guidanceIndex])
+		guidance = &expanded
 		available -= messageTokens(*guidance)
 	}
 

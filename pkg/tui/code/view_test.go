@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
@@ -38,7 +39,7 @@ func TestStreamCellsRefreshForContentLayoutAndTheme(t *testing.T) {
 	check(80)
 	a.streamCurrent = streamSnapshot{toolName: "shell", toolHint: "go test", toolProgress: "running"}
 	check(80)
-	a.streamCurrent.completeTool(&harness.ToolResult{Name: "shell", Content: "all tests passed"})
+	a.streamCurrent.completeTool(&harness.ToolResult{Name: "shell", Content: tool.TextContent("all tests passed")})
 	check(80)
 	a.promptActive = true
 	check(80)

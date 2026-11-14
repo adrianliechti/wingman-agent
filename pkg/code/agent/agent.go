@@ -544,6 +544,10 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 		return nil, fmt.Errorf("session %s not found; call NewSession first", id)
 	}
 
+	if reviewArgs, extra, isReview := parseReviewSlashInput(input); isReview {
+		return s.runIsolatedReview(ctx, input, reviewArgs, extra)
+	}
+
 	ctx = hook.WithRuntime(code.WithSessionID(ctx, id), s.hookRuntime())
 	return s.harness.Send(ctx, input)
 }
@@ -848,19 +852,54 @@ func (s *sessionState) catalogTools() []tool.Tool {
 }
 
 func (s *sessionState) filterTools(tools []tool.Tool) []tool.Tool {
+	guarded := make([]tool.Tool, len(tools))
 	for i, t := range tools {
-		if t.Name == "lsp" {
-			tools[i] = s.freshness.TrackSnapshots(t)
+		if t.Name == "lsp" && s.freshness != nil {
+			t = s.freshness.TrackSnapshots(t)
+		}
+		guarded[i] = s.guardModeTool(t)
+	}
+	slices.SortStableFunc(guarded, func(a, b tool.Tool) int { return cmp.Compare(a.Name, b.Name) })
+	return guarded
+}
+
+func (s *sessionState) subagentFilterTools(tools []tool.Tool) []tool.Tool {
+	cloned := slices.Clone(tools)
+	for i, t := range cloned {
+		if t.Name == "lsp" && s.freshness != nil {
+			cloned[i] = s.freshness.TrackSnapshots(t)
 		}
 	}
 	if s.currentMode() == modePlan {
-		tools = planModeTools(tools)
+		cloned = planModeTools(cloned)
 	}
 	if s.unattended.Load() {
-		tools = slices.DeleteFunc(tools, func(t tool.Tool) bool { return t.Name == "elicit" || t.Name == "ask" })
+		cloned = slices.DeleteFunc(cloned, func(t tool.Tool) bool { return t.Name == "elicit" || t.Name == "ask" })
 	}
-	slices.SortStableFunc(tools, func(a, b tool.Tool) int { return cmp.Compare(a.Name, b.Name) })
-	return tools
+	slices.SortStableFunc(cloned, func(a, b tool.Tool) int { return cmp.Compare(a.Name, b.Name) })
+	return cloned
+}
+
+// guardModeTool keeps tool schemas invariant across Plan/Agent/Unattended mode
+// switches (preserving prompt-cache prefixes) while enforcing active mode
+// restrictions at execution time.
+func (s *sessionState) guardModeTool(t tool.Tool) tool.Tool {
+	execute := t.Execute
+	if execute == nil {
+		return t
+	}
+	t.Execute = func(ctx context.Context, args map[string]any) (tool.Result, error) {
+		if s.currentMode() == modePlan {
+			if t.Effect == nil || t.Effect(args) != tool.EffectReadOnly {
+				return tool.Result{}, fmt.Errorf("plan mode only allows read-only tool calls (%s is blocked in Plan mode)", t.Name)
+			}
+		}
+		if s.unattended.Load() && (t.Name == "elicit" || t.Name == "ask") {
+			return tool.Result{}, fmt.Errorf("unattended mode is active: user questions (%s) are disabled; state reasonable assumptions and continue", t.Name)
+		}
+		return execute(ctx, args)
+	}
+	return t
 }
 
 func planModeTools(tools []tool.Tool) []tool.Tool {
@@ -892,15 +931,28 @@ func planModeEffectExecute(t tool.Tool) func(context.Context, map[string]any) (t
 func (s *sessionState) instructions() string {
 	option, _ := s.parent.roleModel(s, "")
 	base, data := instructionTemplate(option.ID, prompt.SectionData{
-		ToolNames:      promptToolNames(s.harness.AvailableTools()),
-		PlanMode:       s.currentMode() == modePlan,
-		UnattendedMode: s.unattended.Load(),
+		ToolNames: promptToolNames(s.harness.AvailableTools()),
 	})
 	return prompt.BuildBaseInstructions(base, data)
 }
 
+func (s *sessionState) sessionContextData() prompt.SectionData {
+	option, _ := s.parent.roleModel(s, "")
+	_, data := instructionTemplate(option.ID, s.instructionsData())
+	return data
+}
+
+func (s *sessionState) contextSections() []harness.ContextSection {
+	sections := prompt.BuildSessionContextSections(s.sessionContextData())
+	out := make([]harness.ContextSection, len(sections))
+	for i, sec := range sections {
+		out[i] = harness.ContextSection{Title: sec.Title, Content: sec.Content}
+	}
+	return out
+}
+
 func (s *sessionState) contextInstructions() string {
-	return prompt.BuildSessionContext(s.instructionsData())
+	return prompt.BuildSessionContext(s.sessionContextData())
 }
 
 func (s *sessionState) subagentContext(tools []tool.Tool) string {

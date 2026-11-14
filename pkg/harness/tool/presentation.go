@@ -294,6 +294,9 @@ func batchEditPaths(args map[string]any) []string {
 		if path, _ := entry["file_path"].(string); path != "" && !slices.Contains(paths, path) {
 			paths = append(paths, path)
 		}
+		if moveTo, _ := entry["move_to"].(string); moveTo != "" && !slices.Contains(paths, moveTo) {
+			paths = append(paths, moveTo)
+		}
 	}
 	return paths
 }

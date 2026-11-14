@@ -54,10 +54,10 @@ func expectCredentialDenial(t *testing.T, calls []credentialCall) {
 	for _, call := range calls {
 		result, err := call.tool.Execute(context.Background(), call.args)
 		if err == nil || !strings.Contains(err.Error(), credentialDenial) {
-			t.Errorf("%s: got %q, %v; want a %s error", call.name, result.Content, err, credentialDenial)
+			t.Errorf("%s: got %q, %v; want a %s error", call.name, result.Content.Text(), err, credentialDenial)
 		}
-		if strings.Contains(result.Content, "fixture") || (err != nil && strings.Contains(err.Error(), "fixture")) {
-			t.Errorf("%s disclosed credential content: %q, %v", call.name, result.Content, err)
+		if strings.Contains(result.Content.Text(), "fixture") || (err != nil && strings.Contains(err.Error(), "fixture")) {
+			t.Errorf("%s disclosed credential content: %q, %v", call.name, result.Content.Text(), err)
 		}
 	}
 }
@@ -109,8 +109,8 @@ func TestLinkedSkillRootIntoCredentialStoreIsRefused(t *testing.T) {
 				{"grep", grep, map[string]any{"path": filepath.Join(".agents", "skills"), "pattern": "Shared review", "output_mode": "content"}, "Shared review guidance"},
 			} {
 				result, err := check.tool.Execute(context.Background(), check.args)
-				if err != nil || !strings.Contains(result.Content, check.want) {
-					t.Errorf("%s through the ordinary linked root = %q, %v", check.name, result.Content, err)
+				if err != nil || !strings.Contains(result.Content.Text(), check.want) {
+					t.Errorf("%s through the ordinary linked root = %q, %v", check.name, result.Content.Text(), err)
 				}
 			}
 		})
@@ -152,8 +152,8 @@ func TestNestedLinkIntoCredentialStoreIsRefused(t *testing.T) {
 			{"grep", grep, map[string]any{"path": skills, "pattern": "fixture|Host", "output_mode": "content"}},
 		} {
 			result, err := search.tool.Execute(context.Background(), search.args)
-			if err != nil || strings.Contains(result.Content, "id_ed25519") || strings.Contains(result.Content, "fixture") {
-				t.Errorf("granted=%t: %s of the enclosing root = %q, %v", granted, search.name, result.Content, err)
+			if err != nil || strings.Contains(result.Content.Text(), "id_ed25519") || strings.Contains(result.Content.Text(), "fixture") {
+				t.Errorf("granted=%t: %s of the enclosing root = %q, %v", granted, search.name, result.Content.Text(), err)
 			}
 		}
 	}
@@ -245,7 +245,7 @@ func TestCredentialStoreInsideWorkspaceIsHidden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, content := range map[string]string{"glob": listed.Content, "grep": matched.Content} {
+	for name, content := range map[string]string{"glob": listed.Content.Text(), "grep": matched.Content.Text()} {
 		if strings.Contains(content, "id_ed25519") || strings.Contains(content, "PRIVATE KEY") || strings.Contains(content, "Host fixture") {
 			t.Errorf("%s walked into the credential store:\n%s", name, content)
 		}
@@ -280,8 +280,8 @@ func TestWorkspaceInsideCredentialStoreKeepsItsFiles(t *testing.T) {
 		{EditTool(root), createArgs("new.go", "package project\n"), "new.go"},
 	} {
 		result, err := check.tool.Execute(context.Background(), check.args)
-		if err != nil || !strings.Contains(result.Content, check.want) {
-			t.Errorf("%s in a workspace inside a store = %q, %v", check.tool.Name, result.Content, err)
+		if err != nil || !strings.Contains(result.Content.Text(), check.want) {
+			t.Errorf("%s in a workspace inside a store = %q, %v", check.tool.Name, result.Content.Text(), err)
 		}
 	}
 	// The rest of the store stays out of reach, even through an explicit grant.

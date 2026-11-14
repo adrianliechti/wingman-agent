@@ -10,6 +10,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
@@ -331,5 +335,194 @@ func TestSendDoesNotCompactAfterReachingTurnLimit(t *testing.T) {
 	}
 	if !errors.Is(turnErr, ErrMaxTurnsExceeded) || requests != 1 || compactions != 0 {
 		t.Fatalf("error=%v requests=%d compactions=%d", turnErr, requests, compactions)
+	}
+}
+
+func TestSteeringBeforeAnyOutputTellsTheModelItWasInterrupted(t *testing.T) {
+	for _, tc := range []struct{ name, firstEvent, kept string }{
+		{"while thinking", `{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","summary_index":0,"delta":"Planning the handler"}`, ""},
+		{"while answering", `{"type":"response.output_text.delta","item_id":"msg_partial","content_index":0,"delta":"Starting initial approach..."}`, "Starting initial approach..."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			var secondReqBody string
+			httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				header := http.Header{"Content-Type": []string{"text/event-stream"}}
+				if requests.Add(1) == 1 {
+					pr, pw := io.Pipe()
+					go func() {
+						defer pw.Close()
+						_, _ = io.WriteString(pw, "data: "+tc.firstEvent+"\n\n")
+						<-r.Context().Done()
+					}()
+					return &http.Response{StatusCode: http.StatusOK, Header: header, Body: pr, Request: r}, nil
+				}
+				raw, _ := io.ReadAll(r.Body)
+				secondReqBody = string(raw)
+				return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(phaseTestResponse(false, finalAnswerOutput))), Request: r}, nil
+			})}
+			client := openai.NewClient(option.WithBaseURL("http://agent.test"), option.WithAPIKey("test"), option.WithHTTPClient(httpClient))
+
+			a := &Agent{Config: &Config{client: &client, MaxTurns: 1}}
+			stream, err := a.Send(t.Context(), []Content{{Text: "write a REST handler"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			steered := false
+			for msg, err := range stream {
+				if err != nil {
+					t.Fatalf("unexpected stream error: %v", err)
+				}
+				if !steered && msg.Role == RoleAssistant {
+					steered = true
+					if !a.QueueInput([]Content{{Text: "actually use gRPC instead"}}) {
+						t.Fatal("QueueInput rejected mid-stream steering")
+					}
+				}
+			}
+			prompt, notice, steering := strings.Index(secondReqBody, "write a REST handler"), strings.Index(secondReqBody, "The user interrupted your previous response"), strings.Index(secondReqBody, "actually use gRPC instead")
+			if prompt < 0 || steering < prompt {
+				t.Fatalf("second request lacks the prompt or the steering message: %s", secondReqBody)
+			}
+			// Kept text already separates the two user messages; a notice there would wrongly say it was discarded.
+			if tc.kept != "" {
+				if notice >= 0 || !strings.Contains(secondReqBody, tc.kept) {
+					t.Fatalf("partial answer must be kept without a notice: %s", secondReqBody)
+				}
+				return
+			}
+			if notice < prompt || notice > steering {
+				t.Fatalf("the notice must sit between the prompt and the steering message: %s", secondReqBody)
+			}
+			for _, message := range a.MessagesSnapshot() {
+				if strings.Contains(contentText(message.Content), "The user interrupted") && !message.Hidden {
+					t.Fatal("the notice must not be shown to the user")
+				}
+			}
+		})
+	}
+}
+
+func TestMidTurnSteeringReleasesAToolThatOnlyWaits(t *testing.T) {
+	var requests atomic.Int32
+	var secondReqBody string
+	client := streamingTestClient(func(r *http.Request) string {
+		if requests.Add(1) == 1 {
+			return phaseTestResponse(true, `{"type":"function_call","id":"fc_1","call_id":"call_1","name":"wait","arguments":"{}","status":"completed"}`)
+		}
+		raw, _ := io.ReadAll(r.Body)
+		secondReqBody = string(raw)
+		return phaseTestResponse(false, finalAnswerOutput)
+	})
+
+	waiting := make(chan struct{})
+	tools := []tool.Tool{{Name: "wait", Parameters: map[string]any{"type": "object"}, Execute: func(ctx context.Context, _ map[string]any) (tool.Result, error) {
+		close(waiting)
+		waitCtx, cancel := tool.UntilUserInput(ctx)
+		defer cancel()
+		select {
+		case <-waitCtx.Done():
+			if context.Cause(waitCtx) != tool.ErrUserInput || ctx.Err() != nil {
+				return tool.Result{}, waitCtx.Err()
+			}
+			return tool.Text("stopped waiting for the user"), nil
+		case <-time.After(30 * time.Second):
+			return tool.Text("waited the full time"), nil
+		}
+	}}}
+	a := &Agent{Config: &Config{client: &client, Tools: func() []tool.Tool { return tools }}}
+	stream, err := a.Send(t.Context(), []Content{{Text: "wait for the agents"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		<-waiting
+		if !a.QueueInputWithID([]Content{{Text: "check the logs instead"}}, "steer-logs") {
+			t.Error("QueueInput rejected steering during a tool call")
+		}
+	}()
+	started := time.Now()
+	for _, err := range stream {
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+	}
+	if waited := time.Since(started); waited > 10*time.Second {
+		t.Fatalf("the waiting tool held the user's message for %s", waited)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("expected 2 requests, got %d", got)
+	}
+	if !strings.Contains(secondReqBody, "stopped waiting for the user") || !strings.Contains(secondReqBody, "check the logs instead") {
+		t.Fatalf("second request lacks the tool result or the user's message: %s", secondReqBody)
+	}
+	if strings.Index(secondReqBody, "stopped waiting for the user") > strings.Index(secondReqBody, "check the logs instead") {
+		t.Fatalf("the user's message must follow the tool result: %s", secondReqBody)
+	}
+}
+
+func TestMidTurnSteeringPreemptsActiveStreamBeforeToolDispatch(t *testing.T) {
+	var requests atomic.Int32
+	streamCanceled := make(chan struct{})
+	var secondReqBody string
+
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		n := requests.Add(1)
+		if n == 1 {
+			pr, pw := io.Pipe()
+			go func() {
+				defer pw.Close()
+				_, _ = io.WriteString(pw, "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_partial\",\"content_index\":0,\"delta\":\"Starting initial approach...\"}\n\n")
+				<-r.Context().Done()
+				close(streamCanceled)
+			}()
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       pr,
+				Request:    r,
+			}, nil
+		}
+		raw, _ := io.ReadAll(r.Body)
+		secondReqBody = string(raw)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(phaseTestResponse(false, finalAnswerOutput))),
+			Request:    r,
+		}, nil
+	})}
+	client := openai.NewClient(
+		option.WithBaseURL("http://agent.test"),
+		option.WithAPIKey("test"),
+		option.WithHTTPClient(httpClient),
+	)
+
+	a := &Agent{Config: &Config{client: &client, MaxTurns: 1}}
+	stream, err := a.Send(t.Context(), []Content{{Text: "write a REST handler"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	steered := false
+	for msg, err := range stream {
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+		if !steered && strings.Contains(contentText(msg.Content), "Starting initial approach") {
+			steered = true
+			if !a.QueueInputWithID([]Content{{Text: "actually use gRPC instead"}}, "steer-grpc") {
+				t.Fatal("QueueInput rejected mid-stream steering")
+			}
+		}
+	}
+	<-streamCanceled
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("expected 2 requests (preempted + steered), got %d", got)
+	}
+	if !strings.Contains(secondReqBody, "Starting initial approach...") {
+		t.Fatalf("second request lost partial assistant output before preemption: %s", secondReqBody)
+	}
+	if !strings.Contains(secondReqBody, "actually use gRPC instead") {
+		t.Fatalf("second request missing steered user input: %s", secondReqBody)
 	}
 }

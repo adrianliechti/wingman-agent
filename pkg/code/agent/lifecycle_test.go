@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -104,12 +103,16 @@ func TestModeSwitchReachesToolsWhileCatalogStaysPinned(t *testing.T) {
 	s := &sessionState{
 		parent: &Agent{workspace: &code.Workspace{}},
 		tools: []tool.Tool{
-			{Name: "elicit"},
-			{Name: "read"},
+			{Name: "elicit", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text("asked"), nil }},
+			{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text("read"), nil }},
 		},
 	}
 	s.setMode(modeAgent)
-	catalog := []tool.Tool{{Name: "elicit"}, {Name: "read"}, {Name: "mcp_search"}}
+	catalog := []tool.Tool{
+		{Name: "elicit", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text("asked"), nil }},
+		{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text("read"), nil }},
+		{Name: "mcp_search", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text("searched"), nil }},
+	}
 	s.harness = &harness.Agent{Config: &harness.Config{
 		Tools: func() []tool.Tool { return catalog }, FilterTools: s.filterTools, PinTools: true,
 	}}
@@ -120,26 +123,38 @@ func TestModeSwitchReachesToolsWhileCatalogStaysPinned(t *testing.T) {
 	// A nil catalog arriving mid-turn must not replace the snapshot.
 	catalog = nil
 
-	has := func(name string) bool {
-		return slices.ContainsFunc(s.harness.AvailableTools(), func(t tool.Tool) bool { return t.Name == name })
+	findTool := func(name string) (tool.Tool, bool) {
+		for _, candidate := range s.harness.AvailableTools() {
+			if candidate.Name == name {
+				return candidate, true
+			}
+		}
+		return tool.Tool{}, false
 	}
 
-	if !has("elicit") || !has("mcp_search") {
+	if _, ok := findTool("elicit"); !ok {
+		t.Fatalf("agent mode tools = %#v", s.harness.AvailableTools())
+	}
+	if _, ok := findTool("mcp_search"); !ok {
 		t.Fatalf("agent mode tools = %#v", s.harness.AvailableTools())
 	}
 
 	s.setMode(modeUnattended)
-	if has("elicit") {
-		t.Fatalf("mode switch did not reach the tool set mid-turn: %#v", s.harness.AvailableTools())
+	elicitTool, ok := findTool("elicit")
+	if !ok {
+		t.Fatalf("cache-invariant schema dropped elicit on mode switch: %#v", s.harness.AvailableTools())
 	}
-	if !has("mcp_search") {
+	if _, err := elicitTool.Execute(t.Context(), nil); err == nil {
+		t.Fatal("unattended mode switch did not block elicit execution mid-turn")
+	}
+	if _, ok := findTool("mcp_search"); !ok {
 		t.Fatalf("pinned catalog lost mid-turn: %#v", s.harness.AvailableTools())
 	}
 
 	s.harness.Cancel(nil)
 	for range stream {
 	}
-	if has("mcp_search") {
+	if _, ok := findTool("mcp_search"); ok {
 		t.Fatalf("catalog stayed pinned after the turn: %#v", s.harness.AvailableTools())
 	}
 }
@@ -148,16 +163,23 @@ func TestUnattendedModeOwnsToolsAndInstructions(t *testing.T) {
 	s := &sessionState{
 		parent: &Agent{workspace: &code.Workspace{}},
 		tools: []tool.Tool{
-			{Name: "elicit"},
-			{Name: "read"},
+			{Name: "elicit", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text("asked"), nil }},
+			{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text("read"), nil }},
 		},
 	}
 	s.setMode(modeUnattended)
 	s.harness = &harness.Agent{Config: &harness.Config{Tools: s.catalogTools, FilterTools: s.filterTools}}
 
 	tools := s.harness.AvailableTools()
-	if len(tools) != 1 || tools[0].Name != "read" {
-		t.Fatalf("unattended tools = %#v, want read without elicit", tools)
+	if len(tools) != 2 {
+		t.Fatalf("unattended tools = %#v, want cache-invariant schema list", tools)
+	}
+	for _, tl := range tools {
+		if tl.Name == "elicit" {
+			if _, err := tl.Execute(t.Context(), nil); err == nil {
+				t.Fatal("unattended mode allowed elicit execution")
+			}
+		}
 	}
 	instructions := BuildInstructions("", s.instructionsData())
 	if !strings.Contains(instructions, "Work unattended") || !strings.Contains(instructions, "Do not ask the user") {
@@ -174,9 +196,9 @@ func TestPlanAndUnattendedAreIndependent(t *testing.T) {
 	s := &sessionState{
 		parent: &Agent{workspace: &code.Workspace{}},
 		tools: []tool.Tool{
-			{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly)},
-			{Name: "edit", Effect: tool.StaticEffect(tool.EffectMutates)},
-			{Name: "elicit", Effect: tool.StaticEffect(tool.EffectReadOnly)},
+			{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text("ok"), nil }},
+			{Name: "edit", Effect: tool.StaticEffect(tool.EffectMutates), Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text("edited"), nil }},
+			{Name: "elicit", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) { return tool.Text("asked"), nil }},
 		},
 	}
 	s.harness = &harness.Agent{Config: &harness.Config{Tools: s.catalogTools, FilterTools: s.filterTools}}
@@ -200,8 +222,18 @@ func TestPlanAndUnattendedAreIndependent(t *testing.T) {
 	if got := s.permissionMode(); got != "plan" {
 		t.Fatalf("unattended weakened plan permission mode: %s", got)
 	}
-	if tools := s.harness.AvailableTools(); len(tools) != 1 || tools[0].Name != "read" {
-		t.Fatalf("unattended plan tools = %#v", tools)
+	tools := s.harness.AvailableTools()
+	if len(tools) != 3 {
+		t.Fatalf("unattended plan tools dropped schemas = %#v", tools)
+	}
+	for _, tl := range tools {
+		_, execErr := tl.Execute(ctx, nil)
+		if tl.Name == "read" && execErr != nil {
+			t.Fatalf("read rejected in unattended plan mode: %v", execErr)
+		}
+		if (tl.Name == "edit" || tl.Name == "elicit") && execErr == nil {
+			t.Fatalf("%s unexpectedly allowed in unattended plan mode", tl.Name)
+		}
 	}
 	if _, got := a.Models("sid"); got != "gpt-6-sol" || a.effortFor(s) != "high" {
 		t.Fatalf("policy changed selection: model=%s effort=%s", got, a.effortFor(s))

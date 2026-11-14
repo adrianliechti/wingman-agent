@@ -64,7 +64,7 @@ func TestToolPanicBecomesToolErrorNotProcessCrash(t *testing.T) {
 					continue
 				}
 				for _, c := range message.Content {
-					if c.ToolResult != nil && strings.Contains(c.ToolResult.Content, "panicked") {
+					if c.ToolResult != nil && strings.Contains(c.ToolResult.Content.Text(), "panicked") {
 						reported++
 					}
 				}
@@ -100,10 +100,10 @@ func TestDuplicateToolCallIDReportsErrorWhenLeaderPanics(t *testing.T) {
 	close(release)
 
 	first, second := <-results, <-results
-	if !first.IsError || !strings.Contains(first.Content, "panicked") {
+	if !first.IsError || !strings.Contains(first.Content.Text(), "panicked") {
 		t.Fatalf("leader result = %+v, want panic error", first)
 	}
-	if !second.IsError || !strings.Contains(second.Content, "panicked") {
+	if !second.IsError || !strings.Contains(second.Content.Text(), "panicked") {
 		t.Fatalf("duplicate waiter result = %+v, want panic error", second)
 	}
 }

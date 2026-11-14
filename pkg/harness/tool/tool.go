@@ -52,17 +52,17 @@ type TelemetryMetadata struct {
 // text. Metadata should contain JSON-compatible values so session state can be
 // persisted unchanged.
 type Result struct {
-	Content  string
+	Content  Content
 	IsError  bool
 	Metadata map[string]any
 }
 
 func Text(content string) Result {
-	return Result{Content: content}
+	return Result{Content: TextContent(content)}
 }
 
 func Error(content string) Result {
-	return Result{Content: content, IsError: true}
+	return Result{Content: TextContent(content), IsError: true}
 }
 
 type ToolCall struct {

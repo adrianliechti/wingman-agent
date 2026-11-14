@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
 )
@@ -270,7 +272,7 @@ func (a *Agent) repairToolHistory(preserveReasoning bool) error {
 			if call := c.ToolCall; call != nil && call.ID != "" && !outputIDs[call.ID] {
 				missing = append(missing, Message{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{
 					ID: call.ID, Name: call.Name, Args: call.Args, IsError: true,
-					Content: "No recorded result is available for this tool call. It may have been interrupted; execution and side effects are unknown. Check the current state before retrying.",
+					Content: tool.TextContent("No recorded result is available for this tool call. It may have been interrupted; execution and side effects are unknown. Check the current state before retrying."),
 				}}}})
 				outputIDs[call.ID] = true
 				changed = true

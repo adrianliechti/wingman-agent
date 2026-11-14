@@ -19,6 +19,12 @@ type State struct {
 	ContextRevision uint64         `json:"context_revision,omitempty"`
 }
 
+// RecordUsage credits a host-run child without importing its conversation.
+// The child's provider calls already charge the shared task budget.
+func (a *Agent) RecordUsage(usage Usage) error {
+	return a.recordEvents(RuntimeEvent{Type: EventUsage, Usage: &usage})
+}
+
 // RecordMessage appends a message to the conversation ledger without starting
 // a model turn. If a turn is currently running, the message is queued for the
 // next request boundary instead.
@@ -244,6 +250,7 @@ func CloneMessages(messages []Message) []Message {
 
 func cloneMessage(message Message) Message {
 	message.Content = CloneContent(message.Content)
+	message.ContextSections = slices.Clone(message.ContextSections)
 	return message
 }
 
@@ -269,6 +276,7 @@ func CloneContent(in []Content) []Content {
 		}
 		if content.ToolResult != nil {
 			result := *content.ToolResult
+			result.Content = result.Content.Clone()
 			result.Locations = slices.Clone(result.Locations)
 			result.Presentation = cloneToolPresentation(result.Presentation)
 			result.Metadata = maps.Clone(result.Metadata)

@@ -28,8 +28,8 @@ func platformSandboxCommand(shell, command, workingDir string, policy sandboxPol
 		network = "network"
 	}
 	// The helper installs seccomp before executing any model-generated code.
-	args = append(args[:len(args)-3], append([]string{exe, linuxSandboxHelper, network}, args[len(args)-3:]...)...)
-	return bwrap, args, nil
+	shellAt := len(args) - 1 - len(shellArguments(shell, command))
+	return bwrap, slices.Insert(args, shellAt, exe, linuxSandboxHelper, network), nil
 }
 
 func bubblewrapArgs(shell, command, workingDir string, policy sandboxPolicy) []string {
@@ -70,7 +70,7 @@ func bubblewrapArgs(shell, command, workingDir string, policy sandboxPolicy) []s
 			args = append(args, "--ro-bind", "/dev/null", path)
 		}
 	}
-	return append(args, "--chdir", workingDir, "--", shell, "-c", command)
+	return append(append(args, "--chdir", workingDir, "--", shell), shellArguments(shell, command)...)
 }
 
 func findBubblewrap(writableRoots []string) (string, error) {

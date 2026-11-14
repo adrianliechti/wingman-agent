@@ -20,6 +20,7 @@ func TestCurrentProviderModels(t *testing.T) {
 		{"gemini-3.7-flash", "Gemini 3.7 Flash", ClassMedium, 1_114_112, 65_536},
 		{"gemini-4-argon", "Gemini 4 Argon", ClassLarge, 1_048_576, 65_536},
 		{"gemini-4-carbon", "Gemini 4 Carbon", ClassLarge, 1_048_576, 65_536},
+		{"gemini-4-hydrogen", "Gemini 4 Hydrogen", ClassMedium, 1_048_576, 65_536},
 		{"minimax-m3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"MiniMax-M3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"grok-4.6", "Grok 4.6", ClassLarge, 500_000, 500_000},
@@ -159,18 +160,29 @@ func TestGemini4LimitsAndEfforts(t *testing.T) {
 	}
 }
 
+func TestGemini4HydrogenSharedWindow(t *testing.T) {
+	t.Setenv("WINGMAN_CONTEXT_WINDOW_MODE", "full")
+	for _, id := range []string{"gemini-4-hydrogen", "~google/GEMINI-4-HYDROGEN:latest"} {
+		m, ok := Find(id)
+		if !ok || m.InputTokens() != 983_040 || m.ContextTokens() != 1_048_576 || m.OutputTokens() != 65_536 {
+			t.Fatalf("unexpected Hydrogen limits: %+v", m)
+		}
+	}
+}
+
 // Carbon is the stronger reasoning model, so it is the preferred Gemini 4 pick.
 func TestGemini4ModelAvailability(t *testing.T) {
 	available := Available(map[string]bool{
-		"gemini-4-argon":         true,
-		"google/gemini-4-carbon": true,
-		"gemini-3.8-flash":       true,
+		"gemini-4-argon":           true,
+		"google/gemini-4-hydrogen": true,
+		"google/gemini-4-carbon":   true,
+		"gemini-3.8-flash":         true,
 	})
 	ids := make([]string, 0, len(available))
 	for _, m := range available {
 		ids = append(ids, m.ID)
 	}
-	want := []string{"gemini-3.8-flash", "google/gemini-4-carbon", "gemini-4-argon"}
+	want := []string{"google/gemini-4-hydrogen", "gemini-3.8-flash", "google/gemini-4-carbon", "gemini-4-argon"}
 	if !slices.Equal(ids, want) {
 		t.Fatalf("Available() ids = %v, want %v", ids, want)
 	}

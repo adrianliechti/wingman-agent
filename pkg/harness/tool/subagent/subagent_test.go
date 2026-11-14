@@ -209,8 +209,8 @@ func TestAgentToolBackgroundValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("editing types must be backgroundable, got %v", err)
 	}
-	if !strings.Contains(out.Content, "Launched background agent") {
-		t.Fatalf("launch result = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "Launched background agent") {
+		t.Fatalf("launch result = %q", out.Content.Text())
 	}
 	// The empty config has no model client, so the run dies — the registry
 	// must contain that as a failed task instead of crashing the process.
@@ -278,8 +278,8 @@ func TestAgentToolBackgroundRunsDetached(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "Launched background agent") {
-		t.Fatalf("launch result = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "Launched background agent") {
+		t.Fatalf("launch result = %q", out.Content.Text())
 	}
 
 	var done task.Event
@@ -317,8 +317,8 @@ func TestAgentToolBackgroundRunsDetached(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "resumed") {
-		t.Fatalf("agent_send result = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "resumed") {
+		t.Fatalf("agent_send result = %q", out.Content.Text())
 	}
 
 	select {
@@ -389,13 +389,13 @@ func TestAgentToolSyncRunAdoptedForFollowUps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "sync report") {
-		t.Fatalf("result = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "sync report") {
+		t.Fatalf("result = %q", out.Content.Text())
 	}
 
-	m := regexp.MustCompile(`\(id (\S+) — agent_send`).FindStringSubmatch(out.Content)
+	m := regexp.MustCompile(`\(id (\S+) — agent_send`).FindStringSubmatch(out.Content.Text())
 	if m == nil {
-		t.Fatalf("result missing follow-up id: %q", out.Content)
+		t.Fatalf("result missing follow-up id: %q", out.Content.Text())
 	}
 	id := m[1]
 
@@ -449,8 +449,8 @@ func TestAgentToolReportSurvivesExplicitFinish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(out.Content, "finished report") || !strings.Contains(out.Content, "0 tool calls") {
-		t.Fatalf("result = %q", out.Content)
+	if !strings.HasPrefix(out.Content.Text(), "finished report") || !strings.Contains(out.Content.Text(), "0 tool calls") {
+		t.Fatalf("result = %q", out.Content.Text())
 	}
 }
 
@@ -473,7 +473,7 @@ func TestAgentToolSyncRunWithoutRegistryOmitsFollowUpID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out.Content, "agent_send") {
-		t.Fatalf("no-registry result must not advertise agent_send: %q", out.Content)
+	if strings.Contains(out.Content.Text(), "agent_send") {
+		t.Fatalf("no-registry result must not advertise agent_send: %q", out.Content.Text())
 	}
 }

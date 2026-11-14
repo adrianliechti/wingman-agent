@@ -87,8 +87,8 @@ func TestGlobExplicitRelativeDepthAndLiteralSpaces(t *testing.T) {
 		{" report.txt", " report.txt"},
 	} {
 		result, err := GlobTool(root).Execute(t.Context(), map[string]any{"pattern": tc.pattern})
-		if err != nil || result.Content != tc.want {
-			t.Fatalf("%q: %q, %v; want %q", tc.pattern, result.Content, err, tc.want)
+		if err != nil || result.Content.Text() != tc.want {
+			t.Fatalf("%q: %q, %v; want %q", tc.pattern, result.Content.Text(), err, tc.want)
 		}
 	}
 }
@@ -99,8 +99,8 @@ func TestGlobPathIsLiteral(t *testing.T) {
 			want := filepath.Join(directory, "file.txt")
 			root := globReviewRoot(t, want, "other/file.txt")
 			result, err := GlobTool(root).Execute(t.Context(), map[string]any{"path": directory, "pattern": "*.txt"})
-			if err != nil || result.Content != want {
-				t.Fatalf("result = %q, %v; want %q", result.Content, err, want)
+			if err != nil || result.Content.Text() != want {
+				t.Fatalf("result = %q, %v; want %q", result.Content.Text(), err, want)
 			}
 		})
 	}
@@ -110,14 +110,14 @@ func TestGlobAbsolutePatternsPreserveDepth(t *testing.T) {
 	root := globReviewRoot(t, "src/file.txt", "src/nested/file.txt")
 	for _, pattern := range []string{"*.txt", "file.txt"} {
 		result, err := GlobTool(root).Execute(t.Context(), map[string]any{"pattern": filepath.Join(root.Name(), "src", pattern)})
-		if err != nil || result.Content != filepath.Join("src", "file.txt") {
-			t.Fatalf("%s: %q, %v", pattern, result.Content, err)
+		if err != nil || result.Content.Text() != filepath.Join("src", "file.txt") {
+			t.Fatalf("%s: %q, %v", pattern, result.Content.Text(), err)
 		}
 	}
 
 	missing, err := GlobTool(root).Execute(t.Context(), map[string]any{"pattern": filepath.Join(root.Name(), "missing", "*.txt")})
-	if err != nil || missing.Content != "No files found" {
-		t.Fatalf("missing literal directory in absolute pattern: %q, %v", missing.Content, err)
+	if err != nil || missing.Content.Text() != "No files found" {
+		t.Fatalf("missing literal directory in absolute pattern: %q, %v", missing.Content.Text(), err)
 	}
 }
 
@@ -137,15 +137,15 @@ func TestGlobAbsoluteAndHomePatternsWithMetacharacterRoot(t *testing.T) {
 	defer root.Close()
 
 	result, err := GlobTool(root).Execute(t.Context(), map[string]any{"pattern": filepath.Join(wsDir, "src", "*.txt")})
-	if err != nil || result.Content != filepath.Join("src", "file.txt") {
-		t.Fatalf("metacharacter workspace root: %q, %v", result.Content, err)
+	if err != nil || result.Content.Text() != filepath.Join("src", "file.txt") {
+		t.Fatalf("metacharacter workspace root: %q, %v", result.Content.Text(), err)
 	}
 
 	t.Setenv("HOME", base)
 	t.Setenv("USERPROFILE", base)
 	homeResult, err := GlobTool(root).Execute(t.Context(), map[string]any{"pattern": "~/[workspace]/src/*.txt"})
-	if err != nil || homeResult.Content != filepath.Join("src", "file.txt") {
-		t.Fatalf("home-relative pattern: %q, %v", homeResult.Content, err)
+	if err != nil || homeResult.Content.Text() != filepath.Join("src", "file.txt") {
+		t.Fatalf("home-relative pattern: %q, %v", homeResult.Content.Text(), err)
 	}
 }
 
@@ -153,8 +153,8 @@ func TestGlobLiteralPrefixesCannotBypassVCSFilter(t *testing.T) {
 	root := globReviewRoot(t, ".git/objects/blob.txt", "src/.svn/entries.txt", "visible.txt")
 	for _, pattern := range []string{".git/objects/*", ".git/objects/blob.txt", "src/.svn/**/*.txt", filepath.Join(root.Name(), ".git", "objects", "*.txt")} {
 		result, err := GlobTool(root).Execute(t.Context(), map[string]any{"pattern": pattern})
-		if err != nil || result.Content != "No files found" {
-			t.Fatalf("%s: %q, %v", pattern, result.Content, err)
+		if err != nil || result.Content.Text() != "No files found" {
+			t.Fatalf("%s: %q, %v", pattern, result.Content.Text(), err)
 		}
 	}
 }
@@ -174,13 +174,13 @@ func TestGlobExcludesMatchedSymlinks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(result.Content, "link") {
-			t.Fatalf("%s returned links: %s", pattern, result.Content)
+		if strings.Contains(result.Content.Text(), "link") {
+			t.Fatalf("%s returned links: %s", pattern, result.Content.Text())
 		}
 	}
 	result, err := GlobTool(root).Execute(t.Context(), map[string]any{"path": "linked", "pattern": "*.txt"})
-	if err != nil || result.Content != filepath.Join("linked", "file.txt") {
-		t.Fatalf("explicit linked path: %q, %v", result.Content, err)
+	if err != nil || result.Content.Text() != filepath.Join("linked", "file.txt") {
+		t.Fatalf("explicit linked path: %q, %v", result.Content.Text(), err)
 	}
 }
 
@@ -200,7 +200,7 @@ func TestGlobStableLimitAndUniqueResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(result.Content, "\n")
+	lines := strings.Split(result.Content.Text(), "\n")
 	if len(lines) != DefaultGlobLimit+1 {
 		t.Fatalf("got %d output lines", len(lines))
 	}

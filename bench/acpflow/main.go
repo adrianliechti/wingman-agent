@@ -173,6 +173,7 @@ type benchResult struct {
 	Error        string       `json:"error,omitempty"`
 	Scenario     string       `json:"scenario,omitempty"`
 	Turns        []benchTurn  `json:"turns,omitempty"`
+	Behavior     *behavior    `json:"behavior,omitempty"`
 }
 
 type benchTurn struct {
@@ -187,6 +188,7 @@ type benchTurn struct {
 	FileCount          int          `json:"source_file_count"`
 	BuildOutput        string       `json:"build_output,omitempty"`
 	Error              string       `json:"error,omitempty"`
+	Behavior           *behavior    `json:"behavior,omitempty"`
 }
 
 func writeFixture(root string) error {
@@ -424,18 +426,50 @@ func checkDashboardRequirements(root, turn string) error {
 	return nil
 }
 
-func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nodeModules, gatewayURL, otlpURL string) benchResult {
-	result := benchResult{Agent: agentName, Model: model, Effort: effort, Scenario: scenario}
+func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nodeModules, gatewayURL, otlpURL, recordPath string) (result benchResult) {
+	result = benchResult{Agent: agentName, Model: model, Effort: effort, Scenario: scenario}
+	recorder, err := newRequestRecorder(gatewayURL)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	// Registered first so it runs after the agent process has exited.
+	defer func() {
+		recorder.Close()
+		exchanges := recorder.snapshot()
+		summary := analyzeBehavior(exchanges, leadConversation(exchanges))
+		result.Behavior = &summary
+		if err := recorder.writeJSONL(recordPath); err != nil {
+			result.Error = appendBenchError(result.Error, "record: "+err.Error())
+		}
+	}()
+	gatewayURL = recorder.URL()
 	fixture, err := os.MkdirTemp("", "harness-e2e-"+agentName+"-")
 	if err != nil {
 		result.Error = err.Error()
 		return result
 	}
 	defer os.RemoveAll(fixture)
-	if scenario == "dashboard" {
+	script, scripted := scriptedScenarios[scenario]
+	if scripted {
+		err = script.fixture(fixture)
+	} else if scenario == "dashboard" {
 		err = writeDashboardFixture(fixture, nodeModules)
 	} else {
-		err = writeFixture(fixture)
+		switch scenario {
+		case "invoice", "invoice_dense", "":
+			err = writeFixture(fixture)
+		case "refactor_move":
+			err = writeRefactorMoveFixture(fixture)
+		case "concurrency_bug":
+			err = writeConcurrencyBugFixture(fixture)
+		case "plan_then_build":
+			err = writePlanThenBuildFixture(fixture)
+		case "bug_review":
+			err = writeBugReviewFixture(fixture)
+		default:
+			err = fmt.Errorf("unknown scenario %q (choose %s, dashboard, or suite)", scenario, strings.Join(allGoScenarios, ", "))
+		}
 	}
 	if err != nil {
 		result.Error = err.Error()
@@ -551,6 +585,28 @@ func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nod
 		result.AgentStderr = stderr.String()
 		return result
 	}
+	if scripted {
+		result.Turns = runScriptedScenario(ctx, conn, client, recorder, session, fixture, script)
+		result.TestsPassed = len(result.Turns) == len(script.steps)
+		for _, turn := range result.Turns {
+			result.TotalMS += turn.TotalMS
+			if turn.Error != "" {
+				result.TestsPassed = false
+				if result.Error == "" {
+					result.Error = turn.Name + ": " + turn.Error
+				}
+			}
+		}
+		if len(result.Turns) > 0 {
+			last := result.Turns[len(result.Turns)-1]
+			result.StopReason, result.Usage, result.FinalText = last.StopReason, last.Usage, last.FinalText
+		}
+		if value := strings.TrimSpace(stderr.String()); value != "" {
+			result.AgentStderr = value
+		}
+		return result
+	}
+
 	if scenario == "dashboard" {
 		result.Turns = append(result.Turns,
 			runDashboardTurn(ctx, conn, client, session.SessionId, fixture, "create_dashboard", dashboardCreatePrompt),
@@ -570,6 +626,26 @@ func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nod
 		}
 		if len(result.Turns) > 0 {
 			result.StopReason = result.Turns[len(result.Turns)-1].StopReason
+			result.Usage = result.Turns[len(result.Turns)-1].Usage
+		}
+		if value := strings.TrimSpace(stderr.String()); value != "" {
+			result.AgentStderr = value
+		}
+		return result
+	}
+
+	if scenario == "plan_then_build" {
+		turns, passed, combinedErr := runPlanThenBuildScenario(ctx, conn, client, session, fixture)
+		result.Turns = turns
+		result.TestsPassed = passed
+		result.Error = combinedErr
+		for _, turn := range turns {
+			result.TotalMS += turn.TotalMS
+		}
+		if len(turns) > 0 {
+			result.StopReason = turns[len(turns)-1].StopReason
+			result.Usage = turns[len(turns)-1].Usage
+			result.FinalText = turns[len(turns)-1].FinalText
 		}
 		if value := strings.TrimSpace(stderr.String()); value != "" {
 			result.AgentStderr = value
@@ -580,8 +656,15 @@ func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nod
 	started = time.Now()
 	client.reset(started)
 	prompt := taskPrompt
-	if scenario == "invoice_dense" {
+	switch scenario {
+	case "invoice_dense":
 		prompt += denseTaskSuffix
+	case "refactor_move":
+		prompt = refactorMovePrompt
+	case "concurrency_bug":
+		prompt = concurrencyBugPrompt
+	case "bug_review":
+		prompt = bugReviewPrompt
 	}
 	response, err := conn.Prompt(ctx, acp.PromptRequest{
 		SessionId: session.SessionId,
@@ -595,18 +678,70 @@ func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nod
 		result.StopReason = string(response.StopReason)
 		result.Usage = response.Usage
 	}
-	contents, readErr := os.ReadFile(filepath.Join(fixture, "billing", "invoice.go"))
-	if readErr == nil {
-		result.File = string(contents)
+
+	switch scenario {
+	case "refactor_move":
+		if verifyErr := verifyRefactorMove(ctx, fixture); verifyErr != nil {
+			result.Error = appendBenchError(result.Error, "verification: "+verifyErr.Error())
+		} else {
+			result.TestsPassed = true
+		}
+	case "concurrency_bug":
+		if testErr := runGoTests(ctx, fixture, true, "./..."); testErr != nil {
+			result.Error = appendBenchError(result.Error, "test: "+testErr.Error())
+		} else {
+			result.TestsPassed = true
+		}
+	case "bug_review":
+		if reviewErr := checkBugReviewFindings(fixture, result.FinalText); reviewErr != nil {
+			result.Error = appendBenchError(result.Error, "verification: "+reviewErr.Error())
+		} else {
+			result.TestsPassed = true
+		}
+	default:
+		contents, readErr := os.ReadFile(filepath.Join(fixture, "billing", "invoice.go"))
+		if readErr == nil {
+			result.File = string(contents)
+		}
+		result.TestsPassed = runGoTests(ctx, fixture, false, "./billing") == nil
 	}
-	test := exec.CommandContext(ctx, "go", "test", "./billing")
-	test.Dir = fixture
-	test.Env = replaceEnv(os.Environ(), map[string]string{"GOCACHE": filepath.Join(fixture, ".gocache")})
-	result.TestsPassed = test.Run() == nil
 	if value := strings.TrimSpace(stderr.String()); value != "" {
 		result.AgentStderr = value
 	}
 	return result
+}
+
+type scenarioRun struct {
+	name   string
+	suffix string
+}
+
+func repeatScenarios(scenarios []string, repeat int) []scenarioRun {
+	var runs []scenarioRun
+	for i := 1; i <= max(repeat, 1); i++ {
+		for _, name := range scenarios {
+			run := scenarioRun{name: strings.TrimSpace(name)}
+			if repeat > 1 {
+				run.suffix = fmt.Sprintf("-r%d", i)
+			}
+			runs = append(runs, run)
+		}
+	}
+	return runs
+}
+
+func recordPath(flagValue, output string) string {
+	switch flagValue {
+	case "none", "":
+		return ""
+	case "auto":
+		if output == "" {
+			return ""
+		}
+		return strings.TrimSuffix(output, filepath.Ext(output)) + ".requests.jsonl"
+	default:
+		return flagValue
+	}
 }
 
 func claudeTelemetryEnvironment(endpoint, model string) map[string]string {
@@ -636,7 +771,9 @@ func main() {
 	agentName := flag.String("agent", "wingman", "wingman, codex, or claude")
 	model := flag.String("model", "gpt-5.6-sol", "model ID")
 	effort := flag.String("effort", "high", "reasoning effort")
-	scenario := flag.String("scenario", "invoice", "invoice, invoice_dense, or dashboard")
+	scenario := flag.String("scenario", "invoice", strings.Join(allGoScenarios, ", ")+", dashboard, a comma-separated list, or suite")
+	repeat := flag.Int("repeat", 1, "runs per scenario for a list or suite; model behavior varies, so compare several")
+	summary := flag.String("summary", "", "print pass rates and behavior metrics for comma-separated result directories without running an agent")
 	nodeModules := flag.String("node-modules", "server/ui/node_modules", "preinstalled node_modules for dashboard")
 	gateway := flag.String("gateway", "http://localhost:4242", "gateway base URL")
 	timeout := flag.Duration("timeout", 12*time.Minute, "run timeout")
@@ -644,7 +781,14 @@ func main() {
 	telemetryOutput := flag.String("telemetry-output", "", "optional OTLP JSON sidecar path (defaults beside -output)")
 	reportOutput := flag.String("report", "auto", "comparison HTML path; auto writes beside -output, none disables")
 	reportOnly := flag.String("report-only", "", "generate comparison artifacts from an existing result directory without running an agent")
+	recordOutput := flag.String("record", "auto", "JSONL file for the recorded model requests and responses; auto writes beside -output, none disables")
 	flag.Parse()
+	if *summary != "" {
+		if err := writeSummary(os.Stdout, strings.Split(*summary, ",")); err != nil {
+			panic(err)
+		}
+		return
+	}
 	if *reportOnly != "" {
 		directory, err := filepath.Abs(*reportOnly)
 		if err != nil {
@@ -679,10 +823,74 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+
+	if *scenario == "suite" || strings.Contains(*scenario, ",") || *repeat > 1 {
+		scenarios := allGoScenarios
+		if *scenario != "suite" {
+			scenarios = strings.Split(*scenario, ",")
+		}
+		outDir := *output
+		if outDir == "" {
+			var err error
+			outDir, err = os.MkdirTemp("", "acpflow-suite-")
+			if err != nil {
+				panic(err)
+			}
+		} else if err := os.MkdirAll(outDir, 0o755); err != nil {
+			panic(err)
+		}
+		failed := false
+		for _, sc := range repeatScenarios(scenarios, *repeat) {
+			otlp := newOTLPReceiver()
+			// -timeout bounds one scenario; a shared budget would make late
+			// scenarios fail for time the earlier ones spent.
+			scenarioCtx, cancelScenario := context.WithTimeout(context.Background(), *timeout)
+			base := filepath.Join(outDir, fmt.Sprintf("%s-%s-%s", *agentName, *effort, sc.name+sc.suffix))
+			sc := sc.name
+			res := runOne(scenarioCtx, absoluteBinary, *agentName, *model, *effort, sc, absoluteNodeModules, strings.TrimRight(*gateway, "/"), otlp.URL(), recordPath(*recordOutput, base+".json"))
+			cancelScenario()
+			if err := otlp.writeJSON(base + ".otel.json"); err != nil {
+				otlp.Close()
+				panic(err)
+			}
+			otlp.Close()
+			raw, err := json.MarshalIndent(res, "", "  ")
+			if err != nil {
+				panic(err)
+			}
+			if err := os.WriteFile(base+".json", append(raw, '\n'), 0o644); err != nil {
+				panic(err)
+			}
+			fmt.Fprintf(os.Stderr, "[suite] %s (%s): passed=%v duration=%dms err=%q\n", sc, *agentName, res.TestsPassed && res.Error == "", res.TotalMS, res.Error)
+			if !res.TestsPassed || res.Error != "" {
+				failed = true
+			}
+		}
+		htmlPath := automaticReportPath(*reportOutput, outDir, *effort)
+		if htmlPath != "" {
+			if !filepath.IsAbs(htmlPath) {
+				var err error
+				htmlPath, err = filepath.Abs(htmlPath)
+				if err != nil {
+					panic(err)
+				}
+			}
+			dataPath, err := writeComparisonArtifacts(outDir, *effort, htmlPath)
+			if err != nil {
+				panic(err)
+			}
+			fmt.Fprintf(os.Stderr, "ACP suite report: %s (data: %s)\n", htmlPath, dataPath)
+		}
+		if failed {
+			os.Exit(1)
+		}
+		return
+	}
+
 	otlp := newOTLPReceiver()
 	defer otlp.Close()
 
-	result := runOne(ctx, absoluteBinary, *agentName, *model, *effort, *scenario, absoluteNodeModules, strings.TrimRight(*gateway, "/"), otlp.URL())
+	result := runOne(ctx, absoluteBinary, *agentName, *model, *effort, *scenario, absoluteNodeModules, strings.TrimRight(*gateway, "/"), otlp.URL(), recordPath(*recordOutput, *output))
 	telemetryPath := *telemetryOutput
 	if telemetryPath == "" && *output != "" {
 		extension := filepath.Ext(*output)

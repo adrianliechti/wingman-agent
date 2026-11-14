@@ -24,8 +24,8 @@ func TestExecuteToolRendersInterruption(t *testing.T) {
 	cancel()
 
 	got := a.executeTool(ctx, ToolCall{ID: "1", Name: "probe"}, tl, 0, time.Now())
-	if !strings.Contains(got.Content, "interrupted") {
-		t.Fatalf("canceled call rendered as %q", got.Content)
+	if !strings.Contains(got.Content.Text(), "interrupted") {
+		t.Fatalf("canceled call rendered as %q", got.Content.Text())
 	}
 }
 
@@ -45,8 +45,8 @@ func TestExecuteToolRendersTimeout(t *testing.T) {
 	defer cancel()
 
 	got := a.executeTool(ctx, ToolCall{ID: "1", Name: "probe"}, tl, timeout, time.Now())
-	if !strings.Contains(got.Content, "time limit") {
-		t.Fatalf("timed-out call rendered as %q", got.Content)
+	if !strings.Contains(got.Content.Text(), "time limit") {
+		t.Fatalf("timed-out call rendered as %q", got.Content.Text())
 	}
 }
 
@@ -66,8 +66,8 @@ func TestExecuteToolBlamesRequestDeadlineNotToolLimit(t *testing.T) {
 	defer cancel()
 
 	got := a.executeTool(ctx, ToolCall{ID: "1", Name: "probe"}, tl, time.Hour, time.Now())
-	if !strings.Contains(got.Content, "request deadline") {
-		t.Fatalf("parent-deadline abort rendered as %q", got.Content)
+	if !strings.Contains(got.Content.Text(), "request deadline") {
+		t.Fatalf("parent-deadline abort rendered as %q", got.Content.Text())
 	}
 }
 
@@ -82,8 +82,8 @@ func TestExecuteToolKeepsToolErrorWhenContextIntact(t *testing.T) {
 	}
 
 	got := a.executeTool(context.Background(), ToolCall{ID: "1", Name: "probe"}, tl, 0, time.Now())
-	if strings.Contains(got.Content, "interrupted") {
-		t.Fatalf("a tool's own canceled error must not read as user interruption: %q", got.Content)
+	if strings.Contains(got.Content.Text(), "interrupted") {
+		t.Fatalf("a tool's own canceled error must not read as user interruption: %q", got.Content.Text())
 	}
 }
 

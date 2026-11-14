@@ -36,8 +36,8 @@ func TestPathHandlingCrossplatform(t *testing.T) {
 			t.Fatalf("unexpected error reading: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "test") {
-			t.Errorf("expected content, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "test") {
+			t.Errorf("expected content, got: %s", result.Content.Text())
 		}
 	})
 

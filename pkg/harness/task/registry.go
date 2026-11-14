@@ -373,6 +373,13 @@ type Registry struct {
 	tasks    []*Task
 	running  int
 	launched int
+	stateCh  chan struct{}
+
+	// A blocked Wait returns a finished task's result inline. Its completion
+	// event is held meanwhile so the same report is not also delivered as a
+	// notification; the last waiter to leave without it publishes the event.
+	waiting  map[*Task]int
+	deferred map[*Task]Event
 
 	path          string
 	persistMu     sync.Mutex
@@ -391,10 +398,13 @@ func newRegistry(path string) *Registry {
 	// handler around the buffered run.
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Registry{
-		ctx:    ctx,
-		cancel: cancel,
-		events: make(chan Event, MaxPerSession),
-		path:   path,
+		ctx:      ctx,
+		cancel:   cancel,
+		events:   make(chan Event, MaxPerSession),
+		stateCh:  make(chan struct{}),
+		waiting:  map[*Task]int{},
+		deferred: map[*Task]Event{},
+		path:     path,
 	}
 }
 
@@ -787,12 +797,128 @@ func (r *Registry) execute(ctx context.Context, cancel context.CancelFunc, t *Ta
 
 	r.mu.Lock()
 	r.running--
+	held := notify && r.waiting[t] > 0
+	if held {
+		r.deferred[t] = ev
+	}
+	if r.stateCh != nil {
+		close(r.stateCh)
+		r.stateCh = make(chan struct{})
+	}
 	r.mu.Unlock()
 
-	if notify {
+	if notify && !held {
 		r.Publish(ev)
 	}
 	return result, err
+}
+
+// Wait blocks until all (waitAll=true) or at least one (waitAll=false) of the
+// specified task IDs reaches a non-running terminal status, or until timeout
+// or ctx expires. It returns consistent Info snapshots in the requested order
+// and timedOut=true if the deadline elapsed while tasks were still running.
+//
+// A result returned here is the task's delivery: its completion notification
+// is not published as well. Results Wait does not return (still running, or
+// the call failed) are delivered as notifications as usual.
+func (r *Registry) Wait(ctx context.Context, ids []string, waitAll bool, timeout time.Duration) (infos []Info, timedOut bool, err error) {
+	if len(ids) == 0 {
+		return nil, false, fmt.Errorf("at least one task id is required")
+	}
+	waitCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	r.mu.Lock()
+	targets := make([]*Task, len(ids))
+	for i, id := range ids {
+		for _, tk := range r.tasks {
+			if tk.ID == id {
+				targets[i] = tk
+				break
+			}
+		}
+		if targets[i] == nil {
+			r.mu.Unlock()
+			return nil, false, fmt.Errorf("no agent with id %s", id)
+		}
+	}
+	for _, tk := range targets {
+		r.waiting[tk]++
+	}
+	r.mu.Unlock()
+	defer func() { r.endWait(targets, infos, err) }()
+
+	snapshot := func() (snapshots []Info, allDone, anyDone bool) {
+		snapshots = make([]Info, len(targets))
+		allDone = true
+		for i, tk := range targets {
+			snapshots[i] = tk.Info()
+			if snapshots[i].Status == StatusRunning {
+				allDone = false
+			} else {
+				anyDone = true
+			}
+		}
+		return snapshots, allDone, anyDone
+	}
+
+	for {
+		// Take the channel before reading statuses: a completion in between
+		// closes it, so the select below cannot miss the wakeup.
+		r.mu.Lock()
+		waitCh := r.stateCh
+		r.mu.Unlock()
+
+		snapshots, allDone, anyDone := snapshot()
+		if (waitAll && allDone) || (!waitAll && anyDone) {
+			return snapshots, false, nil
+		}
+
+		select {
+		case <-waitCh:
+		case <-r.ctx.Done():
+			return snapshots, false, errors.New("session is shutting down")
+		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return nil, false, ctx.Err()
+			}
+			// Only the wait's own deadline passed: report the latest state.
+			snapshots, _, _ = snapshot()
+			return snapshots, true, nil
+		}
+	}
+}
+
+// endWait settles the completion events held for this waiter. A result it
+// returned counts as delivered; anything else is published once no other
+// waiter remains to return it.
+func (r *Registry) endWait(targets []*Task, infos []Info, err error) {
+	var publish []Event
+	r.mu.Lock()
+	for i, tk := range targets {
+		if r.waiting[tk]--; r.waiting[tk] <= 0 {
+			delete(r.waiting, tk)
+		}
+		ev, held := r.deferred[tk]
+		if !held {
+			continue
+		}
+		returned := err == nil && i < len(infos) && infos[i].Status != StatusRunning && infos[i].Seq == ev.Seq
+		if returned {
+			delete(r.deferred, tk)
+		} else if r.waiting[tk] == 0 {
+			delete(r.deferred, tk)
+			publish = append(publish, ev)
+		}
+	}
+	r.mu.Unlock()
+	for _, ev := range publish {
+		r.Publish(ev)
+	}
 }
 
 func (r *Registry) Get(id string) *Task {

@@ -362,8 +362,8 @@ func TestStreamingCancellationDrainsStartedTool(t *testing.T) {
 			for _, c := range m.Content {
 				if c.ToolResult != nil {
 					results++
-					if c.ToolResult.Content != interruptedToolResult {
-						t.Errorf("interrupted result=%s", c.ToolResult.Content)
+					if c.ToolResult.Content.Text() != interruptedToolResult {
+						t.Errorf("interrupted result=%s", c.ToolResult.Content.Text())
 					}
 				}
 			}

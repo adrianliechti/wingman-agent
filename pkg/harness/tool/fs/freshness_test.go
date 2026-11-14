@@ -31,7 +31,7 @@ func TestFreshnessDetectsExternalChangesOnce(t *testing.T) {
 	for _, tl := range tools {
 		byName[tl.Name] = func(args map[string]any) (string, error) {
 			result, err := tl.Execute(t.Context(), args)
-			return result.Content, err
+			return result.Content.Text(), err
 		}
 	}
 
@@ -97,7 +97,7 @@ func TestEditRejectsStaleFileAfterExternalChange(t *testing.T) {
 	for _, tl := range tools {
 		byName[tl.Name] = func(args map[string]any) (string, error) {
 			result, err := tl.Execute(t.Context(), args)
-			return result.Content, err
+			return result.Content.Text(), err
 		}
 	}
 

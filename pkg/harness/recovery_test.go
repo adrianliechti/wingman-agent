@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+
 	"github.com/openai/openai-go/v3"
 )
 
@@ -209,8 +211,8 @@ func TestRepairToolHistoryPreservesParallelCallsAndKnownResults(t *testing.T) {
 			{ToolCall: &ToolCall{ID: "missing", Name: "write"}},
 		}},
 		{Role: RoleAssistant, Content: []Content{
-			{ToolResult: &ToolResult{ID: "known", Content: "file A updated"}},
-			{ToolResult: &ToolResult{ID: "orphan", Content: "unmatched"}},
+			{ToolResult: &ToolResult{ID: "known", Content: tool.TextContent("file A updated")}},
+			{ToolResult: &ToolResult{ID: "orphan", Content: tool.TextContent("unmatched")}},
 			{Text: "Independent observed evidence"},
 		}},
 		{Role: RoleUser, Content: []Content{{Text: "continue after interruption"}}},
@@ -254,7 +256,7 @@ func toolRoundMessages(n, resultBytes int) []Message {
 	for range n {
 		messages = append(messages,
 			Message{Role: RoleAssistant, Content: []Content{{ToolCall: &ToolCall{ID: "c", Name: "shell", Args: "{}"}}}},
-			Message{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{ID: "c", Name: "shell", Content: strings.Repeat("x", resultBytes)}}}},
+			Message{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{ID: "c", Name: "shell", Content: tool.TextContent(strings.Repeat("x", resultBytes))}}}},
 		)
 	}
 	return messages
@@ -269,7 +271,7 @@ func TestDropForeignReasoningPurgesAllPayloadsAfterCrossProviderRewrite(t *testi
 	a.Messages = []Message{
 		reasoningMessage("r1", "gpt-5.5", "blob-a"),
 		{Role: RoleAssistant, Content: []Content{{ToolCall: &ToolCall{ID: "c1", Name: "shell"}}}},
-		{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{ID: "c1", Name: "shell", Content: "ok"}}}},
+		{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{ID: "c1", Name: "shell", Content: tool.TextContent("ok")}}}},
 		reasoningMessage("r2", "claude-sonnet-5", "blob-b"),
 		{Role: RoleAssistant, Content: []Content{{Text: "done"}}},
 	}
@@ -341,7 +343,7 @@ func TestReplaceContextDropsReplayableReasoningAfterSameModelRewrite(t *testing.
 func TestDropDanglingReasoning(t *testing.T) {
 	reasoning := reasoningMessage("r1", "m", "blob")
 	toolCall := Message{Role: RoleAssistant, Content: []Content{{ToolCall: &ToolCall{ID: "c1", Name: "shell"}}}}
-	toolResult := Message{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{ID: "c1", Name: "shell", Content: "ok"}}}}
+	toolResult := Message{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{ID: "c1", Name: "shell", Content: tool.TextContent("ok")}}}}
 	text := Message{Role: RoleAssistant, Content: []Content{{Text: "answer"}}}
 	user := Message{Role: RoleUser, Content: []Content{{Text: "hi"}}}
 

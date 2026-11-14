@@ -26,6 +26,12 @@ func messageTokens(m Message) int {
 		}
 		if c.ToolResult != nil {
 			size += len(c.ToolResult.ID)
+			for _, block := range c.ToolResult.Content {
+				if block.Image != nil {
+					size -= len(block.Image.Data)
+					images++
+				}
+			}
 		}
 	}
 	// Allow a little space for role and content framing as well as the payload.
@@ -97,7 +103,12 @@ func messageBytes(m Message) int {
 			total += len(c.ToolCall.Args)
 		}
 		if c.ToolResult != nil {
-			total += len(c.ToolResult.Content)
+			total += len(c.ToolResult.Content.Text())
+			for _, block := range c.ToolResult.Content {
+				if block.Image != nil {
+					total += len(block.Image.Data)
+				}
+			}
 		}
 		if reasoningToInput(c.Reasoning) != nil {
 			// Encrypted payloads are base64 with fixed envelope overhead, as estimated by Codex.

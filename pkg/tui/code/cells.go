@@ -333,7 +333,15 @@ func cellTool(result *harness.ToolResult, width int, full bool) []string {
 	name := result.Name
 
 	hint := tool.ExtractHint(result.Args, result.Name)
-	output := strings.TrimRight(result.Content, "\n")
+	output := strings.TrimRight(result.Content.Text(), "\n")
+	for _, block := range result.Content {
+		if block.Image != nil {
+			if output != "" {
+				output += "\n"
+			}
+			output += "[" + block.Image.MIMEType + " image attached]"
+		}
+	}
 	errored := result.IsError || strings.HasPrefix(output, "error:")
 
 	colorize := func(s string) string { return dim(markdown.Sanitize(s)) }

@@ -198,7 +198,7 @@ func lspTool(service *language.Service) tool.Tool {
 						return "", err
 					}
 					preview, err = workspaceEditPreview(manager, edit, started)
-					return preview.Content, err
+					return preview.Content.Text(), err
 				}, nil)
 				return preview, err
 			case "diagnostics":

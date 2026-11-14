@@ -56,11 +56,11 @@ func TestExecCommandCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "hello") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "hello") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
-	if !strings.Contains(out.Content, "Command completed") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "Command completed") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 	if len(m.sessions) != 0 {
 		t.Fatal("expected no running sessions")
@@ -74,8 +74,8 @@ func TestExecCommandCanStartInPrivateTempWithoutApproval(t *testing.T) {
 	result, err := executeExecCommand(t.Context(), m, workspace, nil, &Options{TempDir: tempDir}, map[string]any{
 		"command": "pwd", "workdir": tempDir,
 	})
-	if err != nil || result.IsError || !strings.Contains(result.Content, canonicalPath(tempDir)) {
-		t.Fatalf("private temp workdir failed: %v %s", err, result.Content)
+	if err != nil || result.IsError || !strings.Contains(result.Content.Text(), canonicalPath(tempDir)) {
+		t.Fatalf("private temp workdir failed: %v %s", err, result.Content.Text())
 	}
 }
 
@@ -89,7 +89,7 @@ func TestExecCommandExitCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "Command exited with code 3") || !out.IsError || out.Metadata["exit_code"] != 3 {
+	if !strings.Contains(out.Content.Text(), "Command exited with code 3") || !out.IsError || out.Metadata["exit_code"] != 3 {
 		t.Fatalf("output = %+v", out)
 	}
 }
@@ -107,24 +107,24 @@ func TestExecCommandBackgroundPollKill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "started") || !strings.Contains(out.Content, "session_id 1") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "started") || !strings.Contains(out.Content.Text(), "session_id 1") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 
 	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "wait": 0})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "no new output") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "no new output") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 
 	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "kill": true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "Session 1 killed") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "Session 1 killed") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 
 	if _, err := executeExecSession(ctx, m, nil, map[string]any{"session_id": 1}); err == nil {
@@ -145,24 +145,24 @@ func TestExecSessionStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "session_id 1") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "session_id 1") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 
 	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "input": "hello\n", "wait": 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "hello") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "hello") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 
 	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "eof": true, "wait": 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "Command completed") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "Command completed") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 }
 
@@ -179,8 +179,8 @@ func TestExecCommandTTY(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "isatty") {
-		t.Fatalf("tty output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "isatty") {
+		t.Fatalf("tty output = %q", out.Content.Text())
 	}
 
 	out, err = executeExecCommand(ctx, m, t.TempDir(), nil, nil, map[string]any{
@@ -189,8 +189,8 @@ func TestExecCommandTTY(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "notty") {
-		t.Fatalf("pipe output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "notty") {
+		t.Fatalf("pipe output = %q", out.Content.Text())
 	}
 }
 
@@ -208,24 +208,24 @@ func TestExecSessionTTYStdinEOF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "session_id 1") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "session_id 1") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 
 	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "input": "hello\n", "wait": 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "hello") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "hello") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 
 	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "eof": true, "wait": 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "Command completed") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "Command completed") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 }
 
@@ -250,8 +250,8 @@ func TestExecSessionDangerousInputConfirmed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "session_id 1") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "session_id 1") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 
 	_, err = executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": "sudo rm -rf /tmp/x\n"})
@@ -304,8 +304,8 @@ func TestExecSessionDangerousInputCannotBeSplitAcrossWrites(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(out.Content, "session_id 1") {
-				t.Fatalf("output = %q", out.Content)
+			if !strings.Contains(out.Content.Text(), "session_id 1") {
+				t.Fatalf("output = %q", out.Content.Text())
 			}
 
 			if _, err := executeExecSession(ctx, m, elicit, map[string]any{"session_id": 1, "input": tc.line[:1], "wait": 0}); err != nil {
@@ -353,8 +353,8 @@ func TestExecSessionPendingInputCheckedBeforeEOFOrCtrlD(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(out.Content, "session_id 1") {
-				t.Fatalf("output = %q", out.Content)
+			if !strings.Contains(out.Content.Text(), "session_id 1") {
+				t.Fatalf("output = %q", out.Content.Text())
 			}
 
 			if _, err := executeExecSession(ctx, m, elicit, map[string]any{
@@ -409,8 +409,8 @@ func TestExecSessionPromptTransformationAcrossStateAndWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "session_id 1") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "session_id 1") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 
 	for _, input := range []string{`a='$'` + "\n", `b="$a(touch /tmp/wingman-marker)"` + "\n", `echo ${b@`} {
@@ -485,16 +485,16 @@ func TestExecSessionCtrlCInterruptsPipeSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "session_id 1") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "session_id 1") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 
 	out, err = executeExecSession(ctx, m, nil, map[string]any{"session_id": 1, "input": "\u0003", "wait": 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "signal: interrupt") {
-		t.Fatalf("output = %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "signal: interrupt") {
+		t.Fatalf("output = %q", out.Content.Text())
 	}
 }
 
@@ -519,8 +519,8 @@ func TestExecSessionPollReportsExitedProcessWithZeroWait(t *testing.T) {
 		}
 		m.Close()
 
-		if !strings.Contains(out.Content, "Command completed") || strings.Contains(out.Content, "still running") {
-			t.Fatalf("exited process reported as running: %q", out.Content)
+		if !strings.Contains(out.Content.Text(), "Command completed") || strings.Contains(out.Content.Text(), "still running") {
+			t.Fatalf("exited process reported as running: %q", out.Content.Text())
 		}
 	}
 }
@@ -535,8 +535,8 @@ func TestExecCommandZeroWaitReturnsExitedProcessInline(t *testing.T) {
 		}
 		// Either the process had not exited yet (a session is handed back) or it
 		// had, in which case the result must be the completed one.
-		if !strings.Contains(out.Content, "Command completed") && !strings.Contains(out.Content, "session_id 1") {
-			t.Fatalf("unexpected result: %q", out.Content)
+		if !strings.Contains(out.Content.Text(), "Command completed") && !strings.Contains(out.Content.Text(), "session_id 1") {
+			t.Fatalf("unexpected result: %q", out.Content.Text())
 		}
 	}
 }
@@ -568,15 +568,15 @@ func TestExecRecreatesRemovedPrivateTempForSubsequentWorkdir(t *testing.T) {
 	allow := &tool.Elicitation{Confirm: func(context.Context, string) (bool, error) { return true, nil }}
 
 	if res, err := executeExecCommand(t.Context(), m, workspace, allow, opts, map[string]any{"command": `rmdir "$TMPDIR"`, "wait": 10}); err != nil || res.IsError {
-		t.Fatalf("remove private temp: %v %s", err, res.Content)
+		t.Fatalf("remove private temp: %v %s", err, res.Content.Text())
 	}
 	if info, err := os.Stat(privateTemp); err != nil || !info.IsDir() {
 		t.Fatalf("private temp not restored on exit: %v", err)
 	}
 	_ = os.RemoveAll(privateTemp)
 	res, err := executeExecCommand(t.Context(), m, workspace, nil, opts, map[string]any{"command": "pwd", "workdir": privateTemp, "wait": 10})
-	if err != nil || res.IsError || !strings.Contains(res.Content, privateTemp) {
-		t.Fatalf("subsequent workdir in private temp: %v %s", err, res.Content)
+	if err != nil || res.IsError || !strings.Contains(res.Content.Text(), privateTemp) {
+		t.Fatalf("subsequent workdir in private temp: %v %s", err, res.Content.Text())
 	}
 }
 
@@ -599,7 +599,7 @@ func TestExecEscalationKeepsPrivateTemp(t *testing.T) {
 		"command": `cat "$TMPDIR/staged"`, "wait": 10,
 		"sandbox_permissions": "require_escalated", "justification": "read a staged file",
 	})
-	if err != nil || result.IsError || !strings.Contains(result.Content, "staged") {
+	if err != nil || result.IsError || !strings.Contains(result.Content.Text(), "staged") {
 		t.Fatalf("escalated run lost private temp: %+v, %v", result, err)
 	}
 }

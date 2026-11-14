@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coder/acp-go-sdk"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -28,22 +29,26 @@ type comparisonReport struct {
 }
 
 type comparisonRun struct {
-	Agent           string              `json:"agent"`
-	Model           string              `json:"model"`
-	Effort          string              `json:"effort"`
-	Scenario        string              `json:"scenario"`
-	DurationMS      int64               `json:"duration_ms"`
-	InitializeMS    int64               `json:"initialize_ms"`
-	NewSessionMS    int64               `json:"new_session_ms"`
-	Success         bool                `json:"success"`
-	Error           string              `json:"error,omitempty"`
-	ToolCalls       int                 `json:"tool_calls"`
-	ModelRequests   int                 `json:"model_requests"`
-	SourceFileCount int                 `json:"source_file_count,omitempty"`
-	Turns           []comparisonTurn    `json:"turns"`
-	Telemetry       comparisonTelemetry `json:"telemetry"`
-	ResultArtifact  string              `json:"result_artifact"`
-	OTELArtifact    string              `json:"otel_artifact"`
+	Agent            string              `json:"agent"`
+	Model            string              `json:"model"`
+	Effort           string              `json:"effort"`
+	Scenario         string              `json:"scenario"`
+	DurationMS       int64               `json:"duration_ms"`
+	InitializeMS     int64               `json:"initialize_ms"`
+	NewSessionMS     int64               `json:"new_session_ms"`
+	Success          bool                `json:"success"`
+	Error            string              `json:"error,omitempty"`
+	ToolCalls        int                 `json:"tool_calls"`
+	ModelRequests    int                 `json:"model_requests"`
+	InputTokens      int64               `json:"input_tokens,omitempty"`
+	OutputTokens     int64               `json:"output_tokens,omitempty"`
+	CachedReadTokens int64               `json:"cached_read_tokens,omitempty"`
+	CacheHitRatio    float64             `json:"cache_hit_ratio,omitempty"`
+	SourceFileCount  int                 `json:"source_file_count,omitempty"`
+	Turns            []comparisonTurn    `json:"turns"`
+	Telemetry        comparisonTelemetry `json:"telemetry"`
+	ResultArtifact   string              `json:"result_artifact"`
+	OTELArtifact     string              `json:"otel_artifact"`
 }
 
 type comparisonTurn struct {
@@ -248,8 +253,8 @@ func normalizeComparisonRun(candidate reportCandidate) (comparisonRun, error) {
 		run.Telemetry.TraceModeNotice = "Codex trace export was intentionally disabled for the timed matrix: its native trace stream contains thousands of implementation-level spans. Logs and metrics remain enabled."
 	}
 
-	if result.Scenario == "dashboard" {
-		run.Success = result.Error == "" && len(result.Turns) > 0
+	if len(result.Turns) > 0 {
+		run.Success = result.Error == ""
 		for _, turn := range result.Turns {
 			normalized := normalizeTurn(turn.Name, turn.TotalMS, turn.BuildPassed && turn.RequirementsPassed && turn.Error == "", reportFailure(turn.Error), turn.Events)
 			run.Turns = append(run.Turns, normalized)
@@ -262,11 +267,87 @@ func normalizeComparisonRun(candidate reportCandidate) (comparisonRun, error) {
 	} else {
 		run.DurationMS = result.TotalMS
 		run.Success = result.TestsPassed && result.Error == ""
-		turn := normalizeTurn("fix_invoice", result.TotalMS, run.Success, reportFailure(result.Error), result.Events)
+		turnName := "fix_invoice"
+		if result.Scenario != "" && result.Scenario != "invoice" && result.Scenario != "invoice_dense" {
+			turnName = result.Scenario
+		}
+		turn := normalizeTurn(turnName, result.TotalMS, run.Success, reportFailure(result.Error), result.Events)
 		run.ToolCalls = turn.ToolCalls
 		run.Turns = []comparisonTurn{turn}
 	}
+	run.InputTokens, run.OutputTokens, run.CachedReadTokens, run.CacheHitRatio = computeRunTokenMetrics(result, summary)
 	return run, nil
+}
+
+func computeRunTokenMetrics(result benchResult, summary otlpSummary) (inputTokens, outputTokens, cachedReadTokens int64, cacheHitRatio float64) {
+	if summary.InputTokens > 0 || summary.OutputTokens > 0 || summary.CachedReadTokens > 0 {
+		inputTokens = summary.InputTokens
+		outputTokens = summary.OutputTokens
+		cachedReadTokens = summary.CachedReadTokens
+		// Claude reports fresh input separately; GenAI and Codex include cache.
+		if result.Agent == "claude" {
+			inputTokens += cachedReadTokens + summary.CachedWriteTokens
+		}
+	} else {
+		addUsage := func(u *benchUsageView) {
+			if u == nil {
+				return
+			}
+			inputTokens += u.totalInput
+			outputTokens += u.totalOutput
+			cachedReadTokens += u.cachedRead
+		}
+		if len(result.Turns) > 0 {
+			// Wingman's ACP Usage returns cumulative session usage, whereas Codex returns per-turn usage.
+			// Use the last cumulative value for Wingman and sum per-turn values otherwise.
+			last := viewACPUsage(result.Turns[len(result.Turns)-1].Usage)
+			if result.Agent == "wingman" {
+				addUsage(last)
+			} else {
+				for _, t := range result.Turns {
+					addUsage(viewACPUsage(t.Usage))
+				}
+			}
+		} else {
+			addUsage(viewACPUsage(result.Usage))
+		}
+	}
+	if inputTokens > 0 && cachedReadTokens > 0 {
+		ratio := float64(cachedReadTokens) / float64(inputTokens)
+		if ratio > 1 {
+			ratio = 1
+		}
+		// Round to 4 decimal places for clean JSON serialization.
+		cacheHitRatio = float64(int(ratio*10000+0.5)) / 10000
+	}
+	return inputTokens, outputTokens, cachedReadTokens, cacheHitRatio
+}
+
+type benchUsageView struct {
+	totalInput  int64
+	totalOutput int64
+	cachedRead  int64
+}
+
+func viewACPUsage(u *acp.Usage) *benchUsageView {
+	if u == nil {
+		return nil
+	}
+	var cachedRead, cachedWrite, reasoning int64
+	if u.CachedReadTokens != nil {
+		cachedRead = int64(*u.CachedReadTokens)
+	}
+	if u.CachedWriteTokens != nil {
+		cachedWrite = int64(*u.CachedWriteTokens)
+	}
+	if u.ThoughtTokens != nil {
+		reasoning = int64(*u.ThoughtTokens)
+	}
+	return &benchUsageView{
+		totalInput:  int64(u.InputTokens) + cachedRead + cachedWrite,
+		totalOutput: int64(u.OutputTokens) + reasoning,
+		cachedRead:  cachedRead,
+	}
 }
 
 func rebuiltOTLPSummary(artifact otlpArtifact) otlpSummary {
@@ -410,10 +491,18 @@ func scenarioRank(value string) int {
 		return 0
 	case "invoice_dense":
 		return 1
-	case "dashboard":
+	case "refactor_move":
 		return 2
-	default:
+	case "concurrency_bug":
 		return 3
+	case "plan_then_build":
+		return 4
+	case "bug_review":
+		return 5
+	case "dashboard":
+		return 6
+	default:
+		return 7
 	}
 }
 

@@ -79,7 +79,10 @@ func readAttachedWorkspaceImage(path, rootPath string) string {
 	if err != nil {
 		return ""
 	}
-	return res.Content
+	if urls := res.Content.ImageURLs(); len(urls) > 0 {
+		return urls[0]
+	}
+	return ""
 }
 
 func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
@@ -152,8 +155,12 @@ func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
 					Args:      display.args,
 					Locations: display.locations,
 					Hint:      display.hint,
-					Content:   c.ToolResult.Content,
+					Content:   c.ToolResult.Content.Text(),
 				})
+
+				for _, url := range c.ToolResult.Content.ImageURLs() {
+					s.sendSession(ev.SessionID, Frame{Type: EvtImage, Content: url})
+				}
 
 				if s.files != nil {
 					s.files.Notify()

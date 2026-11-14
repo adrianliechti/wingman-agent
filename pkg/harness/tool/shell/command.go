@@ -57,7 +57,7 @@ func sandboxGuideLine(opts *Options) string {
 	return strings.Join([]string{
 		"- Commands run in an OS sandbox. Use the Shell writable roots in Environment context to choose output paths and workdir." + credentials + " " + protection,
 		"- Use private TMPDIR/TEMP/TMP for temporary files; " + temp + ". Expand environment variables inside command using the host shell's syntax. In workdir and writable_roots, supply literal paths, not environment-variable references.",
-		"- Preserve inherited tool/cache configuration; many tools still read a cache they cannot write. Set GODEBUG=goindex=0 for Go commands so they read the host build cache without writing its package index. Only if a command still fails writing a disposable cache, redirect that cache to private temp for the command, e.g. " + cacheExample + "; likewise PIP_CACHE_DIR, UV_CACHE_DIR or GOCACHE/GOTMPDIR. Do not reset HOME, GOPATH, GOMODCACHE, CARGO_HOME or XDG_CACHE_HOME to repair one cache error.",
+		"- Preserve inherited tool/cache configuration; many tools still read a cache they cannot write. Go commands already run with GODEBUG=goindex=0, so they read the host build cache without writing it; a `writing stat cache` warning is harmless. Only if a command still fails writing a disposable cache, redirect that cache to private temp for the command, e.g. " + cacheExample + "; likewise PIP_CACHE_DIR, UV_CACHE_DIR or GOCACHE/GOTMPDIR. Do not reset HOME, GOPATH, GOMODCACHE, CARGO_HOME or XDG_CACHE_HOME to repair one cache error.",
 		"- " + network + ". Use default permissions when configured access suffices. For required network access or writes outside listed roots, request require_permissions with the needed network/writable_roots and justification. Grants retain the sandbox and apply to the launched command, not later exec calls.",
 		"- Request require_escalated only when the required operation cannot run with scoped grants. It removes the local sandbox for the launched command; supply justification and omit network/writable_roots.",
 		"- Run commands that need host credentials, such as git push, with default permissions. When a command that finishes within the wait fails with a likely sandbox denial, the harness requests approval and re-runs the whole command, inside the sandbox with network access when only the network was missing and otherwise outside it; the result says so. Keep such commands out of long or non-repeatable command chains. Validation runs are not re-run.",
@@ -70,6 +70,9 @@ var sandboxDenialHints = []string{"operation not permitted", "permission denied"
 
 // offlineDenialHints are the name-resolution and routing failures of a sandbox without IP networking, such as git push.
 var offlineDenialHints = []string{"could not resolve host", "temporary failure in name resolution", "name or service not known", "nodename nor servname", "getaddrinfo", "network is unreachable", "no such host"}
+
+// Go reports its read-only module cache with this warning and carries on, so it never explains a failure.
+var benignDenialPrefixes = []string{"go: writing stat cache:"}
 
 // sandboxLauncherPrefixes start the errors of a sandbox that failed to start;
 // the command never ran, so running it outside the sandbox is no remedy.
@@ -110,6 +113,9 @@ func sandboxDenial(output string, err error, network bool) string {
 	}
 	for line := range strings.Lines(output) {
 		lower := strings.ToLower(line)
+		if slices.ContainsFunc(benignDenialPrefixes, func(prefix string) bool { return strings.HasPrefix(strings.TrimSpace(lower), prefix) }) {
+			continue
+		}
 		if slices.ContainsFunc(hints, func(hint string) bool { return strings.Contains(lower, hint) }) {
 			line = strings.TrimSpace(line)
 			if runes := []rune(line); len(runes) > 300 {
@@ -218,6 +224,9 @@ func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir str
 	if sandbox != nil && !sandbox.Network {
 		environment = environmentOffline(environment)
 	}
+	if sandbox != nil {
+		environment = environmentReadOnlyCaches(environment)
+	}
 	return buildCommandWithEnvironment(ctx, command, workingDir, environment, sandbox)
 }
 
@@ -246,7 +255,7 @@ func buildCommandWithEnvironment(ctx context.Context, command, workingDir string
 			shell = "/bin/sh"
 		}
 		if sandbox == nil {
-			cmd = exec.CommandContext(ctx, shell, "-c", command)
+			cmd = exec.CommandContext(ctx, shell, shellArguments(shell, command)...)
 		} else {
 			var err error
 			if cmd, err = buildSandboxedCommand(ctx, shell, command, workingDir, *sandbox); err != nil {
@@ -266,6 +275,14 @@ func buildCommandWithEnvironment(ctx context.Context, command, workingDir string
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 
 	return cmd, nil
+}
+
+// Models write globs for sh and bash, which pass an unmatched pattern through; zsh aborts the command instead.
+func shellArguments(shell, command string) []string {
+	if filepath.Base(shell) == "zsh" {
+		return []string{"-o", "nonomatch", "-c", command}
+	}
+	return []string{"-c", command}
 }
 
 // sandboxOptions sets the workspace boundary and any extra writable roots, such as project memory.

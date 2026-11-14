@@ -150,19 +150,19 @@ func TestExecSandboxConfinesWritesToWorkspace(t *testing.T) {
 	exec := ExecTools(manager, t.TempDir(), nil, nil)[0]
 	run := func(command string) tool.Result {
 		result, err := exec.Execute(context.Background(), map[string]any{"command": command, "wait": 60})
-		if err != nil || strings.Contains(result.Content, "sandbox_apply: Operation not permitted") {
+		if err != nil || strings.Contains(result.Content.Text(), "sandbox_apply: Operation not permitted") {
 			if runtime.GOOS == "windows" {
 				t.Fatal(err)
 			}
-			t.Skipf("sandbox backend unavailable: %v %s", err, result.Content)
+			t.Skipf("sandbox backend unavailable: %v %s", err, result.Content.Text())
 		}
 		return result
 	}
 	if inside := run(touchCommand("inside.txt")); inside.IsError {
-		t.Fatalf("write inside the workspace failed: %s", inside.Content)
+		t.Fatalf("write inside the workspace failed: %s", inside.Content.Text())
 	}
 	if escaped := run(touchCommand(outside)); !escaped.IsError {
-		t.Fatalf("write outside the workspace was allowed: %s", escaped.Content)
+		t.Fatalf("write outside the workspace was allowed: %s", escaped.Content.Text())
 	}
 }
 
@@ -194,14 +194,14 @@ func TestExecEscalationRunsOutsideSandboxAfterApproval(t *testing.T) {
 		"command": touchCommand(outside), "wait": 10,
 		"sandbox_permissions": "require_escalated", "justification": "write a marker in the home directory",
 	})
-	if err != nil || strings.Contains(escalated.Content, "sandbox_apply: Operation not permitted") {
+	if err != nil || strings.Contains(escalated.Content.Text(), "sandbox_apply: Operation not permitted") {
 		if runtime.GOOS == "windows" {
 			t.Fatal(err)
 		}
-		t.Skipf("sandbox backend unavailable: %v %s", err, escalated.Content)
+		t.Skipf("sandbox backend unavailable: %v %s", err, escalated.Content.Text())
 	}
 	if escalated.IsError {
-		t.Fatalf("escalated command failed: %s", escalated.Content)
+		t.Fatalf("escalated command failed: %s", escalated.Content.Text())
 	}
 	if len(approvals) != 1 || approvals[0].Action["type"] != "sandbox_escalation" || !strings.Contains(approvals[0].Message, "write a marker") {
 		t.Fatalf("approvals = %+v", approvals)
@@ -256,13 +256,13 @@ func TestExecRetriesSandboxDenialOutsideSandbox(t *testing.T) {
 			raw, _ := json.Marshal(args)
 			ctx := hook.WithToolCall(context.Background(), tool.ToolCall{ID: "call-1", Name: "exec", Args: string(raw)})
 			result, err := ExecTools(manager, t.TempDir(), tc.elicit(&reviews), nil)[0].Execute(ctx, args)
-			if err != nil || strings.Contains(result.Content, "sandbox_apply: Operation not permitted") {
+			if err != nil || strings.Contains(result.Content.Text(), "sandbox_apply: Operation not permitted") {
 				if runtime.GOOS == "windows" {
 					t.Fatal(err)
 				}
-				t.Skipf("sandbox backend unavailable: %v %s", err, result.Content)
+				t.Skipf("sandbox backend unavailable: %v %s", err, result.Content.Text())
 			}
-			if result.IsError == tc.allowed || !strings.Contains(result.Content, tc.notice) {
+			if result.IsError == tc.allowed || !strings.Contains(result.Content.Text(), tc.notice) {
 				t.Fatalf("result = %+v", result)
 			}
 			if _, err := os.Stat(outside); (err == nil) != tc.allowed {

@@ -163,7 +163,7 @@ func TestToolResultPrecedesTerminalInSameAppend(t *testing.T) {
 	if len(last) != 2 || last[0].Type != EventMessage || last[1].Type != EventToolTerminal {
 		t.Fatalf("tool commit batch = %#v", last)
 	}
-	if got := last[0].Message.Content[0].ToolResult.Content; got != "written" {
+	if got := last[0].Message.Content[0].ToolResult.Content.Text(); got != "written" {
 		t.Fatalf("durable tool output = %q", got)
 	}
 }

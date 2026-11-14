@@ -78,8 +78,8 @@ func TestBatchEditToolAppliesCrossFileTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Content, "3 edits across 2 files") {
-		t.Fatalf("unexpected result: %q", result.Content)
+	if !strings.Contains(result.Content.Text(), "3 edits across 2 files") {
+		t.Fatalf("unexpected result: %q", result.Content.Text())
 	}
 	if contents, _ := os.ReadFile(filepath.Join(directory, "existing.txt")); string(contents) != "ONE TWO\n" {
 		t.Fatalf("existing contents = %q", contents)

@@ -1,7 +1,11 @@
 package harness
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
+
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
@@ -132,11 +136,11 @@ func TestToInputFlushesImagesAfterToolResultRun(t *testing.T) {
 			{ToolCall: &ToolCall{ID: "c2", Name: "read"}},
 		}},
 		{Role: RoleAssistant, Content: []Content{
-			{ToolResult: &ToolResult{ID: "c1", Name: "view_image", Content: "[image attached below]"}},
+			{ToolResult: &ToolResult{ID: "c1", Name: "view_image", Content: tool.TextContent("[image attached below]")}},
 			{File: &File{Data: "data:image/png;base64,AAAA"}},
 		}},
 		{Role: RoleAssistant, Content: []Content{
-			{ToolResult: &ToolResult{ID: "c2", Name: "read", Content: "file contents"}},
+			{ToolResult: &ToolResult{ID: "c2", Name: "read", Content: tool.TextContent("file contents")}},
 		}},
 	}
 
@@ -164,5 +168,72 @@ func TestToInputFlushesImagesAfterToolResultRun(t *testing.T) {
 		if kinds[i] != want[i] {
 			t.Fatalf("items = %v, want %v", kinds, want)
 		}
+	}
+}
+
+// A tool result is one wire item. Its images travel inside the output, in
+// order, so they stay attached to the call that produced them; plain text
+// keeps the string form every backend accepts.
+func TestToolOutputCarriesAttachmentsInOrder(t *testing.T) {
+	image := imageContentFixture(t)
+	url := image[0].Image.DataURL()
+	mixed := tool.Content{tool.TextBlock("before"), image[0], tool.TextBlock(""), tool.TextBlock("after")}
+
+	messages := []Message{
+		{Role: RoleAssistant, Content: []Content{
+			{ToolCall: &ToolCall{ID: "shot", Name: "browser_screenshot", Args: "{}"}},
+			{ToolCall: &ToolCall{ID: "text", Name: "read", Args: "{}"}},
+		}},
+		{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{ID: "shot", Name: "browser_screenshot", Content: mixed}}}},
+		{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{ID: "text", Name: "read", Content: tool.Content{tool.TextBlock("line one"), tool.TextBlock("line two")}}}}},
+	}
+	items := toInput(messages)
+	if len(items) != 4 {
+		t.Fatalf("attachments must not add wire items: got %d items", len(items))
+	}
+
+	raw, err := json.Marshal(items[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shot struct {
+		Type   string `json:"type"`
+		CallID string `json:"call_id"`
+		Output []struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			ImageURL string `json:"image_url"`
+			Detail   string `json:"detail"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &shot); err != nil {
+		t.Fatalf("output is not a part list: %v\n%s", err, raw)
+	}
+	if shot.Type != "function_call_output" || shot.CallID != "shot" || len(shot.Output) != 3 {
+		t.Fatalf("unexpected item: %s", raw)
+	}
+	if shot.Output[0].Type != "input_text" || shot.Output[0].Text != "before" ||
+		shot.Output[1].Type != "input_image" || shot.Output[1].ImageURL != url || shot.Output[1].Detail != "auto" ||
+		shot.Output[2].Type != "input_text" || shot.Output[2].Text != "after" {
+		t.Fatalf("parts lost or reordered: %s", raw)
+	}
+
+	raw, err = json.Marshal(items[3])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plain struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &plain); err != nil || plain.Output != "line one\nline two" {
+		t.Fatalf("text-only output must stay a string: %v\n%s", err, raw)
+	}
+
+	// The reverse mapping restores the same blocks.
+	restored := toMessages(items)
+	got := restored[len(restored)-2].Content[0].ToolResult
+	want := tool.Content{tool.TextBlock("before"), image[0], tool.TextBlock("after")}
+	if got == nil || got.Name != "browser_screenshot" || !reflect.DeepEqual(got.Content, want) {
+		t.Fatalf("round trip changed the result: %+v", got)
 	}
 }

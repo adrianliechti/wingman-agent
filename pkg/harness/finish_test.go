@@ -206,7 +206,7 @@ func TestExplicitFinishModelSwitchInSameChat(t *testing.T) {
 					for _, c := range m.Content {
 						if result := c.ToolResult; result != nil && result.Name == finishToolName {
 							rejections++
-							if !result.IsError || !strings.Contains(result.Content, "answer directly as assistant text") {
+							if !result.IsError || !strings.Contains(result.Content.Text(), "answer directly as assistant text") {
 								t.Fatalf("expected finish rejection with direct-answer guidance, got %+v", result)
 							}
 						}
@@ -449,7 +449,7 @@ func TestExplicitFinish(t *testing.T) {
 				for _, content := range message.Content {
 					if content.ToolResult != nil {
 						delete(unresolved, content.ToolResult.ID)
-						if tc.name == "marker without answer" && content.ToolResult.ID == "bad" && !strings.Contains(content.ToolResult.Content, "You have not written a user-facing answer") {
+						if tc.name == "marker without answer" && content.ToolResult.ID == "bad" && !strings.Contains(content.ToolResult.Content.Text(), "You have not written a user-facing answer") {
 							t.Error("bare marker rejection did not explain the missing answer")
 						}
 					}
@@ -730,7 +730,7 @@ func TestExplicitFinishAcceptsBareMarkerAfterAnswer(t *testing.T) {
 			for _, message := range a.StateSnapshot().Messages {
 				for _, content := range message.Content {
 					if content.ToolResult != nil && content.ToolResult.Name == finishToolName {
-						results = append(results, content.ToolResult.Content)
+						results = append(results, content.ToolResult.Content.Text())
 					}
 				}
 			}

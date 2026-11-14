@@ -73,8 +73,8 @@ func TestSkillDirectoryLinks(t *testing.T) {
 							{"grep", grep, map[string]any{"path": path, "pattern": "Shared review guidance", "output_mode": "content"}, "Shared review guidance"},
 						} {
 							result, err := check.tool.Execute(context.Background(), check.args)
-							if err != nil || !strings.Contains(result.Content, check.want) {
-								t.Errorf("%s through %q = %q, %v", check.name, path, result.Content, err)
+							if err != nil || !strings.Contains(result.Content.Text(), check.want) {
+								t.Errorf("%s through %q = %q, %v", check.name, path, result.Content.Text(), err)
 							}
 						}
 					}
@@ -128,7 +128,7 @@ func TestSkillDirectoryLinks(t *testing.T) {
 							{glob, map[string]any{"path": path, "pattern": "**/*"}},
 						} {
 							if result, err := check.tool.Execute(context.Background(), check.args); err == nil {
-								t.Errorf("%s escaped the allowed skill root through %s: %q", check.tool.Name, link, result.Content)
+								t.Errorf("%s escaped the allowed skill root through %s: %q", check.tool.Name, link, result.Content.Text())
 							}
 						}
 					}

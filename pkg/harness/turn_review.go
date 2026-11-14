@@ -113,7 +113,15 @@ func BuildTurnReviews(events []RuntimeEvent) []TurnReview {
 				var args map[string]any
 				_ = json.Unmarshal([]byte(result.Args), &args)
 				if result.Name == "exec" || result.Name == "exec_command" || result.Name == "exec_session" {
-					review.Untracked = true
+					if changes, err := tool.ResultFileChanges(result.Metadata); err != nil {
+						review.Uncertain = true
+					} else if len(changes) > 0 {
+						review.Files = append(review.Files, changes...)
+						review.lastEdit = position
+					}
+					if complete, _ := result.Metadata["workspace_snapshot_complete"].(bool); !complete {
+						review.Untracked = true
+					}
 					sequence := position
 					id, known := tool.IntArg(result.Metadata, "session_id")
 					if result.Name == "exec" || result.Name == "exec_command" {

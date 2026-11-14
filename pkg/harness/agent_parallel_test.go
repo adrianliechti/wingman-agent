@@ -59,7 +59,7 @@ func TestParallelToolResultsKeepCallOrderWhenRecorded(t *testing.T) {
 						{ID: "second", Name: "read", Args: `{"id":"second"}`},
 					}, tools, func(m Message, _ error) bool {
 						if result := m.Content[0].ToolResult; result != nil {
-							if result.IsError || result.Content != result.ID {
+							if result.IsError || result.Content.Text() != result.ID {
 								t.Errorf("result lost during persistence: %+v", result)
 							}
 							visible = append(visible, result.ID)
@@ -123,8 +123,8 @@ func TestProcessToolCallsRunsReadsConcurrently(t *testing.T) {
 
 	for _, m := range a.Messages {
 		for _, c := range m.Content {
-			if c.ToolResult != nil && strings.HasPrefix(c.ToolResult.Content, "error") {
-				t.Fatalf("reads did not overlap: %s", c.ToolResult.Content)
+			if c.ToolResult != nil && strings.HasPrefix(c.ToolResult.Content.Text(), "error") {
+				t.Fatalf("reads did not overlap: %s", c.ToolResult.Content.Text())
 			}
 		}
 	}
@@ -201,7 +201,7 @@ func TestDuplicateToolCallIDExecutesOnce(t *testing.T) {
 	close(release)
 
 	first, second := <-results, <-results
-	if calls != 1 || first.Content != "written" || second.Content != "written" {
+	if calls != 1 || first.Content.Text() != "written" || second.Content.Text() != "written" {
 		t.Fatalf("calls=%d results=(%+v, %+v)", calls, first, second)
 	}
 }
@@ -216,7 +216,7 @@ func TestCanceledDuplicateWaiterLeavesToolAndOtherWaitersRunning(t *testing.T) {
 				calls++
 				close(started)
 				<-release
-				return tool.Result{Content: "read", Metadata: map[string]any{"version": 1}}, nil
+				return tool.Result{Content: tool.TextContent("read"), Metadata: map[string]any{"version": 1}}, nil
 			},
 		}}
 		a := &Agent{Config: &Config{ToolTimeout: -1}}
@@ -232,7 +232,7 @@ func TestCanceledDuplicateWaiterLeavesToolAndOtherWaitersRunning(t *testing.T) {
 		go func() { results <- a.runSingleToolCallOutcomeDeferred(t.Context(), call, tools).result }()
 		synctest.Wait()
 		cancel()
-		if result := <-canceled; !result.IsError || result.Content != interruptedWaitResult {
+		if result := <-canceled; !result.IsError || result.Content.Text() != interruptedWaitResult {
 			t.Fatalf("canceled waiter = %+v", result)
 		}
 		select {
@@ -243,7 +243,7 @@ func TestCanceledDuplicateWaiterLeavesToolAndOtherWaitersRunning(t *testing.T) {
 
 		close(release)
 		first, second := <-results, <-results
-		if calls != 1 || first.IsError || second.IsError || first.Content != "read" || second.Content != "read" {
+		if calls != 1 || first.IsError || second.IsError || first.Content.Text() != "read" || second.Content.Text() != "read" {
 			t.Fatalf("calls=%d, results=(%+v, %+v)", calls, first, second)
 		}
 		first.Metadata["version"] = 2
@@ -266,7 +266,7 @@ func TestRetainedToolResultPreventsReplayAfterRestore(t *testing.T) {
 				ID: "persisted", Name: "write", Args: `{"path":"a"}`,
 			}}}},
 			{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{
-				ID: "persisted", Name: "write", Args: `{"path":"a"}`, Content: "already written",
+				ID: "persisted", Name: "write", Args: `{"path":"a"}`, Content: tool.TextContent("already written"),
 			}}}},
 		},
 	}
@@ -282,32 +282,29 @@ func TestRetainedToolResultPreventsReplayAfterRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := a.Messages[len(a.Messages)-1].Content[0].ToolResult
-	if called || result == nil || result.Content != "already written" {
+	if called || result == nil || result.Content.Text() != "already written" {
 		t.Fatalf("called=%v result=%+v", called, result)
 	}
 }
 
 func TestRetainedImageResultRestoresAttachedData(t *testing.T) {
-	a := &Agent{
-		Config: &Config{ToolTimeout: -1},
-		Messages: []Message{{Role: RoleAssistant, Content: []Content{
-			{ToolResult: &ToolResult{ID: "image", Name: "view_image", Content: "[image attached below]"}},
-			{File: &File{Data: "data:image/png;base64,abc"}},
-		}}},
-	}
-
+	image := imageContentFixture(t)[0].Image
+	a := &Agent{Config: &Config{ToolTimeout: -1}, Messages: []Message{{Role: RoleAssistant, Content: []Content{
+		{ToolResult: &ToolResult{ID: "image", Name: "view_image", Content: tool.TextContent(imageResultPlaceholder)}},
+		{File: &File{Data: image.DataURL()}},
+	}}}}
 	result := a.runSingleToolCall(context.Background(), ToolCall{ID: "image", Name: "view_image"}, nil)
-	if result.Content != "data:image/png;base64,abc" {
-		t.Fatalf("restored image = %q", result.Content)
+	if urls := result.Content.ImageURLs(); len(urls) != 1 || urls[0] != image.DataURL() || result.Content.Text() != "" {
+		t.Fatalf("restored image = %+v", result)
 	}
 }
 
 func TestToolResultMessagePreservesStructuredResult(t *testing.T) {
 	message := toolResultMessage(ToolCall{ID: "call", Name: "shell"}, tool.Result{
-		Content: "failed", IsError: true, Metadata: map[string]any{"exit_code": 7},
+		Content: tool.TextContent("failed"), IsError: true, Metadata: map[string]any{"exit_code": 7},
 	})
 	result := message.Content[0].ToolResult
-	if result == nil || !result.IsError || result.Content != "failed" || result.Metadata["exit_code"] != 7 {
+	if result == nil || !result.IsError || result.Content.Text() != "failed" || result.Metadata["exit_code"] != 7 {
 		t.Fatalf("tool result = %+v", result)
 	}
 }
@@ -320,7 +317,7 @@ func TestToolCallIDReuseWithDifferentArgumentsFails(t *testing.T) {
 	tools := []tool.Tool{tl}
 	first := a.runSingleToolCall(context.Background(), ToolCall{ID: "reused", Name: "write", Args: `{"v":1}`}, tools)
 	second := a.runSingleToolCall(context.Background(), ToolCall{ID: "reused", Name: "write", Args: `{"v":2}`}, tools)
-	if first.IsError || !second.IsError || !strings.Contains(second.Content, "reused") {
+	if first.IsError || !second.IsError || !strings.Contains(second.Content.Text(), "reused") {
 		t.Fatalf("first=%+v second=%+v", first, second)
 	}
 }

@@ -125,6 +125,25 @@ func environmentOffline(environment []string) []string {
 	return environment
 }
 
+// With Go's package index on, loading a package fails on a build cache that is readable but not writable.
+func environmentReadOnlyCaches(environment []string) []string {
+	value := ""
+	for _, entry := range environment {
+		if key, existing, ok := strings.Cut(entry, "="); ok && environmentKeysEqual(key, "GODEBUG") {
+			value = existing
+		}
+	}
+	switch {
+	case strings.Contains(value, "goindex="):
+		return environment
+	case value == "":
+		value = "goindex=0"
+	default:
+		value = strings.TrimRight(value, ",") + ",goindex=0"
+	}
+	return setEnvironment(environment, "GODEBUG", value)
+}
+
 // Filter applies the policy to KEY=value entries. Matching is
 // case-insensitive on Windows and supports a trailing * prefix pattern.
 func (p EnvironmentPolicy) Filter(environ []string) []string {

@@ -33,20 +33,20 @@ func TestExecCommandHandlesShellScriptsAndMergedOutput(t *testing.T) {
 	}
 	result := runExec(t, command)
 	for _, want := range []string{"hello world", "hello again", "stderr", "Command completed"} {
-		if !strings.Contains(result.Content, want) {
-			t.Fatalf("output %q does not contain %q", result.Content, want)
+		if !strings.Contains(result.Content.Text(), want) {
+			t.Fatalf("output %q does not contain %q", result.Content.Text(), want)
 		}
 	}
 }
 
 func TestExecCommandReportsEmptyOutputAndStructuredFailure(t *testing.T) {
 	empty := runExec(t, "exit 0")
-	if empty.Content != "Command completed" || empty.IsError {
+	if empty.Content.Text() != "Command completed" || empty.IsError {
 		t.Fatalf("empty command result = %+v", empty)
 	}
 
 	failed := runExec(t, "exit 7")
-	if !failed.IsError || failed.Metadata["exit_code"] != 7 || !strings.Contains(failed.Content, "code 7") {
+	if !failed.IsError || failed.Metadata["exit_code"] != 7 || !strings.Contains(failed.Content.Text(), "code 7") {
 		t.Fatalf("failed command result = %+v", failed)
 	}
 }
@@ -73,8 +73,8 @@ func TestExecCommandWorkdirAndEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Content, want) {
-		t.Fatalf("unexpected workdir/environment output: %q", result.Content)
+	if !strings.Contains(result.Content.Text(), want) {
+		t.Fatalf("unexpected workdir/environment output: %q", result.Content.Text())
 	}
 	if _, err := execTool.Execute(context.Background(), map[string]any{"command": "pwd", "workdir": "missing"}); err == nil {
 		t.Fatal("expected an inaccessible-workdir error")
@@ -122,8 +122,8 @@ func TestExecCommandTimeoutKillsTheProcess(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 10*time.Second {
 		t.Fatalf("timeout did not kill the command promptly (took %s)", elapsed)
 	}
-	if !strings.Contains(result.Content, "exceeding its 1s timeout") {
-		t.Fatalf("result does not report the timeout: %q", result.Content)
+	if !strings.Contains(result.Content.Text(), "exceeding its 1s timeout") {
+		t.Fatalf("result does not report the timeout: %q", result.Content.Text())
 	}
 }
 
@@ -148,8 +148,8 @@ func TestExecCommandBackgroundsOnceOutputGoesQuiet(t *testing.T) {
 		t.Fatalf("idle command was not backgrounded promptly (took %s)", elapsed)
 	}
 	for _, want := range []string{"listening", "Started and idle", "session_id"} {
-		if !strings.Contains(result.Content, want) {
-			t.Fatalf("output %q does not contain %q", result.Content, want)
+		if !strings.Contains(result.Content.Text(), want) {
+			t.Fatalf("output %q does not contain %q", result.Content.Text(), want)
 		}
 	}
 
@@ -162,8 +162,8 @@ func TestExecCommandBackgroundsOnceOutputGoesQuiet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("exec failed: %v", err)
 	}
-	if !strings.Contains(quiet.Content, "done") || !strings.Contains(quiet.Content, "Command completed") {
-		t.Fatalf("silent command was backgrounded instead of completing: %q", quiet.Content)
+	if !strings.Contains(quiet.Content.Text(), "done") || !strings.Contains(quiet.Content.Text(), "Command completed") {
+		t.Fatalf("silent command was backgrounded instead of completing: %q", quiet.Content.Text())
 	}
 }
 

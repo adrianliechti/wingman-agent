@@ -63,7 +63,7 @@ func TestActiveAgentOutlivesIdleLimit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result := out.Content
+			result := out.Content.Text()
 			if background {
 				ev := reviewEvent(t, registry)
 				if ev.Status != task.StatusDone {
@@ -71,7 +71,7 @@ func TestActiveAgentOutlivesIdleLimit(t *testing.T) {
 				}
 				result = ev.Result
 			} else if out.IsError {
-				t.Fatalf("active agent was aborted: %q", out.Content)
+				t.Fatalf("active agent was aborted: %q", out.Content.Text())
 			}
 			if !strings.Contains(result, "a report") {
 				t.Fatalf("result = %q", result)
@@ -100,10 +100,10 @@ func TestSilentAgentHitsIdleLimit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result := out.Content
+			result := out.Content.Text()
 			if background {
 				result = reviewEvent(t, registry).Result
-			} else if !out.IsError || !strings.Contains(out.Content, registry.List()[0].ID) {
+			} else if !out.IsError || !strings.Contains(out.Content.Text(), registry.List()[0].ID) {
 				t.Fatalf("stall lost its failure or follow-up id: %#v", out)
 			}
 			if !strings.Contains(result, "idle time limit reached") || !strings.Contains(result, "100ms") {

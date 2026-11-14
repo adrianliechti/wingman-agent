@@ -73,16 +73,11 @@ func TestPreviewWithoutPersistenceAndLineBoundaries(t *testing.T) {
 }
 
 // Ported from codex's hook output spill tests: in-budget output stays inline
-// and leaves no file behind, and image payloads are never rewritten even when
-// they exceed the text budget.
-func TestInBudgetAndImageResultsStayInlineWithoutScratchFiles(t *testing.T) {
+// and leaves no file behind. Typed images bypass text transforms in the harness.
+func TestInBudgetResultsStayInlineWithoutScratchFiles(t *testing.T) {
 	dir := t.TempDir()
 	run := New(dir)
-	image := "data:image/png;base64," + base64.StdEncoding.EncodeToString(noisyPNG(t))
-	if len(image) <= MaxBytes {
-		t.Fatalf("test image must exceed the budget: %d bytes", len(image))
-	}
-	for name, result := range map[string]string{"short": "short", "exact": strings.Repeat("x", MaxBytes), "image": image} {
+	for name, result := range map[string]string{"short": "short", "exact": strings.Repeat("x", MaxBytes)} {
 		out, err := run(t.Context(), tool.ToolCall{Name: "shell"}, result)
 		if err != nil || out.UpdatedResult != nil {
 			t.Fatalf("%s: result was rewritten: %+v, %v", name, out, err)
@@ -107,4 +102,12 @@ func noisyPNG(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+func TestImageLookingTextStillHasATextBudget(t *testing.T) {
+	text := "data:image/png;base64," + base64.StdEncoding.EncodeToString(noisyPNG(t))
+	out, err := New(t.TempDir())(t.Context(), tool.ToolCall{Name: "shell"}, text)
+	if err != nil || out.UpdatedResult == nil {
+		t.Fatal("image-looking text bypassed truncation")
+	}
 }

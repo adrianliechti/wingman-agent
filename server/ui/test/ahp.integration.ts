@@ -652,7 +652,7 @@ test(
 							.data,
 						"updated\n",
 					);
-					assert.equal(file.isEditing, false);
+					assert.equal(file.status, 0);
 					await writeFile(`${root}/tracked.txt`, "changed again\n");
 					await until(
 						() =>

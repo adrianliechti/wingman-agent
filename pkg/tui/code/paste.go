@@ -247,10 +247,10 @@ func normalizeClipboardImage(dataURL string) string {
 		return dataURL
 	}
 	res, err := tool.ReadImage(context.Background(), strings.NewReader(string(raw)))
-	if err != nil || res.Content == "" {
+	if err != nil || len(res.Content) == 0 || res.Content[0].Image == nil {
 		return dataURL
 	}
-	return res.Content
+	return res.Content[0].Image.DataURL()
 }
 
 // readAttachedImageFile checks whether path is a supported raster image file
@@ -286,5 +286,8 @@ func readAttachedImageFile(path, workingDir string) string {
 	if err != nil {
 		return ""
 	}
-	return res.Content
+	if urls := res.Content.ImageURLs(); len(urls) > 0 {
+		return urls[0]
+	}
+	return ""
 }

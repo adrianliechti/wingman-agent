@@ -477,7 +477,7 @@ func TestContextTrimmingE2EOnlyUnderPressure(t *testing.T) {
 		id := fmt.Sprintf("old-%d", i)
 		a.Messages = append(a.Messages,
 			harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolCall: &harness.ToolCall{ID: id, Name: "read", Args: "{}"}}}},
-			harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: &harness.ToolResult{ID: id, Name: "read", Content: strings.Repeat("x", 8192)}}}},
+			harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{ToolResult: &harness.ToolResult{ID: id, Name: "read", Content: tool.TextContent(strings.Repeat("x", 8192))}}}},
 		)
 	}
 	if err := drain(t, a, "continue"); err != nil {
@@ -496,7 +496,7 @@ func TestContextTrimmingE2EOnlyUnderPressure(t *testing.T) {
 	assertRequestPrefix(t, requests[1], requests[2])
 	for _, m := range a.MessagesSnapshot() {
 		for _, c := range m.Content {
-			if c.ToolResult != nil && len(c.ToolResult.Content) != 8192 {
+			if c.ToolResult != nil && len(c.ToolResult.Content.Text()) != 8192 {
 				t.Fatal("canonical result was trimmed")
 			}
 		}

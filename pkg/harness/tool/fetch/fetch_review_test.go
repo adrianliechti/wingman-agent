@@ -78,7 +78,7 @@ func TestFetchRedirectApprovalIncludesPort(t *testing.T) {
 	if _, err := tl.Execute(t.Context(), map[string]any{"url": target.URL}); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := tl.Execute(t.Context(), map[string]any{"url": source.URL}); err != nil || result.Content != "private service" {
+	if result, err := tl.Execute(t.Context(), map[string]any{"url": source.URL}); err != nil || result.Content.Text() != "private service" {
 		t.Fatalf("approved redirect = %+v, %v", result, err)
 	}
 }
@@ -136,8 +136,8 @@ func TestFetchGzipLimitsApplyAfterDecompression(t *testing.T) {
 	}))
 	defer server.Close()
 	result, err := Tools(nil)[0].Execute(t.Context(), map[string]any{"url": server.URL})
-	if err != nil || !utf8.ValidString(result.Content) || len(result.Content) > tool.MaxInlineResultBytes || !strings.Contains(result.Content, "2 MiB") {
-		t.Fatalf("decompressed result: %d bytes, %v", len(result.Content), err)
+	if err != nil || !utf8.ValidString(result.Content.Text()) || len(result.Content.Text()) > tool.MaxInlineResultBytes || !strings.Contains(result.Content.Text(), "2 MiB") {
+		t.Fatalf("decompressed result: %d bytes, %v", len(result.Content.Text()), err)
 	}
 }
 
@@ -169,7 +169,7 @@ func TestFetchRedactsCredentialsAndDoesNotForwardThemAcrossOrigins(t *testing.T)
 	}
 	u.User = url.UserPassword("user", "private-password")
 	result, err := tl.Execute(t.Context(), map[string]any{"url": u.String()})
-	if err != nil || result.Content != "ok" || receivedAuth != "" || strings.Contains(prompt, "private-password") {
+	if err != nil || result.Content.Text() != "ok" || receivedAuth != "" || strings.Contains(prompt, "private-password") {
 		t.Fatalf("credentials leaked or redirect failed: auth=%q prompt=%q err=%v", receivedAuth, prompt, err)
 	}
 
@@ -197,7 +197,7 @@ func TestFetchReportsTruncatedEmptyContent(t *testing.T) {
 	}))
 	defer server.Close()
 	result, err := Tools(nil)[0].Execute(t.Context(), map[string]any{"url": server.URL})
-	if err != nil || !strings.Contains(result.Content, "truncated") || !strings.Contains(result.Content, "2 MiB") {
+	if err != nil || !strings.Contains(result.Content.Text(), "truncated") || !strings.Contains(result.Content.Text(), "2 MiB") {
 		t.Fatalf("lost source truncation: %+v, %v", result, err)
 	}
 }
@@ -225,10 +225,10 @@ func TestFetchDecodesTextAndRejectsNonText(t *testing.T) {
 			result, err := Tools(nil)[0].Execute(t.Context(), map[string]any{"url": server.URL})
 			if tc.wantError {
 				if err == nil {
-					t.Fatalf("non-text accepted: %.60q", result.Content)
+					t.Fatalf("non-text accepted: %.60q", result.Content.Text())
 				}
-			} else if err != nil || result.Content != tc.want || !utf8.ValidString(result.Content) {
-				t.Fatalf("text = %q, %v; want %q", result.Content, err, tc.want)
+			} else if err != nil || result.Content.Text() != tc.want || !utf8.ValidString(result.Content.Text()) {
+				t.Fatalf("text = %q, %v; want %q", result.Content.Text(), err, tc.want)
 			}
 		})
 	}

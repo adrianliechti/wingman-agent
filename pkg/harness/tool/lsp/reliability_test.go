@@ -74,7 +74,7 @@ func TestUnavailableLSPProvidesFallbackWithoutCleanResult(t *testing.T) {
 	for _, operation := range []string{"diagnostics", "goToTypeDefinition", "previewRename", "codeActions"} {
 		t.Run(operation, func(t *testing.T) {
 			result, err := inspect.Execute(t.Context(), map[string]any{"operation": operation, "file_path": "main.go", "symbol": "run", "new_name": "execute"})
-			message := result.Content
+			message := result.Content.Text()
 			if err != nil {
 				message += err.Error()
 			}
@@ -96,18 +96,18 @@ func TestUnavailableLSPProvidesFallbackWithoutCleanResult(t *testing.T) {
 	} {
 		t.Run("tree-sitter/"+operation, func(t *testing.T) {
 			result, err := inspect.Execute(t.Context(), map[string]any{"operation": operation, "file_path": "main.go", "symbol": "run"})
-			if err != nil || !strings.Contains(result.Content, want) || !strings.Contains(strings.ToLower(result.Content), "tree-sitter") {
-				t.Fatalf("result = %q, err = %v, want labeled tree-sitter result containing %q", result.Content, err, want)
+			if err != nil || !strings.Contains(result.Content.Text(), want) || !strings.Contains(strings.ToLower(result.Content.Text()), "tree-sitter") {
+				t.Fatalf("result = %q, err = %v, want labeled tree-sitter result containing %q", result.Content.Text(), err, want)
 			}
 		})
 	}
 	result, err := inspect.Execute(t.Context(), map[string]any{"operation": "outgoingCalls", "file_path": "main.go", "symbol": "main"})
-	if err != nil || !strings.Contains(result.Content, "run (Function) - main.go:2, called at lines 3") {
-		t.Fatalf("outgoing calls = %q, %v", result.Content, err)
+	if err != nil || !strings.Contains(result.Content.Text(), "run (Function) - main.go:2, called at lines 3") {
+		t.Fatalf("outgoing calls = %q, %v", result.Content.Text(), err)
 	}
 	result, err = inspect.Execute(t.Context(), map[string]any{"operation": "workspaceSymbol", "query": "absentSymbol"})
-	if err != nil || !strings.Contains(result.Content, "No symbols found") || !strings.Contains(result.Content, "Tree-sitter fallback") {
-		t.Fatalf("empty syntax search = %q, %v, want a labeled empty result", result.Content, err)
+	if err != nil || !strings.Contains(result.Content.Text(), "No symbols found") || !strings.Contains(result.Content.Text(), "Tree-sitter fallback") {
+		t.Fatalf("empty syntax search = %q, %v, want a labeled empty result", result.Content.Text(), err)
 	}
 	if len(service.Manager().Activities()) != 0 {
 		t.Fatal("availability checks started a server")
@@ -155,7 +155,7 @@ func TestPreviewProducesExactAtomicEditArguments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(preview.Content, "sha256") {
+	if strings.Contains(preview.Content.Text(), "sha256") {
 		t.Fatal("private snapshot leaked into the model-visible preview")
 	}
 	snapshots, err := tool.ResultFileSnapshots(preview.Metadata)
@@ -165,7 +165,7 @@ func TestPreviewProducesExactAtomicEditArguments(t *testing.T) {
 	var payload struct {
 		Edits []previewEdit `json:"edits"`
 	}
-	if err := json.Unmarshal([]byte(preview.Content[strings.Index(preview.Content, "{"):]), &payload); err != nil {
+	if err := json.Unmarshal([]byte(preview.Content.Text()[strings.Index(preview.Content.Text(), "{"):]), &payload); err != nil {
 		t.Fatal(err)
 	}
 	if len(payload.Edits) != 1 || payload.Edits[0].Path != "file.go" {

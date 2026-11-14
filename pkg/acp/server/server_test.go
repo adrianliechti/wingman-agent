@@ -1,10 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +42,7 @@ type recordingClient struct {
 func TestNotifyContentPreservesToolFailureStatus(t *testing.T) {
 	var update acpsdk.SessionUpdate
 	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, harness.RoleAssistant, harness.Content{
-		ToolResult: &harness.ToolResult{ID: "call-1", Name: "shell", Content: "failed", IsError: true},
+		ToolResult: &harness.ToolResult{ID: "call-1", Name: "shell", Content: tool.TextContent("failed"), IsError: true},
 	})
 
 	if update.ToolCallUpdate == nil || update.ToolCallUpdate.Status == nil {
@@ -46,6 +50,35 @@ func TestNotifyContentPreservesToolFailureStatus(t *testing.T) {
 	}
 	if got := *update.ToolCallUpdate.Status; got != acpsdk.ToolCallStatusFailed {
 		t.Fatalf("tool status = %q, want %q", got, acpsdk.ToolCallStatusFailed)
+	}
+}
+
+func TestNotifyContentPreservesOrderedToolImages(t *testing.T) {
+	var pngBytes bytes.Buffer
+	if err := png.Encode(&pngBytes, image.NewNRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	content := tool.Content{
+		tool.TextBlock("before"),
+		{Image: &tool.ImageContent{MIMEType: "image/png", Data: pngBytes.Bytes()}},
+		tool.TextBlock("after"),
+	}
+	var update acpsdk.SessionUpdate
+	notifyContent(func(got acpsdk.SessionUpdate) { update = got }, harness.RoleAssistant, harness.Content{
+		ToolResult: &harness.ToolResult{ID: "image-call", Content: content, IsError: true},
+	})
+	call := update.ToolCallUpdate
+	if call == nil || call.ToolCallId != "image-call" || call.Status == nil || *call.Status != acpsdk.ToolCallStatusFailed || len(call.Content) != 3 {
+		t.Fatalf("unexpected update: %+v", call)
+	}
+	for i, block := range call.Content {
+		if block.Content == nil {
+			t.Fatalf("missing block %d", i)
+		}
+	}
+	first, img, last := call.Content[0].Content.Content.Text, call.Content[1].Content.Content.Image, call.Content[2].Content.Content.Text
+	if first == nil || first.Text != "before" || last == nil || last.Text != "after" || img == nil || img.MimeType != "image/png" || img.Data != base64.StdEncoding.EncodeToString(pngBytes.Bytes()) {
+		t.Fatalf("lost content or order: %+v", call.Content)
 	}
 }
 

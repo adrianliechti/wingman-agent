@@ -45,7 +45,8 @@ func UndoFileChanges(ctx context.Context, root *os.Root, changes []tool.FileChan
 		if err != nil {
 			return err
 		}
-		tx.changes = append(tx.changes, fileChange{target: target, displayPath: file.Path, before: []byte(file.After), beforePresent: file.AfterExists, beforeMode: os.FileMode(file.Mode), after: []byte(file.Before), afterPresent: file.BeforeExists})
+		mode := os.FileMode(file.Mode)
+		tx.changes = append(tx.changes, fileChange{target: target, displayPath: file.Path, before: []byte(file.After), beforePresent: file.AfterExists, beforeMode: os.FileMode(file.ResultMode()), after: []byte(file.Before), afterPresent: file.BeforeExists, afterMode: &mode})
 	}
 	return commitFileTransactionLocked(ctx, root, tx)
 }

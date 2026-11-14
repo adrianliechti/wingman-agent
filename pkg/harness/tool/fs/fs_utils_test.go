@@ -26,8 +26,8 @@ func TestEditAndReadNormalizeAbsoluteWorkspacePaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read absolute workspace path: %v", err)
 	}
-	if !strings.Contains(result.Content, "hello") {
-		t.Fatalf("read result = %q, want content", result.Content)
+	if !strings.Contains(result.Content.Text(), "hello") {
+		t.Fatalf("read result = %q, want content", result.Content.Text())
 	}
 }
 
@@ -97,8 +97,8 @@ func TestSandboxWildcardRoot(t *testing.T) {
 				t.Fatalf("denied operation changed file: %q, %v", data, err)
 			}
 			out, err := check.makeTool(root, "*").Execute(context.Background(), check.args)
-			if err != nil || !strings.Contains(out.Content, check.want) {
-				t.Fatalf("wildcard operation = %q, %v; want %q", out.Content, err, check.want)
+			if err != nil || !strings.Contains(out.Content.Text(), check.want) {
+				t.Fatalf("wildcard operation = %q, %v; want %q", out.Content.Text(), err, check.want)
 			}
 			if data, err := os.ReadFile(outside); err != nil || string(data) != check.wantFile {
 				t.Fatalf("wildcard file = %q, %v; want %q", data, err, check.wantFile)
@@ -180,7 +180,7 @@ func TestEditReturnsConciseFileSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
-	if result.Content != "Applied 1 edits across 1 files.\nM diff.txt" {
-		t.Fatalf("unexpected edit summary: %q", result.Content)
+	if result.Content.Text() != "Applied 1 edits across 1 files.\nM diff.txt" {
+		t.Fatalf("unexpected edit summary: %q", result.Content.Text())
 	}
 }

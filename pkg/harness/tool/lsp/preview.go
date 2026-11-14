@@ -136,7 +136,7 @@ func workspaceEditPreview(manager *lsp.Manager, edit *lsp.WorkspaceEdit, querySt
 	if len(payload) > maxPreviewBytes {
 		return tool.Result{}, fmt.Errorf("preview exceeds %d bytes; review the complete refactoring in the editor (no partial edit payload returned)", maxPreviewBytes)
 	}
-	return tool.Result{Content: "Preview only; no files changed. Review these exact-match replacements, then pass this JSON to edit for authorized changes. If files change, refresh the preview.\n" + string(payload), Metadata: map[string]any{tool.FileSnapshotsMetadata: snapshots}}, nil
+	return tool.Result{Content: tool.TextContent("Preview only; no files changed. Review these exact-match replacements, then pass this JSON to edit for authorized changes. If files change, refresh the preview.\n" + string(payload)), Metadata: map[string]any{tool.FileSnapshotsMetadata: snapshots}}, nil
 }
 
 func previewVersionMatches(requested *int32, current int, opened bool) bool {

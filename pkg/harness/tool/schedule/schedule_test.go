@@ -131,8 +131,8 @@ func TestToolsResolveIDPrefix(t *testing.T) {
 		t.Fatalf("paused task next run = %v, want none", next)
 	}
 
-	if result, err := tools["schedule"].Execute(context.Background(), map[string]any{"action": "list"}); err != nil || !strings.Contains(result.Content, id) {
-		t.Fatalf("list = %q, %v", result.Content, err)
+	if result, err := tools["schedule"].Execute(context.Background(), map[string]any{"action": "list"}); err != nil || !strings.Contains(result.Content.Text(), id) {
+		t.Fatalf("list = %q, %v", result.Content.Text(), err)
 	}
 	if _, err := tools["schedule"].Execute(context.Background(), map[string]any{"action": "remove", "id": id}); err != nil {
 		t.Fatalf("remove failed: %v", err)

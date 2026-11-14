@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 
 // These wire-level contracts follow the upstream subscription specification and
 // selected VS Code conformance scenarios. They are not the full VS Code suite:
-// https://github.com/microsoft/agent-host-protocol/blob/d7a5579b1733fb2e1e4a2c653442e26c7b7226dd/docs/specification/subscriptions.md
+// https://github.com/microsoft/agent-host-protocol/blob/spec/v1.1.0/docs/specification/subscriptions.md
 // https://github.com/microsoft/vscode/blob/c198526d8e64ba6f9944e9f7bcc079ed1f6d7fcc/src/vs/platform/agentHost/test/node/e2e/suites/protocolContractsSuite.ts
 // Only provider discovery/session creation is faked. Assertions use the public
 // WebSocket endpoint, without inspecting host state or using browser adapters.
@@ -187,6 +188,13 @@ func (p *ahpConformancePeer) initialize(version string, channels ...string) {
 	p.call("initialize", types.InitializeParams{Channel: types.RootResourceURI, ClientId: p.id, ProtocolVersions: []string{"99.0.0", version}, InitialSubscriptions: channels}, &result)
 	if result.ProtocolVersion != version || result.ServerSeq < 0 || len(result.Snapshots) != len(channels) {
 		p.t.Fatalf("invalid handshake: %+v", result)
+	}
+	pathStyle := types.PathStylePosix
+	if runtime.GOOS == "windows" {
+		pathStyle = types.PathStyleWindows
+	}
+	if result.Environment == nil || result.Environment.PathStyle == nil || *result.Environment.PathStyle != pathStyle {
+		p.t.Fatalf("missing authoritative host path style: %+v", result.Environment)
 	}
 	for i, snapshot := range result.Snapshots {
 		if snapshot.Resource != channels[i] || snapshot.FromSeq > result.ServerSeq {

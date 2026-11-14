@@ -38,8 +38,8 @@ func TestEditTool(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if !strings.Contains(result.Content, "Applied 1 edits across 1 files") {
-			t.Errorf("expected success message, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "Applied 1 edits across 1 files") {
+			t.Errorf("expected success message, got: %s", result.Content.Text())
 		}
 
 		content, _ := os.ReadFile(testFile)
@@ -59,8 +59,8 @@ func TestEditTool(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(result.Content, "Applied 1 edits across 1 files") {
-			t.Errorf("expected success message, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "Applied 1 edits across 1 files") {
+			t.Errorf("expected success message, got: %s", result.Content.Text())
 		}
 
 		content, err := os.ReadFile(filepath.Join(tmpDir, "created_by_edit.txt"))
@@ -370,8 +370,8 @@ func TestEditTool(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(result.Content, "3 edits") {
-			t.Errorf("expected batched success message, got: %s", result.Content)
+		if !strings.Contains(result.Content.Text(), "3 edits") {
+			t.Errorf("expected batched success message, got: %s", result.Content.Text())
 		}
 
 		content, _ := os.ReadFile(testFile)

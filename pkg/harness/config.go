@@ -108,6 +108,12 @@ type Config struct {
 	// snapshot to history instead of rewriting the cached Instructions prefix.
 	ContextInstructions func() string
 
+	// ContextSections optionally supplies structured session-context sections.
+	// When set, initial turns emit the full [Session context] snapshot and later
+	// changes emit compact section-level incremental updates instead of resending
+	// unchanged sections.
+	ContextSections func() []ContextSection
+
 	// RoleModel resolves "default", "complex", and "utility" role models. An empty
 	// role names the currently inherited model and is used for effort clamping.
 	// ok=false or an empty ID keeps the inherited model. Nil disables role

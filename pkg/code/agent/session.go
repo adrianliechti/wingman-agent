@@ -128,6 +128,7 @@ func (s *sessionState) configureHarness() {
 	s.harness.PrepareTurn = s.prepareTurn
 	sessionCfg.Instructions = s.instructions
 	sessionCfg.ContextInstructions = s.contextInstructions
+	sessionCfg.ContextSections = s.contextSections
 	sessionCfg.PermissionMode = s.permissionMode
 	if sessionCfg.RequireFinish == nil {
 		sessionCfg.RequireFinish = requiresFinish
@@ -201,7 +202,8 @@ func (s *sessionState) configureTools() error {
 		Freshness:         s.freshness,
 	}))
 	if !a.cfg.DisableShell {
-		tools = append(tools, shell.ExecTools(s.resources.execManager, ws.RootPath, elicit, shellOpts)...)
+		execTools := shell.ExecTools(s.resources.execManager, ws.RootPath, elicit, shellOpts)
+		tools = append(tools, fs.WrapWithWorkspaceSnapshot(ws.Root, execTools)...)
 	}
 	tools = append(tools, schedule.Tools(s.schedules, s.scriptOptions)...)
 	tools = append(tools, elicitation.Tools(elicit)...)
@@ -211,7 +213,14 @@ func (s *sessionState) configureTools() error {
 	if !a.cfg.DisableWebSearch {
 		tools = append(tools, websearch.Tools(elicit)...)
 	}
-	s.tools = append(tools, subagent.Tools(sessionCfg, s.subagentContext, s.resources.tasks, subagent.Discover(ws.RootPath)...)...)
+	subagentCfg := sessionCfg.Clone()
+	subagentCfg.FilterTools = s.subagentFilterTools
+	s.tools = append(tools, subagent.ToolsWithOptions(subagentCfg, subagent.Options{
+		SharedContext:  s.subagentContext,
+		Tasks:          s.resources.tasks,
+		Custom:         subagent.Discover(ws.RootPath),
+		ParentMessages: s.harness.MessagesSnapshot,
+	})...)
 	return nil
 }
 

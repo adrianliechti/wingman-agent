@@ -76,8 +76,8 @@ func TestExecuteAllowsHeaderlessSingleQuestion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if answer.Content != "blue" {
-		t.Fatalf("answer = %q, want blue", answer.Content)
+	if answer.Content.Text() != "blue" {
+		t.Fatalf("answer = %q, want blue", answer.Content.Text())
 	}
 
 	if len(captured.Fields) != 1 || captured.Fields[0].Name != "q_1" {
@@ -139,8 +139,8 @@ func TestExecuteSingleQuestionHoistsMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Content != "Postgres" {
-		t.Errorf("result = %q, want Postgres", result.Content)
+	if result.Content.Text() != "Postgres" {
+		t.Errorf("result = %q, want Postgres", result.Content.Text())
 	}
 
 	if got.Message != "Which database?" {
@@ -200,8 +200,8 @@ func TestExecuteMultipleQuestionsAndMultiSelect(t *testing.T) {
 		t.Errorf("multi-question requests have no top-level message, got %q", got.Message)
 	}
 
-	if !strings.Contains(result.Content, "Scope: API, CLI") || !strings.Contains(result.Content, "Language: Go") {
-		t.Errorf("rendered answers = %q", result.Content)
+	if !strings.Contains(result.Content.Text(), "Scope: API, CLI") || !strings.Contains(result.Content.Text(), "Language: Go") {
+		t.Errorf("rendered answers = %q", result.Content.Text())
 	}
 }
 
@@ -223,8 +223,8 @@ func TestExecuteRendersDeclineAndCancel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("action %s: unexpected error: %v", action, err)
 		}
-		if !strings.Contains(strings.ToLower(result.Content), want) {
-			t.Errorf("action %s: result %q should mention %q", action, result.Content, want)
+		if !strings.Contains(strings.ToLower(result.Content.Text()), want) {
+			t.Errorf("action %s: result %q should mention %q", action, result.Content.Text(), want)
 		}
 	}
 }
@@ -267,7 +267,7 @@ func TestExecuteDeduplicatesCollidingHeaderSlugsAndFiltersEmptySelections(t *tes
 	if len(got.Fields) != 3 || got.Fields[0].Name != "a_3" || got.Fields[1].Name != "a" || got.Fields[2].Name != "a_4" {
 		t.Fatalf("fields = %+v", got.Fields)
 	}
-	if !strings.Contains(result.Content, "- a_3: first") || !strings.Contains(result.Content, "- a: (no answer)") || !strings.Contains(result.Content, "- a: one, two") {
-		t.Fatalf("rendered = %q", result.Content)
+	if !strings.Contains(result.Content.Text(), "- a_3: first") || !strings.Contains(result.Content.Text(), "- a: (no answer)") || !strings.Contains(result.Content.Text(), "- a: one, two") {
+		t.Fatalf("rendered = %q", result.Content.Text())
 	}
 }

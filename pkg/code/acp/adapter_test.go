@@ -265,8 +265,9 @@ func TestLoadSessionStreamReplaysAndCachesHistory(t *testing.T) {
 
 func TestLongReplayDoesNotOverflowNotificationQueue(t *testing.T) {
 	const messages = 4000
-	for _, stream := range []bool{false, true} {
-		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+	for _, mode := range []string{"load", "stream", "slow stream"} {
+		stream := mode != "load"
+		t.Run(mode, func(t *testing.T) {
 			var serverConn *acpsdk.AgentSideConnection
 			remote := &adapterProtocolAgent{caps: acpsdk.AgentCapabilities{LoadSession: true}}
 			remote.loadFn = func(ctx context.Context, req acpsdk.LoadSessionRequest) (acpsdk.LoadSessionResponse, error) {
@@ -295,6 +296,10 @@ func TestLongReplayDoesNotOverflowNotificationQueue(t *testing.T) {
 				for _, err := range a.LoadSessionStream(context.Background(), "long") {
 					if err != nil {
 						t.Fatal(err)
+					}
+					// A reader slower than the replay must only see fewer snapshots.
+					if mode == "slow stream" {
+						time.Sleep(time.Millisecond)
 					}
 				}
 			} else if err := a.LoadSession(context.Background(), "long"); err != nil {
@@ -413,7 +418,7 @@ func TestModelDescriptionIsPreserved(t *testing.T) {
 func TestSessionUpdatesPreserveCommandsMetadataUsageAndProgress(t *testing.T) {
 	progress := make(chan string, 1)
 	ctx := tool.WithProgressSink(context.Background(), func(_ context.Context, id, text string) { progress <- id + ":" + text })
-	turn := &turn{ctx: ctx, events: make(chan event, 1), done: make(chan struct{})}
+	turn := &turn{ctx: ctx, events: make(chan *event, 1), done: make(chan struct{})}
 	sess := &sessionState{id: "session", inflight: turn, toolCalls: map[string]toolCall{}}
 	a := &Agent{sessions: map[string]*sessionState{"session": sess}}
 

@@ -23,8 +23,8 @@ func TestExecExitNotifiesBackgroundedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "Still running") {
-		t.Fatalf("expected backgrounded session, got %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "Still running") {
+		t.Fatalf("expected backgrounded session, got %q", out.Content.Text())
 	}
 
 	select {
@@ -43,7 +43,7 @@ func TestExecExitNotifiesBackgroundedSession(t *testing.T) {
 	}
 	// Notifications must not consume the late poll's output or exit metadata.
 	completed, err := tools[1].Execute(t.Context(), map[string]any{"session_id": 1, "wait": 0})
-	if err != nil || completed.Metadata["exit_code"] != 0 || !strings.Contains(completed.Content, "done") {
+	if err != nil || completed.Metadata["exit_code"] != 0 || !strings.Contains(completed.Content.Text(), "done") {
 		t.Fatalf("late poll = %+v, %v", completed, err)
 	}
 	select {
@@ -71,8 +71,8 @@ func TestExecExitInlineDeliverySuppressesNotification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Content, "done") || !strings.Contains(out.Content, "Command completed") {
-		t.Fatalf("expected inline exit delivery, got %q", out.Content)
+	if !strings.Contains(out.Content.Text(), "done") || !strings.Contains(out.Content.Text(), "Command completed") {
+		t.Fatalf("expected inline exit delivery, got %q", out.Content.Text())
 	}
 
 	select {

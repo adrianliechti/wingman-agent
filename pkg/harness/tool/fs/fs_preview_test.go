@@ -29,7 +29,7 @@ func TestPrivatePreviewSnapshotGuardsEntireAtomicBatch(t *testing.T) {
 	freshness := NewFreshness(root)
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(before)))
 	preview := freshness.TrackSnapshots(tool.Tool{Execute: func(context.Context, map[string]any) (tool.Result, error) {
-		return tool.Result{Content: "preview", Metadata: map[string]any{tool.FileSnapshotsMetadata: []tool.FileSnapshot{
+		return tool.Result{Content: tool.TextContent("preview"), Metadata: map[string]any{tool.FileSnapshotsMetadata: []tool.FileSnapshot{
 			{Path: "a.txt", SHA256: digest}, {Path: "b.txt", SHA256: digest},
 		}}}, nil
 	}})

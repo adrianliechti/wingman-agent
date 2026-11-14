@@ -40,15 +40,15 @@ func TestReadImagePreservesSupportedFormats(t *testing.T) {
 			}
 			result, err := ReadImage(t.Context(), bytes.NewReader(buf.Bytes()))
 			want := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
-			if err != nil || result.Content != want || !IsImageResult(result.Content) {
-				t.Fatalf("image was not preserved: %.60s, err = %v", result.Content, err)
+			if err != nil || strings.Join(result.Content.ImageURLs(), "") != want || !IsImageResult(strings.Join(result.Content.ImageURLs(), "")) {
+				t.Fatalf("image was not preserved: %.60s, err = %v", strings.Join(result.Content.ImageURLs(), ""), err)
 			}
 			// Trailing metadata/padding can exceed the byte budget even for a
 			// tiny bitmap. Exercise each decoder and conversion to PNG.
 			large := append(bytes.Clone(buf.Bytes()), make([]byte, MaxImageBytes-buf.Len()+1)...)
 			result, err = ReadImage(t.Context(), bytes.NewReader(large))
-			if err != nil || !IsImageResult(result.Content) || result.Metadata["media_type"] != "image/png" {
-				t.Fatalf("image was not reencoded: %.60s, err = %v", result.Content, err)
+			if err != nil || !IsImageResult(strings.Join(result.Content.ImageURLs(), "")) || result.Metadata["media_type"] != "image/png" {
+				t.Fatalf("image was not reencoded: %.60s, err = %v", strings.Join(result.Content.ImageURLs(), ""), err)
 			}
 		})
 	}
@@ -61,10 +61,10 @@ func TestReadImageResizesDimensionsAndPreservesTransparency(t *testing.T) {
 			t.Fatal(err)
 		}
 		result, err := ReadImage(t.Context(), &buf)
-		if err != nil || !IsImageResult(result.Content) {
-			t.Fatalf("resized image = %.60s, err = %v", result.Content, err)
+		if err != nil || !IsImageResult(strings.Join(result.Content.ImageURLs(), "")) {
+			t.Fatalf("resized image = %.60s, err = %v", strings.Join(result.Content.ImageURLs(), ""), err)
 		}
-		_, encoded, _ := strings.Cut(result.Content, ";base64,")
+		_, encoded, _ := strings.Cut(strings.Join(result.Content.ImageURLs(), ""), ";base64,")
 		data, _ := base64.StdEncoding.DecodeString(encoded)
 		bitmap, err := png.Decode(bytes.NewReader(data))
 		if err != nil {
@@ -94,8 +94,8 @@ func TestReadImageReducesOversizedPayload(t *testing.T) {
 		t.Fatal("fixture must exceed attachment byte budget")
 	}
 	result, err := ReadImage(t.Context(), &buf)
-	if err != nil || !IsImageResult(result.Content) {
-		t.Fatalf("resized image = %.60s, err = %v", result.Content, err)
+	if err != nil || !IsImageResult(strings.Join(result.Content.ImageURLs(), "")) {
+		t.Fatalf("resized image = %.60s, err = %v", strings.Join(result.Content.ImageURLs(), ""), err)
 	}
 	width, height := result.Metadata["width"].(int), result.Metadata["height"].(int)
 	if width >= 2048 || width != height*2 {
@@ -141,6 +141,6 @@ func TestReadImageRejectsTruncatedBitmapAfterValidHeader(t *testing.T) {
 		t.Fatalf("fixture has no valid header: %v", err)
 	}
 	if result, err := ReadImage(t.Context(), bytes.NewReader(header)); err == nil {
-		t.Fatalf("corrupt image was attached: %.60s", result.Content)
+		t.Fatalf("corrupt image was attached: %.60s", strings.Join(result.Content.ImageURLs(), ""))
 	}
 }

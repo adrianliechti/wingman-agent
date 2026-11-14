@@ -336,7 +336,7 @@ func briefingMessage(m Message, textLimit int) string {
 			fmt.Fprintf(&b, "[tool call]: %s(%s)\n\n", c.ToolCall.Name, briefingExcerpt(c.ToolCall.Args, 2000))
 		}
 		if c.ToolResult != nil {
-			fmt.Fprintf(&b, "[tool result; error=%t]: %s\n\n", c.ToolResult.IsError, briefingExcerpt(c.ToolResult.Content, 2000))
+			fmt.Fprintf(&b, "[tool result; error=%t]: %s\n\n", c.ToolResult.IsError, briefingExcerpt(c.ToolResult.Content.Text(), 2000))
 		}
 	}
 	// A multipart message shares one allowance, preserving space for evidence.

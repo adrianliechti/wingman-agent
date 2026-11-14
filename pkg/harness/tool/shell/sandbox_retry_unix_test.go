@@ -62,14 +62,14 @@ func TestExecRetriesOfflineDenialWithNetworkFirst(t *testing.T) {
 			raw, _ := json.Marshal(args)
 			ctx := hook.WithToolCall(context.Background(), tool.ToolCall{ID: "call-1", Name: "exec", Args: string(raw)})
 			result, err := ExecTools(manager, workspace, elicit, nil)[0].Execute(ctx, args)
-			if err != nil || strings.Contains(result.Content, "sandbox_apply: Operation not permitted") {
-				t.Skipf("sandbox backend unavailable: %v %s", err, result.Content)
+			if err != nil || strings.Contains(result.Content.Text(), "sandbox_apply: Operation not permitted") {
+				t.Skipf("sandbox backend unavailable: %v %s", err, result.Content.Text())
 			}
 			if strings.Join(kinds, ",") != strings.Join(tc.kinds, ",") {
-				t.Fatalf("approvals = %v, want %v\n%s", kinds, tc.kinds, result.Content)
+				t.Fatalf("approvals = %v, want %v\n%s", kinds, tc.kinds, result.Content.Text())
 			}
-			if !strings.Contains(result.Content, tc.notice) {
-				t.Fatalf("result lacks %q:\n%s", tc.notice, result.Content)
+			if !strings.Contains(result.Content.Text(), tc.notice) {
+				t.Fatalf("result lacks %q:\n%s", tc.notice, result.Content.Text())
 			}
 			if runs, _ := os.ReadFile(filepath.Join(workspace, "runs.txt")); strings.Count(string(runs), "run") != tc.runs {
 				t.Fatalf("command ran %d times, want %d", strings.Count(string(runs), "run"), tc.runs)
@@ -117,8 +117,8 @@ func TestReviewedCommandIsNotReviewedAgainAfterDenial(t *testing.T) {
 			raw, _ := json.Marshal(args)
 			ctx := hook.WithToolCall(context.Background(), tool.ToolCall{ID: "call-1", Name: "exec", Args: string(raw)})
 			result, err := ExecTools(manager, t.TempDir(), elicit, nil)[0].Execute(ctx, args)
-			if err != nil || strings.Contains(result.Content, "sandbox_apply: Operation not permitted") {
-				t.Skipf("sandbox backend unavailable: %v %s", err, result.Content)
+			if err != nil || strings.Contains(result.Content.Text(), "sandbox_apply: Operation not permitted") {
+				t.Skipf("sandbox backend unavailable: %v %s", err, result.Content.Text())
 			}
 			if validation {
 				// A check is never re-run, so its approval promises nothing more.
@@ -128,7 +128,7 @@ func TestReviewedCommandIsNotReviewedAgainAfterDenial(t *testing.T) {
 				return
 			}
 			if len(requests) != 2 {
-				t.Fatalf("requests = %+v\n%s", requests, result.Content)
+				t.Fatalf("requests = %+v\n%s", requests, result.Content.Text())
 			}
 			first, second := requests[0], requests[1]
 			if first.kind != "shell_command" || first.rerun != true || first.covered != nil || !strings.Contains(first.message, "runs once more") {

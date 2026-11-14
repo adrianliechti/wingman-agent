@@ -251,10 +251,17 @@ func BuildBaseInstructions(base string, data SectionData) string {
 	return composeSections(sections)
 }
 
-func BuildSessionContext(data SectionData) string {
+func BuildSessionContextSections(data SectionData) []Section {
 	sections := renderSections(staticTemplates, data)
 	sections = append(sections, renderSections(dynamicTemplates, data)...)
-	return composeSections(sections)
+	if mode := strings.TrimSpace(renderBase(data.ModeInstructions, data)); mode != "" {
+		sections = append(sections, Section{Title: "Collaboration Mode", Content: mode})
+	}
+	return sections
+}
+
+func BuildSessionContext(data SectionData) string {
+	return composeSections(BuildSessionContextSections(data))
 }
 
 func BuildInstructions(base string, data SectionData) string {

@@ -134,7 +134,7 @@ func (o *transcriptOverlay) buildEntries() {
 					continue
 				}
 				key := baseKey + ":tool:" + result.ID
-				raw := result.Name + " " + tool.ExtractHint(result.Args, result.Name) + "\n" + result.Content
+				raw := result.Name + " " + tool.ExtractHint(result.Args, result.Name) + "\n" + result.Content.Text()
 				entries = append(entries, transcriptEntry{
 					key: key, kind: transcriptTool, raw: raw, selectable: true,
 					render: func(width int, expanded bool) []string { return cellTool(result, width, expanded) },

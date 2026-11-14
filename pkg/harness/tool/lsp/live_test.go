@@ -61,25 +61,25 @@ func TestLiveLSPAgentEvaluation(t *testing.T) {
 		t.Helper()
 		start := time.Now()
 		result, err := inspect.Execute(ctx, args)
-		t.Logf("METRIC operation=%v elapsed_ms=%.3f output_bytes=%d error=%t", args["operation"], float64(time.Since(start).Microseconds())/1000, len(result.Content), err != nil)
+		t.Logf("METRIC operation=%v elapsed_ms=%.3f output_bytes=%d error=%t", args["operation"], float64(time.Since(start).Microseconds())/1000, len(result.Content.Text()), err != nil)
 		return result, err
 	}
 	t.Run("cold_definition", func(t *testing.T) {
 		result, err := run(t, map[string]any{"operation": "goToDefinition", "file_path": "refs.go", "line": 4, "symbol": "Target"})
-		if err != nil || !strings.Contains(result.Content, "refs.go:3:") {
-			t.Fatalf("definition=%s error=%v", result.Content, err)
+		if err != nil || !strings.Contains(result.Content.Text(), "refs.go:3:") {
+			t.Fatalf("definition=%s error=%v", result.Content.Text(), err)
 		}
 	})
 	t.Run("qualified_symbol", func(t *testing.T) {
 		result, err := run(t, map[string]any{"operation": "hover", "file_path": "types.go", "symbol": "Beta.Close"})
-		if err != nil || !strings.Contains(result.Content, "Beta") {
-			t.Fatalf("hover=%s error=%v", result.Content, err)
+		if err != nil || !strings.Contains(result.Content.Text(), "Beta") {
+			t.Fatalf("hover=%s error=%v", result.Content.Text(), err)
 		}
 	})
 	t.Run("qualified_symbol_with_line", func(t *testing.T) {
 		result, err := run(t, map[string]any{"operation": "hover", "file_path": "types.go", "symbol": "Beta.Close", "line": 6})
-		if err != nil || !strings.Contains(result.Content, "Beta") {
-			t.Fatalf("qualified declaration plus line=%s error=%v", result.Content, err)
+		if err != nil || !strings.Contains(result.Content.Text(), "Beta") {
+			t.Fatalf("qualified declaration plus line=%s error=%v", result.Content.Text(), err)
 		}
 		if _, err := run(t, map[string]any{"operation": "hover", "file_path": "types.go", "symbol": "Beta.Close", "line": 4}); err == nil {
 			t.Fatal("qualified name accepted at the wrong receiver's line")
@@ -88,19 +88,19 @@ func TestLiveLSPAgentEvaluation(t *testing.T) {
 	t.Run("ambiguous_symbol", func(t *testing.T) {
 		result, err := run(t, map[string]any{"operation": "hover", "file_path": "types.go", "symbol": "Close"})
 		if err == nil || !strings.Contains(err.Error(), "ambiguous") {
-			t.Fatalf("silently selected a symbol: %s %v", result.Content, err)
+			t.Fatalf("silently selected a symbol: %s %v", result.Content.Text(), err)
 		}
 	})
 	t.Run("wrong_qualified_symbol", func(t *testing.T) {
 		result, err := run(t, map[string]any{"operation": "hover", "file_path": "types.go", "symbol": "Missing.Close"})
 		if err == nil {
-			t.Fatalf("matched wrong receiver: %s", result.Content)
+			t.Fatalf("matched wrong receiver: %s", result.Content.Text())
 		}
 	})
 	t.Run("type_definition", func(t *testing.T) {
 		result, err := run(t, map[string]any{"operation": "goToTypeDefinition", "file_path": "types.go", "line": 8, "column": 14})
-		if err != nil || !strings.Contains(result.Content, "types.go:7:") {
-			t.Fatalf("type definition=%s %v", result.Content, err)
+		if err != nil || !strings.Contains(result.Content.Text(), "types.go:7:") {
+			t.Fatalf("type definition=%s %v", result.Content.Text(), err)
 		}
 	})
 	t.Run("reference_completeness", func(t *testing.T) {
@@ -110,7 +110,7 @@ func TestLiveLSPAgentEvaluation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			output.WriteString(result.Content)
+			output.WriteString(result.Content.Text())
 		}
 		found := 0
 		for i := range 125 {
@@ -125,8 +125,8 @@ func TestLiveLSPAgentEvaluation(t *testing.T) {
 	})
 	t.Run("compact_reference_counts", func(t *testing.T) {
 		result, err := run(t, map[string]any{"operation": "findReferences", "file_path": "refs.go", "symbol": "Target", "output_mode": "count", "include_declaration": false})
-		if err != nil || !strings.Contains(result.Content, "125 across 1 files") || !strings.Contains(result.Content, "refs.go: 125") || strings.Contains(result.Content, "decoy.go") {
-			t.Fatalf("counts=%s error=%v", result.Content, err)
+		if err != nil || !strings.Contains(result.Content.Text(), "125 across 1 files") || !strings.Contains(result.Content.Text(), "refs.go: 125") || strings.Contains(result.Content.Text(), "decoy.go") {
+			t.Fatalf("counts=%s error=%v", result.Content.Text(), err)
 		}
 	})
 	t.Run("preview_and_apply_rename", func(t *testing.T) {
@@ -140,12 +140,12 @@ func TestLiveLSPAgentEvaluation(t *testing.T) {
 				t.Fatalf("preview changed %s", name)
 			}
 		}
-		index := strings.Index(result.Content, "{")
+		index := strings.Index(result.Content.Text(), "{")
 		if index < 0 {
-			t.Fatal(result.Content)
+			t.Fatal(result.Content.Text())
 		}
 		var args map[string]any
-		if err := json.Unmarshal([]byte(result.Content[index:]), &args); err != nil {
+		if err := json.Unmarshal([]byte(result.Content.Text()[index:]), &args); err != nil {
 			t.Fatal(err)
 		}
 		fsRoot, err := os.OpenRoot(root)
@@ -171,8 +171,8 @@ func TestLiveLSPAgentEvaluation(t *testing.T) {
 	})
 	t.Run("code_actions", func(t *testing.T) {
 		result, err := run(t, map[string]any{"operation": "codeActions", "file_path": "types.go"})
-		if err != nil || !strings.Contains(result.Content, "Code actions") {
-			t.Fatalf("code actions=%s %v", result.Content, err)
+		if err != nil || !strings.Contains(result.Content.Text(), "Code actions") {
+			t.Fatalf("code actions=%s %v", result.Content.Text(), err)
 		}
 	})
 	t.Run("preview_across_unopened_files", func(t *testing.T) {
@@ -185,11 +185,11 @@ func TestLiveLSPAgentEvaluation(t *testing.T) {
 				Path string `json:"file_path"`
 			} `json:"edits"`
 		}
-		index := strings.Index(result.Content, "{")
+		index := strings.Index(result.Content.Text(), "{")
 		if index < 0 {
 			t.Fatal("missing preview JSON")
 		}
-		if err := json.Unmarshal([]byte(result.Content[index:]), &payload); err != nil {
+		if err := json.Unmarshal([]byte(result.Content.Text()[index:]), &payload); err != nil {
 			t.Fatal(err)
 		}
 		if len(payload.Edits) != 2 {
@@ -207,7 +207,7 @@ func TestLiveLSPAgentEvaluation(t *testing.T) {
 		defer missing.Close()
 		result, err := lsptool.NewTools(missing)[0].Execute(ctx, map[string]any{"operation": "hover", "file_path": "types.go", "symbol": "Item"})
 		if err == nil || !strings.Contains(err.Error(), "grep/glob/read") {
-			t.Fatalf("missing fallback: %s %v", result.Content, err)
+			t.Fatalf("missing fallback: %s %v", result.Content.Text(), err)
 		}
 	})
 }

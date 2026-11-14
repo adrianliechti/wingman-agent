@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 )
@@ -10,6 +11,30 @@ type progressSinkKey struct{}
 type progressCallKey struct{}
 type usageSinkKey struct{}
 type backgroundOriginKey struct{}
+type userInputKey struct{}
+
+// ErrUserInput is the cancellation cause of a context that ended because the user sent a message.
+var ErrUserInput = errors.New("the user sent a new message")
+
+// WithUserInput lets the tools of a round observe signal, which is cancelled when the user sends a message.
+func WithUserInput(ctx, signal context.Context) context.Context {
+	return context.WithValue(ctx, userInputKey{}, signal)
+}
+
+// UntilUserInput returns a context that also ends when the user sends a message, for tools that only wait.
+func UntilUserInput(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	signal, ok := ctx.Value(userInputKey{}).(context.Context)
+	if !ok {
+		return ctx, func() { cancel(nil) }
+	}
+	stop := context.AfterFunc(signal, func() {
+		if context.Cause(signal) == ErrUserInput {
+			cancel(ErrUserInput)
+		}
+	})
+	return ctx, func() { stop(); cancel(nil) }
+}
 
 // WithBackgroundOrigin marks ctx as belonging to a detached background agent
 // run, so session-scoped state (e.g. file freshness) can tell its tool calls

@@ -68,9 +68,9 @@ Use Plan mode to explore an approach before making changes.
 The built-in agent runs shell commands in a sandbox with writes limited to the
 workspace, project memory, and private session temporary storage. `TMPDIR`,
 `TEMP`, and `TMP` point to that private directory. Tool cache settings are inherited,
-including configuration in `go env -w` and `.npmrc`. Go reads the host build
-cache it cannot write when run with `GODEBUG=goindex=0`. The model receives the
-actual writable roots and network policy, and redirects a cache into private
+including configuration in `go env -w` and `.npmrc`. Sandboxed commands run with
+`GODEBUG=goindex=0`, so Go reads the host build cache it cannot write. The model
+receives the actual writable roots and network policy, and redirects a cache into private
 temp only when a command fails writing it (for example,
 `npm ci --cache "$TMPDIR/npm-cache"`).
 Private temporary files are reused within the session and removed on close.

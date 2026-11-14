@@ -35,7 +35,7 @@ func TestSessionLSPPreviewProtectsOrdinaryEdit(t *testing.T) {
 	}
 	s.setMode(modeAgent)
 	s.tools = append(s.tools, tool.Tool{Name: "lsp", Effect: tool.StaticEffect(tool.EffectReadOnly), Execute: func(context.Context, map[string]any) (tool.Result, error) {
-		return tool.Result{Content: "preview", Metadata: map[string]any{tool.FileSnapshotsMetadata: []tool.FileSnapshot{{Path: path, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(before)))}}}}, nil
+		return tool.Result{Content: tool.TextContent("preview"), Metadata: map[string]any{tool.FileSnapshotsMetadata: []tool.FileSnapshot{{Path: path, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(before)))}}}}, nil
 	}})
 	s.harness = &harness.Agent{Config: &harness.Config{Tools: s.catalogTools, FilterTools: s.filterTools}}
 	var preview, edit tool.Tool
@@ -66,7 +66,9 @@ func TestSessionLSPPreviewProtectsOrdinaryEdit(t *testing.T) {
 	s.setMode(modePlan)
 	for _, candidate := range s.harness.AvailableTools() {
 		if candidate.Name == "edit" {
-			t.Fatal("preview tracking exposed edit in plan mode")
+			if _, err := candidate.Execute(t.Context(), map[string]any{"file_path": "sample.txt", "old_string": "old", "new_string": "new"}); err == nil || !strings.Contains(err.Error(), "plan mode only allows read-only tool calls") {
+				t.Fatalf("plan mode did not block edit execution: %v", err)
+			}
 		}
 	}
 }

@@ -11,8 +11,10 @@ import (
 	"testing"
 
 	collectorlogsv1 "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	collectortracev1 "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonv1 "go.opentelemetry.io/proto/otlp/common/v1"
 	logsv1 "go.opentelemetry.io/proto/otlp/logs/v1"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -193,5 +195,34 @@ func TestOTLPReceiverAcceptsGzipAndWritesArtifact(t *testing.T) {
 	}
 	if bytes.Contains(contents, []byte("\n  \"")) {
 		t.Fatalf("telemetry artifact is unexpectedly pretty-printed: %s", contents)
+	}
+}
+
+func TestTokenSummaryCountsInferenceOnceAcrossSignals(t *testing.T) {
+	var traces collectortracev1.ExportTraceServiceRequest
+	err := protojson.Unmarshal([]byte(`{"resourceSpans":[{"scopeSpans":[{"spans":[
+ {"name":"invoke_agent","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"invoke_agent"}},{"key":"gen_ai.usage.input_tokens","value":{"intValue":"100"}}]},
+ {"name":"chat test","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},{"key":"gen_ai.usage.input_tokens","value":{"intValue":"100"}}]}
+ ]}]}]}`), &traces)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs collectorlogsv1.ExportLogsServiceRequest
+	err = protojson.Unmarshal([]byte(`{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"eventName":"gen_ai.client.inference.operation.details","attributes":[{"key":"gen_ai.usage.input_tokens","value":{"intValue":"100"}},{"key":"gen_ai.usage.cache_read.input_tokens","value":{"intValue":"80"}},{"key":"gen_ai.usage.cache_write.input_tokens","value":{"intValue":"10"}}]}]}]}]}`), &logs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, logsFirst := range []bool{false, true} {
+		var summary otlpSummary
+		if logsFirst {
+			summary.add("logs", &logs)
+		}
+		summary.add("traces", &traces)
+		if !logsFirst {
+			summary.add("logs", &logs)
+		}
+		if summary.InputTokens != 100 || summary.CachedReadTokens != 80 || summary.CachedWriteTokens != 10 {
+			t.Fatalf("duplicated usage: %+v", summary)
+		}
 	}
 }
