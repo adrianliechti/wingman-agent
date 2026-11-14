@@ -13,6 +13,20 @@ import (
 	"time"
 )
 
+func TestSandboxHelperRunsTheShellWithAllItsArguments(t *testing.T) {
+	for _, shell := range []string{"/bin/sh", "/usr/bin/zsh"} {
+		_, args, err := platformSandboxCommand(shell, "true", "/repo", sandboxPolicy{WritableRoots: []string{"/repo"}})
+		if err != nil {
+			t.Skipf("sandbox unavailable: %v", err)
+		}
+		helper := slices.Index(args, linuxSandboxHelper)
+		want := append([]string{shell}, shellArguments(shell, "true")...)
+		if helper < 2 || args[helper-2] != "--" || !slices.Equal(args[helper+2:], want) {
+			t.Errorf("%s: helper must sit between -- and the shell invocation %q: %q", shell, want, args)
+		}
+	}
+}
+
 func TestBubblewrapArgsMakeOnlySelectedRootsWritable(t *testing.T) {
 	args := bubblewrapArgs("/bin/sh", "touch marker", "/repo/sub", sandboxPolicy{WritableRoots: []string{"/repo", "/tmp"}, Network: true})
 

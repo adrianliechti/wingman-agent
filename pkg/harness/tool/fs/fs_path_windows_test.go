@@ -68,8 +68,8 @@ func TestWindowsFileToolPaths(t *testing.T) {
 							if err != nil {
 								t.Fatal(err)
 							}
-							if !strings.Contains(result.Content, test.want) {
-								t.Fatalf("result = %q, want %q", result.Content, test.want)
+							if !strings.Contains(result.Content.Text(), test.want) {
+								t.Fatalf("result = %q, want %q", result.Content.Text(), test.want)
 							}
 						})
 					}

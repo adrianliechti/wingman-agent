@@ -71,6 +71,9 @@ var sandboxDenialHints = []string{"operation not permitted", "permission denied"
 // offlineDenialHints are the name-resolution and routing failures of a sandbox without IP networking, such as git push.
 var offlineDenialHints = []string{"could not resolve host", "temporary failure in name resolution", "name or service not known", "nodename nor servname", "getaddrinfo", "network is unreachable", "no such host"}
 
+// Go reports its read-only module cache with this warning and carries on, so it never explains a failure.
+var benignDenialPrefixes = []string{"go: writing stat cache:"}
+
 // sandboxLauncherPrefixes start the errors of a sandbox that failed to start;
 // the command never ran, so running it outside the sandbox is no remedy.
 var sandboxLauncherPrefixes = []string{"bwrap:", "sandbox-exec:", "wingman sandbox:"}
@@ -110,6 +113,9 @@ func sandboxDenial(output string, err error, network bool) string {
 	}
 	for line := range strings.Lines(output) {
 		lower := strings.ToLower(line)
+		if slices.ContainsFunc(benignDenialPrefixes, func(prefix string) bool { return strings.HasPrefix(strings.TrimSpace(lower), prefix) }) {
+			continue
+		}
 		if slices.ContainsFunc(hints, func(hint string) bool { return strings.Contains(lower, hint) }) {
 			line = strings.TrimSpace(line)
 			if runes := []rune(line); len(runes) > 300 {
@@ -249,7 +255,7 @@ func buildCommandWithEnvironment(ctx context.Context, command, workingDir string
 			shell = "/bin/sh"
 		}
 		if sandbox == nil {
-			cmd = exec.CommandContext(ctx, shell, "-c", command)
+			cmd = exec.CommandContext(ctx, shell, shellArguments(shell, command)...)
 		} else {
 			var err error
 			if cmd, err = buildSandboxedCommand(ctx, shell, command, workingDir, *sandbox); err != nil {
@@ -269,6 +275,14 @@ func buildCommandWithEnvironment(ctx context.Context, command, workingDir string
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 
 	return cmd, nil
+}
+
+// Models write globs for sh and bash, which pass an unmatched pattern through; zsh aborts the command instead.
+func shellArguments(shell, command string) []string {
+	if filepath.Base(shell) == "zsh" {
+		return []string{"-o", "nonomatch", "-c", command}
+	}
+	return []string{"-c", command}
 }
 
 // sandboxOptions sets the workspace boundary and any extra writable roots, such as project memory.

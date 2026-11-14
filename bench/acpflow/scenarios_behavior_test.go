@@ -55,13 +55,29 @@ func TestFileOpsFixtureAndCheck(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		updated := strings.NewReplacer("package util", "package textutil", `internal/util"`, `internal/textutil"`, "util.", "textutil.").Replace(string(data))
+		updated := strings.NewReplacer("package util", "package textutil", `internal/util"`, `internal/textutil"`, " util.", " textutil.", "(util.", "(textutil.").Replace(string(data))
 		if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := checkFileOps(ctx, state); err != nil {
 		t.Fatalf("reorganized workspace failed checkFileOps: %v", err)
+	}
+
+	// The fixture's trap: replacing every "util." also rewrites timeutil and breaks the build.
+	careless := filepath.Join(root, "catalog", "product.go")
+	original, err := os.ReadFile(careless)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(careless, []byte(strings.ReplaceAll(string(original), "timeutil.", "timetextutil.")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkFileOps(ctx, state); err == nil {
+		t.Fatal("a corrupted timeutil reference passed checkFileOps")
+	}
+	if err := os.WriteFile(careless, original, 0o644); err != nil {
+		t.Fatal(err)
 	}
 
 	// A leftover import of the old path must be caught even if it compiles.

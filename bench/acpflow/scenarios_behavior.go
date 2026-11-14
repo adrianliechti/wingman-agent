@@ -266,13 +266,34 @@ func TestFormatV1(t *testing.T) {
 	}
 }
 `,
+		// A second package ending in "util" makes a careless text substitution break the build.
+		"internal/timeutil/stamp.go": `package timeutil
+
+import "time"
+
+// Stamp formats t as a compact UTC timestamp.
+func Stamp(t time.Time) string {
+	return t.UTC().Format("20060102T150405Z")
+}
+`,
 		"catalog/product.go": `package catalog
 
-import "example.com/shop/internal/util"
+import (
+	"time"
+
+	"example.com/shop/internal/timeutil"
+	"example.com/shop/internal/util"
+)
 
 type Product struct {
 	Name       string
 	PriceCents int
+	AddedAt    time.Time
+}
+
+// Added is the listing timestamp of a product.
+func (p Product) Added() string {
+	return timeutil.Stamp(p.AddedAt)
 }
 
 // Handle is the URL-safe identifier of a product.
@@ -322,11 +343,12 @@ import (
 	"fmt"
 
 	"example.com/shop/catalog"
+	"example.com/shop/internal/timeutil"
 	"example.com/shop/internal/util"
 )
 
 func formatLine(p catalog.Product) string {
-	return fmt.Sprintf("%-14s %s  %d.%02d", util.Truncate(p.Handle(), 14), p.DisplayName(), p.PriceCents/100, p.PriceCents%100)
+	return fmt.Sprintf("%-14s %s  %d.%02d  %s", util.Truncate(p.Handle(), 14), p.DisplayName(), p.PriceCents/100, p.PriceCents%100, timeutil.Stamp(p.AddedAt))
 }
 `,
 	})
@@ -347,8 +369,10 @@ func checkFileOps(ctx context.Context, step stepState) error {
 			return fmt.Errorf("%s still exists", gone)
 		}
 	}
-	if !exists(step.root, "cmd", "shop", "format.go") {
-		return fmt.Errorf("cmd/shop/format.go missing")
+	for _, kept := range []string{"cmd/shop/format.go", "internal/timeutil/stamp.go"} {
+		if !exists(step.root, filepath.FromSlash(kept)) {
+			return fmt.Errorf("%s missing", kept)
+		}
 	}
 	var stale string
 	_ = filepath.WalkDir(step.root, func(path string, entry fs.DirEntry, err error) error {

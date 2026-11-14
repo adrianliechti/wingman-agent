@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"bytes"
 	"runtime"
 	"slices"
 	"strings"
@@ -112,6 +113,10 @@ func parseShellSyntax(source string, dialect shellDialect) (result shellSyntax) 
 	}
 	defer tree.Release()
 	result.uncertain = tree.RootNode().HasErrorOrMissing() && !shellParseErrorsHandled(tree.RootNode(), lang, sourceBytes)
+	// A recovering parser can stop early without leaving an error node; the unread rest must not pass as understood.
+	if int(tree.RootNode().EndByte()) < len(bytes.TrimRight(sourceBytes, " \t\r\n")) {
+		result.uncertain = true
+	}
 
 	executable := slices.Clone(sourceBytes)
 	var statements []shellStatement
@@ -186,6 +191,34 @@ func walkShellAST(node *gotreesitter.Node, lang *gotreesitter.Language, source [
 	case "pipeline":
 		if directPipelineIsDangerous(node, lang, source, dialect) {
 			result.downloadToShell = true
+		}
+	case "command_parameter":
+		// The grammar may lex quotes, variables and operators into the parameter, hiding what they run.
+		if dialect == dialectPowerShell && !isPlainPowerShellParameter(source[node.StartByte():node.EndByte()]) {
+			result.uncertain = true
+		}
+	case "comment":
+		// PowerShell reads `#` inside a word as text, so the rest of the line still runs.
+		if start := node.StartByte(); dialect == dialectPowerShell && start > 0 && !strings.ContainsRune(" \t\r\n", rune(source[start-1])) {
+			result.uncertain = true
+		}
+	case "stop_parsing", "verbatim_command_argument", "--%":
+		// After `--%` the native program reads the line itself; the grammar loses a following pipe or line.
+		result.uncertain = true
+	case "invokation_expression", "argument_list":
+		// A .NET method call runs code that no command statement shows.
+		if dialect == dialectPowerShell {
+			result.hasSubstitution = true
+		}
+	case "generic_token":
+		// PowerShell redirections written without a space, such as `>out.txt`, arrive as arguments.
+		if target, writes, ok := powerShellInlineRedirection(node.Text(source)); ok && dialect == dialectPowerShell {
+			result.hasRedirection = true
+			if writes {
+				result.protectedWrite = result.protectedWrite || isProtectedRedirectTarget(target)
+			} else {
+				result.credentialRead = result.credentialRead || isSensitiveCredentialPath(target)
+			}
 		}
 	}
 
@@ -419,13 +452,36 @@ func needsPowerShellArgumentMask(word []byte) bool {
 	for _, c := range []byte(rest) {
 		switch {
 		case isASCIILetter(c), c == '-', c == '_':
-		case c >= '0' && c <= '9', strings.IndexByte("=:.%+/~", c) >= 0:
+		case c >= '0' && c <= '9', strings.IndexByte(powerShellLiteralArgumentChars, c) >= 0:
 			needs = true
 		default:
 			return false
 		}
 	}
 	return needs
+}
+
+// Besides letters, digits, - and _, the only characters a dash word may hold and still be read as literal text.
+const powerShellLiteralArgumentChars = "=:.%+/~"
+
+func isPlainPowerShellParameter(word []byte) bool {
+	for _, c := range word {
+		if !isASCIILetter(c) && c != '-' && c != '_' && (c < '0' || c > '9') && strings.IndexByte(powerShellLiteralArgumentChars, c) < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// PowerShell reads an operator only at the start of a word: `2>err.txt` redirects, `a>b` is one literal argument.
+func powerShellInlineRedirection(word string) (target string, writes, ok bool) {
+	if len(word) > 1 && (word[0] == '*' || word[0] >= '1' && word[0] <= '6') && word[1] == '>' {
+		word = word[1:]
+	}
+	if word == "" || word[0] != '<' && word[0] != '>' {
+		return "", false, false
+	}
+	return strings.TrimLeft(word, "<>"), word[0] == '>', true
 }
 
 func isPowerShellArgumentSeparator(c byte) bool { return c == ' ' || c == '\t' }

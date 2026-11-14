@@ -35,6 +35,10 @@ func ExecutionContext(workspace string, opts *Options) string {
 			}
 		}
 	}
+	if runtime.GOOS == "darwin" {
+		// Models write GNU sed; on macOS `\b` silently matches nothing and the edit is lost.
+		b.WriteString("- Shell utilities are the BSD versions: `sed` has no `\\b`, `\\+` or `\\|` (use `sed -E` with `[[:<:]]` and `[[:>:]]`, or `perl -pi -e`), and `sed -i` takes a suffix argument (`sed -i ''`).\n")
+	}
 	if opts != nil && opts.TempDir != "" {
 		fmt.Fprintf(&b, "- Shell temporary storage: TMPDIR = TEMP = TMP = `%s`, removed on session close. Store persistent outputs in a project directory.", opts.TempDir)
 	} else if workspaceSandboxEnabled(opts) {

@@ -26,7 +26,7 @@ func platformSandboxCommand(shell, command, _ string, policy sandboxPolicy) (str
 	if filepath.Base(shell) == "zsh" {
 		args = append(args, "-o", "nobgnice")
 	}
-	args = append(args, "-c", command)
+	args = append(args, shellArguments(shell, command)...)
 	return sandboxExecPath, args, nil
 }
 
