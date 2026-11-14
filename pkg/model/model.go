@@ -99,6 +99,7 @@ var nemotronEfforts = []string{"none", "medium", "high"}
 var nemotron3SuperEfforts = []string{"none", "low", "high"}
 var nemotronThinkingEfforts = []string{"none", "high"}
 var gemini4Efforts = []string{"low", "medium", "high"}
+var gemini4HydrogenEfforts = []string{"low", "medium", "high", "xhigh"}
 
 // Models lists every known model in preference order: the first entry of a
 // family, filter or class is the one picked automatically.
@@ -714,6 +715,20 @@ var Models = []Model{
 	},
 
 	// Google
+
+	{
+		ID:        "gemini-4-hydrogen",
+		Namespace: "google",
+		Name:      "Gemini 4 Hydrogen",
+		Class:     ClassMedium,
+
+		// Input, thinking, and output share one window.
+		Context: 1048576,
+		Output:  65536,
+
+		ContextThreshold: 200_000,
+		Efforts:          gemini4HydrogenEfforts,
+	},
 
 	{
 		ID: "gemini-3.8-flash",

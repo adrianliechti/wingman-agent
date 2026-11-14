@@ -234,18 +234,19 @@ File picker, text search and reveal use the REST routes above; upstream
 
 Workspace resource access is confined to the project. Recursive resource
 watches support include/exclude globs. The shared uncommitted changeset exposes
-immutable before/after content, content/file nonces, and advisory `isEditing`
-flags. Content from replaced changesets is not retained indefinitely: refresh
+immutable before/after content, content/file nonces, and advisory
+`ChangesetFileStatus.Editing` flags. Content from replaced changesets is not retained indefinitely: refresh
 the changeset if an old content reference is unavailable. An editing flag is
 presentation information, not a lock or proof that applying a change is safe.
 
-The host supports AHP 1.0 and selected 1.1 features: mixed steering/queued
-pending messages, changeset file nonces and `isEditing`, model `vendor` and
+The host supports AHP 1.0 and 1.1, including mixed steering/queued pending
+messages, changeset file nonces and `status` activity flags, model `vendor` and
 per-model effort schemas, chat activity, and host-measured reasoning
 `startedAt`/`duration`. A reasoning run ends when the next markdown, tool or
 reasoning part starts, or before the turn's terminal action; timing lasts for
-the host process and history from earlier processes is untimed. The web UI
-negotiates 1.1; 1.0 clients receive the legacy queue/steering projection.
+the host process and history from earlier processes is untimed. The initialize
+response supplies standard `environment.pathStyle` metadata for native host
+paths. The web UI negotiates 1.1; 1.0 clients receive the legacy queue/steering projection.
 Side chats, chats from other providers, client-provided tools, TCP channels,
 experimental channel windows, and protocol-native automations are not
 advertised. Draft/archive/title overrides currently last for the host process.
@@ -345,16 +346,61 @@ one running unless `terminateDebuggee` says otherwise.
 
 ## SDK provenance
 
-The host's Go types and the browser SDK are pinned to upstream commit
-[`d7a5579b1733fb2e1e4a2c653442e26c7b7226dd`](https://github.com/microsoft/agent-host-protocol/commit/d7a5579b1733fb2e1e4a2c653442e26c7b7226dd).
-The checked-in npm archive combines the official TypeScript client with that
-commit's canonical generated protocol types/reducers. It is labeled
-`1.1.0-dev.d7a5579b1733`; it is not a published 1.1 release. Installation does not
-require a local upstream checkout. To reproduce the archive:
+The host uses the official Go SDK
+`github.com/microsoft/agent-host-protocol/clients/go@v1.1.0` and the browser uses
+`@microsoft/agent-host-protocol@1.1.0` from npm, both released November 12, 2026.
+The Go module and npm lockfiles pin the releases. The browser integration tests
+also install the published 1.0.0 SDK under an alias to exercise older clients.
+The former development archive and its generation script are no longer needed.
 
-```bash
-node scripts/vendor-ahp.mjs /path/to/agent-host-protocol
-```
+### Protocol simplification review (November 14, 2026)
+
+Upstream [1.1.0](https://github.com/microsoft/agent-host-protocol/tree/spec/v1.1.0)
+is released; [the changelog](https://github.com/microsoft/agent-host-protocol/blob/main/CHANGELOG.md)
+lists 1.2.0 as unreleased. Its changelog entry is still empty, but the
+[changes since 1.1](https://github.com/microsoft/agent-host-protocol/compare/spec/v1.1.0...main)
+include one-time automation triggers (`kind: "oneTime"`, `runAt`) and the
+`AutomationCapabilities.oneTime` presence capability. SDK versions and spec
+versions are independent; the host does not advertise unreleased features.
+
+The stable SDK removes the handwritten reconnect-result object: it now
+serializes the reconnect discriminator correctly. The Go terminal subscription
+test helper still decodes its known channel directly: 1.1.0 continues to mistake
+a terminal lifecycle object for a session lifecycle string in `SnapshotState`.
+File activity uses the final
+`ChangesetFile.status` bitset rather than the draft `isEditing` field. Queue,
+reasoning timing, model effort schemas, chat titles and per-chat configuration
+already use standard 1.1 fields and actions, so they need no extra protocol.
+
+The most useful next migration is scheduled tasks. AHP's automation catalogue,
+update/remove actions and subscriptions could replace the schedule-specific
+REST list/delete/pause/resume endpoints in `server/handler_schedules.go` and
+`server/ui/src/api/tasks.ts`. The 1.2 draft's one-time trigger maps directly to
+our timestamp schedules, alongside 1.1's recurring schedule triggers. Map
+`Task.ID` to a stable automation URI, paused state to `enabled: false`, and
+`nextRunAt` to an absolute timestamp that the client formats locally. The draft
+requires at-most-once firing for each `runAt`, and changing `runAt` moves the
+occurrence; an adapter must reset the native one-shot bookkeeping accordingly.
+
+That migration is not implemented here. It needs capability negotiation,
+per-client catalogue filtering for older clients, authoritative automation/run
+state and action acknowledgements, and mappings for existing stored tasks.
+Script gates, failure backoff, jitter, persistence and native queue delivery
+remain host execution policy; standard protocol types do not replace the
+runner. The published SDKs do not yet contain the one-time trigger, so adopting
+it now would reintroduce an unreleased SDK pin. Keep the scheduling REST API
+until the full adapter and its compatibility tests are ready.
+
+The remaining extensions listed above still have specific jobs. Standard
+resource-watch channels cover file changes, but do not replace workspace
+identity or skill/task catalogue invalidation. The transport-boundary browser
+notification handling remains necessary because the SDK's bounded async event
+queues can discard older events. Experimental flow control could address large
+stream delivery, but requires host framing/credit support and is not a drop-in
+replacement. Ranged resource reads are optional and do not replace revision
+checks or workspace path restrictions. Cross-provider chats, TCP forwarding,
+canvas channels and native automations are separate capabilities; upgrading an
+SDK does not implement or advertise them.
 
 ## Validation
 

@@ -252,9 +252,9 @@ func TestAHPTerminalOutputFilterBoundaries(t *testing.T) {
 	}
 }
 
-// The Go SDK 1.0.0 SnapshotState decoder checks lifecycle before content,
-// mistaking a terminal lifecycle object for a session lifecycle string. Decode
-// this known channel directly while still exercising its official RPC client.
+// The Go SDK 1.1.0 still checks lifecycle before content, mistaking a terminal
+// lifecycle object for a session lifecycle string. Decode this known channel
+// directly while exercising its official RPC client.
 func subscribeTerminal(ctx context.Context, client *ahp.Client, uri string) (*types.TerminalState, *ahp.Subscription, error) {
 	sub := client.AttachSubscription(uri)
 	var result struct {

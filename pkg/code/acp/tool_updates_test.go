@@ -62,7 +62,7 @@ func TestToolCompletionPreservesOrderedImages(t *testing.T) {
 			t.Run(string(status)+map[bool]string{false: "/update", true: "/start"}[terminalStart], func(t *testing.T) {
 				a := &Agent{}
 				s := &sessionState{toolCalls: map[string]toolCall{}}
-				turn := &turn{ctx: t.Context(), events: make(chan event, 1)}
+				turn := &turn{ctx: t.Context(), events: make(chan *event, 1)}
 				const id acpsdk.ToolCallId = "image-call"
 				update := acpsdk.StartToolCall(id, "read", acpsdk.WithStartContent(content), acpsdk.WithStartStatus(status))
 				if !terminalStart {

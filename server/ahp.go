@@ -616,10 +616,14 @@ func (c *ahpConnection) subscribeRequest(req ahpRequest) error {
 	switch req.Method {
 	case "initialize":
 		dir := h.directoryURI()
-		c.reply(req.ID, t.InitializeResult{ProtocolVersion: version, ServerSeq: h.seq, ServerInfo: &t.Implementation{Name: "wingman", Title: ahpPtr("Wingman")}, Snapshots: snapshots, DefaultDirectory: &dir, CompletionTriggerCharacters: []string{"/"}}, nil)
+		pathStyle := t.PathStylePosix
+		if runtime.GOOS == "windows" {
+			pathStyle = t.PathStyleWindows
+		}
+		c.reply(req.ID, t.InitializeResult{ProtocolVersion: version, ServerSeq: h.seq, ServerInfo: &t.Implementation{Name: "wingman", Title: ahpPtr("Wingman")}, Snapshots: snapshots, DefaultDirectory: &dir, Environment: &t.HostEnvironment{PathStyle: &pathStyle}, CompletionTriggerCharacters: []string{"/"}}, nil)
 	case "reconnect":
 		// AHP explicitly permits snapshot recovery when replay is unavailable.
-		c.reply(req.ID, map[string]any{"type": "snapshot", "snapshots": snapshots}, nil)
+		c.reply(req.ID, t.ReconnectResult{Value: &t.ReconnectSnapshotResult{Snapshots: snapshots}}, nil)
 	case "subscribe":
 		c.reply(req.ID, t.SubscribeResult{Snapshot: &snapshots[0]}, nil)
 	}

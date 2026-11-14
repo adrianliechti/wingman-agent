@@ -45,6 +45,8 @@ func TestModelRuntimeFields(t *testing.T) {
 		{"gemini-4-carbon", 200_000, gemini4Efforts},
 		{"~google/GEMINI-4-CARBON:latest", 200_000, gemini4Efforts},
 		{"gemini-4-argon", 200_000, gemini4Efforts},
+		{"gemini-4-hydrogen", 200_000, gemini4HydrogenEfforts},
+		{"~google/GEMINI-4-HYDROGEN:latest", 200_000, gemini4HydrogenEfforts},
 		{"glm-5.3", 1_000_000, nil},
 		{"glm-5.2", 1_000_000, nil},
 		{"kimi-k3", 1_048_576, nil},

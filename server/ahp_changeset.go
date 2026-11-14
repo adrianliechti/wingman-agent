@@ -158,13 +158,21 @@ func (h *ahpHost) buildChangeset(diffs []changes.FileDiff, editing map[string]bo
 		nonce := sha256.Sum256(identity)
 		next.state.Files = append(next.state.Files, t.ChangesetFile{
 			Id: h.fileURI(diff.Path), Edit: edit, Nonce: ahpPtr(hex.EncodeToString(nonce[:])),
-			IsEditing: ahpPtr(editing[filepath.Clean(diff.Path)]),
+			Status: changesetFileStatus(editing[filepath.Clean(diff.Path)]),
 		})
 		if bytes > 64<<20 {
 			return nil, fmt.Errorf("changeset exceeds the 64 MiB content limit")
 		}
 	}
 	return next, nil
+}
+
+func changesetFileStatus(editing bool) *t.ChangesetFileStatus {
+	var status t.ChangesetFileStatus
+	if editing {
+		status = t.ChangesetFileStatusEditing
+	}
+	return &status
 }
 
 func changesetOperations(channel string, isGit bool, hasFiles bool) []t.ChangesetOperation {
@@ -208,7 +216,7 @@ func (h *ahpHost) refreshChangesetLocked(channel string, force bool) {
 			copy.state.Files = slices.Clone(previous.state.Files)
 			for i := range copy.state.Files {
 				path, _ := h.resourcePath(copy.state.Files[i].Id)
-				copy.state.Files[i].IsEditing = ahpPtr(editing[filepath.Clean(path)])
+				copy.state.Files[i].Status = changesetFileStatus(editing[filepath.Clean(path)])
 			}
 			next = &copy
 		} else {

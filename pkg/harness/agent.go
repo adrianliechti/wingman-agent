@@ -582,6 +582,9 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 
 	toolCtx, cancelTools := withToolStop(ctx)
 	defer cancelTools()
+	userInput, userInputArrived := context.WithCancelCause(toolCtx)
+	defer userInputArrived(nil)
+	toolCtx = tool.WithUserInput(toolCtx, userInput)
 	inferenceCtx, cancelInference := context.WithCancelCause(inferenceCtx)
 	defer cancelInference(nil)
 	stopInference := context.AfterFunc(toolCtx, func() {
@@ -651,6 +654,8 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 			select {
 			case <-steerCh:
 				trySteerPreempt()
+				// A started tool is not preempted; one that only waits can end and let the message through.
+				userInputArrived(tool.ErrUserInput)
 			case <-streamDone:
 				return
 			case <-inferenceCtx.Done():

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -334,6 +335,64 @@ func TestSendDoesNotCompactAfterReachingTurnLimit(t *testing.T) {
 	}
 	if !errors.Is(turnErr, ErrMaxTurnsExceeded) || requests != 1 || compactions != 0 {
 		t.Fatalf("error=%v requests=%d compactions=%d", turnErr, requests, compactions)
+	}
+}
+
+func TestMidTurnSteeringReleasesAToolThatOnlyWaits(t *testing.T) {
+	var requests atomic.Int32
+	var secondReqBody string
+	client := streamingTestClient(func(r *http.Request) string {
+		if requests.Add(1) == 1 {
+			return phaseTestResponse(true, `{"type":"function_call","id":"fc_1","call_id":"call_1","name":"wait","arguments":"{}","status":"completed"}`)
+		}
+		raw, _ := io.ReadAll(r.Body)
+		secondReqBody = string(raw)
+		return phaseTestResponse(false, finalAnswerOutput)
+	})
+
+	waiting := make(chan struct{})
+	tools := []tool.Tool{{Name: "wait", Parameters: map[string]any{"type": "object"}, Execute: func(ctx context.Context, _ map[string]any) (tool.Result, error) {
+		close(waiting)
+		waitCtx, cancel := tool.UntilUserInput(ctx)
+		defer cancel()
+		select {
+		case <-waitCtx.Done():
+			if context.Cause(waitCtx) != tool.ErrUserInput || ctx.Err() != nil {
+				return tool.Result{}, waitCtx.Err()
+			}
+			return tool.Text("stopped waiting for the user"), nil
+		case <-time.After(30 * time.Second):
+			return tool.Text("waited the full time"), nil
+		}
+	}}}
+	a := &Agent{Config: &Config{client: &client, Tools: func() []tool.Tool { return tools }}}
+	stream, err := a.Send(t.Context(), []Content{{Text: "wait for the agents"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		<-waiting
+		if !a.QueueInputWithID([]Content{{Text: "check the logs instead"}}, "steer-logs") {
+			t.Error("QueueInput rejected steering during a tool call")
+		}
+	}()
+	started := time.Now()
+	for _, err := range stream {
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+	}
+	if waited := time.Since(started); waited > 10*time.Second {
+		t.Fatalf("the waiting tool held the user's message for %s", waited)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("expected 2 requests, got %d", got)
+	}
+	if !strings.Contains(secondReqBody, "stopped waiting for the user") || !strings.Contains(secondReqBody, "check the logs instead") {
+		t.Fatalf("second request lacks the tool result or the user's message: %s", secondReqBody)
+	}
+	if strings.Index(secondReqBody, "stopped waiting for the user") > strings.Index(secondReqBody, "check the logs instead") {
+		t.Fatalf("the user's message must follow the tool result: %s", secondReqBody)
 	}
 }
 

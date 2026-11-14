@@ -112,6 +112,46 @@ func TestCancelledTurnDrainsLateUpdatesBeforeNextPrompt(t *testing.T) {
 	})
 }
 
+func TestReaderThatStartsLateReceivesTheWholeBurst(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const chunks = 5000
+		peer := &lifecyclePeer{}
+		sent := make(chan struct{})
+		peer.promptFn = func(ctx context.Context, p acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
+			defer close(sent)
+			for range chunks {
+				if err := peer.conn.SessionUpdate(ctx, acpsdk.SessionNotification{SessionId: p.SessionId, Update: acpsdk.UpdateAgentMessageText("x")}); err != nil {
+					return acpsdk.PromptResponse{}, err
+				}
+			}
+			return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
+		}
+		a := newLifecycleClient(t, peer)
+		id, err := a.NewSession(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream, err := a.Send(context.Background(), id, []harness.Content{{Text: "burst"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-sent
+		synctest.Wait()
+		received := 0
+		for msg, err := range stream {
+			if err != nil {
+				t.Fatalf("after %d of %d chunks: %v", received, chunks, err)
+			}
+			for _, c := range msg.Content {
+				received += len(c.Text)
+			}
+		}
+		if received != chunks {
+			t.Fatalf("received %d of %d chunks", received, chunks)
+		}
+	})
+}
+
 func TestUnreadTurnCannotBlockAnotherSession(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		peer := &lifecyclePeer{}
@@ -119,7 +159,7 @@ func TestUnreadTurnCannotBlockAnotherSession(t *testing.T) {
 		peer.promptFn = func(ctx context.Context, p acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
 			if p.Prompt[0].Text.Text == "flood" {
 				defer close(flooded)
-				for range 600 {
+				for range turnEventBacklog + 100 {
 					if err := peer.conn.SessionUpdate(context.WithoutCancel(ctx), acpsdk.SessionNotification{SessionId: p.SessionId, Update: acpsdk.UpdateAgentMessageText("x")}); err != nil {
 						return acpsdk.PromptResponse{}, err
 					}

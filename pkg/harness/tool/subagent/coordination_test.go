@@ -3,6 +3,7 @@ package subagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,6 +74,52 @@ func TestAgentWaitAllAndAny(t *testing.T) {
 	}
 	if !strings.Contains(allRes.Content.Text(), "fast result ok") || !strings.Contains(allRes.Content.Text(), "slow result ok") {
 		t.Fatalf("unexpected mode=all output:\n%s", allRes.Content.Text())
+	}
+}
+
+func TestAgentWaitReturnsWhenTheUserSendsAMessage(t *testing.T) {
+	registry := task.NewRegistry()
+	t.Cleanup(registry.Close)
+	blocked, err := registry.Launch("slow audit", "explore", func(ctx context.Context, _ *task.Task) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waitTool tool.Tool
+	for _, tl := range taskTools(registry) {
+		if tl.Name == "agent_wait" {
+			waitTool = tl
+		}
+	}
+
+	userInput, arrived := context.WithCancelCause(t.Context())
+	defer arrived(nil)
+	time.AfterFunc(20*time.Millisecond, func() { arrived(tool.ErrUserInput) })
+	started := time.Now()
+	result, err := waitTool.Execute(tool.WithUserInput(t.Context(), userInput), map[string]any{"ids": []any{blocked.ID}, "timeout_seconds": 600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waited := time.Since(started); waited > 10*time.Second {
+		t.Fatalf("agent_wait held the user's message for %s", waited)
+	}
+	if text := result.Content.Text(); !strings.Contains(text, "the user sent a new message") || strings.Contains(text, "Timed out") {
+		t.Fatalf("unexpected result:\n%s", text)
+	}
+
+	// Without a message the wait runs to its timeout, and a cancelled call stays an error.
+	quiet, done := context.WithCancelCause(t.Context())
+	defer done(nil)
+	result, err = waitTool.Execute(tool.WithUserInput(t.Context(), quiet), map[string]any{"ids": []any{blocked.ID}, "timeout_seconds": 1})
+	if err != nil || !strings.Contains(result.Content.Text(), "Timed out after 1s") {
+		t.Fatalf("timeout result: %v\n%s", err, result.Content.Text())
+	}
+	cancelled, cancel := context.WithCancel(tool.WithUserInput(t.Context(), quiet))
+	cancel()
+	if _, err := waitTool.Execute(cancelled, map[string]any{"ids": []any{blocked.ID}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled call: %v", err)
 	}
 }
 

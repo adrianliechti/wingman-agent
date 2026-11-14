@@ -112,10 +112,12 @@ type toolCall struct {
 
 type turn struct {
 	ctx      context.Context
-	events   chan event
+	events   chan *event
 	done     chan struct{}
 	cancel   context.CancelFunc
 	updateMu sync.Mutex
+	// A history load reads snapshots of emitted, so its events only say that something changed.
+	replay bool
 
 	mu                sync.Mutex
 	emitted           []harness.Message
@@ -134,10 +136,13 @@ func (t *turn) send(msg harness.Message) {
 	default:
 	}
 	select {
-	case t.events <- event{msg: msg}:
+	case t.events <- &event{msg: msg}:
 	case <-t.done:
 	case <-t.ctx.Done():
 	default:
+		if t.replay {
+			return
+		}
 		t.mu.Lock()
 		t.streamErr = errors.New("ACP session update buffer exhausted; the consumer stopped reading")
 		t.mu.Unlock()
@@ -207,6 +212,9 @@ type event struct {
 	err  error
 	done bool
 }
+
+// How far a live turn's consumer may fall behind before the turn fails; an unread turn must not grow without bound.
+const turnEventBacklog = 1 << 14
 
 const (
 	modelConfigID  = "model"
@@ -649,9 +657,10 @@ func (a *Agent) loadSessionStream(ctx context.Context, id string, snapshots bool
 		loadCtx, cancel := context.WithCancel(ctx)
 		t := &turn{
 			ctx:    loadCtx,
-			events: make(chan event, 256),
+			events: make(chan *event, 1),
 			done:   make(chan struct{}),
 			cancel: cancel,
+			replay: true,
 		}
 		sess.mu.Lock()
 		if sess.loaded {
@@ -758,10 +767,6 @@ func (a *Agent) loadSessionStream(ctx context.Context, id string, snapshots bool
 				if !snapshots {
 					continue
 				}
-				// Coalesce a replay burst so history is cloned once per batch, not per event.
-				for len(t.events) > 0 {
-					<-t.events
-				}
 				if !yield(t.messages(), nil) {
 					return
 				}
@@ -854,7 +859,7 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 	sendCtx, cancel := context.WithCancel(ctx)
 	t := &turn{
 		ctx:               sendCtx,
-		events:            make(chan event, 256),
+		events:            make(chan *event, turnEventBacklog),
 		done:              make(chan struct{}),
 		cancel:            cancel,
 		ignoreUserUpdates: true,
@@ -905,7 +910,7 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 		}
 		close(responseDone)
 		select {
-		case t.events <- event{done: true, err: err}:
+		case t.events <- &event{done: true, err: err}:
 		case <-t.done:
 		}
 	}()

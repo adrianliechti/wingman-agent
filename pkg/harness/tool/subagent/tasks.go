@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -209,7 +210,12 @@ func taskTools(tasks *task.Registry) []tool.Tool {
 					timeoutSec = rawTimeout
 				}
 
-				infos, timedOut, err := tasks.Wait(ctx, ids, waitAll, time.Duration(timeoutSec)*time.Second)
+				waitCtx, cancel := tool.UntilUserInput(ctx)
+				defer cancel()
+				infos, timedOut, err := tasks.Wait(waitCtx, ids, waitAll, time.Duration(timeoutSec)*time.Second)
+				if errors.Is(err, context.Canceled) && ctx.Err() == nil && context.Cause(waitCtx) == tool.ErrUserInput {
+					return tool.Text("Stopped waiting because the user sent a new message; handle it first. Agents notify you when they finish, and you can wait for them again."), nil
+				}
 				if err != nil {
 					return tool.Result{}, err
 				}
