@@ -173,6 +173,7 @@ type benchResult struct {
 	Error        string       `json:"error,omitempty"`
 	Scenario     string       `json:"scenario,omitempty"`
 	Turns        []benchTurn  `json:"turns,omitempty"`
+	Behavior     *behavior    `json:"behavior,omitempty"`
 }
 
 type benchTurn struct {
@@ -187,6 +188,7 @@ type benchTurn struct {
 	FileCount          int          `json:"source_file_count"`
 	BuildOutput        string       `json:"build_output,omitempty"`
 	Error              string       `json:"error,omitempty"`
+	Behavior           *behavior    `json:"behavior,omitempty"`
 }
 
 func writeFixture(root string) error {
@@ -424,15 +426,34 @@ func checkDashboardRequirements(root, turn string) error {
 	return nil
 }
 
-func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nodeModules, gatewayURL, otlpURL string) benchResult {
-	result := benchResult{Agent: agentName, Model: model, Effort: effort, Scenario: scenario}
+func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nodeModules, gatewayURL, otlpURL, recordPath string) (result benchResult) {
+	result = benchResult{Agent: agentName, Model: model, Effort: effort, Scenario: scenario}
+	recorder, err := newRequestRecorder(gatewayURL)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	// Registered first so it runs after the agent process has exited.
+	defer func() {
+		recorder.Close()
+		exchanges := recorder.snapshot()
+		summary := analyzeBehavior(exchanges, leadConversation(exchanges))
+		result.Behavior = &summary
+		if err := recorder.writeJSONL(recordPath); err != nil {
+			result.Error = appendBenchError(result.Error, "record: "+err.Error())
+		}
+	}()
+	gatewayURL = recorder.URL()
 	fixture, err := os.MkdirTemp("", "harness-e2e-"+agentName+"-")
 	if err != nil {
 		result.Error = err.Error()
 		return result
 	}
 	defer os.RemoveAll(fixture)
-	if scenario == "dashboard" {
+	script, scripted := scriptedScenarios[scenario]
+	if scripted {
+		err = script.fixture(fixture)
+	} else if scenario == "dashboard" {
 		err = writeDashboardFixture(fixture, nodeModules)
 	} else {
 		switch scenario {
@@ -447,7 +468,7 @@ func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nod
 		case "bug_review":
 			err = writeBugReviewFixture(fixture)
 		default:
-			err = fmt.Errorf("unknown scenario %q (choose invoice, invoice_dense, dashboard, refactor_move, concurrency_bug, plan_then_build, bug_review, or suite)", scenario)
+			err = fmt.Errorf("unknown scenario %q (choose %s, dashboard, or suite)", scenario, strings.Join(allGoScenarios, ", "))
 		}
 	}
 	if err != nil {
@@ -564,6 +585,28 @@ func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nod
 		result.AgentStderr = stderr.String()
 		return result
 	}
+	if scripted {
+		result.Turns = runScriptedScenario(ctx, conn, client, recorder, session, fixture, script)
+		result.TestsPassed = len(result.Turns) == len(script.steps)
+		for _, turn := range result.Turns {
+			result.TotalMS += turn.TotalMS
+			if turn.Error != "" {
+				result.TestsPassed = false
+				if result.Error == "" {
+					result.Error = turn.Name + ": " + turn.Error
+				}
+			}
+		}
+		if len(result.Turns) > 0 {
+			last := result.Turns[len(result.Turns)-1]
+			result.StopReason, result.Usage, result.FinalText = last.StopReason, last.Usage, last.FinalText
+		}
+		if value := strings.TrimSpace(stderr.String()); value != "" {
+			result.AgentStderr = value
+		}
+		return result
+	}
+
 	if scenario == "dashboard" {
 		result.Turns = append(result.Turns,
 			runDashboardTurn(ctx, conn, client, session.SessionId, fixture, "create_dashboard", dashboardCreatePrompt),
@@ -668,6 +711,39 @@ func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nod
 	return result
 }
 
+type scenarioRun struct {
+	name   string
+	suffix string
+}
+
+func repeatScenarios(scenarios []string, repeat int) []scenarioRun {
+	var runs []scenarioRun
+	for i := 1; i <= max(repeat, 1); i++ {
+		for _, name := range scenarios {
+			run := scenarioRun{name: strings.TrimSpace(name)}
+			if repeat > 1 {
+				run.suffix = fmt.Sprintf("-r%d", i)
+			}
+			runs = append(runs, run)
+		}
+	}
+	return runs
+}
+
+func recordPath(flagValue, output string) string {
+	switch flagValue {
+	case "none", "":
+		return ""
+	case "auto":
+		if output == "" {
+			return ""
+		}
+		return strings.TrimSuffix(output, filepath.Ext(output)) + ".requests.jsonl"
+	default:
+		return flagValue
+	}
+}
+
 func claudeTelemetryEnvironment(endpoint, model string) map[string]string {
 	return map[string]string{
 		"CLAUDE_CODE_ENABLE_TELEMETRY":        "1",
@@ -695,7 +771,9 @@ func main() {
 	agentName := flag.String("agent", "wingman", "wingman, codex, or claude")
 	model := flag.String("model", "gpt-5.6-sol", "model ID")
 	effort := flag.String("effort", "high", "reasoning effort")
-	scenario := flag.String("scenario", "invoice", "invoice, invoice_dense, dashboard, refactor_move, concurrency_bug, plan_then_build, bug_review, or suite")
+	scenario := flag.String("scenario", "invoice", strings.Join(allGoScenarios, ", ")+", dashboard, a comma-separated list, or suite")
+	repeat := flag.Int("repeat", 1, "runs per scenario for a list or suite; model behavior varies, so compare several")
+	summary := flag.String("summary", "", "print pass rates and behavior metrics for comma-separated result directories without running an agent")
 	nodeModules := flag.String("node-modules", "server/ui/node_modules", "preinstalled node_modules for dashboard")
 	gateway := flag.String("gateway", "http://localhost:4242", "gateway base URL")
 	timeout := flag.Duration("timeout", 12*time.Minute, "run timeout")
@@ -703,7 +781,14 @@ func main() {
 	telemetryOutput := flag.String("telemetry-output", "", "optional OTLP JSON sidecar path (defaults beside -output)")
 	reportOutput := flag.String("report", "auto", "comparison HTML path; auto writes beside -output, none disables")
 	reportOnly := flag.String("report-only", "", "generate comparison artifacts from an existing result directory without running an agent")
+	recordOutput := flag.String("record", "auto", "JSONL file for the recorded model requests and responses; auto writes beside -output, none disables")
 	flag.Parse()
+	if *summary != "" {
+		if err := writeSummary(os.Stdout, strings.Split(*summary, ",")); err != nil {
+			panic(err)
+		}
+		return
+	}
 	if *reportOnly != "" {
 		directory, err := filepath.Abs(*reportOnly)
 		if err != nil {
@@ -739,7 +824,11 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	if *scenario == "suite" {
+	if *scenario == "suite" || strings.Contains(*scenario, ",") || *repeat > 1 {
+		scenarios := allGoScenarios
+		if *scenario != "suite" {
+			scenarios = strings.Split(*scenario, ",")
+		}
 		outDir := *output
 		if outDir == "" {
 			var err error
@@ -751,14 +840,15 @@ func main() {
 			panic(err)
 		}
 		failed := false
-		for _, sc := range allGoScenarios {
+		for _, sc := range repeatScenarios(scenarios, *repeat) {
 			otlp := newOTLPReceiver()
 			// -timeout bounds one scenario; a shared budget would make late
 			// scenarios fail for time the earlier ones spent.
 			scenarioCtx, cancelScenario := context.WithTimeout(context.Background(), *timeout)
-			res := runOne(scenarioCtx, absoluteBinary, *agentName, *model, *effort, sc, absoluteNodeModules, strings.TrimRight(*gateway, "/"), otlp.URL())
+			base := filepath.Join(outDir, fmt.Sprintf("%s-%s-%s", *agentName, *effort, sc.name+sc.suffix))
+			sc := sc.name
+			res := runOne(scenarioCtx, absoluteBinary, *agentName, *model, *effort, sc, absoluteNodeModules, strings.TrimRight(*gateway, "/"), otlp.URL(), recordPath(*recordOutput, base+".json"))
 			cancelScenario()
-			base := filepath.Join(outDir, fmt.Sprintf("%s-%s-%s", *agentName, *effort, sc))
 			if err := otlp.writeJSON(base + ".otel.json"); err != nil {
 				otlp.Close()
 				panic(err)
@@ -800,7 +890,7 @@ func main() {
 	otlp := newOTLPReceiver()
 	defer otlp.Close()
 
-	result := runOne(ctx, absoluteBinary, *agentName, *model, *effort, *scenario, absoluteNodeModules, strings.TrimRight(*gateway, "/"), otlp.URL())
+	result := runOne(ctx, absoluteBinary, *agentName, *model, *effort, *scenario, absoluteNodeModules, strings.TrimRight(*gateway, "/"), otlp.URL(), recordPath(*recordOutput, *output))
 	telemetryPath := *telemetryOutput
 	if telemetryPath == "" && *output != "" {
 		extension := filepath.Ext(*output)

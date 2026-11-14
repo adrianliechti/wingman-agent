@@ -31,6 +31,7 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 			"- To create a new file (or replace an empty file), use an empty `old_string` and put the complete file in `new_string`.",
 			"- To delete an existing file, set `delete: true` (omit `old_string` and `new_string`).",
 			"- To move or rename an existing file, set `move_to` to the destination path; omit `old_string`/`new_string` for a pure move, or include them to move and edit in one step.",
+			"- Directories are not entries: to move or remove one, move or delete each of its files. A directory left empty this way is removed.",
 			"- Entries for the same file run in order, so later entries see earlier replacements.",
 			"- Every entry is validated and every result is staged before any file is changed. Validation failures leave files unchanged; commit failures attempt rollback and report any restoration errors. External readers may observe the batch being committed.",
 			"- The result is authoritative; do not re-read files merely to verify a successful edit.",
@@ -309,7 +310,11 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 				}
 				changes = append(changes, record)
 			}
-			return tool.Result{Content: tool.TextContent(fmt.Sprintf("Applied %d edits across %d files.\n%s", editCount, len(tx.changes), strings.Join(summaries, "\n"))), Metadata: map[string]any{tool.FileChangesMetadata: changes}}, nil
+			summary := fmt.Sprintf("Applied %d edits across %d files.\n%s", editCount, len(tx.changes), strings.Join(summaries, "\n"))
+			if len(tx.prunedDirs) > 0 {
+				summary += "\nRemoved empty directories: " + strings.Join(tx.prunedDirs, ", ")
+			}
+			return tool.Result{Content: tool.TextContent(summary), Metadata: map[string]any{tool.FileChangesMetadata: changes}}, nil
 		},
 	}
 }

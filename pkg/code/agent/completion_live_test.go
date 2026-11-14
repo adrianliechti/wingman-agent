@@ -84,17 +84,25 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 		t.Fatal(err)
 	}
 	var requests atomic.Int64
+	var nativeBoundary atomic.Bool
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.FlushInterval = -1
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		fault, _ := resp.Request.Context().Value(liveProgressKey{}).(bool)
-		if !fault || resp.StatusCode != http.StatusOK {
+		if resp.StatusCode != http.StatusOK {
 			return nil
 		}
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			return err
+		}
+		if !fault {
+			if bytes.Contains(body, []byte(`"end_turn":true`)) {
+				nativeBoundary.Store(true)
+			}
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+			return nil
 		}
 		body, err = liveProgressFault(body, !requiresFinish(model))
 		if err != nil {
@@ -281,7 +289,9 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 			}
 		}
 	}
-	if !strings.Contains(text.String(), "STEER_OK") || !strings.Contains(text.String(), "QUEUE_OK") || (requiresFinish(resumeModel) && finishes < 2) {
+	// A gateway that reports the model's own end of turn finishes it without the marker.
+	needsMarkers := requiresFinish(resumeModel) && !nativeBoundary.Load()
+	if !strings.Contains(text.String(), "STEER_OK") || !strings.Contains(text.String(), "QUEUE_OK") || (needsMarkers && finishes < 2) {
 		t.Fatalf("steering/follow-up/finish missing: accepted finishes=%d text=%q", finishes, text.String())
 	}
 	usage := a.Usage(id)
@@ -293,6 +303,8 @@ func liveProgressFault(body []byte, commentary bool) ([]byte, error) {
 	mark = func(value any) {
 		switch value := value.(type) {
 		case map[string]any:
+			// The fault is a stop without a turn boundary; a gateway that reports one would end the turn.
+			delete(value, "end_turn")
 			if commentary && value["type"] == "message" && value["role"] == "assistant" {
 				value["phase"] = "commentary"
 			}

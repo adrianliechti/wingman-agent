@@ -19,6 +19,13 @@ var allGoScenarios = []string{
 	"concurrency_bug",
 	"plan_then_build",
 	"bug_review",
+	"file_ops",
+	"mode_switch",
+	"agent_fanout",
+	"fork_context",
+	"image_read",
+	"unattended",
+	"slash_review",
 }
 
 const refactorMovePrompt = `Refactor this repository cleanly:
@@ -177,8 +184,6 @@ func (c *Cache) Get(key string) (string, bool) {
 		return "", false
 	}
 	if !c.now().Before(it.expiresAt) {
-		// BUG 1: mutating map under RLock causes concurrent map write race,
-		// and calling c.evictKey acquires Lock while holding RLock -> deadlock!
 		c.evictKey(key)
 		return "", false
 	}
@@ -196,8 +201,6 @@ func (c *Cache) Set(key, value string) {
 	defer c.mu.Unlock()
 	now := c.now()
 	if _, exists := c.items[key]; !exists && len(c.items) >= c.capacity {
-		// BUG 2: fails to purge expired items first and never removes key from order slice,
-		// evicting stale/already-deleted keys instead of making room.
 		if len(c.order) > 0 {
 			oldest := c.order[0]
 			delete(c.items, oldest)
@@ -306,8 +309,6 @@ func RunWithRetry(ctx context.Context, cfg Config, fn func(context.Context) erro
 		} else {
 			lastErr = err
 		}
-		// BUG 1: sleeps even after the final failed attempt.
-		// BUG 2: ignores ctx cancellation while sleeping and does not cap delay at cfg.MaxDelay.
 		time.Sleep(delay)
 		delay *= 2
 	}

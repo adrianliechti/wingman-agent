@@ -57,7 +57,7 @@ func sandboxGuideLine(opts *Options) string {
 	return strings.Join([]string{
 		"- Commands run in an OS sandbox. Use the Shell writable roots in Environment context to choose output paths and workdir." + credentials + " " + protection,
 		"- Use private TMPDIR/TEMP/TMP for temporary files; " + temp + ". Expand environment variables inside command using the host shell's syntax. In workdir and writable_roots, supply literal paths, not environment-variable references.",
-		"- Preserve inherited tool/cache configuration; many tools still read a cache they cannot write. Set GODEBUG=goindex=0 for Go commands so they read the host build cache without writing its package index. Only if a command still fails writing a disposable cache, redirect that cache to private temp for the command, e.g. " + cacheExample + "; likewise PIP_CACHE_DIR, UV_CACHE_DIR or GOCACHE/GOTMPDIR. Do not reset HOME, GOPATH, GOMODCACHE, CARGO_HOME or XDG_CACHE_HOME to repair one cache error.",
+		"- Preserve inherited tool/cache configuration; many tools still read a cache they cannot write. Go commands already run with GODEBUG=goindex=0, so they read the host build cache without writing it; a `writing stat cache` warning is harmless. Only if a command still fails writing a disposable cache, redirect that cache to private temp for the command, e.g. " + cacheExample + "; likewise PIP_CACHE_DIR, UV_CACHE_DIR or GOCACHE/GOTMPDIR. Do not reset HOME, GOPATH, GOMODCACHE, CARGO_HOME or XDG_CACHE_HOME to repair one cache error.",
 		"- " + network + ". Use default permissions when configured access suffices. For required network access or writes outside listed roots, request require_permissions with the needed network/writable_roots and justification. Grants retain the sandbox and apply to the launched command, not later exec calls.",
 		"- Request require_escalated only when the required operation cannot run with scoped grants. It removes the local sandbox for the launched command; supply justification and omit network/writable_roots.",
 		"- Run commands that need host credentials, such as git push, with default permissions. When a command that finishes within the wait fails with a likely sandbox denial, the harness requests approval and re-runs the whole command, inside the sandbox with network access when only the network was missing and otherwise outside it; the result says so. Keep such commands out of long or non-repeatable command chains. Validation runs are not re-run.",
@@ -217,6 +217,9 @@ func buildToolCommand(ctx context.Context, command, workspaceDir, workingDir str
 	}
 	if sandbox != nil && !sandbox.Network {
 		environment = environmentOffline(environment)
+	}
+	if sandbox != nil {
+		environment = environmentReadOnlyCaches(environment)
 	}
 	return buildCommandWithEnvironment(ctx, command, workingDir, environment, sandbox)
 }

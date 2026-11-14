@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -37,7 +38,8 @@ type fileChange struct {
 }
 
 type fileTransaction struct {
-	changes []fileChange
+	changes    []fileChange
+	prunedDirs []string
 }
 
 // Serialize agent transactions, including transactions from other sessions.
@@ -195,7 +197,32 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 		}
 	}
 	cleanup()
+	for i := range tx.changes {
+		change := &tx.changes[i]
+		if change.beforePresent && !change.afterPresent {
+			tx.prunedDirs = append(tx.prunedDirs, pruneEmptyParents(change)...)
+		}
+	}
 	return nil
+}
+
+// Like git rm: moving a directory file by file would otherwise leave an empty husk.
+func pruneEmptyParents(change *fileChange) []string {
+	// An unrooted target resolves against the filesystem root, which gives no bound.
+	if !change.target.InWorkspace && change.target.RootPath == "" {
+		return nil
+	}
+	var pruned []string
+	display := filepath.ToSlash(change.displayPath)
+	for dir := filepath.Dir(change.path); dir != "." && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
+		// Remove fails on a directory that still has entries.
+		if err := change.root.Remove(dir); err != nil {
+			break
+		}
+		display = pathpkg.Dir(display)
+		pruned = append(pruned, display)
+	}
+	return pruned
 }
 
 func closeTransactionRoots(tx *fileTransaction) {

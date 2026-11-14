@@ -280,3 +280,89 @@ func TestEditOptionalFieldSpellings(t *testing.T) {
 		})
 	}
 }
+
+func TestEditMoveAndDeletePruneEmptiedDirectories(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"internal/util/slug.go":        "package util\n",
+		"internal/util/strings.go":     "package util\n",
+		"internal/legacy/v1/format.go": "package v1\n",
+		"internal/keep/kept.go":        "package keep\n",
+		"internal/keep/removed.go":     "package keep\n",
+		"top.txt":                      "top\n",
+	}
+	for name, content := range files {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	var readTool, editTool tool.Tool
+	for _, tl := range Tools(root, &Options{Freshness: NewFreshness(root)}) {
+		switch tl.Name {
+		case "read":
+			readTool = tl
+		case "edit":
+			editTool = tl
+		}
+	}
+	for name := range files {
+		if _, err := readTool.Execute(t.Context(), map[string]any{"file_path": name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, err := editTool.Execute(t.Context(), map[string]any{"edits": []any{
+		map[string]any{"file_path": "internal/util/slug.go", "move_to": "internal/textutil/slug.go", "old_string": "package util", "new_string": "package textutil"},
+		map[string]any{"file_path": "internal/util/strings.go", "move_to": "internal/textutil/strings.go", "old_string": "package util", "new_string": "package textutil"},
+		map[string]any{"file_path": "internal/legacy/v1/format.go", "delete": true},
+		map[string]any{"file_path": "internal/keep/removed.go", "delete": true},
+		map[string]any{"file_path": "top.txt", "delete": true},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{"internal/util", "internal/legacy/v1", "internal/legacy"} {
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(gone))); !os.IsNotExist(err) {
+			t.Errorf("%s was left behind: %v", gone, err)
+		}
+		if !strings.Contains(res.Content.Text(), gone) {
+			t.Errorf("result does not report removing %s:\n%s", gone, res.Content.Text())
+		}
+	}
+	// A directory that still holds a file, and the root itself, must survive.
+	for _, kept := range []string{"internal/keep/kept.go", "internal/textutil/slug.go", "."} {
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(kept))); err != nil {
+			t.Errorf("%s is missing: %v", kept, err)
+		}
+	}
+	if strings.Contains(res.Content.Text(), "internal/keep") && !strings.Contains(res.Content.Text(), "D internal/keep/removed.go") {
+		t.Errorf("result reports a directory that was not removed:\n%s", res.Content.Text())
+	}
+
+	changes, err := tool.ResultFileChanges(res.Metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := UndoFileChanges(t.Context(), root, changes); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range files {
+		got, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
+		if err != nil || string(got) != content {
+			t.Errorf("undo did not restore %s: %q, %v", name, got, err)
+		}
+	}
+	// Undo removes the files the edit created, and with them their directory.
+	if _, err := os.Stat(filepath.Join(dir, "internal", "textutil")); !os.IsNotExist(err) {
+		t.Errorf("undo left internal/textutil behind: %v", err)
+	}
+}
