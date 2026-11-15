@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -19,6 +20,7 @@ type ahpChat struct {
 	session          *ahpSession
 	controller       *sessionController
 	chat             t.ChatState
+	title            string                // the session's name for the chat, which no action can give the chat itself
 	config           *t.SessionConfigState // the controller's, read without its lock
 	prompts          map[string]*ahpPrompt
 	promptSeq        int
@@ -82,7 +84,7 @@ type ahpPendingAction struct {
 
 func newAHPChat(a *ahpSession, c *sessionController, resource, title, stamp string) *ahpChat {
 	config := ahpConfig(c.state.Settings)
-	return &ahpChat{project: a.project, session: a, controller: c, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{},
+	return &ahpChat{project: a.project, session: a, controller: c, title: title, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{},
 		chat: t.ChatState{Resource: resource, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}, Config: &t.ChatConfigState{Values: config.Values}},
 	}
 }
@@ -143,7 +145,13 @@ func (a *ahpChat) chatAction(action t.StateAction) {
 
 func (a *ahpChat) syncLocked(c *sessionController, changes []SessionChange) {
 	a.project.mu.Lock()
-	defer a.project.mu.Unlock()
+	defer func() {
+		unsaved := a.session.unsaved
+		a.project.mu.Unlock()
+		if unsaved {
+			a.session.saveTitle()
+		}
+	}()
 	if a.session.deleted || a.removed {
 		return
 	}
@@ -801,14 +809,14 @@ func ahpConfig(settings SessionSettings) *t.SessionConfigState {
 		if len(values) == 0 {
 			return
 		}
-		def, _ := json.Marshal(current)
-		property := t.SessionConfigPropertySchema{Type: "string", Title: title, Default: ahpPtr(json.RawMessage(def)), SessionMutable: ahpPtr(true), ChatMutable: ahpPtr(true), EnumLabels: labels}
+		// A default that followed the value would change the schema without an action.
+		property := t.SessionConfigPropertySchema{Type: "string", Title: title, SessionMutable: ahpPtr(true), ChatMutable: ahpPtr(true), EnumLabels: labels}
 		for _, value := range values {
 			data, _ := json.Marshal(value)
 			property.Enum = append(property.Enum, data)
 		}
 		cfg.Schema.Properties[key] = property
-		cfg.Values[key] = def
+		cfg.Values[key], _ = json.Marshal(current)
 	}
 	models, names := []string{}, []string{}
 	for _, m := range settings.Models {
@@ -829,8 +837,10 @@ func ahpConfig(settings SessionSettings) *t.SessionConfigState {
 	add("mode", "Mode", settings.Mode, modes, labels)
 	if settings.Unattended != nil {
 		value, _ := json.Marshal(*settings.Unattended)
-		cfg.Schema.Properties["unattended"] = t.SessionConfigPropertySchema{Type: "boolean", Title: "Unattended", SessionMutable: ahpPtr(true), ChatMutable: ahpPtr(true), Default: ahpPtr(json.RawMessage(value))}
+		cfg.Schema.Properties["unattended"] = t.SessionConfigPropertySchema{Type: "boolean", Title: "Unattended", SessionMutable: ahpPtr(true), ChatMutable: ahpPtr(true)}
 		cfg.Values["unattended"] = value
 	}
+	// Every setting always has a value.
+	cfg.Schema.Required = slices.Sorted(maps.Keys(cfg.Schema.Properties))
 	return cfg
 }

@@ -18,6 +18,7 @@ type ahpSession struct {
 	state    t.SessionState
 	chats    []*ahpChat
 	deleted  bool
+	unsaved  bool // the alias has a title that is not saved yet
 	pending  map[string]*ahpPendingAction
 	acks     map[t.ActionOrigin]ahpAck
 	ackOrder []t.ActionOrigin
@@ -68,14 +69,14 @@ func (a *ahpSession) chat(resource string) *ahpChat {
 }
 
 func (a *ahpChat) summary() t.ChatSummary {
-	return t.ChatSummary{Resource: a.chat.Resource, Title: a.chat.Title, Status: a.chat.Status, ModifiedAt: a.chat.ModifiedAt, Origin: a.chat.Origin}
+	return t.ChatSummary{Resource: a.chat.Resource, Title: a.title, Status: a.chat.Status, ModifiedAt: a.chat.ModifiedAt, Origin: a.chat.Origin}
 }
 
 func (a *ahpSession) summary() t.SessionSummary {
 	summary := t.SessionSummary{Resource: a.resource, Provider: a.state.Provider, Title: a.state.Title, Status: a.state.Status, CreatedAt: a.created, ModifiedAt: a.created, Project: a.state.Project, WorkingDirectories: a.state.WorkingDirectories, DefaultChat: a.state.DefaultChat, Chats: []t.SessionChatSummary{}}
 	for _, ch := range a.chats {
 		status := ch.chat.Status
-		summary.Chats = append(summary.Chats, t.SessionChatSummary{Resource: ch.chat.Resource, Title: ch.chat.Title, Status: &status})
+		summary.Chats = append(summary.Chats, t.SessionChatSummary{Resource: ch.chat.Resource, Title: ch.title, Status: &status})
 		summary.ModifiedAt = max(summary.ModifiedAt, ch.chat.ModifiedAt)
 	}
 	return summary
@@ -94,7 +95,30 @@ func (a *ahpSession) rememberTitle() {
 	}
 	alias.Title = a.state.Title
 	a.project.rememberAliasLocked(alias)
-	_ = a.project.saveAlias(alias)
+	a.unsaved = true
+}
+
+// saveTitle writes a remembered title outside the host's lock, which the actions of every project wait for.
+func (a *ahpSession) saveTitle() {
+	p := a.project
+	p.aliasMu.Lock()
+	defer p.aliasMu.Unlock()
+	p.mu.Lock()
+	alias, saved := p.aliases[a.resource]
+	unsaved := a.unsaved
+	a.unsaved = false
+	p.mu.Unlock()
+	if !saved || !unsaved {
+		return
+	}
+	_ = p.saveAlias(alias)
+	// Disposing the session meanwhile removed its alias.
+	p.mu.Lock()
+	_, saved = p.aliases[a.resource]
+	p.mu.Unlock()
+	if !saved {
+		p.removeAlias(alias)
+	}
 }
 
 func (a *ahpSession) removeClient(id string) {
@@ -104,6 +128,26 @@ func (a *ahpSession) removeClient(id string) {
 			return
 		}
 	}
+}
+
+// ahpActivityBits are the status bits a session derives from its chats; its
+// read and archived flags are its own.
+const ahpActivityBits = t.SessionStatus(1<<5 - 1)
+
+// activity is the default chat's, unless another chat needs input or failed.
+func (a *ahpSession) activity() t.SessionStatus {
+	activity := a.chats[0].chat.Status & ahpActivityBits
+	failed := false
+	for _, ch := range a.chats[1:] {
+		if ch.chat.Status.Has(t.SessionStatusInputNeeded) {
+			return t.SessionStatusInputNeeded
+		}
+		failed = failed || ch.chat.Status.Has(t.SessionStatusError)
+	}
+	if failed && !activity.Has(t.SessionStatusInputNeeded) {
+		return t.SessionStatusError
+	}
+	return activity
 }
 
 // syncChats publishes session-level consequences of a chat's projection.
@@ -124,7 +168,7 @@ func (a *ahpSession) syncChats(previous t.SessionSummary) {
 			a.sessionAction(t.StateAction{Value: &t.SessionChatUpdatedAction{Type: t.ActionTypeSessionChatUpdated, Chat: next.Resource, Changes: t.PartialChatSummary{Title: &next.Title, Status: &next.Status, ModifiedAt: &next.ModifiedAt}}})
 		}
 	}
-	a.state.Status = a.chats[0].chat.Status
+	a.state.Status = a.activity() | a.state.Status&^ahpActivityBits
 	a.syncInputNeeded()
 	if next := a.summary(); !reflect.DeepEqual(previous, next) {
 		a.project.notifyRoot("root/sessionSummaryChanged", t.SessionSummaryChangedParams{Channel: t.RootResourceURI, Session: a.resource, Changes: t.PartialSessionSummary{Title: &next.Title, Status: &next.Status, ModifiedAt: &next.ModifiedAt, Chats: next.Chats}})
@@ -199,6 +243,8 @@ func (a *ahpSession) chatDeleted(ch *ahpChat) {
 	a.deleted = true
 	for _, other := range a.chats {
 		other.removed = true
+		// The session's subscribers learn of every chat that goes with it.
+		a.sessionAction(t.StateAction{Value: &t.SessionChatRemovedAction{Type: t.ActionTypeSessionChatRemoved, Chat: other.chat.Resource}})
 		delete(a.project.chats, other.chat.Resource)
 		for client := range a.project.clients {
 			delete(client.subscriptions, other.chat.Resource)

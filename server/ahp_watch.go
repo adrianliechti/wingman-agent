@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io/fs"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -64,16 +63,13 @@ func (p *ahpProject) createResourceWatch(raw json.RawMessage) (any, error) {
 		Track:     func(rel string, _ fs.DirEntry) bool { return len(includes) == 0 || matchesWatch(includes, rel) },
 		Limit:     100000,
 	})
+	// A watch of something that does not exist would never report it.
+	if _, err := p.server.workspace.Root.Stat(rel); err != nil {
+		return nil, err
+	}
 	p.mu.Lock()
 	if p.watches == nil {
 		p.watches = map[string]*ahpResourceWatch{}
-	}
-	for uri, existing := range p.watches {
-		if reflect.DeepEqual(existing.state, w.state) {
-			existing.touched = time.Now()
-			p.mu.Unlock()
-			return t.CreateResourceWatchResult{Channel: uri}, nil
-		}
 	}
 	full := len(p.watches) >= 64
 	p.mu.Unlock()

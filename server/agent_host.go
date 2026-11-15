@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"crypto/subtle"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
 )
@@ -20,18 +22,21 @@ type HostOptions struct {
 	Roots []string
 	// Token must accompany every connection when set.
 	Token string
+	// Idle is how long a project stays open without clients or work: 15 minutes when zero.
+	Idle time.Duration
 
 	disableManagedTools bool
 }
 
 // Host serves AHP for any project, opening one when a session names its directory.
 type Host struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	ahp       *ahpHost
-	token     string
-	handler   http.Handler
-	closeOnce sync.Once
+	ctx        context.Context
+	cancel     context.CancelFunc
+	ahp        *ahpHost
+	token      string
+	handler    http.Handler
+	background sync.WaitGroup
+	closeOnce  sync.Once
 }
 
 func NewHost(ctx context.Context, opts *HostOptions) (*Host, error) {
@@ -63,6 +68,20 @@ func NewHost(ctx context.Context, opts *HostOptions) (*Host, error) {
 		return newServer(hostCtx, dir, &ServerOptions{NoBrowser: true, disableManagedTools: opts.disableManagedTools}, h.ahp)
 	}
 	h.ahp.loadSavedSessions()
+
+	idle := cmp.Or(opts.Idle, 15*time.Minute)
+	h.background.Go(func() {
+		ticker := time.NewTicker(min(idle, time.Minute))
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hostCtx.Done():
+				return
+			case <-ticker.C:
+				h.ahp.closeIdle(idle)
+			}
+		}
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ahp", h.handleAHP)
@@ -119,6 +138,7 @@ func (h *Host) Run(ctx context.Context, port int) error {
 func (h *Host) Close() {
 	h.closeOnce.Do(func() {
 		h.cancel()
+		h.background.Wait()
 		// A project still opening closes itself once it finds the host closed.
 		h.ahp.close()
 		for _, p := range h.ahp.loaded() {

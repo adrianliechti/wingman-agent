@@ -617,7 +617,7 @@ func TestReviewWorkspaceAHPMalformedFramesKeepConnection(t *testing.T) {
 		want  float64
 	}{
 		{`{`, -32700},
-		{`[{"jsonrpc":"2.0","id":1,"method":"ping"}]`, -32700},
+		{`[{"jsonrpc":"2.0","id":1,"method":"ping"}]`, -32600},
 		{`{"jsonrpc":"1.0","id":2,"method":"ping"}`, -32600},
 		{`{"jsonrpc":"2.0","id":3}`, -32600},
 		{`{"jsonrpc":"2.0","id":4,"method":"listSessions"}`, -32602},

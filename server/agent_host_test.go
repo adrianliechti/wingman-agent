@@ -13,6 +13,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
+	"github.com/adrianliechti/wingman-agent/pkg/terminal"
 	"github.com/microsoft/agent-host-protocol/clients/go/ahp"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 	"github.com/microsoft/agent-host-protocol/clients/go/ahpws"
@@ -112,8 +113,10 @@ func TestHostServesSeveralProjects(t *testing.T) {
 	// A session's directory opens its project; other directories stay closed.
 	err = client.Request(ctx, "createSession", types.CreateSessionParams{Channel: "ahp-session:/outside", Provider: ahpPtr("wingman"), WorkingDirectories: []string{fileuri.FromPath(filepath.Dir(root))}}, nil)
 	hostTestCode(t, err, types.ErrorCodePermissionDenied)
-	err = client.Request(ctx, "createSession", types.CreateSessionParams{Channel: "ahp-session:/nowhere", Provider: ahpPtr("wingman")}, nil)
-	hostTestCode(t, err, types.ErrorCodeInvalidParams)
+	// The protocol makes the directory optional; the host's default one is used.
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: "ahp-session:/default", Provider: ahpPtr("wingman")}, nil); err != nil {
+		t.Fatal(err)
+	}
 
 	var config types.ResolveSessionConfigResult
 	if err := client.Request(ctx, "resolveSessionConfig", types.ResolveSessionConfigParams{Channel: types.RootResourceURI, Provider: ahpPtr("wingman"), WorkingDirectory: &uriA}, &config); err != nil {
@@ -165,7 +168,7 @@ func TestHostServesSeveralProjects(t *testing.T) {
 			t.Fatalf("listed session without its project: %+v", session)
 		}
 	}
-	if len(directories) != 3 || directories["ahp-session:/in-a"] != uriA || directories["ahp-session:/in-b"] != uriB || directories["ahp-session:/through-link"] != uriB {
+	if len(directories) != 4 || directories["ahp-session:/in-a"] != uriA || directories["ahp-session:/in-b"] != uriB || directories["ahp-session:/through-link"] != uriB || directories["ahp-session:/default"] != fileuri.FromPath(root) {
 		t.Fatalf("session list: %v", directories)
 	}
 
@@ -246,6 +249,85 @@ func TestHostRestoresSavedSessions(t *testing.T) {
 	}
 	if loaded := second.ahp.loaded(); len(loaded) != 1 {
 		t.Fatalf("subscribing opened %d projects", len(loaded))
+	}
+}
+
+func TestHostClosesIdleProjects(t *testing.T) {
+	testenv.WingmanHome(t)
+	ahpTestGateway(t)
+	root := canonicalPath(t.TempDir())
+	_, uri := hostTestProject(t, root, "project")
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	const session = "ahp-session:/resting"
+
+	host, endpoint := hostTestStart(t, root, "")
+	client := ahpTestClient(t, endpoint, "editor")
+	created := hostTestSession(t, client, session, uri)
+	state, sub := ahpSubscribeChat(t, client, *created.DefaultChat)
+	ahpSend(t, client, state.Resource, "only-turn", 1)
+	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool {
+		_, complete := e.Action.Value.(*types.ChatTurnCompleteAction)
+		return complete
+	})
+
+	// A running terminal is work that closing would cut off.
+	project := host.ahp.loaded()[0]
+	// The turn's last action reaches clients just before its session settles.
+	for settled := time.Now().Add(5 * time.Second); project.server.busy(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(settled) {
+			t.Fatal("project stayed busy after its turn completed")
+		}
+	}
+	if terminal.Supported() {
+		shell := "agenthost-terminal:/resting"
+		claim := types.TerminalClaim{Value: &types.TerminalClientClaim{Kind: types.TerminalClaimKindClient, ClientId: "editor"}}
+		if err := client.Request(ctx, "createTerminal", types.CreateTerminalParams{Channel: shell, Cwd: &uri, Claim: claim}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if !project.server.busy() {
+			t.Fatal("a running terminal did not keep its project busy")
+		}
+		if err := client.Request(ctx, "disposeTerminal", types.DisposeTerminalParams{Channel: shell}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A client that follows the session keeps its project open.
+	host.ahp.closeIdle(0)
+	if loaded := host.ahp.loaded(); len(loaded) != 1 {
+		t.Fatalf("closed a project a client follows: %d open", len(loaded))
+	}
+	_ = client.Shutdown(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for host.ahp.connected() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Recent use keeps it open too; after the idle time it closes.
+	host.ahp.closeIdle(time.Hour)
+	if loaded := host.ahp.loaded(); len(loaded) != 1 {
+		t.Fatalf("closed a project that was just used: %d open", len(loaded))
+	}
+	host.ahp.closeIdle(0)
+	if loaded := host.ahp.loaded(); len(loaded) != 0 {
+		t.Fatalf("idle project stayed open: %d", len(loaded))
+	}
+
+	// Its session stays listed and reopens the project with its history.
+	client = ahpTestClient(t, endpoint, "editor")
+	var sessions types.ListSessionsResult
+	if err := client.Request(ctx, "listSessions", types.ListSessionsParams{Channel: types.RootResourceURI}, &sessions); err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions.Items) != 1 || sessions.Items[0].Resource != session {
+		t.Fatalf("sessions of a closed project: %+v", sessions.Items)
+	}
+	state, _ = ahpSubscribeChat(t, client, ahpChatURI(session))
+	if len(state.Turns) != 1 || state.Turns[0].Id != "only-turn" {
+		t.Fatalf("history after reopening: %+v", state.Turns)
+	}
+	if loaded := host.ahp.loaded(); len(loaded) != 1 {
+		t.Fatalf("reopening left %d projects open", len(loaded))
 	}
 }
 

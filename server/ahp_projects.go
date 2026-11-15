@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
@@ -79,7 +80,11 @@ func (h *ahpHost) projectAt(dir string) (*ahpProject, error) {
 	opened := func() *ahpProject {
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		return h.projects[dir]
+		p := h.projects[dir]
+		if p != nil {
+			p.used = time.Now()
+		}
+		return p
 	}
 	if p := opened(); p != nil {
 		return p, nil
@@ -116,22 +121,27 @@ func (h *ahpHost) projectOf(path string) *ahpProject {
 		return h.pinned
 	}
 	path = canonicalPath(path)
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	var found *ahpProject
-	for _, p := range h.loaded() {
+	for _, p := range h.projectsLocked() {
 		if _, ok := relative(p.dir, path); ok && (found == nil || len(p.dir) > len(found.dir)) {
 			found = p
 		}
 	}
+	if found != nil {
+		found.used = time.Now()
+	}
 	return found
 }
 
-// workingProject opens the project of a session's working directory.
+// workingProject opens the project of a session's working directory: the default one if the client names none.
 func (h *ahpHost) workingProject(uri *string) (*ahpProject, error) {
 	if h.pinned != nil {
 		return h.pinned, nil
 	}
 	if uri == nil {
-		return nil, ahpInvalid("a working directory is required")
+		return h.projectAt(h.roots[0])
 	}
 	path, err := ahpFilePath(*uri)
 	if err != nil {
@@ -186,6 +196,7 @@ func (h *ahpHost) sessionProject(resource string) (*ahpProject, error) {
 func (h *ahpHost) ownerLocked(channel string) *ahpProject {
 	for _, p := range h.projectsLocked() {
 		if p.terminals[channel] != nil || p.watches[channel] != nil || strings.HasPrefix(channel, p.changesetPrefix()) {
+			p.used = time.Now()
 			return p
 		}
 	}
@@ -196,6 +207,48 @@ func (h *ahpHost) owner(channel string) *ahpProject {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.ownerLocked(channel)
+}
+
+// subscribedLocked reports whether a client follows one of the project's channels.
+func (h *ahpHost) subscribedLocked(p *ahpProject) bool {
+	for c := range h.clients {
+		for channel := range c.subscriptions {
+			if a, _ := h.channel(channel); a != nil && a.project == p {
+				return true
+			}
+			if p.terminals[channel] != nil || p.watches[channel] != nil || p.changesets[channel] != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// closeIdle closes the projects that no client has reached for a while and
+// that have no work left. Their sessions stay listed and reopen them.
+func (h *ahpHost) closeIdle(idle time.Duration) {
+	for _, p := range h.loaded() {
+		if p.server.busy() {
+			continue
+		}
+		h.mu.Lock()
+		// Any request that could start work reaches the project first, which counts as use.
+		if h.projects[p.dir] != p || time.Since(p.used) < idle || h.subscribedLocked(p) {
+			h.mu.Unlock()
+			continue
+		}
+		delete(h.projects, p.dir)
+		for resource, a := range h.sessions {
+			if a.project == p {
+				for _, ch := range a.chats {
+					delete(h.chats, ch.chat.Resource)
+				}
+				delete(h.sessions, resource)
+			}
+		}
+		h.mu.Unlock()
+		p.server.Close()
+	}
 }
 
 // resource serves the files of a project.

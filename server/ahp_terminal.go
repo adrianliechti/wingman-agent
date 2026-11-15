@@ -363,7 +363,7 @@ func (c *ahpConnection) createTerminal(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	project.attachTerminal(session, p.Channel, p.Claim)
-	return struct{}{}, nil
+	return nil, nil
 }
 
 func (c *ahpConnection) ownsTerminalLocked(a *ahpTerminal) bool {
@@ -389,7 +389,7 @@ func (c *ahpConnection) disposeTerminal(resource string) (any, error) {
 	h.publishTerminalsLocked()
 	h.mu.Unlock()
 	a.project.server.terminals.Remove(a.session.ID())
-	return struct{}{}, nil
+	return nil, nil
 }
 
 func (c *ahpConnection) executeTerminalAction(p t.DispatchActionParams) error {

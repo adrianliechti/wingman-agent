@@ -36,8 +36,9 @@ func TestAHPCreationRetriesPreserveParametersAndErrors(test *testing.T) {
 		test.Fatal(err)
 	}
 	checkCode(create(params), -32003)
+	// The URI is taken, whatever the second request asks for.
 	params.Config = map[string]json.RawMessage{"model": json.RawMessage(`"other"`)}
-	checkCode(create(params), -32602)
+	checkCode(create(params), -32003)
 	if agent.created.Load() != 1 {
 		test.Fatal("retry created a duplicate conversation")
 	}

@@ -434,11 +434,12 @@ func TestReviewWorkspaceResourceWatchPatternValidationAndLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	same, err := reviewWorkspaceResourceCall(h, "createResourceWatch", map[string]any{"uri": h.fileURI("src"), "recursive": true})
-	if err != nil || same != first {
-		t.Fatalf("identical watch = %v, %v", same, err)
+	// The protocol gives every watch its own channel, also an identical one.
+	second, err := reviewWorkspaceResourceCall(h, "createResourceWatch", map[string]any{"uri": h.fileURI("src"), "recursive": true})
+	if err != nil || second == first {
+		t.Fatalf("identical watch = %v, %v", second, err)
 	}
-	for i := 1; i < 64; i++ {
+	for i := 2; i < 64; i++ {
 		if _, err := reviewWorkspaceResourceCall(h, "createResourceWatch", map[string]any{"uri": h.fileURI("src"), "excludes": items(fmt.Sprint(i))}); err != nil {
 			t.Fatal(i, err)
 		}

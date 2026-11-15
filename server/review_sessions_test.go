@@ -871,7 +871,6 @@ func TestReviewSessionsHostileActionsAreRejected(t *testing.T) {
 		{session, &types.SessionActiveClientSetAction{Type: types.ActionTypeSessionActiveClientSet, ActiveClient: types.SessionActiveClient{ClientId: "impostor"}}},
 		{session, &types.ChatDraftChangedAction{Type: types.ActionTypeChatDraftChanged}},
 		{chat, &types.SessionIsReadChangedAction{Type: types.ActionTypeSessionIsReadChanged, IsRead: true}},
-		{"ahp-chat:/nowhere", &types.ChatDraftChangedAction{Type: types.ActionTypeChatDraftChanged}},
 		{"ahp-session:/wingman/!!/!!", &types.SessionIsReadChangedAction{Type: types.ActionTypeSessionIsReadChanged, IsRead: true}},
 	}
 	snapshot := func() string {
@@ -904,6 +903,18 @@ func TestReviewSessionsHostileActionsAreRejected(t *testing.T) {
 			}
 		}
 		timer.Stop()
+	}
+	// An action for a chat that does not exist is ignored, without an echo.
+	reviewSessionsDispatch(t, client, "ahp-chat:/nowhere", 900, &types.ChatDraftChangedAction{Type: types.ActionTypeChatDraftChanged})
+	for quiet := time.After(300 * time.Millisecond); quiet != nil; {
+		select {
+		case event := <-events.Events():
+			if action, ok := event.Event.(ahp.SubscriptionEventAction); ok && action.Envelope.Origin != nil && action.Envelope.Origin.ClientSeq == 900 {
+				t.Fatal("an action for an unknown chat was echoed")
+			}
+		case <-quiet:
+			quiet = nil
+		}
 	}
 	if after := snapshot(); before != after || agent.sent.Load() != 1 {
 		t.Fatalf("rejected actions changed the chat:\n%s\n%s", before, after)

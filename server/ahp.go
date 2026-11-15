@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,7 +34,6 @@ import (
 type ahpHost struct {
 	mu          sync.Mutex
 	createMu    sync.Mutex
-	done        chan struct{}
 	seq         int64
 	clients     map[*ahpConnection]struct{}
 	sessions    map[string]*ahpSession
@@ -56,8 +54,12 @@ type ahpHost struct {
 type ahpProject struct {
 	*ahpHost
 	server       *Server
-	dir          string // the project's identity: its directory with links resolved
-	namespace    string // prefix of the channels this project names itself
+	dir          string     // the project's identity: its directory with links resolved
+	namespace    string     // prefix of the channels this project names itself
+	aliasMu      sync.Mutex // orders the saved aliases' writes, which happen outside the host's lock
+	used         time.Time  // when a client last reached the project; protected by host.mu
+	done         chan struct{}
+	stopOnce     sync.Once
 	terminalOnce sync.Once
 	terminals    map[string]*ahpTerminal
 	watches      map[string]*ahpResourceWatch
@@ -125,12 +127,12 @@ func (e *ahpRPCError) Error() string  { return e.Message }
 func ahpInvalid(message string) error { return &ahpRPCError{Code: -32602, Message: message} }
 
 func newAHPHost() *ahpHost {
-	return &ahpHost{clients: map[*ahpConnection]struct{}{}, sessions: map[string]*ahpSession{}, chats: map[string]*ahpChat{}, aliases: map[string]ahpAlias{}, chatAliases: map[string]ahpAlias{}, versions: map[string]ahpClientVersion{}, projects: map[string]*ahpProject{}, done: make(chan struct{})}
+	return &ahpHost{clients: map[*ahpConnection]struct{}{}, sessions: map[string]*ahpSession{}, chats: map[string]*ahpChat{}, aliases: map[string]ahpAlias{}, chatAliases: map[string]ahpAlias{}, versions: map[string]ahpClientVersion{}, projects: map[string]*ahpProject{}}
 }
 
 // attach makes a project and its saved sessions reachable through the host.
 func (h *ahpHost) attach(s *Server) *ahpProject {
-	p := &ahpProject{ahpHost: h, server: s, terminals: map[string]*ahpTerminal{}, namespace: "wingman"}
+	p := &ahpProject{ahpHost: h, server: s, terminals: map[string]*ahpTerminal{}, namespace: "wingman", used: time.Now(), done: make(chan struct{})}
 	if s.workspace != nil {
 		p.dir = canonicalPath(s.workspace.RootPath)
 	}
@@ -231,9 +233,7 @@ func (p *ahpProject) forgetChatAlias(chat string) {
 		return
 	}
 	delete(p.chatAliases, chat)
-	if dir, err := p.aliasDirectory(); err == nil {
-		_ = os.Remove(p.aliasPath(dir, alias))
-	}
+	p.removeAlias(alias)
 }
 
 // Caller holds p.mu.
@@ -243,19 +243,40 @@ func (p *ahpProject) forgetAlias(resource string) {
 		return
 	}
 	delete(p.aliases, resource)
+	p.removeAlias(alias)
+}
+
+func (p *ahpProject) removeAlias(alias ahpAlias) {
 	if dir, err := p.aliasDirectory(); err == nil {
 		_ = os.Remove(p.aliasPath(dir, alias))
 	}
 }
 
-// names reports whether an alias is for one of the project's native sessions, whose ids other projects reuse.
-func (p *ahpProject) names(alias ahpAlias, backend, session string) bool {
-	return alias.Project == p.dir && alias.Backend == backend && alias.Session == session
+// nativeKey names a native session, whose id is unique only within its project and agent.
+type nativeKey struct{ project, backend, session string }
+
+func (a ahpAlias) native() nativeKey { return nativeKey{a.Project, a.Backend, a.Session} }
+
+// savedLocked finds the alias of a native session: its forked chat's, or its session's.
+func (h *ahpHost) savedLocked(key nativeKey) (ahpAlias, bool) {
+	for _, alias := range h.chatAliases {
+		if alias.native() == key {
+			return alias, true
+		}
+	}
+	for _, alias := range h.aliases {
+		if alias.native() == key {
+			return alias, true
+		}
+	}
+	return ahpAlias{}, false
 }
 
 // storeAlias saves a session's or chat's alias and makes it known to the host.
 func (p *ahpProject) storeAlias(alias ahpAlias) error {
 	alias.Project = p.dir
+	p.aliasMu.Lock()
+	defer p.aliasMu.Unlock()
 	if err := p.saveAlias(alias); err != nil {
 		return err
 	}
@@ -281,8 +302,14 @@ func (p *ahpProject) workspaceChanged(f Frame) {
 	p.notifyRoot("x-wingman/workspaceChanged", map[string]any{"channel": t.RootResourceURI, "event": f})
 }
 
+// stop ends the project's own goroutines.
+func (p *ahpProject) stop() {
+	p.stopOnce.Do(func() { close(p.done) })
+}
+
 // detach ends the project. The host of a workspace server ends with it.
 func (p *ahpProject) detach() {
+	p.stop()
 	if p.pinned != nil {
 		p.ahpHost.close()
 	}
@@ -295,7 +322,9 @@ func (h *ahpHost) close() {
 		return
 	}
 	h.closed = true
-	close(h.done)
+	for _, p := range h.projectsLocked() {
+		p.stop()
+	}
 	for c := range h.clients {
 		c.writer.close()
 		_ = c.writer.conn.CloseNow()
@@ -371,7 +400,12 @@ func (h *ahpHost) serve(parent context.Context, w http.ResponseWriter, r *http.R
 		}
 		var req ahpRequest
 		if json.Unmarshal(data, &req) != nil {
-			c.reply(json.RawMessage("null"), nil, &ahpRPCError{Code: -32700, Message: "invalid JSON"})
+			// Valid JSON that is no request object is an invalid request, not a parse error.
+			if json.Valid(data) {
+				c.reply(json.RawMessage("null"), nil, &ahpRPCError{Code: -32600, Message: "invalid JSON-RPC request"})
+			} else {
+				c.reply(json.RawMessage("null"), nil, &ahpRPCError{Code: -32700, Message: "invalid JSON"})
+			}
 			continue
 		}
 		if req.JSONRPC != "2.0" || req.Method == "" {
@@ -506,9 +540,6 @@ func (c *ahpConnection) reply(id json.RawMessage, result any, err error) {
 			Error   *ahpRPCError    `json:"error"`
 		}{"2.0", id, rpc})
 		return
-	}
-	if result == nil {
-		result = struct{}{}
 	}
 	c.writer.deliver(struct {
 		JSONRPC string          `json:"jsonrpc"`
@@ -947,6 +978,7 @@ func (h *ahpHost) ensureSession(channel string) (*ahpSession, *ahpChat, error) {
 	if ch == nil && channel != a.resource {
 		return nil, nil, &ahpRPCError{Code: int(t.ErrorCodeSessionNotFound), Message: "unknown chat"}
 	}
+	a.project.used = time.Now()
 	return a, ch, nil
 }
 
@@ -969,20 +1001,12 @@ func (p *ahpProject) loadSession(resource string, chat bool) (*ahpSession, error
 		}
 		alias = ahpAlias{Resource: resource, Project: p.dir, Backend: backend, Session: id}
 		p.mu.Lock()
-		for _, other := range p.aliases {
-			if p.names(other, alias.Backend, alias.Session) {
-				p.mu.Unlock()
-				return nil, ahpMoved(other.Resource)
+		if other, ok := p.savedLocked(alias.native()); ok {
+			p.mu.Unlock()
+			if other.Chat != "" && chat {
+				return nil, ahpMoved(other.Chat)
 			}
-		}
-		for _, other := range p.chatAliases {
-			if p.names(other, alias.Backend, alias.Session) {
-				p.mu.Unlock()
-				if chat {
-					return nil, ahpMoved(other.Chat)
-				}
-				return nil, ahpMoved(other.Resource)
-			}
+			return nil, ahpMoved(other.Resource)
 		}
 	}
 	forks := []ahpAlias{}
@@ -1092,7 +1116,7 @@ func (p *ahpProject) attachChat(a *ahpSession, c *sessionController, alias ahpAl
 
 func (c *ahpConnection) request(req ahpRequest) (any, error) {
 	if req.Method == "ping" {
-		return struct{}{}, nil
+		return nil, nil
 	}
 	if !c.initialized {
 		return nil, ahpInvalid("initialize first")
@@ -1157,7 +1181,7 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 		if !fork {
 			return nil, ahpInvalid("only forked chats can be disposed; dispose the session instead")
 		}
-		return struct{}{}, ch.command(Command{ID: "ahp-dispose:" + ch.chat.Resource, Epoch: ch.controller.epoch, Type: "delete"})
+		return nil, ch.command(Command{ID: "ahp-dispose:" + ch.chat.Resource, Epoch: ch.controller.epoch, Type: "delete"})
 	case "resolveSessionConfig":
 		var p t.ResolveSessionConfigParams
 		if json.Unmarshal(req.Params, &p) != nil {
@@ -1166,11 +1190,6 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 		provider := code.BuiltinAgentName
 		if p.Provider != nil {
 			provider = *p.Provider
-		}
-		if p.WorkingDirectory == nil && h.pinned == nil {
-			// Agents are started in a project, which only a directory names.
-			cfg := ahpConfig(SessionSettings{})
-			return t.ResolveSessionConfigResult{Schema: cfg.Schema, Values: cfg.Values}, nil
 		}
 		project, err := h.workingProject(p.WorkingDirectory)
 		if err != nil {
@@ -1221,7 +1240,7 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 				return nil, err
 			}
 		}
-		return struct{}{}, nil
+		return nil, nil
 	case "resourceList", "resourceRead", "resourceResolve", "resourceRequest", "resourceWrite", "resourceCopy", "resourceMove", "resourceDelete", "resourceMkdir":
 		result, err := h.resource(req)
 		return result, ahpResourceError(err)
@@ -1264,7 +1283,7 @@ func (p *ahpProject) createSession(raw json.RawMessage, clientID string) (any, e
 	requestHash := sha256.Sum256(requestData)
 	fingerprint := hex.EncodeToString(requestHash[:])
 	if exists && alias.RequestFingerprint != "" && alias.RequestFingerprint != fingerprint {
-		return nil, ahpInvalid("session channel reused with different creation parameters")
+		return nil, &ahpRPCError{Code: int(t.ErrorCodeSessionAlreadyExists), Message: "session already exists with other creation parameters"}
 	}
 	if (exists && alias.CreationError == "") || (!exists && existing != nil) {
 		return nil, &ahpRPCError{Code: -32003, Message: "session already exists"}
@@ -1311,7 +1330,7 @@ func (p *ahpProject) createSession(raw json.RawMessage, clientID string) (any, e
 	p.notifyRoot("root/sessionAdded", t.SessionAddedParams{Channel: t.RootResourceURI, Summary: a.summary()})
 	p.mu.Unlock()
 	b.ensureTaskPump(id)
-	return struct{}{}, nil
+	return nil, nil
 }
 
 // createChat adds a chat to a session: a fresh native session, or one forked
@@ -1435,7 +1454,7 @@ func (h *ahpHost) createChat(raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 	}
-	return struct{}{}, nil
+	return nil, nil
 }
 
 func (h *ahpHost) listSessions(raw json.RawMessage) (any, error) {
@@ -1519,16 +1538,13 @@ func (p *ahpProject) nativeSessions(agents []t.AgentInfo, seen map[string]bool) 
 		for _, session := range sessions {
 			resource := p.canonicalURI(b.id, session.ID)
 			p.mu.Lock()
-			// Forked chats are listed with their session.
-			if slices.ContainsFunc(slices.Collect(maps.Values(p.chatAliases)), func(fork ahpAlias) bool { return p.names(fork, b.id, session.ID) }) {
-				p.mu.Unlock()
-				continue
-			}
-			for uri, alias := range p.aliases {
-				if p.names(alias, b.id, session.ID) {
-					resource = uri
-					break
+			if alias, ok := p.savedLocked(nativeKey{p.dir, b.id, session.ID}); ok {
+				// Forked chats are listed with their session.
+				if alias.Chat != "" {
+					p.mu.Unlock()
+					continue
 				}
+				resource = alias.Resource
 			}
 			if a := p.sessions[resource]; a != nil {
 				if !a.deleted {

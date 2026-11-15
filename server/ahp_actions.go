@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -47,6 +48,11 @@ func (c *ahpConnection) dispatch(raw json.RawMessage) {
 			h.mu.Unlock()
 			err = c.executeAction(a, ch, p)
 		}
+	}
+	// An action for a session or chat that does not exist is ignored, without an echo.
+	var rpc *ahpRPCError
+	if a == nil && errors.As(err, &rpc) && rpc.Code == int(t.ErrorCodeSessionNotFound) {
+		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -307,7 +313,11 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 		return ahpInvalid("action is not supported by this host")
 	}
 	a.syncChats(previous)
+	unsaved := a.unsaved
 	h.mu.Unlock()
+	if unsaved {
+		a.saveTitle()
+	}
 	return nil
 }
 

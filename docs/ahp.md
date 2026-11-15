@@ -79,7 +79,11 @@ the folder picker starts in the host's root.
   like `wingman server`.
 - Before a session exists, directories can be listed and files read so that a
   client can choose a folder; files become writable once a session uses their
-  directory. A project stays open until the host exits.
+  directory. A session created without a working directory uses the host's
+  root.
+- A project closes after 15 minutes without a subscribed client, a request
+  that reaches it, or work: a running or queued turn, an open question, a
+  background task, a schedule or a live terminal keep it open.
 - Sessions the host created are listed after a restart without opening their
   projects; subscribing to one opens its project.
 

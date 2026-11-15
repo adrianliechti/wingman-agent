@@ -147,8 +147,9 @@ func (a *ahpChat) syncActivity(c *sessionController) {
 	a.chatAction(t.StateAction{Value: &t.ChatActivityChangedAction{Type: t.ActionTypeChatActivityChanged, Activity: value}})
 }
 
-// syncTitle names an untitled default chat, and its session, after the
-// first user message.
+// syncTitle names an untitled session after the first user message. The
+// session lists its default chat under that name; the chat's own state keeps
+// its title, because the protocol has no action that renames a chat.
 func (a *ahpChat) syncTitle(c *sessionController) {
 	if a.session.chats[0] != a || a.session.state.Title != "New session" {
 		return
@@ -159,9 +160,8 @@ func (a *ahpChat) syncTitle(c *sessionController) {
 			if len(title) > 80 {
 				title = title[:80]
 			}
-			// No chat action renames a chat; its session announces the new summary.
-			if a.chat.Title == a.session.state.Title {
-				a.chat.Title = string(title)
+			if a.title == a.session.state.Title {
+				a.title = string(title)
 			}
 			a.session.sessionAction(t.StateAction{Value: &t.SessionTitleChangedAction{Type: t.ActionTypeSessionTitleChanged, Title: string(title)}})
 			a.session.rememberTitle()

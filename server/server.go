@@ -106,9 +106,43 @@ type Server struct {
 	managedTools   managedToolsStatus
 }
 
-// New starts a server for one project; it is its own agent host.
+// New starts a server for one project: its own agent host, with the web UI.
 func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, error) {
-	return newServer(ctx, workDir, opts, nil)
+	if opts == nil {
+		opts = new(ServerOptions)
+	}
+	s, err := newServer(ctx, workDir, opts, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.startWeb(opts); err != nil {
+		s.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// startWeb adds what only the web UI uses; a host's projects go without it.
+func (s *Server) startWeb(opts *ServerOptions) (err error) {
+	if s.preview, err = newFilePreviewServer(s.workspace.Root); err != nil {
+		return err
+	}
+	s.terminalPosition.Store(settings.WindowTerminalPositionTab)
+	s.sidebarPosition.Store(settings.WindowSidebarPositionRight)
+	if userSettings, loadErr := settings.Load(); loadErr == nil {
+		s.terminalPosition.Store(userSettings.WindowTerminalPosition)
+		s.sidebarPosition.Store(userSettings.WindowSidebarPosition)
+	}
+
+	s.mux = chi.NewRouter()
+	s.registerRoutes(s.mux)
+
+	csrf := http.NewCrossOriginProtection()
+	s.handler = LocalHostOnly(csrf.Handler(s.checkInstance(s.mux)))
+	if opts.RemoteURL != "" {
+		return s.startRemote(remote.ClientOptions{Relay: opts.RemoteURL, Token: opts.RemoteToken})
+	}
+	return nil
 }
 
 // newServer starts a project. Given a host, its sessions are served there.
@@ -149,10 +183,6 @@ func newServer(ctx context.Context, workDir string, opts *ServerOptions, host *a
 	s.ahpHost()
 
 	s.terminals = terminal.NewManager(ws.RootPath)
-	s.preview, err = newFilePreviewServer(ws.Root)
-	if err != nil {
-		return nil, err
-	}
 
 	cfg.IsolateSessions = true
 	wa := agent.New(ws, cfg, nil)
@@ -164,13 +194,6 @@ func newServer(ctx context.Context, workDir string, opts *ServerOptions, host *a
 		option, _ := wa.RoleModel("")
 		return option.ID
 	}
-	s.terminalPosition.Store(settings.WindowTerminalPositionTab)
-	s.sidebarPosition.Store(settings.WindowSidebarPositionRight)
-	if userSettings, loadErr := settings.Load(); loadErr == nil {
-		s.terminalPosition.Store(userSettings.WindowTerminalPosition)
-		s.sidebarPosition.Store(userSettings.WindowSidebarPosition)
-	}
-
 	ws.WarmUp()
 	if terminal.Supported() {
 		_ = ws.WithDAPManager(func(manager *dap.Manager) error {
@@ -242,17 +265,6 @@ func newServer(ctx context.Context, workDir string, opts *ServerOptions, host *a
 			fmt.Fprintf(os.Stderr, "Model discovery warning: %v\n", err)
 		}
 	})
-
-	s.mux = chi.NewRouter()
-	s.registerRoutes(s.mux)
-
-	csrf := http.NewCrossOriginProtection()
-	s.handler = LocalHostOnly(csrf.Handler(s.checkInstance(s.mux)))
-	if opts.RemoteURL != "" {
-		if err := s.startRemote(remote.ClientOptions{Relay: opts.RemoteURL, Token: opts.RemoteToken}); err != nil {
-			return nil, err
-		}
-	}
 
 	return s, nil
 }
