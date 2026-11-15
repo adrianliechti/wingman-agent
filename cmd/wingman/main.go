@@ -49,6 +49,8 @@ func main() {
 		}
 	case "server":
 		runServer(ctx, args[1:])
+	case "host":
+		runHost(ctx, args[1:])
 	case "relay":
 		runRelay(ctx, args[1:])
 	case "acp":
@@ -112,6 +114,7 @@ Usage:
   wingman exec [flags] [PROMPT] Run non-interactively (alias: e)
   wingman exec resume [ID]      Resume a non-interactive session
   wingman server [flags]        Run the web UI server
+  wingman host [flags]          Run an agent host that opens any project (AHP)
   wingman relay [flags]         Run a relay for remote web access
   wingman acp [target] [flags]  Run as an ACP stdio server (wingman | claude | codex | pi)
   wingman run <target> [args]   Run an external agent through wingman
@@ -143,6 +146,11 @@ Server flags:
   --no-browser                  Do not open a browser on startup
   --remote URL                  Connect through a Wingman relay
   --remote-token TOKEN          Relay registration token
+
+Host flags:
+  --port N                      Local port (default: 9100)
+  --root PATH                   Directory projects may be opened in (default: home)
+  --token TOKEN                 Token clients must connect with (or WINGMAN_HOST_TOKEN)
 
 Relay flags:
   --port N                      HTTP port behind a gateway (default: 8080)

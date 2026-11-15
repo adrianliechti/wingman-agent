@@ -45,6 +45,9 @@ var StaticFS, _ = fs.Sub(staticFiles, "static")
 // DefaultPort is the preferred port used when no explicit port is requested.
 const DefaultPort = 9000
 
+// DefaultHostPort is the port an agent host prefers.
+const DefaultHostPort = 9100
+
 type ServerOptions struct {
 	NoBrowser           bool
 	RemoteURL           string
@@ -73,7 +76,7 @@ type Server struct {
 	scope      WorkspaceScope
 	sendMu     sync.Mutex
 	ahpOnce    sync.Once
-	ahp        *ahpHost
+	ahp        *ahpProject
 
 	dapReferenceSeq  atomic.Uint64
 	searches         atomic.Int32
@@ -103,7 +106,13 @@ type Server struct {
 	managedTools   managedToolsStatus
 }
 
-func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, err error) {
+// New starts a server for one project; it is its own agent host.
+func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, error) {
+	return newServer(ctx, workDir, opts, nil)
+}
+
+// newServer starts a project. Given a host, its sessions are served there.
+func newServer(ctx context.Context, workDir string, opts *ServerOptions, host *ahpHost) (_ *Server, err error) {
 	if opts == nil {
 		opts = new(ServerOptions)
 	}
@@ -134,6 +143,9 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (_ *Server, e
 	}
 	s.workspace = ws
 	s.scope = workspaceScope(ws.RootPath)
+	if host != nil {
+		s.ahpOnce.Do(func() { s.ahp = host.attach(s) })
+	}
 	s.ahpHost()
 
 	s.terminals = terminal.NewManager(ws.RootPath)
@@ -251,7 +263,7 @@ func (s *Server) Close() {
 			s.cancel()
 		}
 		if s.ahp != nil {
-			s.ahp.close()
+			s.ahp.detach()
 		}
 
 		s.backendsMu.Lock()
@@ -298,24 +310,11 @@ func (s *Server) Run(ctx context.Context, port int) error {
 	defer stop()
 	defer s.Close()
 
-	listeners, err := listenLocal(port)
+	listeners, err := listenLocal(port, DefaultPort)
 	if err != nil {
 		return err
 	}
-	for _, listener := range listeners {
-		defer listener.Close()
-	}
 	port = listeners[0].Addr().(*net.TCPAddr).Port
-
-	srv := &http.Server{
-		Handler: s,
-	}
-
-	closeServer := func() { _ = srv.Close() }
-	stopOnSignal := context.AfterFunc(ctx, closeServer)
-	defer stopOnSignal()
-	stopOnClose := context.AfterFunc(s.ctx, closeServer)
-	defer stopOnClose()
 
 	url := fmt.Sprintf("http://localhost:%d", port)
 	fmt.Fprintf(os.Stderr, "Wingman running at %s\n", url)
@@ -324,7 +323,19 @@ func (s *Server) Run(ctx context.Context, port int) error {
 	if !s.noBrowser {
 		openBrowser(url)
 	}
+	return serveLocal(s, listeners, ctx, s.ctx)
+}
 
+// serveLocal serves until a listener fails or one of the contexts ends.
+func serveLocal(handler http.Handler, listeners []net.Listener, done ...context.Context) error {
+	srv := &http.Server{Handler: handler}
+	for _, listener := range listeners {
+		defer listener.Close()
+	}
+	for _, ctx := range done {
+		stop := context.AfterFunc(ctx, func() { _ = srv.Close() })
+		defer stop()
+	}
 	errs := make(chan error, len(listeners))
 	for _, listener := range listeners {
 		go func() { errs <- srv.Serve(listener) }()
@@ -456,9 +467,7 @@ func (s *Server) send(f Frame) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	if s.ahp != nil {
-		s.ahp.mu.Lock()
-		s.ahp.notifyRoot("x-wingman/workspaceChanged", map[string]any{"channel": "ahp-root://", "event": f})
-		s.ahp.mu.Unlock()
+		s.ahp.workspaceChanged(f)
 	}
 }
 
@@ -551,12 +560,7 @@ func (s *Server) debugAvailable(ctx context.Context) bool {
 }
 
 func (s *Server) hasClients() bool {
-	if s.ahp == nil {
-		return false
-	}
-	s.ahp.mu.Lock()
-	defer s.ahp.mu.Unlock()
-	return len(s.ahp.clients) > 0
+	return s.ahp != nil && s.ahp.connected()
 }
 
 func (s *Server) flushFiles() {
@@ -717,9 +721,9 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // Keep the selected socket bound before announcing the URL or opening a browser.
-func listenLocal(port int) ([]net.Listener, error) {
+func listenLocal(port, preferred int) ([]net.Listener, error) {
 	if port == 0 {
-		if listeners, err := listenLoopback(DefaultPort); err == nil {
+		if listeners, err := listenLoopback(preferred); err == nil {
 			return listeners, nil
 		}
 	}

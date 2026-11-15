@@ -13,21 +13,21 @@ import (
 )
 
 // fileURI names a workspace-relative or absolute path.
-func (h *ahpHost) fileURI(path string) string {
+func (p *ahpProject) fileURI(path string) string {
 	if !filepath.IsAbs(path) {
 		root := "/"
-		if h.server.workspace != nil {
-			root = h.server.workspace.RootPath
+		if p.server.workspace != nil {
+			root = p.server.workspace.RootPath
 		}
 		path = filepath.Join(root, path)
 	}
 	return fileuri.FromPath(path)
 }
 
-func (h *ahpHost) message(text string, files, images []string) t.Message {
+func (p *ahpProject) message(text string, files, images []string) t.Message {
 	message := t.Message{Text: text, Origin: t.MessageOrigin{Kind: t.MessageKindUser}}
 	for _, file := range files {
-		message.Attachments = append(message.Attachments, t.MessageAttachment{Value: &t.MessageResourceAttachment{Type: "resource", Uri: h.fileURI(file), Label: file}})
+		message.Attachments = append(message.Attachments, t.MessageAttachment{Value: &t.MessageResourceAttachment{Type: "resource", Uri: p.fileURI(file), Label: file}})
 	}
 	for _, image := range images {
 		prefix, data, ok := strings.Cut(image, ",")
@@ -53,7 +53,7 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 		if input.Intent == string(code.TurnInputSteer) {
 			kind = t.PendingMessageKindSteering
 		}
-		message := a.host.message(input.Text, input.Files, input.Images)
+		message := a.project.message(input.Text, input.Files, input.Images)
 		next[input.ID] = t.PendingMessage{Id: input.ID, Kind: ahpPtr(kind), Message: message}
 		kinds[input.ID] = kind
 	}
@@ -164,6 +164,7 @@ func (a *ahpChat) syncTitle(c *sessionController) {
 				a.chat.Title = string(title)
 			}
 			a.session.sessionAction(t.StateAction{Value: &t.SessionTitleChangedAction{Type: t.ActionTypeSessionTitleChanged, Title: string(title)}})
+			a.session.rememberTitle()
 			return
 		}
 	}

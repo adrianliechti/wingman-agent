@@ -508,7 +508,7 @@ func testReviewWorkspaceTerminalActionValidation(t *testing.T, scheme string) {
 	expect(owner, ownerSub, "owner", title("renamed"), true)
 	h := s.ahpHost()
 	h.mu.Lock()
-	catalogue := h.terminalCatalogueLocked()
+	catalogue := h.terminalsLocked()
 	h.mu.Unlock()
 	if i := slices.IndexFunc(catalogue, func(info types.TerminalInfo) bool { return info.Resource == uri }); i < 0 || catalogue[i].Title != "renamed" {
 		t.Fatalf("catalogue: %+v", catalogue)
@@ -665,7 +665,7 @@ func TestReviewWorkspaceTerminalCatalogueRecoversFromOverflow(t *testing.T) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		var ids []string
-		for _, info := range h.terminalCatalogueLocked() {
+		for _, info := range h.terminalsLocked() {
 			ids = append(ids, info.Resource)
 		}
 		return ids

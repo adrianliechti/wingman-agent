@@ -12,7 +12,7 @@ import (
 // ahpSession is an AHP session: shared state and its chats, each projected
 // from its own native session. The default chat comes first.
 type ahpSession struct {
-	host     *ahpHost
+	project  *ahpProject
 	resource string
 	created  string
 	state    t.SessionState
@@ -23,12 +23,12 @@ type ahpSession struct {
 	ackOrder []t.ActionOrigin
 }
 
-func newAHPSession(h *ahpHost, resource, provider, title string, updated time.Time) *ahpSession {
+func newAHPSession(h *ahpProject, resource, provider, title string, updated time.Time) *ahpSession {
 	if title == "" {
 		title = "New session"
 	}
-	return &ahpSession{host: h, resource: resource, created: updated.UTC().Format(time.RFC3339Nano), pending: map[string]*ahpPendingAction{}, acks: map[t.ActionOrigin]ahpAck{},
-		state: t.SessionState{Changesets: h.changesetCatalogue(), Provider: provider, Title: title, Status: t.SessionStatusIdle, Lifecycle: t.SessionLifecycleReady, ActiveClients: []t.SessionActiveClient{}, Chats: []t.ChatSummary{}, WorkingDirectories: []string{h.directoryURI()}},
+	return &ahpSession{project: h, resource: resource, created: updated.UTC().Format(time.RFC3339Nano), pending: map[string]*ahpPendingAction{}, acks: map[t.ActionOrigin]ahpAck{},
+		state: t.SessionState{Changesets: h.changesetCatalogue(), Provider: provider, Title: title, Status: t.SessionStatusIdle, Lifecycle: t.SessionLifecycleReady, ActiveClients: []t.SessionActiveClient{}, Chats: []t.ChatSummary{}, Project: h.info(), WorkingDirectories: []string{h.directoryURI()}},
 	}
 }
 
@@ -46,7 +46,7 @@ func (a *ahpSession) addChat(c *sessionController, resource, title string, origi
 	ch.chat.Origin = origin
 	c.ahp = ch
 	a.chats = append(a.chats, ch)
-	a.host.chats[resource] = ch
+	a.project.chats[resource] = ch
 	if len(a.chats) == 1 {
 		a.state.DefaultChat = &resource
 		a.state.Config = ahpConfig(c.state.Settings)
@@ -72,7 +72,7 @@ func (a *ahpChat) summary() t.ChatSummary {
 }
 
 func (a *ahpSession) summary() t.SessionSummary {
-	summary := t.SessionSummary{Resource: a.resource, Provider: a.state.Provider, Title: a.state.Title, Status: a.state.Status, CreatedAt: a.created, ModifiedAt: a.created, WorkingDirectories: a.state.WorkingDirectories, DefaultChat: a.state.DefaultChat, Chats: []t.SessionChatSummary{}}
+	summary := t.SessionSummary{Resource: a.resource, Provider: a.state.Provider, Title: a.state.Title, Status: a.state.Status, CreatedAt: a.created, ModifiedAt: a.created, Project: a.state.Project, WorkingDirectories: a.state.WorkingDirectories, DefaultChat: a.state.DefaultChat, Chats: []t.SessionChatSummary{}}
 	for _, ch := range a.chats {
 		status := ch.chat.Status
 		summary.Chats = append(summary.Chats, t.SessionChatSummary{Resource: ch.chat.Resource, Title: ch.chat.Title, Status: &status})
@@ -84,6 +84,17 @@ func (a *ahpSession) summary() t.SessionSummary {
 func (a *ahpSession) sessionAction(action t.StateAction) {
 	ahp.ApplyActionToSession(&a.state, action)
 	a.emit(a.resource, action)
+}
+
+// A host lists the saved title before it loads the session's project. Caller holds host.mu.
+func (a *ahpSession) rememberTitle() {
+	alias, ok := a.project.aliases[a.resource]
+	if !ok || alias.Title == a.state.Title {
+		return
+	}
+	alias.Title = a.state.Title
+	a.project.rememberAliasLocked(alias)
+	_ = a.project.saveAlias(alias)
 }
 
 func (a *ahpSession) removeClient(id string) {
@@ -116,7 +127,7 @@ func (a *ahpSession) syncChats(previous t.SessionSummary) {
 	a.state.Status = a.chats[0].chat.Status
 	a.syncInputNeeded()
 	if next := a.summary(); !reflect.DeepEqual(previous, next) {
-		a.host.notifyRoot("root/sessionSummaryChanged", t.SessionSummaryChangedParams{Channel: t.RootResourceURI, Session: a.resource, Changes: t.PartialSessionSummary{Title: &next.Title, Status: &next.Status, ModifiedAt: &next.ModifiedAt, Chats: next.Chats}})
+		a.project.notifyRoot("root/sessionSummaryChanged", t.SessionSummaryChangedParams{Channel: t.RootResourceURI, Session: a.resource, Changes: t.PartialSessionSummary{Title: &next.Title, Status: &next.Status, ModifiedAt: &next.ModifiedAt, Chats: next.Chats}})
 	}
 }
 
@@ -176,26 +187,26 @@ func (a *ahpSession) chatDeleted(ch *ahpChat) {
 		previous := a.summary()
 		ch.removed = true
 		a.chats = slices.DeleteFunc(a.chats, func(other *ahpChat) bool { return other == ch })
-		delete(a.host.chats, ch.chat.Resource)
-		for client := range a.host.clients {
+		delete(a.project.chats, ch.chat.Resource)
+		for client := range a.project.clients {
 			delete(client.subscriptions, ch.chat.Resource)
 		}
 		a.sessionAction(t.StateAction{Value: &t.SessionChatRemovedAction{Type: t.ActionTypeSessionChatRemoved, Chat: ch.chat.Resource}})
 		a.syncChats(previous)
-		a.host.forgetChatAlias(ch.chat.Resource)
+		a.project.forgetChatAlias(ch.chat.Resource)
 		return
 	}
 	a.deleted = true
 	for _, other := range a.chats {
 		other.removed = true
-		delete(a.host.chats, other.chat.Resource)
-		for client := range a.host.clients {
+		delete(a.project.chats, other.chat.Resource)
+		for client := range a.project.clients {
 			delete(client.subscriptions, other.chat.Resource)
 		}
 	}
-	for client := range a.host.clients {
+	for client := range a.project.clients {
 		delete(client.subscriptions, a.resource)
 	}
-	a.host.forgetAlias(a.resource)
-	a.host.notifyRoot("root/sessionRemoved", t.SessionRemovedParams{Channel: t.RootResourceURI, Session: a.resource})
+	a.project.forgetAlias(a.resource)
+	a.project.notifyRoot("root/sessionRemoved", t.SessionRemovedParams{Channel: t.RootResourceURI, Session: a.resource})
 }

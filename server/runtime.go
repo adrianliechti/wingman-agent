@@ -9,12 +9,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 
-	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agents"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
@@ -53,10 +51,7 @@ type SessionRef struct {
 
 func workspaceScope(root string) WorkspaceScope {
 	// Connection identity is for the opened root, independent of legacy disk layout.
-	if resolved, err := pathutil.Resolve(root); err == nil {
-		root = resolved
-	}
-	sum := sha256.Sum256([]byte(filepath.Clean(root)))
+	sum := sha256.Sum256([]byte(canonicalPath(root)))
 	return WorkspaceScope{WorkspaceID: hex.EncodeToString(sum[:]), InstanceID: uuid.NewString()}
 }
 

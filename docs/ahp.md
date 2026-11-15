@@ -56,6 +56,48 @@ URL schemes such as `vscode-file://`. Other websites, including sandboxed
 `Origin: null` frames, are rejected. `/lsp` and `/dap` accept only the
 same-origin Web UI.
 
+## One host for every project
+
+`wingman server` serves the project it was started in. `wingman host` serves
+any project: a session names its working directory and the host opens that
+project when the session is created or reopened.
+
+```bash
+wingman host --root ~/Projects --token "$(openssl rand -hex 16)"
+```
+
+The host prints its address, normally `ws://localhost:9100/ahp`, and has no
+web UI. Add it in VS Code like any other host and choose a folder per session;
+the folder picker starts in the host's root.
+
+- `--root PATH` limits the directories the host serves; the default is the
+  home directory. Sessions and file access outside it are refused with AHP
+  `PermissionDenied`.
+- `--token TOKEN` (or `WINGMAN_HOST_TOKEN`) is required from every client as
+  the `tkn` query parameter, which VS Code sends from a host entry's
+  `connectionToken`. Without a token the endpoint is open to local clients,
+  like `wingman server`.
+- Before a session exists, directories can be listed and files read so that a
+  client can choose a folder; files become writable once a session uses their
+  directory. A project stays open until the host exits.
+- Sessions the host created are listed after a restart without opening their
+  projects; subscribing to one opens its project.
+
+A host owns the connections, the order of their actions and the channel
+namespace. A project owns its agents, sessions, terminals, file watches and
+changesets, and is the directory its sessions work in. Sessions carry it as
+the protocol's `project` (`uri` and `displayName`), with links in the
+directory resolved; a directory reached through a link opens the project it
+leads to. `wingman server` is a host with one fixed project plus the web UI,
+`/lsp`, `/dap` and the REST routes, which all describe that project.
+
+Channels a project names itself carry the project on a host for several:
+`ahp-changeset:/wingman/<project>/uncommitted`,
+`ahp-terminal:/wingman/<project>/<id>`, and a third path segment with the
+project directory on unaliased session URIs. Clients read them from session
+and root state. The `wingman.workspace` root metadata and the
+`x-wingman/workspaceChanged` notification exist only on `wingman server`.
+
 ## Shared host and browser architecture
 
 The web UI and VS Code use the same AHP host for sessions, chat, approvals,

@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,32 +21,50 @@ import (
 
 const ahpResourceLimit = 16 << 20
 
-func (h *ahpHost) resourcePath(uri string) (string, error) {
-	if h.server.workspace == nil {
+// ahpFiles serves one directory tree as resources.
+type ahpFiles struct {
+	root *os.Root
+	dir  string
+}
+
+type ahpResourceParams struct {
+	Channel        string            `json:"channel"`
+	URI            string            `json:"uri"`
+	Source         string            `json:"source"`
+	Encoding       t.ContentEncoding `json:"encoding"`
+	Write          bool              `json:"write"`
+	FollowSymlinks *bool             `json:"followSymlinks"`
+}
+
+func (p *ahpProject) files() ahpFiles {
+	return ahpFiles{root: p.server.workspace.Root, dir: p.server.workspace.RootPath}
+}
+
+func (p *ahpProject) resourcePath(uri string) (string, error) {
+	if p.server.workspace == nil {
 		return "", ahpInvalid("workspace unavailable")
 	}
-	u, err := url.Parse(uri)
-	if err != nil || u.Scheme != "file" || u.Host != "" && u.Host != "localhost" || u.RawQuery != "" || u.Fragment != "" {
-		return "", ahpInvalid("local file URI required")
+	return p.files().path(uri)
+}
+
+// path names a resource relative to the tree.
+func (f ahpFiles) path(uri string) (string, error) {
+	path, err := ahpFilePath(uri)
+	if err != nil {
+		return "", err
 	}
-	path, _ := fileuri.Path(uri)
-	if !filepath.IsAbs(path) {
-		return "", ahpInvalid("absolute file URI required")
+	rel, ok := relative(f.dir, path)
+	if !ok {
+		// Links reach the same tree under other names, such as /var and /private/var on macOS.
+		rel, ok = relative(canonicalPath(f.dir), canonicalPath(path))
 	}
-	rel, err := filepath.Rel(h.server.workspace.RootPath, path)
-	if err != nil || rel != "." && !filepath.IsLocal(rel) {
-		// macOS commonly exposes the same root through /var and /private/var.
-		if canonicalRoot, resolveErr := filepath.EvalSymlinks(h.server.workspace.RootPath); resolveErr == nil {
-			rel, err = filepath.Rel(canonicalRoot, path)
-		}
-	}
-	if err != nil || rel != "." && !filepath.IsLocal(rel) {
+	if !ok {
 		return "", ahpInvalid("resource is outside this Wingman workspace")
 	}
 	return rel, nil
 }
-func (h *ahpHost) validateDirectory(uri string) error {
-	rel, err := h.resourcePath(uri)
+func (p *ahpProject) validateDirectory(uri string) error {
+	rel, err := p.resourcePath(uri)
 	if err != nil {
 		return err
 	}
@@ -74,49 +91,48 @@ func ahpResourceError(err error) error {
 	}
 	return err
 }
-func (h *ahpHost) resource(req ahpRequest) (any, error) {
-	var p struct {
-		Channel        string            `json:"channel"`
-		URI            string            `json:"uri"`
-		Encoding       t.ContentEncoding `json:"encoding"`
-		Write          bool              `json:"write"`
-		FollowSymlinks *bool             `json:"followSymlinks"`
-	}
-	if json.Unmarshal(req.Params, &p) != nil || p.Channel != t.RootResourceURI {
+func (p *ahpProject) resource(req ahpRequest) (any, error) {
+	var params ahpResourceParams
+	if json.Unmarshal(req.Params, &params) != nil || params.Channel != t.RootResourceURI {
 		return nil, ahpInvalid("root channel required")
 	}
 	switch req.Method {
 	case "resourceWrite", "resourceCopy", "resourceMove", "resourceDelete", "resourceMkdir":
-		return h.mutateResource(req)
+		return p.mutateResource(req)
 	}
-	if p.Encoding != "" && p.Encoding != t.ContentEncodingUtf8 && p.Encoding != t.ContentEncodingBase64 {
+	if params.Encoding != "" && params.Encoding != t.ContentEncodingUtf8 && params.Encoding != t.ContentEncodingBase64 {
 		return nil, ahpInvalid("unsupported encoding")
 	}
-	if strings.HasPrefix(p.URI, "ahp-content:") {
-		h.mu.Lock()
-		content, exists := h.changesetContentLocked(p.URI)
-		h.mu.Unlock()
+	if strings.HasPrefix(params.URI, "ahp-content:") {
+		p.mu.Lock()
+		content, exists := p.changesetContentLocked(params.URI)
+		p.mu.Unlock()
 		if !exists {
 			return nil, &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "changeset content is no longer retained; refresh the changeset"}
 		}
 		switch req.Method {
 		case "resourceRead":
-			return resourceContent([]byte(content), p.Encoding), nil
+			return resourceContent([]byte(content), params.Encoding), nil
 		case "resourceResolve":
-			return t.ResourceResolveResult{Uri: p.URI, Type: t.ResourceTypeFile, Size: ahpPtr(int64(len(content))), Etag: ahpPtr(fileRevision([]byte(content)))}, nil
+			return t.ResourceResolveResult{Uri: params.URI, Type: t.ResourceTypeFile, Size: ahpPtr(int64(len(content))), Etag: ahpPtr(fileRevision([]byte(content)))}, nil
 		case "resourceRequest":
-			if !p.Write {
+			if !params.Write {
 				return struct{}{}, nil
 			}
 		}
 		return nil, ahpInvalid("changeset content is read-only")
 	}
-	rel, err := h.resourcePath(p.URI)
+	rel, err := p.resourcePath(params.URI)
 	if err != nil {
 		return nil, err
 	}
-	root := h.server.workspace.Root
-	switch req.Method {
+	return p.files().read(req.Method, params, rel)
+}
+
+// read answers the requests that leave the tree unchanged.
+func (f ahpFiles) read(method string, p ahpResourceParams, rel string) (any, error) {
+	root := f.root
+	switch method {
 	case "resourceList":
 		entries, err := fs.ReadDir(root.FS(), filepath.ToSlash(rel))
 		if err != nil {
@@ -136,11 +152,11 @@ func (h *ahpHost) resource(req ahpRequest) (any, error) {
 		if p.FollowSymlinks == nil || *p.FollowSymlinks {
 			info, err = root.Stat(rel)
 			if err == nil {
-				canonical, resolveErr := filepath.EvalSymlinks(filepath.Join(h.server.workspace.RootPath, rel))
+				canonical, resolveErr := filepath.EvalSymlinks(filepath.Join(f.dir, rel))
 				if resolveErr != nil {
 					return nil, resolveErr
 				}
-				_, resolveErr = h.resourcePath(fileuri.FromPath(canonical))
+				_, resolveErr = f.path(fileuri.FromPath(canonical))
 				if resolveErr != nil {
 					return nil, resolveErr
 				}
@@ -163,7 +179,7 @@ func (h *ahpHost) resource(req ahpRequest) (any, error) {
 			}
 		}
 		if info.Mode().IsRegular() && info.Size() <= ahpResourceLimit {
-			data, err := h.readResourceFile(rel)
+			data, err := f.readFile(rel)
 			if err != nil {
 				return nil, err
 			}
@@ -193,13 +209,13 @@ func (h *ahpHost) resource(req ahpRequest) (any, error) {
 		_, err := root.Stat(rel)
 		return struct{}{}, err
 	case "resourceRead":
-		data, err := h.readResourceFile(rel)
+		data, err := f.readFile(rel)
 		if err != nil {
 			return nil, err
 		}
 		return resourceContent(data, p.Encoding), nil
 	}
-	return nil, ahpInvalid(req.Method)
+	return nil, ahpInvalid(method)
 }
 func resourceContent(data []byte, encoding t.ContentEncoding) t.ResourceReadResult {
 	if encoding == "" {
@@ -211,26 +227,30 @@ func resourceContent(data []byte, encoding t.ContentEncoding) t.ResourceReadResu
 	}
 	return t.ResourceReadResult{Data: content, Encoding: encoding, ContentType: ahpPtr(http.DetectContentType(data))}
 }
-func (h *ahpHost) readResourceFile(rel string) ([]byte, error) {
+func (p *ahpProject) readResourceFile(rel string) ([]byte, error) {
+	return p.files().readFile(rel)
+}
+
+func (f ahpFiles) readFile(rel string) ([]byte, error) {
 	// Opening a FIFO or device for reading can block, so check the type first.
-	if info, err := h.server.workspace.Root.Stat(rel); err != nil {
+	if info, err := f.root.Stat(rel); err != nil {
 		return nil, err
 	} else if !info.Mode().IsRegular() {
 		return nil, ahpInvalid("resource must be a regular file")
 	}
-	f, err := h.server.workspace.Root.Open(rel)
+	file, err := f.root.Open(rel)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	info, err := f.Stat()
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
 		return nil, ahpInvalid("resource must be a regular file")
 	}
-	data, err := io.ReadAll(io.LimitReader(f, ahpResourceLimit+1))
+	data, err := io.ReadAll(io.LimitReader(file, ahpResourceLimit+1))
 	if err != nil {
 		return nil, err
 	}
@@ -240,34 +260,34 @@ func (h *ahpHost) readResourceFile(rel string) ([]byte, error) {
 	return data, nil
 }
 
-func (h *ahpHost) mutateResource(req ahpRequest) (any, error) {
-	var p struct {
+func (p *ahpProject) mutateResource(req ahpRequest) (any, error) {
+	var params struct {
 		t.ResourceWriteParams
 		Source       string `json:"source"`
 		Destination  string `json:"destination"`
 		FailIfExists bool   `json:"failIfExists"`
 		Recursive    bool   `json:"recursive"`
 	}
-	if err := json.Unmarshal(req.Params, &p); err != nil {
+	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return nil, ahpInvalid("invalid resource parameters")
 	}
-	uri := p.Uri
+	uri := params.Uri
 	if req.Method == "resourceCopy" || req.Method == "resourceMove" {
-		uri = p.Source
+		uri = params.Source
 	}
-	rel, err := h.resourcePath(uri)
+	rel, err := p.resourcePath(uri)
 	if err != nil {
 		return nil, err
 	}
 	if rel == "." {
 		return nil, ahpInvalid("cannot mutate the workspace root")
 	}
-	s, root := h.server, h.server.workspace.Root
+	s, root := p.server, p.server.workspace.Root
 	s.fileWriteMu.Lock()
 	defer s.fileWriteMu.Unlock()
 	switch req.Method {
 	case "resourceWrite":
-		err = h.writeResource(rel, p.ResourceWriteParams)
+		err = p.writeResource(rel, params.ResourceWriteParams)
 	case "resourceMkdir":
 		if info, statErr := root.Stat(rel); statErr == nil && !info.IsDir() {
 			err = fs.ErrExist
@@ -276,7 +296,7 @@ func (h *ahpHost) mutateResource(req ahpRequest) (any, error) {
 		}
 	case "resourceDelete":
 		if _, err = root.Lstat(rel); err == nil {
-			if p.Recursive {
+			if params.Recursive {
 				err = root.RemoveAll(rel)
 			} else {
 				err = root.Remove(rel)
@@ -284,7 +304,7 @@ func (h *ahpHost) mutateResource(req ahpRequest) (any, error) {
 		}
 	case "resourceCopy", "resourceMove":
 		var destination string
-		destination, err = h.resourcePath(p.Destination)
+		destination, err = p.resourcePath(params.Destination)
 		if err != nil {
 			break
 		}
@@ -305,8 +325,8 @@ func (h *ahpHost) mutateResource(req ahpRequest) (any, error) {
 		}
 		// Resolve aliases before any overwrite. A symlink source can point
 		// inside the destination that an overwrite would otherwise remove.
-		canonicalSource, sourceErr := filepath.EvalSymlinks(filepath.Join(h.server.workspace.RootPath, rel))
-		canonicalDestination, destinationErr := resourceDestinationPath(filepath.Join(h.server.workspace.RootPath, destination))
+		canonicalSource, sourceErr := filepath.EvalSymlinks(filepath.Join(p.server.workspace.RootPath, rel))
+		canonicalDestination, destinationErr := resourceDestinationPath(filepath.Join(p.server.workspace.RootPath, destination))
 		if sourceErr == nil && destinationErr == nil && (canonicalSource == canonicalDestination || strings.HasPrefix(canonicalSource, canonicalDestination+string(filepath.Separator)) || info.IsDir() && strings.HasPrefix(canonicalDestination, canonicalSource+string(filepath.Separator))) {
 			return nil, ahpInvalid("destination contains or aliases the source")
 		}
@@ -340,7 +360,7 @@ func (h *ahpHost) mutateResource(req ahpRequest) (any, error) {
 					}
 				}
 			}
-			if p.FailIfExists {
+			if params.FailIfExists {
 				return nil, fs.ErrExist
 			}
 			// Rename replaces a file atomically, but not a directory.
@@ -365,16 +385,16 @@ func (h *ahpHost) mutateResource(req ahpRequest) (any, error) {
 	s.refreshDiagnostics()
 	return struct{}{}, nil
 }
-func (h *ahpHost) writeResource(rel string, p t.ResourceWriteParams) error {
-	data := []byte(p.Data)
-	switch p.Encoding {
+func (p *ahpProject) writeResource(rel string, params t.ResourceWriteParams) error {
+	data := []byte(params.Data)
+	switch params.Encoding {
 	case t.ContentEncodingUtf8:
 		if !utf8.Valid(data) {
 			return ahpInvalid("invalid UTF-8")
 		}
 	case t.ContentEncodingBase64:
 		var err error
-		data, err = base64.StdEncoding.DecodeString(p.Data)
+		data, err = base64.StdEncoding.DecodeString(params.Data)
 		if err != nil {
 			return ahpInvalid("invalid base64")
 		}
@@ -384,7 +404,7 @@ func (h *ahpHost) writeResource(rel string, p t.ResourceWriteParams) error {
 	if len(data) > ahpResourceLimit {
 		return ahpInvalid("resource exceeds 16 MiB")
 	}
-	root := h.server.workspace.Root
+	root := p.server.workspace.Root
 	info, err := root.Lstat(rel)
 	exists := err == nil
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -393,16 +413,16 @@ func (h *ahpHost) writeResource(rel string, p t.ResourceWriteParams) error {
 	if exists && !info.Mode().IsRegular() {
 		return ahpInvalid("write target must be a regular file")
 	}
-	if exists && p.CreateOnly != nil && *p.CreateOnly {
+	if exists && params.CreateOnly != nil && *params.CreateOnly {
 		return fs.ErrExist
 	}
 	var previous []byte
 	mode, position := t.ResourceWriteModeTruncate, int64(0)
-	if p.Mode != nil {
-		mode = *p.Mode
+	if params.Mode != nil {
+		mode = *params.Mode
 	}
-	if p.Position != nil {
-		position = *p.Position
+	if params.Position != nil {
+		position = *params.Position
 	}
 	if mode != t.ResourceWriteModeTruncate && mode != t.ResourceWriteModeAppend && mode != t.ResourceWriteModeInsert {
 		return ahpInvalid("invalid write mode")
@@ -410,13 +430,13 @@ func (h *ahpHost) writeResource(rel string, p t.ResourceWriteParams) error {
 	if position < 0 || position > ahpResourceLimit {
 		return ahpInvalid("invalid write position")
 	}
-	if exists && (p.IfMatch != nil || mode != t.ResourceWriteModeTruncate || position != 0) {
-		previous, err = h.readResourceFile(rel)
+	if exists && (params.IfMatch != nil || mode != t.ResourceWriteModeTruncate || position != 0) {
+		previous, err = p.readResourceFile(rel)
 		if err != nil {
 			return err
 		}
 	}
-	if p.IfMatch != nil && (!exists || *p.IfMatch != fileRevision(previous)) {
+	if params.IfMatch != nil && (!exists || *params.IfMatch != fileRevision(previous)) {
 		return &ahpRPCError{Code: -32011, Message: "file changed on disk"}
 	}
 	if position > int64(len(previous)) {
@@ -433,7 +453,7 @@ func (h *ahpHost) writeResource(rel string, p t.ResourceWriteParams) error {
 		return ahpInvalid("resource exceeds 16 MiB")
 	}
 	flags := os.O_WRONLY | os.O_CREATE
-	if !exists || p.CreateOnly != nil && *p.CreateOnly {
+	if !exists || params.CreateOnly != nil && *params.CreateOnly {
 		flags |= os.O_EXCL
 	}
 	f, err := root.OpenFile(rel, flags, 0644)

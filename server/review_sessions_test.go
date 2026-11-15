@@ -34,8 +34,8 @@ func reviewSessionsAttach(t *testing.T) (*Server, *backendRuntime, *protocolAgen
 }
 
 // reviewSessionsObserver subscribes a connection without a socket to channels.
-func reviewSessionsObserver(t *testing.T, h *ahpHost, version string, channels ...string) *ahpConnection {
-	conn := &ahpConnection{host: h, writer: newWSClient(nil), initialized: true, id: "observer-" + version, version: version, subscriptions: map[string]bool{}}
+func reviewSessionsObserver(t *testing.T, h *ahpProject, version string, channels ...string) *ahpConnection {
+	conn := &ahpConnection{host: h.ahpHost, writer: newWSClient(nil), initialized: true, id: "observer-" + version, version: version, subscriptions: map[string]bool{}}
 	t.Cleanup(func() { h.mu.Lock(); delete(h.clients, conn); h.mu.Unlock() })
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -87,9 +87,9 @@ func reviewSessionsReproject(t *testing.T, c *sessionController, ch *ahpChat, ob
 	t.Helper()
 	reviewSessionsDrain(t, observer)
 	c.mu.Lock()
-	ch.host.mu.Lock()
+	ch.project.mu.Lock()
 	ch.syncProjection(c, nil)
-	ch.host.mu.Unlock()
+	ch.project.mu.Unlock()
 	c.mu.Unlock()
 	return reviewSessionsTypes(reviewSessionsDrain(t, observer))
 }
@@ -481,7 +481,7 @@ func TestReviewSessionsCanonicalForkURIRedirectsToTheForkChat(t *testing.T) {
 // Bug: syncChats reads the default chat controller's settings under the host lock only, racing with refreshSettings, which writes them under the controller lock.
 func TestReviewSessionsSessionActionsDoNotRaceSettingsRefresh(t *testing.T) {
 	s, _, agent, c, ch := reviewSessionsAttach(t)
-	conn := &ahpConnection{host: s.ahp, id: "racer", initialized: true}
+	conn := &ahpConnection{host: s.ahp.ahpHost, id: "racer", initialized: true}
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for i := range 200 {
@@ -590,8 +590,8 @@ func TestReviewSessionsForkThroughACompactionTurn(t *testing.T) {
 func reviewSessionsDiverged(c *sessionController, ch *ahpChat) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ch.host.mu.Lock()
-	defer ch.host.mu.Unlock()
+	ch.project.mu.Lock()
+	defer ch.project.mu.Unlock()
 	turns, active := ch.transcript(c)
 	if !reflect.DeepEqual(turns, ch.chat.Turns) {
 		a, _ := json.Marshal(turns)

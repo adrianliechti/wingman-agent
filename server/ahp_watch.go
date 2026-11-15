@@ -40,61 +40,61 @@ func watchPatterns(raw *json.RawMessage) ([]string, error) {
 	return patterns.Items, nil
 }
 
-func (h *ahpHost) createResourceWatch(raw json.RawMessage) (any, error) {
-	var p t.CreateResourceWatchParams
-	if json.Unmarshal(raw, &p) != nil || p.Channel != t.RootResourceURI {
+func (p *ahpProject) createResourceWatch(raw json.RawMessage) (any, error) {
+	var params t.CreateResourceWatchParams
+	if json.Unmarshal(raw, &params) != nil || params.Channel != t.RootResourceURI {
 		return nil, ahpInvalid("root channel required")
 	}
-	rel, err := h.resourcePath(p.Uri)
+	rel, err := p.resourcePath(params.Uri)
 	if err != nil {
 		return nil, err
 	}
-	includes, err := watchPatterns(p.Includes)
+	includes, err := watchPatterns(params.Includes)
 	if err != nil {
 		return nil, err
 	}
-	excludes, err := watchPatterns(p.Excludes)
+	excludes, err := watchPatterns(params.Excludes)
 	if err != nil {
 		return nil, err
 	}
-	w := &ahpResourceWatch{state: t.ResourceWatchState{Root: p.Uri, Recursive: p.Recursive != nil && *p.Recursive, Includes: p.Includes, Excludes: p.Excludes}, touched: time.Now()}
-	w.scanner = filewatch.NewScanner(h.server.workspace.Root.FS(), filepath.ToSlash(rel), filewatch.Options{
+	w := &ahpResourceWatch{state: t.ResourceWatchState{Root: params.Uri, Recursive: params.Recursive != nil && *params.Recursive, Includes: params.Includes, Excludes: params.Excludes}, touched: time.Now()}
+	w.scanner = filewatch.NewScanner(p.server.workspace.Root.FS(), filepath.ToSlash(rel), filewatch.Options{
 		Recursive: w.state.Recursive,
 		Skip:      func(rel string, _ fs.DirEntry) bool { return matchesWatch(excludes, rel) },
 		Track:     func(rel string, _ fs.DirEntry) bool { return len(includes) == 0 || matchesWatch(includes, rel) },
 		Limit:     100000,
 	})
-	h.mu.Lock()
-	if h.watches == nil {
-		h.watches = map[string]*ahpResourceWatch{}
+	p.mu.Lock()
+	if p.watches == nil {
+		p.watches = map[string]*ahpResourceWatch{}
 	}
-	for uri, existing := range h.watches {
+	for uri, existing := range p.watches {
 		if reflect.DeepEqual(existing.state, w.state) {
 			existing.touched = time.Now()
-			h.mu.Unlock()
+			p.mu.Unlock()
 			return t.CreateResourceWatchResult{Channel: uri}, nil
 		}
 	}
-	full := len(h.watches) >= 64
-	h.mu.Unlock()
+	full := len(p.watches) >= 64
+	p.mu.Unlock()
 	if full {
 		return nil, ahpInvalid("resource watch limit reached")
 	}
-	if _, err := w.scanner.Changes(h.server.ctx); err != nil {
+	if _, err := w.scanner.Changes(p.server.ctx); err != nil {
 		if errors.Is(err, filewatch.ErrLimit) {
 			return nil, ahpInvalid("resource watch exceeds 100000 entries; narrow its root or exclusions")
 		}
 		return nil, err
 	}
 	uri := "ahp-resource-watch:/" + uuid.NewString()
-	h.mu.Lock()
-	if h.closed || len(h.watches) >= 64 {
-		h.mu.Unlock()
+	p.mu.Lock()
+	if p.closed || len(p.watches) >= 64 {
+		p.mu.Unlock()
 		return nil, ahpInvalid("resource watch unavailable")
 	}
-	h.watches[uri] = w
-	h.mu.Unlock()
-	h.watchOnce.Do(func() { h.server.background.Go(h.runResourceWatches) })
+	p.watches[uri] = w
+	p.mu.Unlock()
+	p.watchOnce.Do(func() { p.server.background.Go(p.runResourceWatches) })
 	return t.CreateResourceWatchResult{Channel: uri}, nil
 }
 
@@ -107,20 +107,20 @@ func matchesWatch(patterns []string, name string) bool {
 	return false
 }
 
-func (h *ahpHost) runResourceWatches() {
+func (p *ahpProject) runResourceWatches() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-h.done:
+		case <-p.done:
 			return
 		case <-ticker.C:
 		}
-		h.mu.Lock()
+		p.mu.Lock()
 		active := map[string]*ahpResourceWatch{}
-		for uri, w := range h.watches {
+		for uri, w := range p.watches {
 			subscribed := false
-			for c := range h.clients {
+			for c := range p.clients {
 				if c.subscriptions[uri] {
 					subscribed = true
 					break
@@ -130,27 +130,27 @@ func (h *ahpHost) runResourceWatches() {
 				w.touched = time.Now()
 				active[uri] = w
 			} else if time.Since(w.touched) > time.Minute {
-				delete(h.watches, uri)
+				delete(p.watches, uri)
 			}
 		}
-		h.mu.Unlock()
+		p.mu.Unlock()
 		for uri, w := range active {
-			scanned, err := w.scanner.Changes(h.server.ctx)
+			scanned, err := w.scanner.Changes(p.server.ctx)
 			if err != nil || len(scanned) == 0 {
 				continue // the scanner keeps its baseline across transient read errors
 			}
 			kinds := map[filewatch.ChangeType]t.ResourceChangeType{filewatch.Created: t.ResourceChangeTypeAdded, filewatch.Changed: t.ResourceChangeTypeUpdated, filewatch.Deleted: t.ResourceChangeTypeDeleted}
 			changes := make([]t.ResourceChange, 0, len(scanned))
 			for _, change := range scanned {
-				changes = append(changes, t.ResourceChange{Uri: h.fileURI(change.Path), Type: kinds[change.Type]})
+				changes = append(changes, t.ResourceChange{Uri: p.fileURI(change.Path), Type: kinds[change.Type]})
 			}
 			slices.SortFunc(changes, func(a, b t.ResourceChange) int { return strings.Compare(a.Uri, b.Uri) })
-			h.mu.Lock()
-			if h.watches[uri] == w {
+			p.mu.Lock()
+			if p.watches[uri] == w {
 				data, _ := json.Marshal(map[string]any{"items": changes})
-				h.publish(uri, t.StateAction{Value: &t.ResourceWatchChangedAction{Type: t.ActionTypeResourceWatchChanged, Changes: data}}, nil, nil)
+				p.publish(uri, t.StateAction{Value: &t.ResourceWatchChangedAction{Type: t.ActionTypeResourceWatchChanged, Changes: data}}, nil, nil)
 			}
-			h.mu.Unlock()
+			p.mu.Unlock()
 		}
 	}
 }

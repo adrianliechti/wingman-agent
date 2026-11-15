@@ -48,14 +48,14 @@ func reviewWorkspaceChangesetRepo(t *testing.T, files map[string]string) string 
 	return dir
 }
 
-func reviewWorkspaceChangesetHost(t *testing.T, root string) *ahpHost {
+func reviewWorkspaceChangesetHost(t *testing.T, root string) *ahpProject {
 	t.Helper()
 	h := newDebugTestServer(t, root).ahpHost()
 	t.Cleanup(h.close)
 	return h
 }
 
-func reviewWorkspaceChangesetState(t *testing.T, h *ahpHost, channel string) types.ChangesetState {
+func reviewWorkspaceChangesetState(t *testing.T, h *ahpProject, channel string) types.ChangesetState {
 	t.Helper()
 	if err := h.ensureChangeset(channel); err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func reviewWorkspaceChangesetState(t *testing.T, h *ahpHost, channel string) typ
 	return state
 }
 
-func reviewWorkspaceChangesetFile(t *testing.T, h *ahpHost, channel, path string) types.ChangesetFile {
+func reviewWorkspaceChangesetFile(t *testing.T, h *ahpProject, channel, path string) types.ChangesetFile {
 	t.Helper()
 	for _, file := range reviewWorkspaceChangesetState(t, h, channel).Files {
 		if strings.HasSuffix(file.Id, "/"+path) {
@@ -78,7 +78,7 @@ func reviewWorkspaceChangesetFile(t *testing.T, h *ahpHost, channel, path string
 	return types.ChangesetFile{}
 }
 
-func reviewWorkspaceChangesetInvoke(h *ahpHost, params map[string]any) error {
+func reviewWorkspaceChangesetInvoke(h *ahpProject, params map[string]any) error {
 	raw, _ := json.Marshal(params)
 	_, err := h.invokeChangesetOperation(raw)
 	return err

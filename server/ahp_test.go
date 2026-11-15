@@ -325,8 +325,9 @@ func TestAHPPersistedSessionURI(t *testing.T) {
 	}
 }
 
-func TestAHPBuiltinAgentRoundTrip(t *testing.T) {
-	testenv.WingmanHome(t)
+// ahpTestGateway answers the builtin agent's model list and one streamed reply.
+func ahpTestGateway(t *testing.T) {
+	t.Helper()
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
@@ -340,9 +341,14 @@ func TestAHPBuiltinAgentRoundTrip(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer gateway.Close()
+	t.Cleanup(gateway.Close)
 	t.Setenv("WINGMAN_URL", gateway.URL)
 	t.Setenv("WINGMAN_MODEL", "gpt-6-sol")
+}
+
+func TestAHPBuiltinAgentRoundTrip(t *testing.T) {
+	testenv.WingmanHome(t)
+	ahpTestGateway(t)
 	app, err := New(t.Context(), t.TempDir(), &ServerOptions{NoBrowser: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)

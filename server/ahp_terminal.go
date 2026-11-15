@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
@@ -24,6 +25,7 @@ const (
 )
 
 type ahpTerminal struct {
+	project  *ahpProject
 	resource string
 	session  *terminal.Session
 	state    t.TerminalState // protected by host.mu
@@ -49,100 +51,117 @@ func validAHPTerminalURI(resource string) bool {
 	return validAHPURI(resource, u.Scheme)
 }
 
-func (h *ahpHost) hasTerminal(resource string) bool {
+func (h *ahpHost) terminal(resource string) *ahpTerminal {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.terminals[resource] != nil
+	if p := h.ownerLocked(resource); p != nil {
+		return p.terminals[resource]
+	}
+	return nil
+}
+
+// snapshotLocked fills in the state of one of the project's own channels.
+func (p *ahpProject) snapshotLocked(channel string, state *t.SnapshotState) bool {
+	if terminal := p.terminals[channel]; terminal != nil {
+		state.Terminal = &terminal.state
+	} else if watch := p.watches[channel]; watch != nil {
+		state.ResourceWatch = &watch.state
+		watch.touched = time.Now()
+	} else if changeset := p.changesets[channel]; changeset != nil {
+		state.Changeset = &changeset.state
+	} else {
+		return false
+	}
+	return true
 }
 
 func (h *ahpHost) prepareChannel(channel string) error {
-	if strings.HasPrefix(channel, "ahp-changeset:") {
-		return h.ensureChangeset(channel)
+	for _, p := range h.loaded() {
+		p.startTerminals()
 	}
-	if strings.HasPrefix(channel, "ahp-resource-watch:") {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		if h.watches[channel] == nil {
-			return &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "watch not found"}
+	if p := h.owner(channel); p != nil {
+		if strings.HasPrefix(channel, "ahp-changeset:") {
+			return p.ensureChangeset(channel)
 		}
 		return nil
 	}
-	h.startTerminals()
-	if h.hasTerminal(channel) {
-		return nil
-	}
-	if validAHPTerminalURI(channel) {
+	switch {
+	case strings.HasPrefix(channel, "ahp-changeset:"):
+		return &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "changeset is no longer available; compare revisions again"}
+	case strings.HasPrefix(channel, "ahp-resource-watch:"):
+		return &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "watch not found"}
+	case validAHPTerminalURI(channel):
 		return &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "terminal not found"}
 	}
 	_, _, err := h.ensureSession(channel)
 	return err
 }
 
-func (h *ahpHost) startTerminals() {
-	if h.server.terminals == nil {
+func (p *ahpProject) startTerminals() {
+	if p.server.terminals == nil {
 		return
 	}
-	h.terminalOnce.Do(func() {
-		initial, events, cancel := h.server.terminals.Subscribe()
-		h.terminalMu.Lock()
+	p.terminalOnce.Do(func() {
+		initial, events, cancel := p.server.terminals.Subscribe()
+		p.terminalMu.Lock()
 		for _, session := range initial {
-			h.attachTerminal(session, "", t.TerminalClaim{})
+			p.attachTerminal(session, "", t.TerminalClaim{})
 		}
-		h.terminalMu.Unlock()
-		h.server.background.Go(func() {
+		p.terminalMu.Unlock()
+		p.server.background.Go(func() {
 			defer func() { cancel() }()
 			for {
 				select {
-				case <-h.done:
+				case <-p.done:
 					return
 				case event, ok := <-events:
 					if !ok {
 						select {
-						case <-h.done:
+						case <-p.done:
 							return
 						default:
 						}
 						// Catalogue overflow is recoverable from the manager's atomic snapshot.
 						cancel()
 						var current []*terminal.Session
-						current, events, cancel = h.server.terminals.Subscribe()
-						h.terminalMu.Lock()
+						current, events, cancel = p.server.terminals.Subscribe()
+						p.terminalMu.Lock()
 						for _, session := range current {
-							h.attachTerminal(session, "", t.TerminalClaim{})
+							p.attachTerminal(session, "", t.TerminalClaim{})
 						}
-						h.mu.Lock()
-						for uri, item := range h.terminals {
+						p.mu.Lock()
+						for uri, item := range p.terminals {
 							if !slices.ContainsFunc(current, func(s *terminal.Session) bool { return s == item.session }) {
 								item.removed = true
-								delete(h.terminals, uri)
+								delete(p.terminals, uri)
 							}
 						}
-						h.publishTerminalsLocked()
-						h.mu.Unlock()
-						h.terminalMu.Unlock()
+						p.publishTerminalsLocked()
+						p.mu.Unlock()
+						p.terminalMu.Unlock()
 						select {
-						case <-h.done:
+						case <-p.done:
 							return
 						default:
 						}
 						continue
 					}
-					h.terminalMu.Lock()
+					p.terminalMu.Lock()
 					if event.Kind == "created" {
-						h.attachTerminal(event.Session, "", t.TerminalClaim{})
+						p.attachTerminal(event.Session, "", t.TerminalClaim{})
 					}
 					if event.Kind == "removed" {
-						h.mu.Lock()
-						for uri, terminal := range h.terminals {
+						p.mu.Lock()
+						for uri, terminal := range p.terminals {
 							if terminal.session == event.Session {
 								terminal.removed = true
-								delete(h.terminals, uri)
+								delete(p.terminals, uri)
 							}
 						}
-						h.publishTerminalsLocked()
-						h.mu.Unlock()
+						p.publishTerminalsLocked()
+						p.mu.Unlock()
 					}
-					h.terminalMu.Unlock()
+					p.terminalMu.Unlock()
 				}
 			}
 		})
@@ -150,46 +169,46 @@ func (h *ahpHost) startTerminals() {
 }
 
 // Caller holds terminalMu; manager locks are never acquired under host.mu.
-func (h *ahpHost) attachTerminal(session *terminal.Session, resource string, claim t.TerminalClaim) *ahpTerminal {
-	h.mu.Lock()
-	for _, existing := range h.terminals {
+func (p *ahpProject) attachTerminal(session *terminal.Session, resource string, claim t.TerminalClaim) *ahpTerminal {
+	p.mu.Lock()
+	for _, existing := range p.terminals {
 		if existing.session == session {
-			h.mu.Unlock()
+			p.mu.Unlock()
 			return existing
 		}
 	}
-	h.mu.Unlock()
+	p.mu.Unlock()
 	if resource == "" {
-		resource = "ahp-terminal:/wingman/" + session.ID()
+		resource = "ahp-terminal:/" + p.namespace + "/" + session.ID()
 	}
 	if claim.Value == nil {
 		claim = ahpHostTerminalClaim()
 	}
 	cols, rows := session.Size()
 	cwd := fileuri.FromPath(session.Cwd())
-	a := &ahpTerminal{resource: resource, session: session, state: t.TerminalState{Title: session.Title(), Cwd: &cwd, Cols: ahpPtr(int64(cols)), Rows: ahpPtr(int64(rows)), Content: []t.TerminalContentPart{}, Claim: claim, IsPty: ahpPtr(true), SupportsCommandDetection: ahpPtr(false), Lifecycle: t.TerminalLifecycleState{Value: &t.TerminalRunningLifecycleState{Status: t.TerminalLifecycleStatusRunning}}}}
+	a := &ahpTerminal{project: p, resource: resource, session: session, state: t.TerminalState{Title: session.Title(), Cwd: &cwd, Cols: ahpPtr(int64(cols)), Rows: ahpPtr(int64(rows)), Content: []t.TerminalContentPart{}, Claim: claim, IsPty: ahpPtr(true), SupportsCommandDetection: ahpPtr(false), Lifecycle: t.TerminalLifecycleState{Value: &t.TerminalRunningLifecycleState{Status: t.TerminalLifecycleStatusRunning}}}}
 	snapshot, offset, output, cancel := session.SubscribeAt()
-	h.mu.Lock()
-	h.terminals[resource] = a
-	h.terminalDataLocked(a, a.filter.feed(snapshot))
-	h.publishTerminalsLocked()
-	h.mu.Unlock()
-	h.server.background.Go(func() {
+	p.mu.Lock()
+	p.terminals[resource] = a
+	p.terminalDataLocked(a, a.filter.feed(snapshot))
+	p.publishTerminalsLocked()
+	p.mu.Unlock()
+	p.server.background.Go(func() {
 		defer func() { cancel() }()
 		for {
 			select {
-			case <-h.done:
+			case <-p.done:
 				return
 			case chunk, ok := <-output:
-				h.mu.Lock()
+				p.mu.Lock()
 				if a.removed {
-					h.mu.Unlock()
+					p.mu.Unlock()
 					return
 				}
 				if ok {
 					offset += int64(len(chunk))
-					h.terminalDataLocked(a, a.filter.feed(chunk))
-					h.mu.Unlock()
+					p.terminalDataLocked(a, a.filter.feed(chunk))
+					p.mu.Unlock()
 					continue
 				}
 				// A stream cut off behind the output closes too; only a complete one reports the exit.
@@ -200,51 +219,54 @@ func (h *ahpHost) attachTerminal(session *terminal.Session, resource string, cla
 					}
 					action := t.StateAction{Value: &t.TerminalExitedAction{Type: t.ActionTypeTerminalExited, ExitCode: code}}
 					ahp.ApplyActionToTerminal(&a.state, action)
-					h.publish(resource, action, nil, nil)
-					h.publishTerminalsLocked()
-					h.mu.Unlock()
+					p.publish(resource, action, nil, nil)
+					p.publishTerminalsLocked()
+					p.mu.Unlock()
 					return
 				}
 				// A slow output subscriber must recover a snapshot, never silently
 				// append across a gap in the VT stream.
-				h.mu.Unlock()
+				p.mu.Unlock()
 				cancel()
 				snapshot, offset, output, cancel = session.SubscribeAt()
-				h.mu.Lock()
+				p.mu.Lock()
 				a.filter = terminalOutputFilter{}
 				clear := t.StateAction{Value: &t.TerminalClearedAction{Type: t.ActionTypeTerminalCleared}}
 				ahp.ApplyActionToTerminal(&a.state, clear)
 				a.size = 0
-				h.publish(resource, clear, nil, nil)
-				h.terminalDataLocked(a, a.filter.feed(snapshot))
-				h.mu.Unlock()
+				p.publish(resource, clear, nil, nil)
+				p.terminalDataLocked(a, a.filter.feed(snapshot))
+				p.mu.Unlock()
 			}
 		}
 	})
 	return a
 }
 
-func (h *ahpHost) terminalCatalogueLocked() []t.TerminalInfo {
-	items := make([]t.TerminalInfo, 0, len(h.terminals))
-	for _, a := range h.terminals {
-		items = append(items, t.TerminalInfo{Resource: a.resource, Title: a.state.Title, Claim: a.state.Claim, Lifecycle: a.state.Lifecycle})
+// terminalsLocked lists the terminals of every project.
+func (h *ahpHost) terminalsLocked() []t.TerminalInfo {
+	items := []t.TerminalInfo{}
+	for _, p := range h.projectsLocked() {
+		for _, a := range p.terminals {
+			items = append(items, t.TerminalInfo{Resource: a.resource, Title: a.state.Title, Claim: a.state.Claim, Lifecycle: a.state.Lifecycle})
+		}
 	}
 	slices.SortFunc(items, func(a, b t.TerminalInfo) int { return strings.Compare(a.Resource, b.Resource) })
 	return items
 }
 
 func (h *ahpHost) publishTerminalsLocked() {
-	h.publish(t.RootResourceURI, t.StateAction{Value: &t.RootTerminalsChangedAction{Type: t.ActionTypeRootTerminalsChanged, Terminals: h.terminalCatalogueLocked()}}, nil, nil)
+	h.publish(t.RootResourceURI, t.StateAction{Value: &t.RootTerminalsChangedAction{Type: t.ActionTypeRootTerminalsChanged, Terminals: h.terminalsLocked()}}, nil, nil)
 }
 
-func (h *ahpHost) terminalDataLocked(a *ahpTerminal, data string) {
+func (p *ahpProject) terminalDataLocked(a *ahpTerminal, data string) {
 	if title := a.filter.title; title != "" {
 		a.filter.title = ""
 		if title != a.state.Title {
 			action := t.StateAction{Value: &t.TerminalTitleChangedAction{Type: t.ActionTypeTerminalTitleChanged, Title: title}}
 			ahp.ApplyActionToTerminal(&a.state, action)
-			h.publish(a.resource, action, nil, nil)
-			h.publishTerminalsLocked()
+			p.publish(a.resource, action, nil, nil)
+			p.publishTerminalsLocked()
 		}
 	}
 	if data == "" {
@@ -252,14 +274,14 @@ func (h *ahpHost) terminalDataLocked(a *ahpTerminal, data string) {
 	}
 	action := t.StateAction{Value: &t.TerminalDataAction{Type: t.ActionTypeTerminalData, Data: data}}
 	ahp.ApplyActionToTerminal(&a.state, action)
-	h.publish(a.resource, action, nil, nil)
+	p.publish(a.resource, action, nil, nil)
 	if a.size += len(data); a.size > ahpTerminalMaxContent {
 		// Only new subscribers see the shorter snapshot; current ones keep
 		// rendering their own history, so no reset is broadcast.
 		var content strings.Builder
 		for _, part := range a.state.Content {
-			if p, ok := part.Value.(*t.TerminalUnclassifiedPart); ok {
-				content.WriteString(p.Value)
+			if text, ok := part.Value.(*t.TerminalUnclassifiedPart); ok {
+				content.WriteString(text.Value)
 			}
 		}
 		tail := string(terminal.SafeTail([]byte(content.String()), ahpTerminalTrimmedContent))
@@ -270,44 +292,47 @@ func (h *ahpHost) terminalDataLocked(a *ahpTerminal, data string) {
 
 // AHP terminals are never unowned: a disconnected owner hands its terminals
 // to the host, from which any client may claim them.
-func (h *ahpHost) releaseTerminalsLocked(clientID string) {
-	for c := range h.clients {
+func (p *ahpProject) releaseTerminalsLocked(clientID string) {
+	for c := range p.clients {
 		if c.id == clientID {
 			return
 		}
 	}
 	released := false
-	for _, a := range h.terminals {
+	for _, a := range p.terminals {
 		if claim, ok := a.state.Claim.Value.(*t.TerminalClientClaim); ok && claim.ClientId == clientID {
 			action := t.StateAction{Value: &t.TerminalClaimedAction{Type: t.ActionTypeTerminalClaimed, Claim: ahpHostTerminalClaim()}}
 			ahp.ApplyActionToTerminal(&a.state, action)
-			h.publish(a.resource, action, nil, nil)
+			p.publish(a.resource, action, nil, nil)
 			released = true
 		}
 	}
 	if released {
-		h.publishTerminalsLocked()
+		p.publishTerminalsLocked()
 	}
 }
 
 func (c *ahpConnection) createTerminal(raw json.RawMessage) (any, error) {
-	h := c.host
 	var p t.CreateTerminalParams
 	if json.Unmarshal(raw, &p) != nil || !validAHPTerminalURI(p.Channel) {
 		return nil, ahpInvalid("valid terminal channel required")
+	}
+	project, err := c.host.loadedProject(p.Cwd)
+	if err != nil {
+		return nil, err
 	}
 	owner, ok := p.Claim.Value.(*t.TerminalClientClaim)
 	if !ok || owner.ClientId != c.id {
 		return nil, ahpInvalid("initial terminal claim must belong to the creating client")
 	}
-	if h.server.terminals == nil {
+	if project.server.terminals == nil {
 		return nil, ahpInvalid("terminal service unavailable")
 	}
-	h.startTerminals()
+	project.startTerminals()
 	dir, name, shell := "", "", ""
 	if p.Cwd != nil {
 		var err error
-		dir, err = h.resourcePath(*p.Cwd)
+		dir, err = project.resourcePath(*p.Cwd)
 		if err != nil {
 			return nil, err
 		}
@@ -328,19 +353,16 @@ func (c *ahpConnection) createTerminal(raw json.RawMessage) (any, error) {
 	if cols < 1 || rows < 1 || cols > 1000 || rows > 1000 {
 		return nil, ahpInvalid("terminal dimensions must be between 1 and 1000")
 	}
-	h.terminalMu.Lock()
-	defer h.terminalMu.Unlock()
-	h.mu.Lock()
-	exists := h.terminals[p.Channel] != nil
-	h.mu.Unlock()
-	if exists {
+	project.terminalMu.Lock()
+	defer project.terminalMu.Unlock()
+	if project.terminal(p.Channel) != nil {
 		return nil, &ahpRPCError{Code: int(t.ErrorCodeAlreadyExists), Message: "terminal already exists"}
 	}
-	session, err := h.server.terminals.CreateShell(shell, dir, name, int(cols), int(rows))
+	session, err := project.server.terminals.CreateShell(shell, dir, name, int(cols), int(rows))
 	if err != nil {
 		return nil, err
 	}
-	h.attachTerminal(session, p.Channel, p.Claim)
+	project.attachTerminal(session, p.Channel, p.Claim)
 	return struct{}{}, nil
 }
 
@@ -350,13 +372,11 @@ func (c *ahpConnection) ownsTerminalLocked(a *ahpTerminal) bool {
 }
 
 func (c *ahpConnection) disposeTerminal(resource string) (any, error) {
-	h := c.host
-	h.mu.Lock()
-	a := h.terminals[resource]
-	h.mu.Unlock()
+	a := c.host.terminal(resource)
 	if a == nil {
 		return nil, &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "terminal not found"}
 	}
+	h := c.host
 	a.opMu.Lock()
 	defer a.opMu.Unlock()
 	h.mu.Lock()
@@ -365,18 +385,15 @@ func (c *ahpConnection) disposeTerminal(resource string) (any, error) {
 		return nil, ahpInvalid("claim the terminal before disposing it")
 	}
 	a.removed = true
-	delete(h.terminals, resource)
+	delete(a.project.terminals, resource)
 	h.publishTerminalsLocked()
 	h.mu.Unlock()
-	h.server.terminals.Remove(a.session.ID())
+	a.project.server.terminals.Remove(a.session.ID())
 	return struct{}{}, nil
 }
 
 func (c *ahpConnection) executeTerminalAction(p t.DispatchActionParams) error {
-	h := c.host
-	h.mu.Lock()
-	a := h.terminals[p.Channel]
-	h.mu.Unlock()
+	a := c.host.terminal(p.Channel)
 	if a == nil {
 		return &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "terminal not found"}
 	}

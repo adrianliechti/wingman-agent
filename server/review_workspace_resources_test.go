@@ -19,7 +19,7 @@ import (
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
-func reviewWorkspaceResourceHost(t *testing.T) (*Server, *ahpHost, string) {
+func reviewWorkspaceResourceHost(t *testing.T) (*Server, *ahpProject, string) {
 	t.Helper()
 	root := t.TempDir()
 	app := newDebugTestServer(t, root)
@@ -28,7 +28,7 @@ func reviewWorkspaceResourceHost(t *testing.T) (*Server, *ahpHost, string) {
 	return app, h, root
 }
 
-func reviewWorkspaceResourceCall(h *ahpHost, method string, params map[string]any) (any, error) {
+func reviewWorkspaceResourceCall(h *ahpProject, method string, params map[string]any) (any, error) {
 	params["channel"] = types.RootResourceURI
 	raw, _ := json.Marshal(params)
 	if method == "createResourceWatch" {

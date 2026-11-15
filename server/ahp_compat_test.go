@@ -77,7 +77,7 @@ func TestAHPSnapshotPrecedesConcurrentUpdates(test *testing.T) {
 	entry := turnQueueEntry(code.TurnInput{ID: "turn", Content: []harness.Content{{Text: "hello"}}}, code.TurnInputActive, 0)
 	c.apply(Frame{Type: EvtTurnInput, Input: &entry})
 	for range 50 {
-		peer := &ahpConnection{host: h, writer: newWSClient(nil), initialized: true, version: "1.1.0", subscriptions: map[string]bool{}}
+		peer := &ahpConnection{host: h.ahpHost, writer: newWSClient(nil), initialized: true, version: "1.1.0", subscriptions: map[string]bool{}}
 		h.mu.Lock()
 		h.clients[peer] = struct{}{}
 		h.mu.Unlock()
@@ -205,8 +205,8 @@ func TestAHPToolCallsReduceToTheirProjection(test *testing.T) {
 		test.Helper()
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		a.host.mu.Lock()
-		defer a.host.mu.Unlock()
+		a.project.mu.Lock()
+		defer a.project.mu.Unlock()
 		_, active := a.transcript(c)
 		if active == nil || a.chat.ActiveTurn == nil || !reflect.DeepEqual(active.ResponseParts, a.chat.ActiveTurn.ResponseParts) {
 			test.Fatalf("%s: reduced state diverged\n%+v\n%+v", step, active, a.chat.ActiveTurn)
@@ -225,7 +225,7 @@ func TestAHPToolCallsReduceToTheirProjection(test *testing.T) {
 	check("completed")
 	c.apply(Frame{Type: EvtToolCall, ID: "run", Name: "shell", Kind: "execute", Args: `{"command":"ls"}`})
 	check("terminal tool")
-	h := a.host
+	h := a.project
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	parts := a.chat.ActiveTurn.ResponseParts

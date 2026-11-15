@@ -21,12 +21,12 @@ func TestListenLocalReservesDefaultAndFallbackPorts(t *testing.T) {
 			listener.Close()
 		}
 	}
-	first, err := listenLocal(0)
+	first, err := listenLocal(0, DefaultPort)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer closeAll(first)
-	second, err := listenLocal(0)
+	second, err := listenLocal(0, DefaultPort)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestListenLocalReservesDefaultAndFallbackPorts(t *testing.T) {
 		if port == 0 {
 			t.Fatal("listener has no assigned port")
 		}
-		duplicate, err := listenLocal(port)
+		duplicate, err := listenLocal(port, DefaultPort)
 		if err == nil {
 			closeAll(duplicate)
 			t.Fatalf("explicit occupied port %d silently fell back", port)

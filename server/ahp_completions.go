@@ -133,7 +133,7 @@ func (h *ahpHost) completions(raw json.RawMessage) (t.CompletionsResult, error) 
 			appendItem(command, "command")
 		}
 	}
-	for _, entry := range h.server.skillCatalogue() {
+	for _, entry := range ch.project.server.skillCatalogue() {
 		appendItem(entry, "skill")
 	}
 	return result, nil

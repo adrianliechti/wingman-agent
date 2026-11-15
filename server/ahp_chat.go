@@ -15,7 +15,7 @@ import (
 
 // ahpChat projects one native session (its controller) as an AHP chat.
 type ahpChat struct {
-	host             *ahpHost
+	project          *ahpProject
 	session          *ahpSession
 	controller       *sessionController
 	chat             t.ChatState
@@ -82,7 +82,7 @@ type ahpPendingAction struct {
 
 func newAHPChat(a *ahpSession, c *sessionController, resource, title, stamp string) *ahpChat {
 	config := ahpConfig(c.state.Settings)
-	return &ahpChat{host: a.host, session: a, controller: c, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{},
+	return &ahpChat{project: a.project, session: a, controller: c, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{},
 		chat: t.ChatState{Resource: resource, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}, Config: &t.ChatConfigState{Values: config.Values}},
 	}
 }
@@ -94,7 +94,7 @@ func (a *ahpSession) emit(channel string, action t.StateAction) {
 	if p != nil && p.envelope == nil && channel == p.params.Channel {
 		origin = &p.origin
 	}
-	envelope := a.host.publish(channel, action, origin, nil)
+	envelope := a.project.publish(channel, action, origin, nil)
 	if origin != nil {
 		p.envelope = &envelope
 		a.remember(*origin, ahpActionKey(action), envelope)
@@ -110,7 +110,7 @@ func (a *ahpSession) acknowledge(client, action t.StateAction) {
 	if p == nil || p.envelope != nil {
 		return
 	}
-	envelope := a.host.publish(p.params.Channel, action, &p.origin, nil)
+	envelope := a.project.publish(p.params.Channel, action, &p.origin, nil)
 	p.envelope = &envelope
 	a.remember(p.origin, key, envelope)
 	delete(a.pending, key)
@@ -142,8 +142,8 @@ func (a *ahpChat) chatAction(action t.StateAction) {
 }
 
 func (a *ahpChat) syncLocked(c *sessionController, changes []SessionChange) {
-	a.host.mu.Lock()
-	defer a.host.mu.Unlock()
+	a.project.mu.Lock()
+	defer a.project.mu.Unlock()
 	if a.session.deleted || a.removed {
 		return
 	}
@@ -171,7 +171,7 @@ func (a *ahpChat) syncLocked(c *sessionController, changes []SessionChange) {
 	}
 	// Updates of a running tool change only its own part.
 	if len(changes) == 1 && changes[0].Type == "entry.upsert" && changes[0].Entry != nil && changes[0].Entry.Type == "tool" && a.chat.ActiveTurn != nil {
-		part, _ := a.host.entryPart(*changes[0].Entry)
+		part, _ := a.project.entryPart(*changes[0].Entry)
 		next := part.Value.(*t.ToolCallResponsePart).ToolCall
 		for _, p := range a.chat.ActiveTurn.ResponseParts {
 			if tool, ok := p.Value.(*t.ToolCallResponsePart); ok && ahpToolCallID(tool.ToolCall) == ahpToolCallID(next) {
@@ -300,7 +300,7 @@ func (a *ahpChat) finishTurn(id string, state t.TurnState, message *string) {
 		// A cancel that lost the race to the turn's end must still be answered.
 		if p := a.session.pending[ahpActionKey(t.StateAction{Value: &t.ChatTurnCancelledAction{TurnId: id}})]; p != nil && p.envelope == nil {
 			reason := "the turn finished before it could be cancelled"
-			envelope := a.host.publish(p.params.Channel, p.params.Action, &p.origin, &reason)
+			envelope := a.project.publish(p.params.Channel, p.params.Action, &p.origin, &reason)
 			p.envelope = &envelope
 			a.session.remember(p.origin, ahpActionKey(p.params.Action), envelope)
 			delete(a.session.pending, ahpActionKey(p.params.Action))
@@ -342,7 +342,7 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 			}
 			var startedAt, duration = (*string)(nil), (*int64)(nil)
 			var usage *t.UsageInfo
-			message := a.host.message(e.Content, e.Files, e.Images)
+			message := a.project.message(e.Content, e.Files, e.Images)
 			if e.Content == "" && len(e.Files)+len(e.Images) == 0 {
 				message.Origin.Kind = t.MessageKindSystemNotification // such as a background task's result
 			}
@@ -373,7 +373,7 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 		if len(turns) == 0 {
 			continue
 		}
-		if part, ok := a.host.entryPart(e); ok {
+		if part, ok := a.project.entryPart(e); ok {
 			if p, ok := part.Value.(*t.ReasoningResponsePart); ok {
 				seen[p.Id] = true
 				if timing := a.reasoning[p.Id]; timing != nil {
@@ -446,7 +446,7 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 	return turns, nil
 }
 
-func (h *ahpHost) entryPart(e TranscriptEntry) (t.ResponsePart, bool) {
+func (p *ahpProject) entryPart(e TranscriptEntry) (t.ResponsePart, bool) {
 	switch e.Type {
 	case "assistant":
 		content := e.Content
@@ -481,7 +481,7 @@ func (h *ahpHost) entryPart(e TranscriptEntry) (t.ResponsePart, bool) {
 			content = append(content, t.ToolResultContent{Value: &t.ToolResultTextContent{Type: t.ToolResultContentTypeText, Text: *e.ToolResult}})
 		}
 		for _, location := range e.ToolLocations {
-			uri := h.fileURI(location.Path)
+			uri := p.fileURI(location.Path)
 			if location.Line > 0 {
 				uri += "#L" + strconv.Itoa(location.Line)
 			}
@@ -685,8 +685,8 @@ func ahpOptionID(option *t.ConfirmationOption) *string {
 }
 
 func (a *ahpChat) resolvePromptLocked(command Command) {
-	a.host.mu.Lock()
-	defer a.host.mu.Unlock()
+	a.project.mu.Lock()
+	defer a.project.mu.Unlock()
 	if p := a.prompts[command.PromptID]; p != nil {
 		p.response = &command
 		if len(command.Content) > 0 {

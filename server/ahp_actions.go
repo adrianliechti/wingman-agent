@@ -27,7 +27,7 @@ func (c *ahpConnection) dispatch(raw json.RawMessage) {
 	var a *ahpSession
 	var ch *ahpChat
 	var err error
-	if h.hasTerminal(p.Channel) {
+	if h.terminal(p.Channel) != nil {
 		err = c.executeTerminalAction(p)
 	} else if a, ch, err = h.ensureSession(p.Channel); err == nil {
 		h.mu.Lock()
@@ -111,7 +111,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			command.Type, command.InputID, command.ID = "queue_update", action.Id, ahpCommandID("queue-update", p.Channel, c.id, p.ClientSeq)
 		}
 		h.mu.Unlock()
-		if err := h.attachments(action.Message, &command); err != nil {
+		if err := a.project.attachments(action.Message, &command); err != nil {
 			return err
 		}
 		if err := ch.command(command); err != nil {
@@ -165,7 +165,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 		}
 		h.mu.Unlock()
 		command.ID, command.Type, command.Text, command.requireIdle = action.TurnId, "send", action.Message.Text, true
-		if err := h.attachments(action.Message, &command); err != nil {
+		if err := a.project.attachments(action.Message, &command); err != nil {
 			return err
 		}
 		if action.Message.Agent != nil {
@@ -274,6 +274,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			return ahpInvalid("nonempty session title required")
 		}
 		a.sessionAction(p.Action)
+		a.rememberTitle()
 	case *t.SessionIsReadChangedAction, *t.SessionIsArchivedChangedAction:
 		if !session {
 			h.mu.Unlock()
@@ -376,7 +377,7 @@ func (a *ahpChat) setConfig(id string, values map[string]json.RawMessage) error 
 	return a.command(command)
 }
 
-func (h *ahpHost) attachments(message t.Message, command *Command) error {
+func (p *ahpProject) attachments(message t.Message, command *Command) error {
 	for _, attachment := range message.Attachments {
 		switch a := attachment.Value.(type) {
 		case *t.SimpleMessageAttachment:
@@ -384,7 +385,7 @@ func (h *ahpHost) attachments(message t.Message, command *Command) error {
 				command.Context = append(command.Context, *a.ModelRepresentation)
 			}
 		case *t.MessageResourceAttachment:
-			path, err := h.resourcePath(a.Uri)
+			path, err := p.resourcePath(a.Uri)
 			if err != nil {
 				return err
 			}
