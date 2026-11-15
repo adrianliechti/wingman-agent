@@ -122,6 +122,19 @@ func (m *TurnManager) session(id string) *managedTurnSession {
 	return s
 }
 
+// settled routes an input by what it is: a compaction or one without an intent
+// is a follow-up, and only steering may wait.
+func settled(input TurnInput) (TurnInput, error) {
+	if input.Compact || input.Intent == "" {
+		input.Intent = TurnInputFollowUp
+	}
+	if input.Intent != TurnInputFollowUp && input.Intent != TurnInputSteer {
+		return input, fmt.Errorf("%w: %q", ErrInvalidIntent, input.Intent)
+	}
+	input.Wait = input.Wait && input.Intent == TurnInputSteer
+	return CloneTurnInput(input), nil
+}
+
 // waits reports whether item is steering that waits in the queue for a turn.
 func waits(item *managedTurnInput) bool { return item.input.Intent == TurnInputSteer }
 
@@ -219,17 +232,10 @@ func (m *TurnManager) submit(ctx context.Context, sessionID string, input TurnIn
 	if len(input.Content) == 0 && !input.Compact {
 		return TurnInputSnapshot{}, errors.New("input content required")
 	}
-	if input.Compact {
-		input.Intent = TurnInputFollowUp
+	input, err := settled(input)
+	if err != nil {
+		return TurnInputSnapshot{}, err
 	}
-	switch input.Intent {
-	case "":
-		input.Intent = TurnInputFollowUp
-	case TurnInputFollowUp, TurnInputSteer:
-	default:
-		return TurnInputSnapshot{}, fmt.Errorf("%w: %q", ErrInvalidIntent, input.Intent)
-	}
-	input = CloneTurnInput(input)
 
 	s := m.session(sessionID)
 	s.mu.Lock()
@@ -734,12 +740,15 @@ func (m *TurnManager) ReplaceQueued(sessionID, inputID string, replacement TurnI
 	}
 	position := 0
 	var previous TurnInput
-	// Only steering that asks to wait keeps waiting for a turn; any other replacement, and a compaction, is a follow-up.
 	replacement.ID = inputID
-	if replacement.Intent != TurnInputSteer || !replacement.Wait || replacement.Compact {
-		replacement.Intent, replacement.Wait = TurnInputFollowUp, false
+	replacement, err := settled(replacement)
+	if err != nil {
+		return err
 	}
-	replacement = CloneTurnInput(replacement)
+	// Only steering that waits stays steering in the queue.
+	if !replacement.Wait {
+		replacement.Intent = TurnInputFollowUp
+	}
 	start := false
 	for i, item := range s.queued {
 		if item.input.ID != inputID || item.delivering {

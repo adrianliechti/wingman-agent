@@ -59,10 +59,6 @@ const (
 
 var colorProfile = DetectProfile()
 
-func SetProfile(p Profile) {
-	colorProfile = p
-}
-
 func DetectProfile() Profile {
 	colorterm := os.Getenv("COLORTERM")
 	if strings.Contains(colorterm, "truecolor") || strings.Contains(colorterm, "24bit") {

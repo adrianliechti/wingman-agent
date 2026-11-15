@@ -234,16 +234,6 @@ func NewFromEnvironment(ctx context.Context, opts Options) (*Telemetry, error) {
 	return newTelemetry(ctx, opts, traces, metrics, logs, captureMode)
 }
 
-// EnvironmentConfigured reports whether a trace, metric, or log exporter is
-// configured with standard OpenTelemetry environment variables.
-func EnvironmentConfigured() bool {
-	if environmentBool("OTEL_SDK_DISABLED") {
-		return false
-	}
-	traces, metrics := configuredSignals()
-	return traces || metrics || signalConfigured("LOGS")
-}
-
 func configuredSignals() (traces, metrics bool) {
 	if environmentBool("OTEL_SDK_DISABLED") {
 		return false, false

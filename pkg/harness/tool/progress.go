@@ -55,8 +55,6 @@ func BackgroundOrigin(ctx context.Context) string {
 	return v
 }
 
-func IsBackgroundOrigin(ctx context.Context) bool { return BackgroundOrigin(ctx) != "" }
-
 // WithProgressSink installs a UI callback that receives transient status text
 // from running tool calls, keyed by tool-call ID. The reporting context carries
 // session metadata installed after the sink itself.

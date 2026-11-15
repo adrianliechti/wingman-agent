@@ -292,7 +292,6 @@ type Command struct {
 	Files      []string             `json:"files,omitempty"`
 	Images     []string             `json:"images,omitempty"`
 	Intent     code.TurnInputIntent `json:"intent,omitempty"`
-	ClearQueue bool                 `json:"clearQueue,omitempty"`
 	Order      []string             `json:"order,omitempty"`
 	PromptID   string               `json:"promptId,omitempty"`
 	Action     string               `json:"action,omitempty"`
@@ -458,12 +457,9 @@ func (c *sessionController) execute(command Command) error {
 	}
 	switch command.Type {
 	case "send", "queue_update":
-		if command.Type == "send" && command.InputID != "" && command.InputID != command.ID {
-			return errors.New("input id must equal the send request id")
-		}
-		id := command.InputID
-		if id == "" {
-			id = command.ID
+		id := command.ID
+		if command.Type == "queue_update" {
+			id = command.InputID
 		}
 		input := code.TurnInput{ID: id, Intent: command.Intent, Wait: command.wait, Origin: "user", Context: command.Context, Display: &code.TurnInputDisplay{Text: command.Text, Files: command.Files, Images: command.Images, Source: command.Message}}
 		if _, canCompact := b.agent.(code.Compactor); canCompact && isCompactCommand(command.Text) {
@@ -501,18 +497,9 @@ func (c *sessionController) execute(command Command) error {
 			return err
 		}
 	case "cancel":
-		if command.InputID != "" {
-			if err := b.turns.CancelTurn(sid, command.InputID, command.ClearQueue); err != nil {
-				return err
-			}
-		} else if command.ClearQueue {
-			if err := b.turns.CancelAll(sid); err != nil {
-				return err
-			}
-		} else {
-			if err := b.turns.CancelCurrent(sid); err != nil {
-				return err
-			}
+		// Stopping a turn also drops what was queued behind it.
+		if err := b.turns.CancelTurn(sid, command.InputID, true); err != nil {
+			return err
 		}
 	case "settings":
 		if command.sync {

@@ -56,37 +56,6 @@ func NewManager(cfg *Config) *Manager {
 	}
 }
 
-func Load(paths ...string) (*Manager, error) {
-	merged := &Config{Servers: map[string]ServerConfig{}}
-
-	var found bool
-
-	for _, path := range paths {
-		if path == "" {
-			continue
-		}
-
-		cfg, err := loadConfig(path)
-
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-
-			return nil, err
-		}
-
-		found = true
-		maps.Copy(merged.Servers, cfg.Servers)
-	}
-
-	if !found {
-		return nil, os.ErrNotExist
-	}
-
-	return NewManager(merged), nil
-}
-
 func (m *Manager) Connect(ctx context.Context, authorize ...func(context.Context, string, ServerConfig) error) error {
 	var errs []error
 

@@ -344,7 +344,7 @@ func TestSessionSettingsRoundTripIndependentUnattendedPolicy(t *testing.T) {
 	}
 }
 
-func TestSessionQueuePersistenceFailureDoesNotAcknowledgeClearing(t *testing.T) {
+func TestSessionQueuePersistenceFailureDoesNotAcknowledgeRemoval(t *testing.T) {
 	s, b, a := newProtocolServer(t)
 	a.queue = code.TurnQueueState{Inputs: []code.TurnInput{{ID: "queued", Content: []harness.Content{{Text: "keep me"}}}}}
 	c := b.session("saved")
@@ -352,9 +352,9 @@ func TestSessionQueuePersistenceFailureDoesNotAcknowledgeClearing(t *testing.T) 
 	a.mu.Lock()
 	a.failSave = true
 	a.mu.Unlock()
-	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "cancel", Type: "cancel", ClearQueue: true})
+	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "remove", Type: "queue_remove", InputID: "queued"})
 	if rec.Code != 409 {
-		t.Fatalf("cancel silently succeeded: %d", rec.Code)
+		t.Fatalf("the removal silently succeeded: %d", rec.Code)
 	}
 	if len(b.turns.Snapshot("saved").Inputs) != 1 {
 		t.Fatal("failed persistence removed the input")
