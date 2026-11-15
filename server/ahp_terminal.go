@@ -38,6 +38,23 @@ func ahpHostTerminalClaim() t.TerminalClaim {
 	return t.TerminalClaim{Value: &t.TerminalClientClaim{Kind: t.TerminalClaimKindClient, ClientId: ahpHostClient}}
 }
 
+// Terminal URI schemes are server-defined. Accept client-chosen schemes
+// (including VS Code's agenthost-terminal), but reserve other ahp-* namespaces
+// for their protocol channels. Never rewrite the terminal's subscription identity.
+func validAHPTerminalURI(resource string) bool {
+	u, err := url.Parse(resource)
+	if err != nil || u.Scheme == "" || strings.HasPrefix(u.Scheme, "ahp-") && u.Scheme != "ahp-terminal" {
+		return false
+	}
+	return validAHPURI(resource, u.Scheme)
+}
+
+func (h *ahpHost) hasTerminal(resource string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.terminals[resource] != nil
+}
+
 func (h *ahpHost) prepareChannel(channel string) error {
 	if strings.HasPrefix(channel, "ahp-changeset:") {
 		return h.ensureChangeset(channel)
@@ -50,14 +67,12 @@ func (h *ahpHost) prepareChannel(channel string) error {
 		}
 		return nil
 	}
-	if strings.HasPrefix(channel, "ahp-terminal:") {
-		h.startTerminals()
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		if h.terminals[channel] == nil {
-			return &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "terminal not found"}
-		}
+	h.startTerminals()
+	if h.hasTerminal(channel) {
 		return nil
+	}
+	if validAHPTerminalURI(channel) {
+		return &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "terminal not found"}
 	}
 	_, _, err := h.ensureSession(channel)
 	return err
@@ -278,7 +293,7 @@ func (h *ahpHost) releaseTerminalsLocked(clientID string) {
 func (c *ahpConnection) createTerminal(raw json.RawMessage) (any, error) {
 	h := c.host
 	var p t.CreateTerminalParams
-	if json.Unmarshal(raw, &p) != nil || !validAHPSessionURI(strings.Replace(p.Channel, "ahp-terminal:", "ahp-session:", 1)) || !strings.HasPrefix(p.Channel, "ahp-terminal:") {
+	if json.Unmarshal(raw, &p) != nil || !validAHPTerminalURI(p.Channel) {
 		return nil, ahpInvalid("valid terminal channel required")
 	}
 	owner, ok := p.Claim.Value.(*t.TerminalClientClaim)

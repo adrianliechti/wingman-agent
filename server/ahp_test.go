@@ -499,14 +499,55 @@ func TestAHPSlowRequestDoesNotBlockTheConnection(t *testing.T) {
 	}
 }
 
-func TestAHPReconnectRequiresAKnownClient(t *testing.T) {
-	_, _, _, endpoint := ahpTestServer(t)
-	client := ahpTestClient(t, endpoint, "")
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	// Its negotiated projection is unknown, so the client must initialize again.
-	if _, err := client.Reconnect(ctx, "stranger", 0, []string{types.RootResourceURI}); err == nil {
-		t.Fatal("reconnect from an unknown client was accepted")
+func TestAHPReconnectUnknownClientCanInitialize(t *testing.T) {
+	for _, version := range []string{"1.0.0", "1.1.0"} {
+		for _, restarted := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/restarted=%t", version, restarted), func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				const clientID = "recovering-client"
+				var lastSeen int64
+				if restarted {
+					oldServer, _, _, oldEndpoint := ahpTestServer(t)
+					oldClient := ahpTestClient(t, oldEndpoint, "")
+					result, err := oldClient.Initialize(ctx, clientID, []string{version}, []string{types.RootResourceURI})
+					if err != nil {
+						t.Fatal(err)
+					}
+					lastSeen = result.ServerSeq
+					_ = oldClient.Shutdown(ctx)
+					oldServer.Close()
+				}
+				_, _, _, endpoint := ahpTestServer(t)
+				client := ahpTestClient(t, endpoint, "")
+				// VS Code can reconnect before its first successful initialize,
+				// or after the host restarts and loses its negotiated versions.
+				_, err := client.Reconnect(ctx, clientID, lastSeen, []string{types.RootResourceURI})
+				var rpc *ahp.RPCError
+				if !errors.As(err, &rpc) || rpc.Code != types.ErrorCodeNotFound {
+					t.Fatalf("want NotFound to trigger a fresh initialize, got %v", err)
+				}
+				// Reuse the same transport, as VS Code's automatic fallback does.
+				result, err := client.Initialize(ctx, clientID, []string{version}, []string{types.RootResourceURI})
+				if err != nil {
+					t.Fatalf("fresh initialize after reconnect: %v", err)
+				}
+				if result.ProtocolVersion != version || len(result.Snapshots) != 1 || result.Snapshots[0].State.Root == nil {
+					t.Fatalf("recovery lost protocol negotiation or root state: %+v", result)
+				}
+				chat := ahpCreate(t, client, "ahp-session:/after-recovery")
+				// The recovered identity also supports normal subsequent reconnects.
+				next := ahpTestClient(t, endpoint, "")
+				recovered, err := next.Reconnect(ctx, clientID, result.ServerSeq, []string{types.RootResourceURI, chat})
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshot, ok := recovered.Value.(*types.ReconnectSnapshotResult)
+				if !ok || len(snapshot.Snapshots) != 2 {
+					t.Fatalf("missing recovered subscriptions: %+v", recovered)
+				}
+			})
+		}
 	}
 }
 

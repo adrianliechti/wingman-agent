@@ -27,7 +27,7 @@ func (c *ahpConnection) dispatch(raw json.RawMessage) {
 	var a *ahpSession
 	var ch *ahpChat
 	var err error
-	if strings.HasPrefix(p.Channel, "ahp-terminal:") {
+	if h.hasTerminal(p.Channel) {
 		err = c.executeTerminalAction(p)
 	} else if a, ch, err = h.ensureSession(p.Channel); err == nil {
 		h.mu.Lock()

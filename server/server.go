@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -297,11 +298,14 @@ func (s *Server) Run(ctx context.Context, port int) error {
 	defer stop()
 	defer s.Close()
 
-	listener, err := listenLocal(port)
+	listeners, err := listenLocal(port)
 	if err != nil {
 		return err
 	}
-	defer listener.Close()
+	for _, listener := range listeners {
+		defer listener.Close()
+	}
+	port = listeners[0].Addr().(*net.TCPAddr).Port
 
 	srv := &http.Server{
 		Handler: s,
@@ -313,16 +317,22 @@ func (s *Server) Run(ctx context.Context, port int) error {
 	stopOnClose := context.AfterFunc(s.ctx, closeServer)
 	defer stopOnClose()
 
-	url := fmt.Sprintf("http://localhost:%d", listener.Addr().(*net.TCPAddr).Port)
+	url := fmt.Sprintf("http://localhost:%d", port)
 	fmt.Fprintf(os.Stderr, "Wingman running at %s\n", url)
-	fmt.Fprintf(os.Stderr, "AHP endpoint: ws://localhost:%d/ahp\n", listener.Addr().(*net.TCPAddr).Port)
+	fmt.Fprintf(os.Stderr, "AHP endpoint: ws://localhost:%d/ahp\n", port)
 
 	if !s.noBrowser {
 		openBrowser(url)
 	}
 
-	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-		return err
+	errs := make(chan error, len(listeners))
+	for _, listener := range listeners {
+		go func() { errs <- srv.Serve(listener) }()
+	}
+	for range listeners {
+		if err := <-errs; err != nil && err != http.ErrServerClosed {
+			return err
+		}
 	}
 	return nil
 }
@@ -707,11 +717,48 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // Keep the selected socket bound before announcing the URL or opening a browser.
-func listenLocal(port int) (net.Listener, error) {
+func listenLocal(port int) ([]net.Listener, error) {
 	if port == 0 {
-		if listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", DefaultPort)); err == nil {
-			return listener, nil
+		if listeners, err := listenLoopback(DefaultPort); err == nil {
+			return listeners, nil
 		}
 	}
-	return net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
+	return listenLoopback(port)
+}
+
+// Clients resolve "localhost" to either loopback address (Windows tries ::1 first), so serve both.
+func listenLoopback(port int) ([]net.Listener, error) {
+	var hosts []string
+	for _, host := range []string{"127.0.0.1", "::1"} {
+		if probe, err := net.Listen("tcp", net.JoinHostPort(host, "0")); err == nil {
+			probe.Close()
+			hosts = append(hosts, host)
+		}
+	}
+	if len(hosts) == 0 {
+		hosts = []string{"localhost"}
+	}
+	for attempt := 0; ; attempt++ {
+		listeners, err := listenHosts(hosts, port)
+		// A random port can be taken on the other address; choose again.
+		if err == nil || port != 0 || attempt == 7 {
+			return listeners, err
+		}
+	}
+}
+
+func listenHosts(hosts []string, port int) ([]net.Listener, error) {
+	var listeners []net.Listener
+	for _, host := range hosts {
+		listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err != nil {
+			for _, open := range listeners {
+				open.Close()
+			}
+			return nil, err
+		}
+		listeners = append(listeners, listener)
+		port = listener.Addr().(*net.TCPAddr).Port
+	}
+	return listeners, nil
 }

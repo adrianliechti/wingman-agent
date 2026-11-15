@@ -260,14 +260,21 @@ func TestReviewWorkspaceTerminalFilterRandomSplitsMatchWholeFeed(t *testing.T) {
 }
 
 func TestReviewWorkspaceTerminalOwnerReconnectAndTakeover(t *testing.T) {
+	for _, scheme := range []string{"ahp-terminal", "agenthost-terminal", "x-test-terminal", "custom-terminal"} {
+		t.Run(scheme, func(t *testing.T) { testReviewWorkspaceTerminalOwnerReconnectAndTakeover(t, scheme) })
+	}
+}
+
+func testReviewWorkspaceTerminalOwnerReconnectAndTakeover(t *testing.T, scheme string) {
+	t.Helper()
 	s, endpoint := reviewWorkspaceTerminalServer(t)
 	first := ahpTestClient(t, endpoint, "owner")
-	uri := "ahp-terminal:/reconnect"
+	uri := scheme + ":/reconnect"
 	createTestTerminal(t, first, uri, "owner")
 	// The same identity reconnects on a new socket before the old one closes.
 	second := ahpTestClient(t, endpoint, "")
 	var raw json.RawMessage
-	if err := second.Request(t.Context(), "reconnect", types.ReconnectParams{Channel: types.RootResourceURI, ClientId: "owner", Subscriptions: []string{uri, "ahp-terminal:/missing"}}, &raw); err != nil {
+	if err := second.Request(t.Context(), "reconnect", types.ReconnectParams{Channel: types.RootResourceURI, ClientId: "owner", Subscriptions: []string{uri, scheme + ":/missing"}}, &raw); err != nil {
 		t.Fatal(err)
 	}
 	var reconnect struct {
@@ -438,9 +445,16 @@ func TestReviewWorkspaceTerminalConcurrentClaimsHaveOneWinner(t *testing.T) {
 }
 
 func TestReviewWorkspaceTerminalActionValidation(t *testing.T) {
+	for _, scheme := range []string{"ahp-terminal", "agenthost-terminal", "x-test-terminal", "custom-terminal"} {
+		t.Run(scheme, func(t *testing.T) { testReviewWorkspaceTerminalActionValidation(t, scheme) })
+	}
+}
+
+func testReviewWorkspaceTerminalActionValidation(t *testing.T, scheme string) {
+	t.Helper()
 	s, endpoint := reviewWorkspaceTerminalServer(t)
 	owner := ahpTestClient(t, endpoint, "owner")
-	uri := "ahp-terminal:/validation"
+	uri := scheme + ":/validation"
 	createTestTerminal(t, owner, uri, "owner")
 	_, ownerSub, err := subscribeTerminal(t.Context(), owner, uri)
 	if err != nil {
@@ -515,22 +529,39 @@ func TestReviewWorkspaceTerminalActionValidation(t *testing.T) {
 }
 
 func TestReviewWorkspaceTerminalCreateValidation(t *testing.T) {
+	for _, scheme := range []string{"ahp-terminal", "agenthost-terminal", "x-test-terminal", "custom-terminal"} {
+		t.Run(scheme, func(t *testing.T) { testReviewWorkspaceTerminalCreateValidation(t, scheme) })
+	}
+}
+
+func testReviewWorkspaceTerminalCreateValidation(t *testing.T, scheme string) {
+	t.Helper()
 	s, endpoint := reviewWorkspaceTerminalServer(t)
 	client := ahpTestClient(t, endpoint, "owner")
 	claim := types.TerminalClaim{Value: &types.TerminalClientClaim{Kind: types.TerminalClaimKindClient, ClientId: "owner"}}
 	outside := t.TempDir()
 	for name, params := range map[string]types.CreateTerminalParams{
-		"session scheme":  {Channel: "ahp-session:/x", Claim: claim},
-		"empty path":      {Channel: "ahp-terminal:", Claim: claim},
-		"host form":       {Channel: "ahp-terminal://host/x", Claim: claim},
-		"query":           {Channel: "ahp-terminal:/x?y=1", Claim: claim},
-		"foreign claim":   {Channel: "ahp-terminal:/x", Claim: types.TerminalClaim{Value: &types.TerminalClientClaim{Kind: types.TerminalClaimKindClient, ClientId: "someone-else"}}},
-		"host claim":      {Channel: "ahp-terminal:/x", Claim: ahpHostTerminalClaim()},
-		"zero cols":       {Channel: "ahp-terminal:/x", Claim: claim, Cols: ahpPtr(int64(0))},
-		"huge rows":       {Channel: "ahp-terminal:/x", Claim: claim, Rows: ahpPtr(int64(5000))},
-		"outside cwd":     {Channel: "ahp-terminal:/x", Claim: claim, Cwd: ahpPtr((&url.URL{Scheme: "file", Path: filepath.ToSlash(outside)}).String())},
-		"unknown shell":   {Channel: "ahp-terminal:/x", Claim: claim, Meta: map[string]json.RawMessage{"wingman.shell": json.RawMessage(`"/bin/rm"`)}},
-		"malformed shell": {Channel: "ahp-terminal:/x", Claim: claim, Meta: map[string]json.RawMessage{"wingman.shell": json.RawMessage(`42`)}},
+		"session scheme":   {Channel: "ahp-session:/x", Claim: claim},
+		"root scheme":      {Channel: "ahp-root:/x", Claim: claim},
+		"chat scheme":      {Channel: "ahp-chat:/x", Claim: claim},
+		"changeset scheme": {Channel: "ahp-changeset:/x", Claim: claim},
+		"watch scheme":     {Channel: "ahp-resource-watch:/x", Claim: claim},
+		"reserved scheme":  {Channel: "ahp-future:/x", Claim: claim},
+		"relative URI":     {Channel: "/terminal", Claim: claim},
+		"opaque URI":       {Channel: scheme + ":terminal", Claim: claim},
+		"oversized URI":    {Channel: scheme + ":/" + strings.Repeat("x", 2048), Claim: claim},
+		"fragment":         {Channel: scheme + ":/x#part", Claim: claim},
+		"root path":        {Channel: scheme + ":/", Claim: claim},
+		"empty path":       {Channel: scheme + ":", Claim: claim},
+		"host form":        {Channel: scheme + "://host/x", Claim: claim},
+		"query":            {Channel: scheme + ":/x?y=1", Claim: claim},
+		"foreign claim":    {Channel: scheme + ":/x", Claim: types.TerminalClaim{Value: &types.TerminalClientClaim{Kind: types.TerminalClaimKindClient, ClientId: "someone-else"}}},
+		"host claim":       {Channel: scheme + ":/x", Claim: ahpHostTerminalClaim()},
+		"zero cols":        {Channel: scheme + ":/x", Claim: claim, Cols: ahpPtr(int64(0))},
+		"huge rows":        {Channel: scheme + ":/x", Claim: claim, Rows: ahpPtr(int64(5000))},
+		"outside cwd":      {Channel: scheme + ":/x", Claim: claim, Cwd: ahpPtr((&url.URL{Scheme: "file", Path: filepath.ToSlash(outside)}).String())},
+		"unknown shell":    {Channel: scheme + ":/x", Claim: claim, Meta: map[string]json.RawMessage{"wingman.shell": json.RawMessage(`"/bin/rm"`)}},
+		"malformed shell":  {Channel: scheme + ":/x", Claim: claim, Meta: map[string]json.RawMessage{"wingman.shell": json.RawMessage(`42`)}},
 	} {
 		if err := client.Request(t.Context(), "createTerminal", params, nil); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -539,7 +570,7 @@ func TestReviewWorkspaceTerminalCreateValidation(t *testing.T) {
 	if len(s.terminals.List()) != 0 {
 		t.Fatalf("rejected requests started %d terminals", len(s.terminals.List()))
 	}
-	uri := "ahp-terminal:/dup"
+	uri := scheme + ":/dup"
 	createTestTerminal(t, client, uri, "owner")
 	err := client.Request(t.Context(), "createTerminal", types.CreateTerminalParams{Channel: uri, Claim: claim}, nil)
 	var rpc *ahp.RPCError

@@ -12,10 +12,17 @@ import (
 )
 
 func TestAHPTerminalLifecycleAndOwnership(t *testing.T) {
+	for _, scheme := range []string{"ahp-terminal", "agenthost-terminal", "x-test-terminal", "custom-terminal"} {
+		t.Run(scheme, func(t *testing.T) { testAHPTerminalLifecycleAndOwnership(t, scheme) })
+	}
+}
+
+func testAHPTerminalLifecycleAndOwnership(t *testing.T, scheme string) {
+	t.Helper()
 	s, _, _, endpoint := ahpTestServer(t)
 	s.terminals = terminal.NewManager(t.TempDir())
 	first := ahpTestClient(t, endpoint, "terminal-owner")
-	uri := "ahp-terminal:/test"
+	uri := scheme + ":/test"
 	err := first.Request(t.Context(), "createTerminal", types.CreateTerminalParams{Channel: uri, Claim: types.TerminalClaim{Value: &types.TerminalClientClaim{Kind: types.TerminalClaimKindClient, ClientId: "terminal-owner"}}}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -178,10 +185,17 @@ func TestAHPTerminalTrimsWithoutResettingClients(t *testing.T) {
 }
 
 func TestAHPTerminalOwnerDisconnectHandsOver(t *testing.T) {
+	for _, scheme := range []string{"ahp-terminal", "agenthost-terminal", "x-test-terminal", "custom-terminal"} {
+		t.Run(scheme, func(t *testing.T) { testAHPTerminalOwnerDisconnectHandsOver(t, scheme) })
+	}
+}
+
+func testAHPTerminalOwnerDisconnectHandsOver(t *testing.T, scheme string) {
+	t.Helper()
 	s, _, _, endpoint := ahpTestServer(t)
 	s.terminals = terminal.NewManager(t.TempDir())
 	owner := ahpTestClient(t, endpoint, "owner")
-	uri := "ahp-terminal:/handover"
+	uri := scheme + ":/handover"
 	createTestTerminal(t, owner, uri, "owner")
 	observer := ahpTestClient(t, endpoint, "observer")
 	state, sub, err := subscribeTerminal(t.Context(), observer, uri)

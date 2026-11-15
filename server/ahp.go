@@ -572,7 +572,9 @@ func (c *ahpConnection) subscribeRequest(req ahpRequest) error {
 			known, ok := h.versions[clientID]
 			if !ok {
 				// The host cannot know which projection this client negotiated.
-				return ahpInvalid("unknown client; initialize again")
+				// VS Code handles NotFound by initializing again on this socket;
+				// InvalidParams leaves it retrying reconnect indefinitely.
+				return &ahpRPCError{Code: int(t.ErrorCodeNotFound), Message: "unknown client; initialize again"}
 			}
 			version = known.version
 		}

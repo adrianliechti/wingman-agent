@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -15,34 +16,47 @@ import (
 )
 
 func TestListenLocalReservesDefaultAndFallbackPorts(t *testing.T) {
+	closeAll := func(listeners []net.Listener) {
+		for _, listener := range listeners {
+			listener.Close()
+		}
+	}
 	first, err := listenLocal(0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer closeAll(first)
 	second, err := listenLocal(0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer second.Close()
-	if first.Addr().String() == second.Addr().String() {
-		t.Fatalf("selected occupied address %s", first.Addr())
+	defer closeAll(second)
+	if first[0].Addr().String() == second[0].Addr().String() {
+		t.Fatalf("selected occupied address %s", first[0].Addr())
 	}
-	for _, listener := range []net.Listener{first, second} {
-		port := listener.Addr().(*net.TCPAddr).Port
+	for _, listeners := range [][]net.Listener{first, second} {
+		port := listeners[0].Addr().(*net.TCPAddr).Port
 		if port == 0 {
 			t.Fatal("listener has no assigned port")
 		}
 		duplicate, err := listenLocal(port)
 		if err == nil {
-			duplicate.Close()
+			closeAll(duplicate)
 			t.Fatalf("explicit occupied port %d silently fell back", port)
 		}
-		conn, err := net.Dial("tcp", listener.Addr().String())
-		if err != nil {
-			t.Fatalf("selected port is not listening: %v", err)
+		// A client may resolve localhost to either loopback address.
+		for _, host := range []string{"127.0.0.1", "::1"} {
+			probe, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+			if err != nil {
+				continue // this machine lacks the address family
+			}
+			probe.Close()
+			conn, err := net.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+			if err != nil {
+				t.Fatalf("selected port is not listening on %s: %v", host, err)
+			}
+			conn.Close()
 		}
-		conn.Close()
 	}
 }
 

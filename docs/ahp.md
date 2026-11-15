@@ -44,10 +44,13 @@ Send a prompt, then try a follow-up, cancellation, and a task requiring tool
 approval. Open `http://localhost:9000` to see the same sessions in Wingman's
 browser UI. An approval answered in one client is resolved for all clients.
 Disconnecting VS Code leaves an active turn running in the host; reconnecting
-restores the current state.
+restores the current state. If the host has restarted or has not yet seen a
+client, `reconnect` returns AHP `NotFound`, allowing VS Code to initialize again
+on the same connection and renegotiate its protocol version automatically.
 
 The local AHP endpoint needs no token or cookie. The server binds to loopback
-and validates the request Host. It accepts clients that send no `Origin`
+on both `127.0.0.1` and `::1`, so `localhost` works whichever address a client
+resolves it to, and validates the request Host. It accepts clients that send no `Origin`
 (native clients), the same-origin Web UI, and desktop web views with their own
 URL schemes such as `vscode-file://`. Other websites, including sandboxed
 `Origin: null` frames, are rejected. `/lsp` and `/dap` accept only the
@@ -207,7 +210,14 @@ user's text. `chat/usage` reports the latest request's prompt tokens as
 `inputTokens`, and the turn's output and cache-read tokens.
 
 Terminal channels share the workspace terminal manager, including debugger
-terminals. They support discovery, creation, ownership, input, resize, titles,
+terminals. Following the [terminal URI specification](https://microsoft.github.io/agent-host-protocol/specification/terminal-channel.html#uri),
+Wingman accepts client-chosen schemes, including VS Code's `agenthost-terminal`
+and custom schemes such as `x-my-terminal`. URIs must have the form
+`<scheme>:/<id>`; other `ahp-*` namespaces remain reserved for protocol channels.
+The original URI is preserved in the catalogue, subscriptions, actions, and
+reconnection. Wingman-created terminals use `ahp-terminal:/wingman/<id>`.
+
+Terminals support discovery, creation, ownership, input, resize, titles,
 clear, disposal, reconnect scrollback, and retained exit status. A disconnected
 owner can be replaced; a connected owner's terminal remains read-only to other
 clients. Scrollback is bounded to 256 KiB. Shell-integration markers are filtered
