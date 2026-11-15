@@ -63,8 +63,7 @@ func BenchmarkEditorRender(b *testing.B) {
 	editor := NewEditor()
 	editor.SetText(strings.Repeat("A long pasted prompt with source context.\n", 500))
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		editor.Render(120, 10, EditorChrome{})
 	}
 }

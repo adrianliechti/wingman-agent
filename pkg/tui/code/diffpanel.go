@@ -200,7 +200,7 @@ func (p *diffPanel) render(width, height int) []string {
 		}
 		return out
 	}
-	rows := height - 1
+	var rows int
 	sticky := ""
 	// Pinned file rows reduce the viewport. Clamp against that viewport so
 	// the final diff lines remain reachable, then re-evaluate the pinned file.

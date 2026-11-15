@@ -23,8 +23,8 @@ func TestClassifierChangelogDangerous(t *testing.T) {
 		{"overlong command", "echo " + strings.Repeat("A", 10_001)},
 
 		// 2.1.214: permission checks no longer fooled by lookalike/invisible characters
-		{"bidi override obfuscation", "ls /tmp/x‮gnihtemos"},
-		{"zero width obfuscation", "l​s && rm -rf /tmp/x"},
+		{"bidi override obfuscation", "ls /tmp/x\u202egnihtemos"},
+		{"zero width obfuscation", "l\u200bs && rm -rf /tmp/x"},
 		{"carriage return obfuscation", "ls\rrm -rf /tmp/x"},
 
 		// 2.1.210: catastrophic removals inside $( ), backticks, and <( ) prompt

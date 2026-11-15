@@ -356,9 +356,7 @@ func (a *App) submitInputIntent(intent code.TurnInputIntent) {
 		} else if imageCount > 1 {
 			attachments = append(attachments, fmt.Sprintf("%d images", imageCount))
 		}
-		for _, f := range a.pendingFiles {
-			attachments = append(attachments, f)
-		}
+		attachments = append(attachments, a.pendingFiles...)
 		if query != "" {
 			displayText = fmt.Sprintf("%s\n[%s]", query, strings.Join(attachments, ", "))
 		} else {

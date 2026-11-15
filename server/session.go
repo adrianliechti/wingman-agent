@@ -101,7 +101,6 @@ type sessionController struct {
 	receiptMu  sync.Mutex
 	backend    *backendRuntime
 	ref        SessionRef
-	epoch      string
 	// opMu serializes load and commands, never stream callbacks.
 	opMu           sync.Mutex
 	loaded         bool
@@ -136,7 +135,7 @@ type hostTurn struct {
 }
 
 func newSessionController(b *backendRuntime, id string) *sessionController {
-	return &sessionController{backend: b, ref: SessionRef{b.scope.WorkspaceID, b.id, id}, epoch: uuid.NewString(), receipts: map[string]*commandReceipt{}, deliveredTasks: map[string]bool{}, entries: []TranscriptEntry{}, prompts: map[string]pendingPrompt{}, attempt: map[string]bool{}, state: SessionState{Status: "loading", Phase: "idle", Prompts: []PromptView{}, PendingInputs: []TurnQueueEntry{}, ToolProgress: map[string]string{}, Settings: SessionSettings{Models: []modelOption{}, Efforts: []string{}, Modes: []modeOption{}}}}
+	return &sessionController{backend: b, ref: SessionRef{b.scope.WorkspaceID, b.id, id}, receipts: map[string]*commandReceipt{}, deliveredTasks: map[string]bool{}, entries: []TranscriptEntry{}, prompts: map[string]pendingPrompt{}, attempt: map[string]bool{}, state: SessionState{Status: "loading", Phase: "idle", Prompts: []PromptView{}, PendingInputs: []TurnQueueEntry{}, ToolProgress: map[string]string{}, Settings: SessionSettings{Models: []modelOption{}, Efforts: []string{}, Modes: []modeOption{}}}}
 }
 
 func (c *sessionController) load() {

@@ -810,7 +810,7 @@ func (a *Agent) UnstableForkSession(ctx context.Context, params acpsdk.UnstableF
 				}
 				started, startErr := a.codex.threadStart(ctx, threadStartParams{Cwd: cwd, Model: model, Config: config})
 				err = startErr
-				resp = threadForkResponse{Thread: started.Thread, Model: started.Model, ReasoningEffort: started.ReasoningEffort}
+				resp = threadForkResponse(started)
 			}
 		}
 	}

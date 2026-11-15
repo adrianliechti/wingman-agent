@@ -27,7 +27,9 @@ type lifecycleAgent struct {
 
 func (a *lifecycleAgent) Send(ctx context.Context, _ string, _ []harness.Content) (iter.Seq2[harness.Message, error], error) {
 	return func(yield func(harness.Message, error) bool) {
-		yield(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "working"}}}, nil)
+		if !yield(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "working"}}}, nil) {
+			return
+		}
 		<-ctx.Done()
 		close(a.cancelled)
 		<-a.release
@@ -83,12 +85,12 @@ func TestSessionDeleteWaitsForFinalQueueWrite(t *testing.T) {
 	c := b.session("saved")
 	c.load()
 	path := "/api/v2/backends/one/sessions/saved/commands"
-	if rec := protocolRequest(t, s, path, Command{ID: "send", Epoch: c.epoch, Type: "send", Text: "hello"}); rec.Code != 200 {
+	if rec := protocolRequest(t, s, path, Command{ID: "send", Type: "send", Text: "hello"}); rec.Code != 200 {
 		t.Fatal(rec.Body)
 	}
 	waitProtocol(t, func() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.state.Phase == "streaming" })
 	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- protocolRequest(t, s, path, Command{ID: "delete", Epoch: c.epoch, Type: "delete"}) }()
+	go func() { done <- protocolRequest(t, s, path, Command{ID: "delete", Type: "delete"}) }()
 	<-a.cancelled
 	var rec *httptest.ResponseRecorder
 	select {
@@ -168,13 +170,13 @@ func TestSessionRequestIDIsSharedByPromptsAndInFlightCommands(t *testing.T) {
 	model := "new-model"
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		done <- protocolRequest(t, s, path, Command{ID: "shared", Epoch: c.epoch, Type: "settings", Model: &model})
+		done <- protocolRequest(t, s, path, Command{ID: "shared", Type: "settings", Model: &model})
 	}()
 	waitProtocol(t, func() bool { c.mu.Lock(); defer c.mu.Unlock(); return len(c.prompts) == 1 })
 	c.mu.Lock()
 	prompt := c.state.Prompts[0].ID
 	c.mu.Unlock()
-	answer := Command{ID: "shared", Epoch: c.epoch, Type: "prompt_response", PromptID: prompt, Action: "accept"}
+	answer := Command{ID: "shared", Type: "prompt_response", PromptID: prompt, Action: "accept"}
 	if rec := protocolRequest(t, s, path, answer); rec.Code != 409 {
 		t.Errorf("request ID reused across command types: %d", rec.Code)
 	}
@@ -191,7 +193,7 @@ func TestSessionRequestIDIsSharedByPromptsAndInFlightCommands(t *testing.T) {
 		t.Fatal("prompt deadlocked with settings")
 	}
 	// A completed prompt receipt must also reserve its ID against ordinary commands.
-	if rec := protocolRequest(t, s, path, Command{ID: "answer", Epoch: c.epoch, Type: "queue_clear"}); rec.Code != 409 {
+	if rec := protocolRequest(t, s, path, Command{ID: "answer", Type: "queue_clear"}); rec.Code != 409 {
 		t.Errorf("completed prompt ID reused: %d", rec.Code)
 	}
 }

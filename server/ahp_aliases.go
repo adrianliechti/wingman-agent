@@ -165,7 +165,7 @@ func (p *ahpProject) discard(c *sessionController, alias ahpAlias) {
 		p.forgetAlias(alias.Resource)
 	}
 	p.mu.Unlock()
-	_ = c.command(c.backend.ctx, Command{ID: "ahp-discard:" + c.ref.SessionID, Epoch: c.epoch, Type: "delete"})
+	_ = c.command(c.backend.ctx, Command{ID: "ahp-discard:" + c.ref.SessionID, Type: "delete"})
 }
 
 // storeAlias saves a session's or chat's alias and makes it known to the host.

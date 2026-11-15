@@ -108,7 +108,7 @@ func (b *backendRuntime) beginOperation() bool {
 func (s *Server) backendOperation(fn func(*backendRuntime, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return s.backendHandler(func(b *backendRuntime, w http.ResponseWriter, r *http.Request) {
 		if !b.beginOperation() {
-			http.Error(w, "workspace closed", 409)
+			http.Error(w, "workspace closed", http.StatusConflict)
 			return
 		}
 		defer b.operations.Done()
@@ -284,7 +284,6 @@ type Command struct {
 	answers     map[string]t.ChatInputAnswer // an AHP client's answers with its drafts, as its reducer keeps them
 
 	ID         string               `json:"id"`
-	Epoch      string               `json:"epoch,omitempty"`
 	Type       string               `json:"type"`
 	InputID    string               `json:"inputId,omitempty"`
 	Text       string               `json:"text,omitempty"`
@@ -307,10 +306,7 @@ type Command struct {
 }
 
 type Receipt struct {
-	ID      string     `json:"id"`
-	Ref     SessionRef `json:"ref"`
-	Epoch   string     `json:"epoch"`
-	Outcome string     `json:"outcome"`
+	Ref SessionRef `json:"ref"`
 }
 
 type commandReceipt struct {
@@ -365,7 +361,7 @@ func (b *backendRuntime) createSession(command Command) commandReceipt {
 	}
 	c := b.session(id)
 	c.opMu.Lock()
-	receipt := Receipt{ID: command.ID, Ref: c.ref, Epoch: c.epoch, Outcome: "created"}
+	receipt := Receipt{Ref: c.ref}
 	c.loaded = true
 	c.replaceHistory()
 	c.mu.Lock()
@@ -383,9 +379,6 @@ func (b *backendRuntime) createSession(command Command) commandReceipt {
 // its own prompt. Never hold a receipt/projection lock while doing backend I/O.
 func (c *sessionController) command(ctx context.Context, command Command) commandReceipt {
 	failure := func(message string) commandReceipt { return commandReceipt{status: 409, message: message} }
-	if c.epoch != command.Epoch {
-		return failure("session epoch changed; subscribe again")
-	}
 	fingerprint := commandFingerprint(command)
 	c.receiptMu.Lock()
 	if previous := c.receipts[command.ID]; previous != nil {
@@ -402,7 +395,7 @@ func (c *sessionController) command(ctx context.Context, command Command) comman
 			return failure("workspace closed")
 		}
 	}
-	record := &commandReceipt{fingerprint: fingerprint, done: make(chan struct{}), receipt: Receipt{ID: command.ID, Ref: c.ref, Epoch: c.epoch, Outcome: "accepted"}}
+	record := &commandReceipt{fingerprint: fingerprint, done: make(chan struct{}), receipt: Receipt{Ref: c.ref}}
 	c.receipts[command.ID] = record
 	c.receiptOrder = append(c.receiptOrder, command.ID)
 	c.pruneReceiptsLocked()

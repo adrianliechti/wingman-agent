@@ -907,7 +907,8 @@ func (s *Session) initialize(ctx context.Context) error {
 		WorkspaceFoldersInitializeParams: protocol.WorkspaceFoldersInitializeParams{
 			WorkspaceFolders: protocol.NewNullable(s.workspaceFolders()),
 		},
-		ProcessID:             &processID,
+		ProcessID: &processID,
+		//lint:ignore SA1019 servers that predate workspace folders read only rootUri
 		RootURI:               &rootURI,
 		InitializationOptions: protocol.LSPAny(s.server.InitializationOptions),
 		Capabilities: protocol.ClientCapabilities{

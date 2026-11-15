@@ -953,7 +953,7 @@ func reviewDAPFixtureServe(input io.Reader, output io.Writer, options []string) 
 				time.Sleep(1500 * time.Millisecond)
 			}
 			if !worker {
-				_ = os.WriteFile("review-dap-disconnect", []byte(fmt.Sprint(arguments["terminateDebuggee"])), 0o644)
+				_ = os.WriteFile("review-dap-disconnect", fmt.Append(nil, arguments["terminateDebuggee"]), 0o644)
 			}
 			respond(message, map[string]any{})
 			if !worker {

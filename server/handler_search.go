@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,8 +15,8 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	toolfs "github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
 	"github.com/bmatcuk/doublestar/v4"
-	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
 
 const (
@@ -77,7 +76,11 @@ func (s *Server) searchWorkspace(ctx context.Context, request workspaceSearchReq
 		return err
 	}
 	fys := s.workspace.Root.FS()
-	ignore := newWorkspaceSearchIgnore(fys)
+	gitignore := toolfs.NewGitignore(ctx, fys)
+	ignored := func(path string, directory bool) bool {
+		ignored, _ := gitignore.Ignored(path, directory) // an unreadable ignore file excludes nothing
+		return ignored
+	}
 	files, matches := 0, 0
 	truncated := false
 
@@ -99,12 +102,12 @@ func (s *Server) searchWorkspace(ctx context.Context, request workspaceSearchReq
 			if filePath == "." {
 				return nil
 			}
-			if workspaceSearchExcludedDir(entry.Name()) || ignore.matches(filePath, true) {
+			if workspaceSearchExcludedDir(entry.Name()) || ignored(filePath, true) {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if ignore.matches(filePath, false) || !config.matchesPath(filePath) {
+		if ignored(filePath, false) || !config.matchesPath(filePath) {
 			return nil
 		}
 		if info, infoErr := entry.Info(); infoErr != nil || info.Size() > maxWorkspaceSearchFileSize {
@@ -306,73 +309,6 @@ func workspaceSearchTail(value string, limit int) string {
 		return value
 	}
 	return "…" + string(runes[len(runes)-limit:])
-}
-
-type workspaceSearchIgnore struct {
-	fsys     fs.FS
-	patterns map[string][]gitignore.Pattern
-}
-
-func newWorkspaceSearchIgnore(fsys fs.FS) *workspaceSearchIgnore {
-	return &workspaceSearchIgnore{fsys: fsys, patterns: map[string][]gitignore.Pattern{}}
-}
-
-func (c *workspaceSearchIgnore) matches(filePath string, directory bool) bool {
-	dir := filePath
-	if !directory {
-		dir = path.Dir(filePath)
-	}
-	patterns := c.patternsFor(dir)
-	return len(patterns) > 0 && gitignore.NewMatcher(patterns).Match(strings.Split(filePath, "/"), directory)
-}
-
-func (c *workspaceSearchIgnore) patternsFor(dir string) []gitignore.Pattern {
-	if patterns, ok := c.patterns[dir]; ok {
-		return patterns
-	}
-	var parent []gitignore.Pattern
-	if dir != "." && dir != "/" {
-		parent = c.patternsFor(path.Dir(dir))
-	}
-	local := loadWorkspaceSearchIgnore(c.fsys, workspaceSearchDomain(dir))
-	if len(local) == 0 {
-		c.patterns[dir] = parent
-		return parent
-	}
-	patterns := append(append([]gitignore.Pattern{}, parent...), local...)
-	c.patterns[dir] = patterns
-	return patterns
-}
-
-func loadWorkspaceSearchIgnore(fsys fs.FS, domain []string) []gitignore.Pattern {
-	ignorePath := ".gitignore"
-	if len(domain) > 0 {
-		ignorePath = path.Join(append(append([]string{}, domain...), ".gitignore")...)
-	}
-	file, err := fsys.Open(ignorePath)
-	if err != nil {
-		return nil
-	}
-	defer file.Close()
-
-	var patterns []gitignore.Pattern
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		patterns = append(patterns, gitignore.ParsePattern(line, domain))
-	}
-	return patterns
-}
-
-func workspaceSearchDomain(dir string) []string {
-	if dir == "." || dir == "/" || dir == "" {
-		return nil
-	}
-	return strings.Split(filepath.ToSlash(dir), "/")
 }
 
 // handleWorkspaceSearch streams matching files as NDJSON; aborting the request

@@ -423,10 +423,8 @@ func (a *App) deliverTaskResults(sessionID string, batch []task.Event) {
 	})
 
 	var blocks []string
-	var labels []string
 	for _, ev := range batch {
 		blocks = append(blocks, ev.Notification())
-		labels = append(labels, ev.Description)
 	}
 
 	first := batch[0]
@@ -1716,10 +1714,6 @@ func lastAssistantText(messages []harness.Message) string {
 		}
 	}
 	return ""
-}
-
-func (a *App) showError(title string, err error) {
-	a.appendChat(cellError(title, err.Error(), a.width()))
 }
 
 func (a *App) isToolHidden(name string) bool {

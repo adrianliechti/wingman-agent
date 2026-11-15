@@ -686,7 +686,7 @@ func TestReviewSessionsCommandReceiptsAreBounded(t *testing.T) {
 	defer b.operations.Done()
 	const commands = 10000
 	for i := range commands {
-		c.command(t.Context(), Command{ID: "answer-" + strconv.Itoa(i), Epoch: c.epoch, Type: "prompt_response", PromptID: "gone", Action: "accept"})
+		c.command(t.Context(), Command{ID: "answer-" + strconv.Itoa(i), Type: "prompt_response", PromptID: "gone", Action: "accept"})
 	}
 	c.receiptMu.Lock()
 	kept := len(c.receipts)

@@ -53,10 +53,6 @@ func isControl(r rune) bool {
 	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r)
 }
 
-func visibleLen(s string) int {
-	return ansi.Width(s)
-}
-
 func WrapLine(line string, width int) []string {
 	if width <= 0 {
 		return []string{line}

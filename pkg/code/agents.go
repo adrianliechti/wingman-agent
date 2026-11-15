@@ -25,15 +25,6 @@ func agentsConfigPath() (string, error) {
 	return layout.WingmanPath("agents.json")
 }
 
-func HasAgentsConfig() bool {
-	path, err := agentsConfigPath()
-	if err != nil {
-		return false
-	}
-	_, err = os.Stat(path)
-	return err == nil
-}
-
 func LoadAgents() ([]AgentDef, error) {
 	path, err := agentsConfigPath()
 	if err != nil {

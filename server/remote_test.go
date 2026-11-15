@@ -193,7 +193,7 @@ func TestRemoteUsesExistingReceiptsAndRecoversLiveSessionAfterTunnelRestart(t *t
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar, Timeout: 5 * time.Second}
 	pairTestRemote(t, client, web.URL, credentials)
-	command := Command{ID: "remote-input", Type: "send", Epoch: c.epoch, Text: "hello"}
+	command := Command{ID: "remote-input", Type: "send", Text: "hello"}
 	if status, _ := remoteCommand(t, client, web.URL, "old-instance", command); status != 409 {
 		t.Fatalf("old instance accepted: %d", status)
 	}
@@ -248,7 +248,7 @@ func TestRemotePairingSwitchCannotRedirectAnOldWorkspaceCommand(t *testing.T) {
 	client := &http.Client{Jar: jar, Timeout: 5 * time.Second}
 	pairTestRemote(t, client, web.URL, firstCredentials)
 	pairTestRemote(t, client, web.URL, secondCredentials)
-	status, _ := remoteCommand(t, client, web.URL, first.scope.InstanceID, Command{ID: "old-page", Epoch: c.epoch, Type: "send", Text: "must not run here"})
+	status, _ := remoteCommand(t, client, web.URL, first.scope.InstanceID, Command{ID: "old-page", Type: "send", Text: "must not run here"})
 	if status != 409 || a.sent.Load() != 0 {
 		t.Fatalf("old browser mutated newly paired workspace: status=%d sends=%d", status, a.sent.Load())
 	}

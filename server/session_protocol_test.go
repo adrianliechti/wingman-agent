@@ -181,7 +181,7 @@ func TestSessionRestoresEditableQueueAndRejectsMissingHistory(t *testing.T) {
 	if len(state.PendingInputs) != 1 || state.PendingInputs[0].ID != "saved-input" || state.PendingInputs[0].Text != "original" || !b.turns.Snapshot("saved").Paused {
 		t.Fatalf("restored queue: %+v", state)
 	}
-	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "edit", Epoch: c.epoch, Type: "queue_update", InputID: "saved-input", Text: "edited", Files: []string{"next.go"}})
+	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "edit", Type: "queue_update", InputID: "saved-input", Text: "edited", Files: []string{"next.go"}})
 	if rec.Code != 200 {
 		t.Fatalf("edit: %d %s", rec.Code, rec.Body)
 	}
@@ -209,7 +209,7 @@ func TestSessionReceiptsDeduplicateAfterCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := "/api/v2/backends/one/sessions/" + created.Ref.SessionID + "/commands"
-	command := Command{ID: "send-request", Epoch: created.Epoch, Type: "send", Text: "hello"}
+	command := Command{ID: "send-request", Type: "send", Text: "hello"}
 	rec = protocolRequest(t, s, path, command)
 	if rec.Code != 200 {
 		t.Fatalf("send: %d %s", rec.Code, rec.Body)
@@ -222,11 +222,6 @@ func TestSessionReceiptsDeduplicateAfterCompletion(t *testing.T) {
 	command.Text = "changed"
 	if rec := protocolRequest(t, s, path, command); rec.Code != 409 {
 		t.Fatalf("changed request accepted: %d", rec.Code)
-	}
-	command.ID = "new"
-	command.Epoch = "old-epoch"
-	if rec := protocolRequest(t, s, path, command); rec.Code != 409 {
-		t.Fatalf("old epoch accepted: %d", rec.Code)
 	}
 }
 
@@ -244,7 +239,7 @@ func TestSessionPromptResponsesRemainAvailableDuringLoadAndHaveOneWinner(t *test
 	id := c.state.Prompts[0].ID
 	c.mu.Unlock()
 	path := "/api/v2/backends/one/sessions/saved/commands"
-	command := Command{ID: "answer", Epoch: c.epoch, Type: "prompt_response", PromptID: id, Action: "accept"}
+	command := Command{ID: "answer", Type: "prompt_response", PromptID: id, Action: "accept"}
 	rec := protocolRequest(t, s, path, command)
 	if rec.Code != 200 {
 		t.Fatalf("response: %d %s", rec.Code, rec.Body)
@@ -278,23 +273,23 @@ func TestSessionBackendsOwnIdenticalNativeIDsAndDeletionIsTerminal(t *testing.T)
 	c.load()
 	other := two.session("same")
 	other.load()
-	if c.ref == other.ref || c.epoch == other.epoch {
+	if c.ref == other.ref {
 		t.Fatal("session identity collided")
 	}
 	value := "model-b"
-	rec := protocolRequest(t, s, "/api/v2/backends/two/sessions/same/commands", Command{ID: "settings", Epoch: other.epoch, Type: "settings", Model: &value})
+	rec := protocolRequest(t, s, "/api/v2/backends/two/sessions/same/commands", Command{ID: "settings", Type: "settings", Model: &value})
 	if rec.Code != 200 {
 		t.Fatalf("settings: %s", rec.Body)
 	}
 	if _, model := a.Models("same"); model != "" {
 		t.Fatal("settings crossed backends")
 	}
-	rec = protocolRequest(t, s, "/api/v2/backends/one/sessions/same/commands", Command{ID: "delete", Epoch: c.epoch, Type: "delete"})
+	rec = protocolRequest(t, s, "/api/v2/backends/one/sessions/same/commands", Command{ID: "delete", Type: "delete"})
 	if rec.Code != 200 {
 		t.Fatalf("delete: %s", rec.Body)
 	}
 	c.apply(Frame{Type: EvtTextDelta, Text: "late"})
-	rec = protocolRequest(t, s, "/api/v2/backends/one/sessions/same/commands", Command{ID: "late", Epoch: c.epoch, Type: "send", Text: "late"})
+	rec = protocolRequest(t, s, "/api/v2/backends/one/sessions/same/commands", Command{ID: "late", Type: "send", Text: "late"})
 	if rec.Code == 200 || a.sent.Load() != 0 {
 		t.Fatal("deleted session accepted input")
 	}
@@ -334,7 +329,7 @@ func TestSessionSettingsRoundTripIndependentUnattendedPolicy(t *testing.T) {
 	c.load()
 	for _, enabled := range []bool{true, false} {
 		rec := protocolRequest(t, s, "/api/v2/backends/policy/sessions/saved/commands", Command{
-			ID: fmt.Sprintf("unattended-%t", enabled), Epoch: c.epoch, Type: "settings", Unattended: &enabled,
+			ID: fmt.Sprintf("unattended-%t", enabled), Type: "settings", Unattended: &enabled,
 		})
 		if rec.Code != 200 {
 			t.Fatalf("settings: %d %s", rec.Code, rec.Body)
@@ -357,7 +352,7 @@ func TestSessionQueuePersistenceFailureDoesNotAcknowledgeClearing(t *testing.T) 
 	a.mu.Lock()
 	a.failSave = true
 	a.mu.Unlock()
-	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "cancel", Epoch: c.epoch, Type: "cancel", ClearQueue: true})
+	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "cancel", Type: "cancel", ClearQueue: true})
 	if rec.Code != 409 {
 		t.Fatalf("cancel silently succeeded: %d", rec.Code)
 	}
@@ -459,7 +454,7 @@ func TestSessionCompactMessageRunsAsTurn(t *testing.T) {
 		return slices.Clone(c.entries)
 	}
 
-	rec := protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-1", Epoch: c.epoch, Type: "send", Text: "/compact api design"})
+	rec := protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-1", Type: "send", Text: "/compact api design"})
 	if rec.Code != 200 {
 		t.Fatalf("compact: %d %s", rec.Code, rec.Body)
 	}
@@ -475,7 +470,7 @@ func TestSessionCompactMessageRunsAsTurn(t *testing.T) {
 		t.Fatalf("compaction turn = %+v", e)
 	}
 
-	rec = protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-2", Epoch: c.epoch, Type: "send", Text: "/compact"})
+	rec = protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-2", Type: "send", Text: "/compact"})
 	if rec.Code != 200 {
 		t.Fatalf("compact: %d %s", rec.Code, rec.Body)
 	}

@@ -451,7 +451,7 @@ func walkGrepFilesWithSkipped(ctx context.Context, fsys fs.FS, root string, hidd
 		}
 	}
 
-	cache := newGitignoreCache(ctx, fsys)
+	cache := NewGitignore(ctx, fsys)
 	if root != "." && root != "/" {
 		ignored, err := cache.ancestorIgnored(root)
 		if err != nil {
@@ -499,7 +499,7 @@ func walkGrepFilesWithSkipped(ctx context.Context, fsys fs.FS, root string, hidd
 			if path == root {
 				return nil
 			}
-			ignored, err := cache.matches(path, true)
+			ignored, err := cache.Ignored(path, true)
 			if err != nil {
 				return err
 			}
@@ -514,7 +514,7 @@ func walkGrepFilesWithSkipped(ctx context.Context, fsys fs.FS, root string, hidd
 			skipped(path)
 			return nil
 		}
-		ignored, err := cache.matches(path, false)
+		ignored, err := cache.Ignored(path, false)
 		if err != nil {
 			return err
 		}
@@ -527,15 +527,17 @@ func walkGrepFilesWithSkipped(ctx context.Context, fsys fs.FS, root string, hidd
 	})
 }
 
-type gitignoreCache struct {
+// Gitignore reports whether a file system's .gitignore files exclude a path,
+// reading each directory's file once.
+type Gitignore struct {
 	ctx      context.Context
 	fsys     fs.FS
 	patterns map[string][]gitignore.Pattern
 	matchers map[string]gitignore.Matcher
 }
 
-func newGitignoreCache(ctx context.Context, fsys fs.FS) *gitignoreCache {
-	return &gitignoreCache{
+func NewGitignore(ctx context.Context, fsys fs.FS) *Gitignore {
+	return &Gitignore{
 		ctx:      ctx,
 		fsys:     fsys,
 		patterns: make(map[string][]gitignore.Pattern),
@@ -543,7 +545,7 @@ func newGitignoreCache(ctx context.Context, fsys fs.FS) *gitignoreCache {
 	}
 }
 
-func (c *gitignoreCache) matches(path string, isDir bool) (bool, error) {
+func (c *Gitignore) Ignored(path string, isDir bool) (bool, error) {
 	// A directory's own ignore file governs its children, not the directory.
 	matcher, err := c.matcherFor(pathpkg.Dir(path))
 	if err != nil {
@@ -556,9 +558,9 @@ func (c *gitignoreCache) matches(path string, isDir bool) (bool, error) {
 	return matcher.Match(strings.Split(path, "/"), isDir), nil
 }
 
-func (c *gitignoreCache) ancestorIgnored(dir string) (bool, error) {
+func (c *Gitignore) ancestorIgnored(dir string) (bool, error) {
 	for current := dir; current != "." && current != "/"; current = pathpkg.Dir(current) {
-		ignored, err := c.matches(current, true)
+		ignored, err := c.Ignored(current, true)
 		if err != nil || ignored {
 			return ignored, err
 		}
@@ -566,7 +568,7 @@ func (c *gitignoreCache) ancestorIgnored(dir string) (bool, error) {
 	return false, nil
 }
 
-func (c *gitignoreCache) matcherFor(dir string) (gitignore.Matcher, error) {
+func (c *Gitignore) matcherFor(dir string) (gitignore.Matcher, error) {
 	if cached, ok := c.matchers[dir]; ok {
 		return cached, nil
 	}
@@ -583,7 +585,7 @@ func (c *gitignoreCache) matcherFor(dir string) (gitignore.Matcher, error) {
 	return m, nil
 }
 
-func (c *gitignoreCache) patternsFor(dir string) ([]gitignore.Pattern, error) {
+func (c *Gitignore) patternsFor(dir string) ([]gitignore.Pattern, error) {
 	if cached, ok := c.patterns[dir]; ok {
 		return cached, nil
 	}

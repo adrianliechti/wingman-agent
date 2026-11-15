@@ -58,7 +58,7 @@ func (h *ahpHost) ensureSession(channel string) (*ahpSession, *ahpChat, error) {
 		h.mu.Unlock()
 		return nil, nil, errHostClosed
 	}
-	a, ch := h.channel(channel)
+	a, _ := h.channel(channel)
 	resource := h.sessionURI(channel)
 	h.mu.Unlock()
 	if a == nil {
@@ -75,7 +75,7 @@ func (h *ahpHost) ensureSession(channel string) (*ahpSession, *ahpChat, error) {
 	if h.closed {
 		return nil, nil, errHostClosed
 	}
-	a, ch = h.channel(channel)
+	a, ch := h.channel(channel)
 	if a == nil || a.deleted {
 		return nil, nil, &ahpRPCError{Code: int(t.ErrorCodeSessionNotFound), Message: "session disposed"}
 	}

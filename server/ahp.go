@@ -726,7 +726,7 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 		if !fork {
 			return nil, ahpInvalid("only forked chats can be disposed; dispose the session instead")
 		}
-		return nil, ch.command(Command{ID: "ahp-dispose:" + ch.chat.Resource, Epoch: ch.controller.epoch, Type: "delete"})
+		return nil, ch.command(Command{ID: "ahp-dispose:" + ch.chat.Resource, Type: "delete"})
 	case "resolveSessionConfig":
 		var p t.ResolveSessionConfigParams
 		if json.Unmarshal(req.Params, &p) != nil {
@@ -785,7 +785,7 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 		// Forks go first: deleting the default chat's native session removes the session.
 		slices.Reverse(chats)
 		for _, ch := range chats {
-			if err := ch.command(Command{ID: "ahp-dispose:" + ch.chat.Resource, Epoch: ch.controller.epoch, Type: "delete"}); err != nil {
+			if err := ch.command(Command{ID: "ahp-dispose:" + ch.chat.Resource, Type: "delete"}); err != nil {
 				return nil, err
 			}
 		}

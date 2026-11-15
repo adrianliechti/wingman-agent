@@ -102,7 +102,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 	if session {
 		ch = a.chats[0] // session config and 1.0 clients address the default chat
 	}
-	command := Command{Epoch: ch.controller.epoch}
+	command := Command{}
 	previous := a.summary()
 	switch action := p.Action.Value.(type) {
 	case *t.ChatPendingMessageSetAction:
@@ -424,7 +424,7 @@ func ahpAnswerValues(view PromptView, content map[string]any) map[string]t.ChatI
 
 // syncSettings has the chat run its session's values with those a client set on it.
 func (a *ahpChat) syncSettings(id string) error {
-	return a.command(Command{ID: id, Epoch: a.controller.epoch, Type: "settings", sync: true})
+	return a.command(Command{ID: id, Type: "settings", sync: true})
 }
 
 // ahpSettings is the settings command that applies config values.
@@ -477,14 +477,14 @@ func (a *ahpChat) start(id string, message t.Message) error {
 	if message.Agent != nil {
 		return ahpInvalid("custom agent selection is not supported")
 	}
-	command := Command{ID: id, Epoch: a.controller.epoch, Type: "send", Text: message.Text, requireIdle: true}
+	command := Command{ID: id, Type: "send", Text: message.Text, requireIdle: true}
 	command.Message, _ = json.Marshal(message)
 	if err := a.project.attachments(message, &command); err != nil {
 		return err
 	}
 	if message.Model != nil {
 		model := message.Model.Id
-		if err := a.command(Command{ID: id + ":model", Epoch: command.Epoch, Type: "settings", Model: &model}); err != nil {
+		if err := a.command(Command{ID: id + ":model", Type: "settings", Model: &model}); err != nil {
 			return err
 		}
 	}

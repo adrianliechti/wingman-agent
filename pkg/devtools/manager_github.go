@@ -467,7 +467,7 @@ func extractTarGzip(data []byte, destination string) error {
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg: // the reader reads legacy regular files as these
 			if header.Size < 0 || extracted+header.Size > maxExtractedBytes {
 				return errors.New("archive expands beyond the allowed size")
 			}

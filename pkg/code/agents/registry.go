@@ -176,14 +176,6 @@ func names(registrations []Registration) []string {
 	return names
 }
 
-func Names() ([]string, error) {
-	available, err := Available()
-	if err != nil {
-		return nil, err
-	}
-	return names(available), nil
-}
-
 // NewExternal constructs a detected/configured ACP agent. Hosts construct the
 // built-in code agent directly and own its provider resources.
 func NewExternal(ctx context.Context, ws *code.Workspace, name string) (code.Agent, error) {

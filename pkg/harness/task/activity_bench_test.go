@@ -13,8 +13,7 @@ func BenchmarkTaskActivity(b *testing.B) {
 	defer registry.Close()
 	task := &Task{ID: "task", registry: registry}
 	registry.tasks = []*Task{task}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		task.SetActivity("Reading main.go")
 	}
 }

@@ -57,7 +57,7 @@ func TestForkSessionCreates(t *testing.T) {
 	if a.forks.Load() != 1 || a.source != "saved" || a.title != "Second try" {
 		t.Fatalf("forks=%d source=%q title=%q", a.forks.Load(), a.source, a.title)
 	}
-	if receipt.Ref.SessionID != "forked-saved" || receipt.Outcome != "created" {
+	if receipt.Ref.SessionID != "forked-saved" {
 		t.Fatalf("receipt = %+v", receipt)
 	}
 	if !s.backends["one"].runtime.settings("").CanFork {

@@ -516,7 +516,7 @@ func reviewWorkspaceDeleteChat(t *testing.T, app *Server, id string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ch.command(Command{ID: "review-delete", Epoch: ch.controller.epoch, Type: "delete"}); err != nil {
+	if err := ch.command(Command{ID: "review-delete", Type: "delete"}); err != nil {
 		t.Fatal(err)
 	}
 }
