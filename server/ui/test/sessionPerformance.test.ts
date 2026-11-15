@@ -40,10 +40,30 @@ test("AHP token bursts retain completed entries and unrelated summaries and batc
 			message: { text: "new", origin: { kind: "user" } },
 			responseParts: [{ kind: "markdown", id: "answer", content: "" }],
 		},
+		queuedMessages: [
+			{
+				id: "later",
+				kind: "queued",
+				message: {
+					text: "later",
+					origin: { kind: "user" },
+					attachments: [
+						{
+							type: "embeddedResource",
+							label: "Image",
+							contentType: "image/png",
+							data: "AAAA",
+						},
+					],
+				},
+			},
+		],
 	};
 	store.set(key, projection.project(key, session, chat, 0));
 	store.set(other, emptySession(other));
 	const completed = store.getSnapshot()[key].entries[1],
+		asked = store.getSnapshot()[key].entries[2],
+		queue = store.getSnapshot()[key].pendingInputs,
 		unrelated = store.getSnapshot()[other],
 		summaries = store.getSummaries();
 	let renders = 0;
@@ -59,6 +79,12 @@ test("AHP token bursts retain completed entries and unrelated summaries and batc
 	}
 	assert.equal(store.getSnapshot()[key].entries.at(-1)?.content.length, 1000);
 	assert.equal(store.getSnapshot()[key].entries[1], completed);
+	assert.equal(
+		store.getSnapshot()[key].entries[2],
+		asked,
+		"the running turn's message keeps its entry",
+	);
+	assert.equal(store.getSnapshot()[key].pendingInputs, queue);
 	assert.equal(store.getSnapshot()[other], unrelated);
 	assert.equal(store.getSummaries(), summaries);
 	assert.equal(renders, 0);
@@ -66,7 +92,7 @@ test("AHP token bursts retain completed entries and unrelated summaries and batc
 	assert.equal(renders, 1);
 	release();
 });
-test("closed histories are bounded without discarding an active session", () => {
+test("closed histories are bounded, and a busy one nobody watches is dropped", () => {
 	const store = new SessionStore();
 	for (let i = 0; i < 100; i++) {
 		const key = `ahp-chat:/${i}`;
@@ -77,6 +103,7 @@ test("closed histories are bounded without discarding an active session", () => 
 		});
 		store.forget(key);
 	}
-	assert.equal(Object.keys(store.getSnapshot()).length, 21);
-	assert.equal(store.getSnapshot()["ahp-chat:/0"].phase, "streaming");
+	// An unwatched view stops changing; the catalogue reports whether it still runs.
+	assert.equal(Object.keys(store.getSnapshot()).length, 20);
+	assert.equal(store.getSnapshot()["ahp-chat:/0"], undefined);
 });

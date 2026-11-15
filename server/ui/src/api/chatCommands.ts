@@ -69,14 +69,28 @@ export function chatCommandsQuery(sessionId?: string, inline = false) {
 	});
 }
 
-// Keep the original attachment (including all opaque metadata) only while its
-// invocation is still in the draft. Instructions are resolved by the host.
-export function selectedCommandAttachments(
+function isCommandAttachment(attachment: MessageAttachment): boolean {
+	return typeof attachment._meta?.command === "string";
+}
+
+/** A command's attachment is already shown by its `/name` in the text. */
+export function visibleAttachments(
+	attachments: MessageAttachment[] = [],
+): MessageAttachment[] {
+	return attachments.filter((attachment) => !isCommandAttachment(attachment));
+}
+
+// A command's attachment, with all its opaque metadata, goes only while its
+// invocation is still in the draft; other attachments go as they are.
+export function sentAttachments(
 	text: string,
 	attachments: MessageAttachment[] = [],
 ): MessageAttachment[] {
 	const names = new Set(
 		[...text.matchAll(/(?:^|\s)(\/[^\s/]+)(?=\s|$)/g)].map((match) => match[1]),
 	);
-	return attachments.filter((attachment) => names.has(attachment.label));
+	return attachments.filter(
+		(attachment) =>
+			!isCommandAttachment(attachment) || names.has(attachment.label),
+	);
 }

@@ -52,6 +52,7 @@ export function AgentSessions({
 		title: string,
 		fork: boolean,
 		updated: string,
+		running?: boolean,
 	) => {
 		const active = id === currentSessionId;
 		return (
@@ -85,7 +86,7 @@ export function AgentSessions({
 					title={title}
 					aria-current={active ? "page" : undefined}
 				>
-					{runningSessionIds?.has(id) ? (
+					{running || runningSessionIds?.has(id) ? (
 						<Loader2 size={12} className="shrink-0 animate-spin text-accent" />
 					) : fork ? (
 						<GitFork size={12} className="shrink-0 text-fg-dim" />
@@ -165,6 +166,7 @@ export function AgentSessions({
 										index === 0 ? title : chat.title || `Fork of ${title}`,
 										index > 0,
 										s.updated_at,
+										chat.running,
 									),
 								);
 							})}

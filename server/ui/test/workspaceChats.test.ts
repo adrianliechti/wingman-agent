@@ -252,12 +252,18 @@ test("stop cancels the turn, clearing removes each queued message, compact is a 
 			usage: undefined,
 			responseParts: [],
 		},
+		// Protocol 1.1 lists the steering message in the queue too.
 		steeringMessage: {
 			id: "s",
 			kind: "steering",
 			message: { text: "s", origin: { kind: "user" } },
 		},
 		queuedMessages: [
+			{
+				id: "s",
+				kind: "steering",
+				message: { text: "s", origin: { kind: "user" } },
+			},
 			{
 				id: "q",
 				kind: "queued",

@@ -7,8 +7,10 @@ import type {
 	Turn,
 	ActiveTurn,
 	Message,
+	MessageAttachment,
 	ChatInputAnswer,
 	ChatInputQuestion,
+	ChatInputRequest,
 	ConfigPropertySchema,
 	SessionConfigPropertySchema,
 	ToolCallState,
@@ -29,19 +31,6 @@ import {
 	type SessionView,
 } from "./sessionStore.ts";
 
-function attachments(message: Message) {
-	const files: string[] = [],
-		images: string[] = [];
-	for (const a of message.attachments ?? []) {
-		if (a.type === "resource") files.push(a.label);
-		else if (
-			a.type === "embeddedResource" &&
-			a.contentType.startsWith("image/")
-		)
-			images.push(`data:${a.contentType};base64,${a.data}`);
-	}
-	return { files, images };
-}
 function display(value: string | { markdown: string } | undefined): string {
 	return typeof value === "string" ? value : (value?.markdown ?? "");
 }
@@ -187,6 +176,33 @@ function chatError(session: SessionState, chat: ChatState): string | null {
 	return "The turn failed";
 }
 
+function askPrompt(request: ChatInputRequest): PendingPrompt {
+	return {
+		id: request.id,
+		kind: "ask",
+		message: request.message ?? "",
+		fields: (request.questions ?? []).map(questionField),
+	};
+}
+
+/** The open request of a chat: in its running turn, or raised while none runs. */
+export function inputRequest(
+	session: SessionState,
+	chat: ChatState,
+	id: string,
+): ChatInputRequest | undefined {
+	for (const part of chat.activeTurn?.responseParts ?? [])
+		if (part.kind === "inputRequest" && part.request.id === id)
+			return part.request;
+	for (const need of session.inputNeeded ?? [])
+		if (
+			need.kind === "chatInput" &&
+			need.chat === chat.resource &&
+			need.request.id === id
+		)
+			return need.request;
+}
+
 function questionField(question: ChatInputQuestion): PromptField {
 	const field: PromptField = {
 		name: question.id,
@@ -232,6 +248,7 @@ function questionField(question: ChatInputQuestion): PromptField {
 export class AHPSessionProjection {
 	private turns = new WeakMap<Turn | ActiveTurn, ChatEntry[]>();
 	private parts = new WeakMap<ResponsePart, ChatEntry | null>();
+	private users = new WeakMap<Message, ChatEntry>();
 	private completed?: Turn[];
 	private completedEntries: ChatEntry[] = [];
 	// Settings and usage keep their identities across token updates.
@@ -266,6 +283,42 @@ export class AHPSessionProjection {
 			}
 		}
 		return { text: text.filter(Boolean).join("\n"), images, locations };
+	}
+	/** Files are the workspace paths this client sends; other attachments stay as sent. */
+	private attachments(message: Message) {
+		const files: string[] = [],
+			images: string[] = [],
+			attachments: MessageAttachment[] = [];
+		for (const a of message.attachments ?? []) {
+			if (
+				a.type === "resource" &&
+				!a.selection &&
+				toolLocation(a.uri, this.directory)?.path === a.label
+			)
+				files.push(a.label);
+			else if (
+				a.type === "embeddedResource" &&
+				a.contentType.startsWith("image/")
+			)
+				images.push(`data:${a.contentType};base64,${a.data}`);
+			else attachments.push(a);
+		}
+		return { files, images, ...(attachments.length ? { attachments } : {}) };
+	}
+	/** The active turn changes with every token; its message does not. */
+	private user(turn: Turn | ActiveTurn): ChatEntry {
+		let entry = this.users.get(turn.message);
+		if (!entry) {
+			entry = {
+				id: `user:${turn.id}`,
+				inputId: turn.id,
+				type: "user",
+				content: turn.message.text,
+				...this.attachments(turn.message),
+			};
+			this.users.set(turn.message, entry);
+		}
+		return entry;
 	}
 	private part(part: ResponsePart, id: string): ChatEntry | null {
 		if (this.parts.has(part)) return this.parts.get(part)!;
@@ -337,18 +390,7 @@ export class AHPSessionProjection {
 		let result = this.turns.get(turn);
 		if (!result) {
 			// Turns the host starts itself, such as a background task's result, have no user message.
-			result =
-				turn.message.origin.kind === "user"
-					? [
-							{
-								id: `user:${turn.id}`,
-								inputId: turn.id,
-								type: "user",
-								content: turn.message.text,
-								...attachments(turn.message),
-							},
-						]
-					: [];
+			result = turn.message.origin.kind === "user" ? [this.user(turn)] : [];
 			turn.responseParts.forEach((part, index) => {
 				const entry = this.part(part, `${turn.id}:${index}`);
 				if (entry) result!.push(entry);
@@ -356,6 +398,27 @@ export class AHPSessionProjection {
 			this.turns.set(turn, result);
 		}
 		return result;
+	}
+	private queue(chat: ChatState): PendingTurnInput[] {
+		const inputs: PendingTurnInput[] = (chat.queuedMessages ?? []).map(
+			(pending) => ({
+				id: pending.id,
+				text: pending.message.text,
+				...this.attachments(pending.message),
+				state: "queued",
+				intent: pending.kind === "steering" ? "steer" : "follow_up",
+				position: 0,
+				origin: "user",
+			}),
+		);
+		inputs.sort(
+			(a, b) => Number(b.intent === "steer") - Number(a.intent === "steer"),
+		);
+		// Steering joins the running turn; follow-ups are numbered from 1 like the host's queue.
+		let position = 0;
+		for (const input of inputs)
+			input.position = input.intent === "steer" ? 0 : ++position;
+		return inputs;
 	}
 	project(
 		key: string,
@@ -394,45 +457,20 @@ export class AHPSessionProjection {
 					})),
 				});
 			} else if (part.kind === "inputRequest" && !part.response) {
-				prompts.push({
-					id: part.request.id,
-					kind: "ask",
-					message: part.request.message ?? "",
-					fields: (part.request.questions ?? []).map(questionField),
-				});
+				prompts.push(askPrompt(part.request));
 			}
 		}
-		const pendingInputs: PendingTurnInput[] = (chat.queuedMessages ?? []).map(
-			(pending) => ({
-				id: pending.id,
-				text: pending.message.text,
-				...attachments(pending.message),
-				state: "queued",
-				intent: pending.kind === "steering" ? "steer" : "follow_up",
-				position: 0,
-				origin: "user",
-			}),
+		// A question raised while no turn runs is only the session's.
+		for (const need of session.inputNeeded ?? [])
+			if (
+				need.kind === "chatInput" &&
+				need.chat === chat.resource &&
+				!prompts.some((prompt) => prompt.id === need.request.id)
+			)
+				prompts.push(askPrompt(need.request));
+		const pendingInputs = this.cached("queue", [chat.queuedMessages], () =>
+			this.queue(chat),
 		);
-		if (
-			chat.steeringMessage &&
-			!pendingInputs.some((input) => input.id === chat.steeringMessage!.id)
-		)
-			pendingInputs.push({
-				id: chat.steeringMessage.id,
-				text: chat.steeringMessage.message.text,
-				...attachments(chat.steeringMessage.message),
-				state: "queued",
-				intent: "steer",
-				position: 0,
-				origin: "user",
-			});
-		pendingInputs.sort(
-			(a, b) => Number(b.intent === "steer") - Number(a.intent === "steer"),
-		);
-		// Steering joins the running turn; follow-ups are numbered from 1 like the host's queue.
-		let position = 0;
-		for (const input of pendingInputs)
-			input.position = input.intent === "steer" ? 0 : ++position;
 		const error = chatError(session, chat);
 		return {
 			...emptySession(key),
@@ -461,16 +499,11 @@ export class AHPSessionProjection {
 }
 
 export function inputAnswers(
-	chat: ChatState,
-	requestId: string,
+	request: ChatInputRequest | undefined,
 	content: Record<string, unknown>,
 ): Record<string, ChatInputAnswer> {
-	const part = chat.activeTurn?.responseParts.find(
-		(p) => p.kind === "inputRequest" && p.request.id === requestId,
-	);
 	const answers: Record<string, ChatInputAnswer> = Object.create(null);
-	if (part?.kind !== "inputRequest") return answers;
-	for (const question of part.request.questions ?? []) {
+	for (const question of request?.questions ?? []) {
 		const value = content[question.id];
 		if (value === undefined) continue;
 		switch (question.kind) {

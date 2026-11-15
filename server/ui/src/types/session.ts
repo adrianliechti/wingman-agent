@@ -1,3 +1,4 @@
+import type { MessageAttachment } from "@microsoft/agent-host-protocol";
 import type {
 	PromptKind,
 	PromptField,
@@ -20,6 +21,8 @@ export interface ChatEntry {
 	content: string;
 	images?: string[];
 	files?: string[];
+	/** The message's attachments that are neither files nor images, as sent. */
+	attachments?: MessageAttachment[];
 	inputId?: string;
 	toolName?: string;
 	toolKind?: string;
@@ -42,5 +45,6 @@ export interface PendingTurnInput {
 	text: string;
 	files: string[];
 	images: string[];
+	attachments?: MessageAttachment[];
 	error?: string;
 }

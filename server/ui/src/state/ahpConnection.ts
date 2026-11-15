@@ -76,13 +76,6 @@ export class AHPConnection {
 	private observers = new Map<string, Observer>();
 	// A lost connection fails pending reads; watches resume after reconnecting.
 	private reads = new Set<(error: Error) => void>();
-	private notifications = new Set<(method: string, params: any) => void>();
-	onNotification(listener: (method: string, params: any) => void) {
-		this.notifications.add(listener);
-		return () => {
-			this.notifications.delete(listener);
-		};
-	}
 	private connectionListeners = new Set<() => void>();
 	private eventListeners = new Set<(event: ServerMessage) => void>();
 	private connected = false;
@@ -193,9 +186,6 @@ export class AHPConnection {
 					} catch {
 						return frame; // the SDK reports malformed frames itself
 					}
-					if (message.method)
-						for (const listener of this.notifications)
-							listener(message.method, message.params);
 					if (message.method === "action")
 						this.action(message.params as ActionEnvelope);
 					else if (message.method === "x-wingman/workspaceChanged")
@@ -325,6 +315,16 @@ export class AHPConnection {
 			}
 		};
 	}
+	/** Reads a watched channel's snapshot again, for state that changes without an action. */
+	refresh(uri: string) {
+		const observer = this.observers.get(uri);
+		if (
+			this.connected &&
+			observer?.listeners.size &&
+			observer.generation === this.generation
+		)
+			void this.attach(uri, observer, this.generation);
+	}
 	private async attach(uri: string, observer: Observer, generation: number) {
 		observer.generation = generation;
 		observer.state = undefined;
@@ -430,7 +430,10 @@ export class AHPConnection {
 				observer.state as ChangesetState,
 				action as ChangesetAction,
 			);
-		else if (channel.startsWith("ahp-terminal:"))
+		else if (
+			channel.startsWith("ahp-terminal:") ||
+			this.root.terminals?.some((terminal) => terminal.resource === channel)
+		)
 			observer.state = boundTerminalState(
 				terminalReducer(
 					observer.state as TerminalState,

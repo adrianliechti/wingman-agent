@@ -261,6 +261,34 @@ test("an unconfirmed send is retried as the same pending message, whatever its i
 	assert.equal(actions[2].action.kind, "queued");
 });
 
+test("a chat keeps only its latest unconfirmed send for a retry", async (t) => {
+	let drops = 2;
+	const { client, ahp, sent } = await reviewHost(
+		t,
+		{
+			[reviewSessionURI]: reviewSession,
+			[reviewDefaultChat]: reviewChat(reviewDefaultChat),
+		},
+		async (m, server) => {
+			if (m.method !== "dispatchAction" || drops-- <= 0) return false;
+			await server.close();
+			return true;
+		},
+	);
+	const image = "data:image/png;base64,AAAA";
+	await assert.rejects(
+		client.send(reviewDefaultChat, "one", [], [image]),
+		/lost/,
+	);
+	await ahp.ready();
+	await assert.rejects(client.send(reviewDefaultChat, "two"), /lost/);
+	await ahp.ready();
+	await client.send(reviewDefaultChat, "one", [], [image]);
+	const ids = sent("dispatchAction").map((m) => m.params.action.id);
+	assert.equal(ids.length, 3);
+	assert.notEqual(ids[2], ids[0], "a newer send released the older request");
+});
+
 test("identical sends in flight coalesce into one delivery", async (t) => {
 	const { client, sent } = await reviewHost(t, {
 		[reviewSessionURI]: reviewSession,

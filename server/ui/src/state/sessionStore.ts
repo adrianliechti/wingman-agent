@@ -210,6 +210,14 @@ export class SessionStore {
 	}
 	forget(key: string) {
 		this.subscriptions.delete(key);
+		// A view nobody watches stops changing; one that was busy would stay busy.
+		if (this.views[key] && this.views[key].phase !== "idle") {
+			this.views = { ...this.views };
+			this.summaries = { ...this.summaries };
+			delete this.views[key];
+			delete this.summaries[key];
+			this.emit();
+		}
 		// Closed tabs can reload a snapshot. Bound cached histories separately
 		// from draft ownership, while retaining active background sessions.
 		const inactive = Object.keys(this.views).filter(
