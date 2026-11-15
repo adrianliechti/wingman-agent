@@ -40,14 +40,7 @@ type Project struct {
 	backends   map[string]*backendEntry
 	scope      WorkspaceScope
 
-	dapReferenceSeq  atomic.Uint64
-	searches         atomic.Int32
-	lspDocumentsMu   sync.Mutex
-	lspDocuments     map[string]*lspDocument
-	lspRefreshers    map[*lspConnection]struct{} // clients that re-pull diagnostics on request
-	lspExternalMu    sync.Mutex
-	lspExternalPaths map[string]bool
-	fileWriteMu      sync.Mutex
+	fileWriteMu sync.Mutex
 
 	terminals *terminal.Manager
 
@@ -63,10 +56,11 @@ type Project struct {
 	managedTools atomic.Pointer[managedToolsStatus] // immutable published snapshot
 
 	host             *Host
-	dir              string     // the project's identity: its directory with links resolved
-	namespace        string     // prefix of the channels this project names itself
-	aliasMu          sync.Mutex // orders the saved aliases' writes, which happen outside the host's lock
-	used             time.Time  // when a client last reached the project; protected by host.mu
+	onDiagnostics    func() // optional web subscriber, protected by host.mu
+	dir              string // the project's identity: its directory with links resolved
+	namespace        string // prefix of the channels this project names itself
+	aliases          aliasStore
+	used             time.Time // when a client last reached the project; protected by host.mu
 	terminalOnce     sync.Once
 	terminalChannels map[string]*terminalChannel
 	watches          map[string]*resourceWatch
@@ -230,6 +224,9 @@ func (s *Project) close() {
 			_ = rt.agent.Close()
 		}
 		s.background.Wait()
+		if s.host != nil {
+			s.saveAliases()
+		}
 		if s.workspace != nil {
 			s.workspace.Close()
 		}
@@ -274,6 +271,9 @@ func (h *Host) show(p *Project) {
 
 // Only the web UI follows a project's files.
 func (p *Project) workspaceChanged(f Frame) {
+	if p == nil || p.host == nil {
+		return
+	}
 	p.host.mu.Lock()
 	defer p.host.mu.Unlock()
 	if p.host.web == p {

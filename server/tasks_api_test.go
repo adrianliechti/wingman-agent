@@ -26,9 +26,9 @@ func TestTasksAPI(t *testing.T) {
 	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
-	record := app.backends["wingman"].runtime.createSession(Command{ID: "create-test", Type: "create"})
-	if record.status != 0 {
-		t.Fatal(record.message)
+	record := app.Project.backends["wingman"].runtime.createSession(Command{ID: "create-test", Type: "create"})
+	if record.err != nil {
+		t.Fatal(record.err)
 	}
 	receipt := record.receipt
 	created := struct{ ID string }{receipt.Ref.SessionID}
@@ -69,7 +69,7 @@ func TestTasksAPI(t *testing.T) {
 		t.Fatalf("unknown task status = %d, want 404", res.StatusCode)
 	}
 
-	reg := app.backends["wingman"].runtime.sessionTasks(created.ID)
+	reg := app.Project.backends["wingman"].runtime.sessionTasks(created.ID)
 	if reg == nil {
 		t.Fatal("no registry for coder session")
 	}

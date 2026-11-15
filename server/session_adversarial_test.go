@@ -73,9 +73,9 @@ func (a *lifecycleAgent) SetModel(ctx context.Context, id, model string) error {
 }
 
 func installProtocolAgent(s *Server, a code.Agent) *backendRuntime {
-	s.backends["one"].runtime.turns.Close()
-	b := s.bindBackend("one", a)
-	s.backends["one"] = &backendEntry{runtime: b}
+	s.Project.backends["one"].runtime.turns.Close()
+	b := s.Project.bindBackend("one", a)
+	s.Project.backends["one"] = &backendEntry{runtime: b}
 	return b
 }
 
@@ -242,7 +242,7 @@ func TestBackendReadsCancelWithEitherRequestOrWorkspace(t *testing.T) {
 			ctx, cancelRequest := context.WithCancel(context.Background())
 			defer cancelRequest()
 			req := httptest.NewRequest("GET", "/api/v2/backends/one/sessions", nil).WithContext(ctx)
-			req.Header.Set(instanceHeader, s.scope.InstanceID)
+			req.Header.Set(instanceHeader, s.Project.scope.InstanceID)
 			done := make(chan struct{})
 			go func() {
 				handler := s.backendOperation(func(b *backendRuntime, _ http.ResponseWriter, r *http.Request) {

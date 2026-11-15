@@ -70,7 +70,7 @@ func untilSession(t *testing.T, sub *sdk.Subscription, predicate func(types.Acti
 func TestAHPForkChatsLiveInTheirSession(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
 	agent := &turnForkingAgent{protocolAgent: &protocolAgent{}}
-	s.backends["fork"] = &backendEntry{runtime: s.bindBackend("fork", agent)}
+	s.Project.backends["fork"] = &backendEntry{runtime: s.Project.bindBackend("fork", agent)}
 	client := protocolTestClient(t, endpoint, "forks")
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -129,7 +129,7 @@ func TestAHPForkChatsLiveInTheirSession(t *testing.T) {
 
 	// A restarted host finds forks through their chat URI, in creation order.
 	other, _, _ := newProtocolServer(t)
-	other.backends["fork"] = &backendEntry{runtime: other.bindBackend("fork", agent)}
+	other.Project.backends["fork"] = &backendEntry{runtime: other.Project.bindBackend("fork", agent)}
 	a, ch, err := other.Project.host.ensureSession("ahp-chat:/late")
 	if err != nil {
 		t.Fatal(err)

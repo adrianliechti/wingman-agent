@@ -116,7 +116,7 @@ func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Cont
 
 // webProject makes a test server the project its own host's web UI shows.
 func webProject(s *Server, dir string) *Project {
-	h := newHost(s.ctx)
+	h := newHost(s.Project.ctx)
 	p := h.attach(s.Project)
 	p.dir = canonicalPath(dir)
 	h.show(p)
@@ -132,8 +132,8 @@ func newProtocolServer(t *testing.T) (*Server, *backendRuntime, *protocolAgent) 
 	s := &Server{Project: &Project{ctx: ctx, cancel: cancel, scope: workspaceScope(protocolProject), backends: map[string]*backendEntry{}}}
 	s.Project = webProject(s, protocolProject)
 	a := &protocolAgent{}
-	b := s.bindBackend("one", a)
-	s.backends[b.id] = &backendEntry{runtime: b}
+	b := s.Project.bindBackend("one", a)
+	s.Project.backends[b.id] = &backendEntry{runtime: b}
 	s.mux = chi.NewRouter()
 	s.mux.Route("/api", s.registerSessionRoutes)
 	s.mux.Get("/ahp", s.Project.host.handleAHP)
@@ -147,7 +147,7 @@ func newProtocolServer(t *testing.T) (*Server, *backendRuntime, *protocolAgent) 
 func protocolRequest(t *testing.T, s *Server, path string, command Command) *httptest.ResponseRecorder {
 	t.Helper()
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	b, err := s.backend(parts[3])
+	b, err := s.Project.backend(parts[3])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,16 +155,16 @@ func protocolRequest(t *testing.T, s *Server, path string, command Command) *htt
 	if len(parts) == 5 {
 		record = b.createSession(command)
 	} else {
-		if !b.beginOperation() {
-			record = commandReceipt{status: 409, message: "workspace closed"}
+		if !b.Project.beginOperation() {
+			record = commandReceipt{err: errors.New("workspace closed")}
 		} else {
-			defer b.operations.Done()
+			defer b.Project.operations.Done()
 			record = b.session(parts[5]).command(t.Context(), command)
 		}
 	}
 	rec := httptest.NewRecorder()
-	if record.status != 0 {
-		http.Error(rec, record.message, record.status)
+	if record.err != nil {
+		http.Error(rec, record.err.Error(), http.StatusConflict)
 	} else {
 		writeJSON(rec, record.receipt)
 	}
@@ -242,7 +242,7 @@ func TestSessionPromptResponsesRemainAvailableDuringLoadAndHaveOneWinner(t *test
 	c := b.session("saved")
 	c.opMu.Lock() // A backend load/settings operation is waiting for UI.
 	defer c.opMu.Unlock()
-	ctx, cancel := context.WithCancel(code.WithSessionID(b.ctx, "saved"))
+	ctx, cancel := context.WithCancel(code.WithSessionID(b.Project.ctx, "saved"))
 	defer cancel()
 	done := make(chan bool, 1)
 	go func() { approved, _ := b.Confirm(ctx, "Proceed?"); done <- approved }()
@@ -279,8 +279,8 @@ func TestSessionPromptResponsesRemainAvailableDuringLoadAndHaveOneWinner(t *test
 func TestSessionBackendsOwnIdenticalNativeIDsAndDeletionIsTerminal(t *testing.T) {
 	s, one, a := newProtocolServer(t)
 	otherAgent := &protocolAgent{}
-	two := s.bindBackend("two", otherAgent)
-	s.backends["two"] = &backendEntry{runtime: two}
+	two := s.Project.bindBackend("two", otherAgent)
+	s.Project.backends["two"] = &backendEntry{runtime: two}
 	c := one.session("same")
 	c.load()
 	other := two.session("same")
@@ -335,8 +335,8 @@ func (a *unattendedProtocolAgent) SetUnattended(_ context.Context, _ string, ena
 func TestSessionSettingsRoundTripIndependentUnattendedPolicy(t *testing.T) {
 	s, other, _ := newProtocolServer(t)
 	a := &unattendedProtocolAgent{protocolAgent: &protocolAgent{model: "selected-model"}}
-	b := s.bindBackend("policy", a)
-	s.backends["policy"] = &backendEntry{runtime: b}
+	b := s.Project.bindBackend("policy", a)
+	s.Project.backends["policy"] = &backendEntry{runtime: b}
 	c := b.session("saved")
 	c.load()
 	for _, enabled := range []bool{true, false} {
@@ -447,8 +447,8 @@ func (a *compactingProtocolAgent) Compact(ctx context.Context, _, focus string) 
 func TestSessionCompactMessageRunsAsTurn(t *testing.T) {
 	s, other, _ := newProtocolServer(t)
 	a := &compactingProtocolAgent{protocolAgent: &protocolAgent{}, focus: make(chan string, 1), release: make(chan error, 1)}
-	b := s.bindBackend("compact", a)
-	s.backends["compact"] = &backendEntry{runtime: b}
+	b := s.Project.bindBackend("compact", a)
+	s.Project.backends["compact"] = &backendEntry{runtime: b}
 	c := b.session("saved")
 	c.load()
 	if !b.settings("saved").CanCompact || other.settings("saved").CanCompact {

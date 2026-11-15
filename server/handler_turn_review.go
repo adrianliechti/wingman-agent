@@ -16,7 +16,7 @@ type turnReviewer interface {
 	UndoTurn(context.Context, string, string) error
 }
 
-func (c *sessionController) handleTurnReviews(w http.ResponseWriter, r *http.Request) {
+func handleTurnReviews(c *sessionController, w http.ResponseWriter, r *http.Request) {
 	reviewer, ok := c.backend.agent.(turnReviewer)
 	if !ok {
 		writeJSON(w, []harness.TurnReview{})
@@ -81,7 +81,7 @@ func netFileChanges(changes []tool.FileChange) []tool.FileChange {
 	return net
 }
 
-func (c *sessionController) handleTurnUndo(w http.ResponseWriter, r *http.Request) {
+func handleTurnUndo(c *sessionController, w http.ResponseWriter, r *http.Request) {
 	reviewer, ok := c.backend.agent.(turnReviewer)
 	if !ok {
 		http.Error(w, "turn undo is unavailable for this agent", http.StatusNotImplemented)
@@ -91,7 +91,7 @@ func (c *sessionController) handleTurnUndo(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	c.backend.flushFiles()
+	c.backend.Project.flushFiles()
 	c.backend.Project.refreshChangesets()
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -87,7 +87,7 @@ Plan $ARGUMENTS in small phases.
 	}
 
 	server := &Server{Project: &Project{workspace: workspace}}
-	blocks := server.skillBlocks("$speckit-plan authentication")
+	blocks := server.Project.skillBlocks("$speckit-plan authentication")
 	if len(blocks) != 1 || !strings.Contains(blocks[0], "Plan authentication in small phases.") {
 		t.Fatalf("skill blocks = %#v", blocks)
 	}

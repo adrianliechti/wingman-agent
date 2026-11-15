@@ -72,8 +72,8 @@ func (b *backendRuntime) prompt(ctx context.Context, kind, message string, field
 		return reply, nil
 	case <-ctx.Done():
 		return Command{}, ctx.Err()
-	case <-b.ctx.Done():
-		return Command{}, b.ctx.Err()
+	case <-b.Project.ctx.Done():
+		return Command{}, b.Project.ctx.Err()
 	}
 }
 
@@ -98,7 +98,7 @@ func (c *sessionController) resolvePrompt(command Command) error {
 }
 
 func (c *sessionController) resolvePromptLocked(command Command) error {
-	if c.state.Status == sessionDeleted || c.backend.ctx.Err() != nil {
+	if c.state.Status == sessionDeleted || c.backend.Project.ctx.Err() != nil {
 		return errors.New("session closed")
 	}
 	p, ok := c.prompts[command.PromptID]

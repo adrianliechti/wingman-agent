@@ -38,7 +38,7 @@ func reviewDAPServer(t *testing.T, options ...string) (*Server, string) {
 	root := t.TempDir()
 	writeDebugTestFile(t, root, "main.go", "package main\nfunc main() {}\n")
 	app := newDebugTestServer(t, root)
-	app.scope = WorkspaceScope{"workspace", "instance"}
+	app.Project.scope = WorkspaceScope{"workspace", "instance"}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -50,13 +50,13 @@ func reviewDAPServer(t *testing.T, options ...string) (*Server, string) {
 	if slices.Contains(options, "children") {
 		descriptor.Transport, descriptor.ReadyPrefix = dap.TransportTCP, "Review DAP listening at "
 	}
-	app.workspace.DAP.Close()
-	app.workspace.DAP = dap.NewManager(root, reviewDAPTools(executable), descriptor)
+	app.Project.workspace.DAP.Close()
+	app.Project.workspace.DAP = dap.NewManager(root, reviewDAPTools(executable), descriptor)
 	return app, root
 }
 
 func reviewDAPRemember(app *Server, root, request string) string {
-	return app.workspace.DAP.RememberPlan(debugLaunchPlan{Adapter: "review", Request: request, ProjectDir: ".", IO: "output", Configuration: map[string]any{"program": filepath.Join(root, "main.go")}})
+	return app.Project.workspace.DAP.RememberPlan(debugLaunchPlan{Adapter: "review", Request: request, ProjectDir: ".", IO: "output", Configuration: map[string]any{"program": filepath.Join(root, "main.go")}})
 }
 
 // reviewDAPClient reads on its own goroutine so tests can wait with timeouts
@@ -285,7 +285,7 @@ func TestReviewDAPCancelAfterConfigurationStopsLaunch(t *testing.T) {
 	if session, _ := c.must("wingman/status", nil)["session"].(map[string]any); session != nil && session["state"] != "terminated" {
 		t.Fatalf("cancelled launch left a session: %v", session)
 	}
-	release, err := app.workspace.DAP.BeginPreparation()
+	release, err := app.Project.workspace.DAP.BeginPreparation()
 	if err != nil {
 		t.Fatalf("cancelled launch left the debugger busy: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestReviewDAPClearBreakpointsOfDeletedFile(t *testing.T) {
 	source := filepath.Join(root, "gone.go")
 	writeDebugTestFile(t, root, "gone.go", "package main\n")
 	app := newDebugTestServer(t, root)
-	app.scope = WorkspaceScope{"workspace", "instance"}
+	app.Project.scope = WorkspaceScope{"workspace", "instance"}
 	c := reviewDAPDial(t, app)
 	c.must("initialize", map[string]any{"adapterID": "wingman"})
 	c.must("setBreakpoints", map[string]any{"source": map[string]any{"path": source}, "breakpoints": []any{map[string]any{"line": 1}}})
@@ -306,8 +306,8 @@ func TestReviewDAPClearBreakpointsOfDeletedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := c.call("setBreakpoints", map[string]any{"source": map[string]any{"path": source}, "breakpoints": []any{}})
-	if response["success"] != true || len(app.workspace.DAP.Breakpoints(source)) != 0 {
-		t.Fatalf("clearing breakpoints of a deleted file: %v; still stored: %v", response, app.workspace.DAP.Breakpoints(source))
+	if response["success"] != true || len(app.Project.workspace.DAP.Breakpoints(source)) != 0 {
+		t.Fatalf("clearing breakpoints of a deleted file: %v; still stored: %v", response, app.Project.workspace.DAP.Breakpoints(source))
 	}
 }
 
@@ -464,7 +464,7 @@ func TestReviewDAPDisconnectKeepsLaunchedDebuggeeWhenAsked(t *testing.T) {
 func TestReviewDAPLaunchHandshakeEdgeCases(t *testing.T) {
 	root := t.TempDir()
 	app := newDebugTestServer(t, root)
-	app.scope = WorkspaceScope{"workspace", "instance"}
+	app.Project.scope = WorkspaceScope{"workspace", "instance"}
 	c := reviewDAPDial(t, app)
 	c.must("initialize", map[string]any{"adapterID": "wingman"})
 	if response := c.call("configurationDone", nil); response["success"] != false {
@@ -473,7 +473,7 @@ func TestReviewDAPLaunchHandshakeEdgeCases(t *testing.T) {
 	if response := c.call("launch", map[string]any{"program": "/bin/sh"}); response["success"] != false || !strings.Contains(reviewDAPError(response), "_wingmanPlanId") {
 		t.Fatalf("launch without a plan = %v", response)
 	}
-	planID := app.workspace.DAP.RememberPlan(debugLaunchPlan{Adapter: "missing", Request: "launch", ProjectDir: ".", IO: "output"})
+	planID := app.Project.workspace.DAP.RememberPlan(debugLaunchPlan{Adapter: "missing", Request: "launch", ProjectDir: ".", IO: "output"})
 	if response := c.call("attach", map[string]any{"_wingmanPlanId": planID}); response["success"] != false {
 		t.Fatalf("attach with a launch plan = %v", response)
 	}
@@ -507,7 +507,7 @@ func TestReviewDAPLaunchHandshakeEdgeCases(t *testing.T) {
 	if initialized != 0 {
 		t.Fatalf("rejected launches sent %d initialized events", initialized)
 	}
-	if _, err := app.workspace.DAP.BeginPreparation(); err != nil {
+	if _, err := app.Project.workspace.DAP.BeginPreparation(); err != nil {
 		t.Fatalf("failed launches left the debugger busy: %v", err)
 	}
 }
@@ -515,7 +515,7 @@ func TestReviewDAPLaunchHandshakeEdgeCases(t *testing.T) {
 func TestReviewDAPEnvelopeAndErrorCodes(t *testing.T) {
 	root := t.TempDir()
 	app := newDebugTestServer(t, root)
-	app.scope = WorkspaceScope{"workspace", "instance"}
+	app.Project.scope = WorkspaceScope{"workspace", "instance"}
 	c := reviewDAPDial(t, app)
 	response := c.call("threads", nil)
 	if response["success"] != false || response["message"] != "failed" || reviewDAPError(response) != "initialize is required" {
@@ -578,7 +578,7 @@ func TestReviewDAPReviewedPlanRejectsTampering(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := newDebugTestServer(t, root)
-	manager := app.workspace.DAP
+	manager := app.Project.workspace.DAP
 	stored := debugLaunchPlan{
 		Action: "debug", Title: "Main", Adapter: "delve", ProjectDir: ".", Request: "launch", IO: "output",
 		Configuration:       map[string]any{"program": "main.go", "args": []any{"one"}},
@@ -669,7 +669,7 @@ func TestReviewDAPConcurrentClientsStress(t *testing.T) {
 	editor.must("initialize", map[string]any{"adapterID": "wingman"})
 	printer.must("initialize", map[string]any{"adapterID": "wingman"})
 	printer.must("wingman/status", nil)
-	_, start := app.workspace.DAP.ActiveSession().OutputSnapshot()
+	_, start := app.Project.workspace.DAP.ActiveSession().OutputSnapshot()
 	wait.Go(func() {
 		for index := range 60 {
 			breakpoints := []any{map[string]any{"line": 1 + index%2}, map[string]any{"line": 2, "condition": fmt.Sprint(index)}}
@@ -699,7 +699,7 @@ func TestReviewDAPConcurrentClientsStress(t *testing.T) {
 		}
 	})
 	wait.Wait()
-	points := app.workspace.DAP.Breakpoints(filepath.Join(root, "main.go"))
+	points := app.Project.workspace.DAP.Breakpoints(filepath.Join(root, "main.go"))
 	if len(points) != 2 || points[1].Condition != "59" {
 		t.Fatalf("last breakpoint edit lost: %+v", points)
 	}
@@ -781,8 +781,8 @@ func TestReviewDAPLifecycleEventsOncePerConnection(t *testing.T) {
 func TestReviewDAPConcurrentLaunchCancelStress(t *testing.T) {
 	root := t.TempDir()
 	app := newDebugTestServer(t, root)
-	app.scope = WorkspaceScope{"workspace", "instance"}
-	planID := app.workspace.DAP.RememberPlan(debugLaunchPlan{Adapter: "missing", Request: "launch", ProjectDir: ".", IO: "output"})
+	app.Project.scope = WorkspaceScope{"workspace", "instance"}
+	planID := app.Project.workspace.DAP.RememberPlan(debugLaunchPlan{Adapter: "missing", Request: "launch", ProjectDir: ".", IO: "output"})
 	var wait sync.WaitGroup
 	for range 3 {
 		c := reviewDAPDial(t, app)
@@ -815,7 +815,7 @@ func TestReviewDAPConcurrentLaunchCancelStress(t *testing.T) {
 		})
 	}
 	wait.Wait()
-	release, err := app.workspace.DAP.BeginPreparation()
+	release, err := app.Project.workspace.DAP.BeginPreparation()
 	if err != nil {
 		t.Fatalf("debugger left busy: %v", err)
 	}

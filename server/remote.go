@@ -32,8 +32,8 @@ func (s *Server) startRemote(opts remote.ClientOptions) error {
 			fmt.Fprintf(os.Stderr, "Remote connection interrupted: %v\n", err)
 		}
 	}
-	s.background.Go(func() {
-		if err := remote.Serve(s.ctx, opts, s); err != nil {
+	s.Project.background.Go(func() {
+		if err := remote.Serve(s.Project.ctx, opts, s); err != nil {
 			fmt.Fprintf(os.Stderr, "Remote access stopped: %v\n", err)
 		}
 	})

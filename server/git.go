@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
 	"strings"
 	"time"
 
@@ -165,7 +164,7 @@ func (s *Project) runGit(ctx context.Context, p gitAction) (gitRunResult, error)
 	case "init":
 		err = s.workspace.GitInit()
 		if err == nil {
-			s.broadcast(Frame{Type: EvtWorkspaceChanged})
+			s.workspaceChanged(Frame{Type: EvtWorkspaceChanged})
 			flush = true
 		}
 	case "createBranch":
@@ -186,7 +185,7 @@ func (s *Project) runGit(ctx context.Context, p gitAction) (gitRunResult, error)
 			return result, ahp.InvalidParams("at least one path is required")
 		}
 		for _, path := range p.Paths {
-			rel, ok := s.workspaceRel(path)
+			rel, ok := workspaceRel(path)
 			if !ok {
 				return result, ahp.InvalidParams("invalid path")
 			}
@@ -254,108 +253,4 @@ func decodeGitAction(data json.RawMessage) (gitAction, error) {
 		}
 	}
 	return p, nil
-}
-
-func (s *Project) handleWorkspaceGit(w http.ResponseWriter, r *http.Request) {
-	if !s.workspace.HasChanges() {
-		writeJSON(w, nil)
-		return
-	}
-	result, err := s.gitStatus(r.Context())
-	writeGitResult(w, result, err)
-}
-
-// HTTP commands remain deliberately small. File edits and layer mutations use AHP.
-func (s *Project) handleGitBranches(w http.ResponseWriter, r *http.Request) {
-	result, err := s.gitBranches(r.Context(), false)
-	writeGitResult(w, result, err)
-}
-func (s *Project) handleGitFetch(w http.ResponseWriter, r *http.Request) {
-	result, err := s.gitBranches(r.Context(), true)
-	writeGitResult(w, result, err)
-}
-func (s *Project) handleGitCommits(w http.ResponseWriter, r *http.Request) {
-	result, err := s.gitHistory(r.Context())
-	writeGitResult(w, result, err)
-}
-func (s *Project) handleWorkspaceInsights(w http.ResponseWriter, r *http.Request) {
-	result, err := s.gitInsights(r.Context())
-	writeGitResult(w, result, err)
-}
-func (s *Project) handleGitAction(action string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, gitRequestLimit))
-		if err != nil {
-			http.Error(w, "invalid Git request body", http.StatusBadRequest)
-			return
-		}
-		if len(bytes.TrimSpace(data)) == 0 {
-			data = []byte("{}")
-		}
-		var fields map[string]json.RawMessage
-		if err := decodeGitParams(data, &fields); err != nil {
-			writeGitResult(w, nil, err)
-			return
-		}
-		if _, exists := fields["action"]; exists {
-			writeGitResult(w, nil, ahp.InvalidParams("action is determined by the endpoint"))
-			return
-		}
-		fields["action"], _ = json.Marshal(action)
-		data, _ = json.Marshal(fields)
-		p, err := decodeGitAction(data)
-		if err != nil {
-			writeGitResult(w, nil, err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-		defer cancel()
-		result, err := s.runGit(ctx, p)
-		if err == nil {
-			s.refreshChangesets()
-		}
-		writeGitResult(w, result, err)
-	}
-}
-func (s *Project) handleGitDiff(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	base, head, mode := strings.TrimSpace(query.Get("base")), strings.TrimSpace(query.Get("head")), query.Get("mode")
-	if base == "" || head == "" {
-		writeGitResult(w, nil, ahp.InvalidParams("base and head revisions are required"))
-		return
-	}
-	if mode == "" {
-		mode = "direct"
-	}
-	if mode != "direct" && mode != "merge-base" {
-		writeGitResult(w, nil, ahp.InvalidParams("invalid compare mode"))
-		return
-	}
-	comparison, err := s.workspace.GitCompare(r.Context(), base, head, mode == "merge-base")
-	if err != nil {
-		writeGitResult(w, nil, err)
-		return
-	}
-	channel, err := s.comparisonChangeset(comparison.Diffs)
-	if err != nil {
-		writeGitResult(w, nil, err)
-		return
-	}
-	writeJSON(w, map[string]string{"channel": channel, "base": base, "head": head, "base_hash": comparison.BaseHash,
-		"head_hash": comparison.HeadHash, "merge_base_hash": comparison.MergeBaseHash})
-}
-func writeGitResult(w http.ResponseWriter, result any, err error) {
-	if err == nil {
-		writeJSON(w, result)
-		return
-	}
-	status := http.StatusConflict
-	var rpc *ahp.Error
-	if errors.As(err, &rpc) && rpc.Code == -32602 {
-		status = http.StatusBadRequest
-	}
-	if errors.Is(err, changes.ErrNotGitRepository) {
-		status = http.StatusNotFound
-	}
-	http.Error(w, err.Error(), status)
 }

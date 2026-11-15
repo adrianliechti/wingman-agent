@@ -17,14 +17,3 @@ func (c *sessionController) publishLocked(changes ...SessionChange) {
 		c.chat.syncLocked(c, changes)
 	}
 }
-
-func (s *Project) broadcast(f Frame) {
-	f.Session = ""
-	s.send(f)
-}
-
-func (s *Project) send(f Frame) {
-	if s != nil && s.host != nil {
-		s.workspaceChanged(f)
-	}
-}

@@ -2,8 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -13,7 +11,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
 	"github.com/adrianliechti/wingman-agent/server/ahp"
-	"github.com/go-chi/chi/v5"
 	sdk "github.com/microsoft/agent-host-protocol/clients/go/ahp"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
@@ -536,24 +533,4 @@ func (f *terminalOutputFilter) feed(data []byte) string {
 		f.pending = p[n:]
 	}
 	return out.String()
-}
-
-// handleTerminalStatus reports whether a terminal runs a command besides its
-// shell, so closing it can ask for confirmation.
-func (s *Project) handleTerminalStatus(w http.ResponseWriter, r *http.Request) {
-	uri, err := url.PathUnescape(chi.URLParam(r, "terminal"))
-	if err != nil {
-		http.Error(w, "invalid terminal URI", http.StatusBadRequest)
-		return
-	}
-	h := s
-	h.startTerminals()
-	h.host.mu.Lock()
-	terminal := h.terminalChannels[uri]
-	h.host.mu.Unlock()
-	if terminal == nil {
-		http.Error(w, "terminal not found", http.StatusNotFound)
-		return
-	}
-	writeJSON(w, map[string]bool{"busy": terminal.session.HasForegroundProcess()})
 }

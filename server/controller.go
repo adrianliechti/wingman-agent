@@ -94,13 +94,10 @@ const (
 )
 
 type SessionChange struct {
-	Type    string
-	Entry   *TranscriptEntry
-	Entries []TranscriptEntry
-	ID      string
-	Text    string
-	IDs     []string
-	State   *SessionState
+	Type  string
+	Entry *TranscriptEntry
+	ID    string
+	Text  string
 }
 
 type sessionController struct {
@@ -139,21 +136,21 @@ type hostTurn struct {
 }
 
 func newSessionController(b *backendRuntime, id string) *sessionController {
-	return &sessionController{backend: b, ref: SessionRef{b.scope.WorkspaceID, b.id, id}, receipts: map[string]*commandReceipt{}, deliveredTasks: map[string]bool{}, entries: []TranscriptEntry{}, prompts: map[string]pendingPrompt{}, attempt: map[string]bool{}, state: SessionState{Status: sessionLoading, Phase: "idle", Prompts: []PromptView{}, PendingInputs: []TurnQueueEntry{}, ToolProgress: map[string]string{}, Settings: SessionSettings{Models: []modelOption{}, Efforts: []string{}, Modes: []modeOption{}}}}
+	return &sessionController{backend: b, ref: SessionRef{b.Project.scope.WorkspaceID, b.id, id}, receipts: map[string]*commandReceipt{}, deliveredTasks: map[string]bool{}, entries: []TranscriptEntry{}, prompts: map[string]pendingPrompt{}, attempt: map[string]bool{}, state: SessionState{Status: sessionLoading, Phase: "idle", Prompts: []PromptView{}, PendingInputs: []TurnQueueEntry{}, ToolProgress: map[string]string{}, Settings: SessionSettings{Models: []modelOption{}, Efforts: []string{}, Modes: []modeOption{}}}}
 }
 
 func (c *sessionController) load() {
-	if !c.backend.beginOperation() {
+	if !c.backend.Project.beginOperation() {
 		return
 	}
-	defer c.backend.operations.Done()
+	defer c.backend.Project.operations.Done()
 	c.opMu.Lock()
 	defer c.opMu.Unlock()
 	_ = c.loadLocked()
 }
 
 func (c *sessionController) loadLocked() error {
-	if err := c.backend.ctx.Err(); err != nil {
+	if err := c.backend.Project.ctx.Err(); err != nil {
 		return err
 	}
 	c.mu.Lock()
@@ -165,7 +162,7 @@ func (c *sessionController) loadLocked() error {
 	if status == sessionReady {
 		return nil
 	}
-	err := c.backend.agent.LoadSession(code.WithSessionID(c.backend.ctx, c.ref.SessionID), c.ref.SessionID)
+	err := c.backend.agent.LoadSession(code.WithSessionID(c.backend.Project.ctx, c.ref.SessionID), c.ref.SessionID)
 	if err != nil {
 		c.mu.Lock()
 		message := err.Error()
@@ -205,10 +202,10 @@ func (b *backendRuntime) settings(sid string) SessionSettings {
 }
 
 func (c *sessionController) refreshSettings() {
-	if !c.backend.beginOperation() {
+	if !c.backend.Project.beginOperation() {
 		return
 	}
-	defer c.backend.operations.Done()
+	defer c.backend.Project.operations.Done()
 	c.metadataMu.Lock()
 	defer c.metadataMu.Unlock()
 	settings := c.backend.settings(c.ref.SessionID)
@@ -231,7 +228,7 @@ func (c *sessionController) refreshSettings() {
 }
 
 func (c *sessionController) publishStateLocked() {
-	c.publishLocked(SessionChange{Type: "state.replace", State: &c.state})
+	c.publishLocked(SessionChange{Type: "state.replace"})
 }
 
 func (c *sessionController) replaceHistory() {
@@ -259,7 +256,7 @@ func (c *sessionController) replaceHistory() {
 	c.attempt = map[string]bool{}
 	// Explicit authoritative replacement at load/commit boundaries. No client
 	// tries to match streamed text against history by content or timing.
-	c.publishLocked(SessionChange{Type: "entries.replace", Entries: entries})
+	c.publishLocked(SessionChange{Type: "entries.replace"})
 }
 
 func (b *backendRuntime) sendSession(sid string, f Frame) {
@@ -269,7 +266,7 @@ func (b *backendRuntime) sendSession(sid string, f Frame) {
 	if f.Type == EvtTasksChanged {
 		f.Session = sid
 		f.Backend = b.id
-		b.Project.send(f)
+		b.Project.workspaceChanged(f)
 		return
 	}
 	b.session(sid).apply(f)
@@ -424,10 +421,8 @@ func (c *sessionController) apply(f Frame) {
 		}
 		c.upsertLocked(e)
 	case EvtStreamReset:
-		ids := []string{}
 		c.entries = slices.DeleteFunc(c.entries, func(e TranscriptEntry) bool {
 			if c.attempt[e.ID] || (e.Type == "tool" && e.ToolPartial) {
-				ids = append(ids, e.ID)
 				return true
 			}
 			return false
@@ -435,7 +430,7 @@ func (c *sessionController) apply(f Frame) {
 		c.attempt = map[string]bool{}
 		c.textID = ""
 		c.reasoningID = ""
-		c.publishLocked(SessionChange{Type: "entries.remove", IDs: ids})
+		c.publishLocked(SessionChange{Type: "entries.remove"})
 		return
 	default:
 		return
@@ -469,66 +464,4 @@ func visibleInput(input code.TurnInput) code.TurnInputDisplay {
 	}
 	out.Text = strings.Join(texts, "\n")
 	return out
-}
-
-func transcriptEntries(messages []harness.Message) []TranscriptEntry {
-	entries := []TranscriptEntry{}
-	for mi, m := range convertMessages(messages) {
-		if m.Role == "user" {
-			input := code.TurnInput{}
-			for _, part := range m.Content {
-				if part.Text != "" {
-					input.Content = append(input.Content, harness.Content{Text: part.Text})
-				}
-				if part.Image != nil {
-					input.Content = append(input.Content, harness.Content{File: &harness.File{Data: part.Image.Data}})
-				}
-			}
-			v := visibleInput(input)
-			if v.Text != "" || len(v.Files)+len(v.Images) > 0 {
-				id := fmt.Sprintf("history:%d:user", mi)
-				if m.InputID != "" {
-					id = "input:" + m.InputID
-				}
-				entries = append(entries, TranscriptEntry{ID: id, InputID: m.InputID, Type: "user", Content: v.Text, Files: v.Files, Images: v.Images})
-			}
-			continue
-		}
-		for ci, part := range m.Content {
-			id := fmt.Sprintf("history:%d:%d", mi, ci)
-			if part.Text != "" {
-				textID := id + ":text"
-				if part.TextID != "" {
-					textID = "assistant:" + part.TextID
-				}
-				entries = append(entries, TranscriptEntry{ID: textID, Type: "assistant", Content: part.Text, MessageID: part.TextID})
-			}
-			if part.Image != nil && part.Image.Data != "" {
-				entries = append(entries, TranscriptEntry{ID: id + ":image", Type: "assistant", Images: []string{part.Image.Data}})
-			}
-			if part.Reasoning != nil {
-				reasonID := id + ":reasoning"
-				if part.Reasoning.ID != "" {
-					reasonID = "reasoning:" + part.Reasoning.ID
-				}
-				entries = append(entries, TranscriptEntry{ID: reasonID, Type: "reasoning", Content: part.Reasoning.Summary, ReasoningID: part.Reasoning.ID})
-			}
-			if t := part.ToolCall; t != nil {
-				tid := "tool:" + t.ID
-				if t.ID == "" {
-					tid = id + ":tool"
-				}
-				entries = append(entries, TranscriptEntry{ID: tid, Type: "tool", ToolID: t.ID, ToolName: t.Name, ToolKind: t.Kind, ToolArgs: t.Args, ToolLocations: t.Locations, ToolHint: t.Hint})
-			}
-			if t := part.ToolResult; t != nil {
-				i := slices.IndexFunc(entries, func(e TranscriptEntry) bool { return t.ID != "" && e.ToolID == t.ID })
-				if i >= 0 {
-					entries[i].ToolResult = &t.Content
-					continue
-				}
-				entries = append(entries, TranscriptEntry{ID: id + ":result", Type: "tool", ToolID: t.ID, ToolName: t.Name, ToolKind: t.Kind, ToolArgs: t.Args, ToolLocations: t.Locations, ToolResult: &t.Content})
-			}
-		}
-	}
-	return entries
 }

@@ -215,7 +215,7 @@ func TestAHPResourcesConfinedToWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.workspace = workspace
+	s.Project.workspace = workspace
 	s.Project = webProject(s, root)
 	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello"), 0600); err != nil {
 		t.Fatal(err)
@@ -321,7 +321,7 @@ func TestAHPPersistedSessionURI(t *testing.T) {
 	if a.resource != uri || ch.controller.ref.SessionID != "session-1" || agent.loaded.Load() != 1 {
 		t.Fatalf("session alias did not recover: %+v", a)
 	}
-	if s.scope.WorkspaceID != other.scope.WorkspaceID {
+	if s.Project.scope.WorkspaceID != other.Project.scope.WorkspaceID {
 		t.Fatal("fixture must share the workspace namespace")
 	}
 }
@@ -446,7 +446,7 @@ func TestAHPNotFoundErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.workspace = workspace
+	s.Project.workspace = workspace
 	s.Project = webProject(s, workspace.RootPath)
 	client := protocolTestClient(t, endpoint, "missing-resources")
 	for _, method := range []string{"resourceRead", "resourceResolve", "resourceList"} {

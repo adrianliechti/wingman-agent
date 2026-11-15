@@ -48,23 +48,23 @@ func TestSnapshotHasActive(t *testing.T) {
 	}
 }
 
-func TestConvertMessagesPreservesAssistantTextIdentity(t *testing.T) {
+func TestTranscriptPreservesAssistantTextIdentity(t *testing.T) {
 	for _, content := range []harness.Content{
 		{Text: "answer", TextID: "message-1"},
 		{Refusal: "answer", TextID: "message-1"},
 	} {
-		messages := convertMessages([]harness.Message{{Role: harness.RoleAssistant, Content: []harness.Content{content}}})
-		if len(messages) != 1 || len(messages[0].Content) != 1 {
-			t.Fatalf("messages = %+v", messages)
+		entries := transcriptEntries([]harness.Message{{Role: harness.RoleAssistant, Content: []harness.Content{content}}})
+		if len(entries) != 1 {
+			t.Fatalf("entries = %+v", entries)
 		}
-		if got := messages[0].Content[0]; got.Text != "answer" || got.TextID != "message-1" {
+		if got := entries[0]; got.Content != "answer" || got.MessageID != "message-1" {
 			t.Fatalf("content = %+v", got)
 		}
 	}
 }
 
-func TestConvertMessagesPreservesToolKind(t *testing.T) {
-	messages := convertMessages([]harness.Message{{
+func TestTranscriptPreservesToolKind(t *testing.T) {
+	entries := transcriptEntries([]harness.Message{{
 		Role: harness.RoleAssistant,
 		Content: []harness.Content{
 			{ToolCall: &harness.ToolCall{ID: "edit-1", Name: "Editing files", Kind: "edit", Locations: []harness.ToolLocation{{Path: "/workspace/main.go"}}}},
@@ -72,13 +72,10 @@ func TestConvertMessagesPreservesToolKind(t *testing.T) {
 		},
 	}})
 
-	if len(messages) != 1 || len(messages[0].Content) != 2 {
-		t.Fatalf("messages = %+v", messages)
+	if len(entries) != 1 {
+		t.Fatalf("entries = %+v", entries)
 	}
-	if got := messages[0].Content[0].ToolCall; got == nil || got.Kind != "edit" || len(got.Locations) != 1 {
-		t.Fatalf("tool call = %+v", got)
-	}
-	if got := messages[0].Content[1].ToolResult; got == nil || got.Kind != "edit" || len(got.Locations) != 1 {
-		t.Fatalf("tool result = %+v", got)
+	if got := entries[0]; got.ToolKind != "edit" || len(got.ToolLocations) != 1 || got.ToolResult == nil || *got.ToolResult != "+new" {
+		t.Fatalf("tool = %+v", got)
 	}
 }

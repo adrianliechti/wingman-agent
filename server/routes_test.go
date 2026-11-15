@@ -20,7 +20,7 @@ func TestChatHandlerKeepsBackendAliveUntilRequestReturns(t *testing.T) {
 				agentClosed.Store(true)
 				return nil
 			}})
-			chat, err := s.attachSession(b.session("native-session"), "ahp-session:/http", "HTTP", time.Now())
+			chat, err := s.Project.attachSession(b.session("native-session"), "ahp-session:/http", "HTTP", time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}

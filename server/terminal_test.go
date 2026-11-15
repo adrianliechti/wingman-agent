@@ -20,7 +20,7 @@ func TestAHPTerminalLifecycleAndOwnership(t *testing.T) {
 func testAHPTerminalLifecycleAndOwnership(t *testing.T, scheme string) {
 	t.Helper()
 	s, _, _, endpoint := protocolTestServer(t)
-	s.terminals = terminal.NewManager(t.TempDir())
+	s.Project.terminals = terminal.NewManager(t.TempDir())
 	first := protocolTestClient(t, endpoint, "terminal-owner")
 	uri := scheme + ":/test"
 	err := first.Request(t.Context(), "createTerminal", types.CreateTerminalParams{Channel: uri, Claim: types.TerminalClaim{Value: &types.TerminalClientClaim{Kind: types.TerminalClaimKindClient, ClientId: "terminal-owner"}}}, nil)
@@ -105,11 +105,11 @@ exited:
 	if len(late.Content) == 0 {
 		t.Fatal("late subscription lost output")
 	}
-	old := s.host.terminal(uri)
+	old := s.Project.host.terminal(uri)
 	if err := first.Request(t.Context(), "disposeTerminal", types.DisposeTerminalParams{Channel: uri}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.terminals.List()) != 0 {
+	if len(s.Project.terminals.List()) != 0 {
 		t.Fatal("terminal was not disposed")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
@@ -118,7 +118,7 @@ exited:
 		t.Fatal("disposed terminal subscribable")
 	}
 	createTestTerminal(t, first, uri, "terminal-owner")
-	actor := &connection{host: s.host, id: "terminal-owner"}
+	actor := &connection{host: s.Project.host, id: "terminal-owner"}
 	if _, err := actor.applyTerminalAction(old, types.DispatchActionParams{Channel: uri, Action: types.StateAction{Value: &types.TerminalTitleChangedAction{Type: types.ActionTypeTerminalTitleChanged, Title: "stale"}}}); err == nil {
 		t.Fatal("a stale terminal accepted an action after its URI was reused")
 	}
@@ -147,7 +147,7 @@ func createTestTerminal(t *testing.T, client *ahp.Client, uri, owner string) {
 
 func TestAHPTerminalTrimsWithoutResettingClients(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
-	s.terminals = terminal.NewManager(t.TempDir())
+	s.Project.terminals = terminal.NewManager(t.TempDir())
 	client := protocolTestClient(t, endpoint, "terminal-owner")
 	uri := "ahp-terminal:/long"
 	createTestTerminal(t, client, uri, "terminal-owner")
@@ -202,7 +202,7 @@ func TestAHPTerminalOwnerDisconnectHandsOver(t *testing.T) {
 func testAHPTerminalOwnerDisconnectHandsOver(t *testing.T, scheme string) {
 	t.Helper()
 	s, _, _, endpoint := protocolTestServer(t)
-	s.terminals = terminal.NewManager(t.TempDir())
+	s.Project.terminals = terminal.NewManager(t.TempDir())
 	owner := protocolTestClient(t, endpoint, "owner")
 	uri := scheme + ":/handover"
 	createTestTerminal(t, owner, uri, "owner")

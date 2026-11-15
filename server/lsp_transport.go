@@ -34,7 +34,7 @@ type lspBuffer struct {
 // connections may have open; mu orders its synchronization.
 type lspDocument struct {
 	mu      sync.Mutex
-	owners  map[*lspConnection]struct{} // guarded by Project.lspDocumentsMu
+	owners  map[*lspConnection]struct{} // guarded by editorState.lspDocumentsMu
 	writer  *lspConnection              // whose buffer the language server has
 	changes uint64                      // counts writer switches
 }
@@ -44,7 +44,7 @@ const lspQueueLimit = 128 << 20
 
 type lspConnection struct {
 	*editorSocket
-	server    *Project
+	server    *Server
 	mu        sync.Mutex
 	documents map[string]lspBuffer
 	reported  map[string]bool // documents in the last workspace diagnostic report
@@ -56,7 +56,7 @@ func validLSPID(id json.RawMessage) bool {
 	return len(id) == 0 || id[0] == '"' || id[0] == '-' || id[0] >= '0' && id[0] <= '9'
 }
 
-func (s *Project) handleLSP(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 	peer, err := s.acceptEditorSocket(w, r)
 	if err != nil {
 		return
@@ -64,9 +64,9 @@ func (s *Project) handleLSP(w http.ResponseWriter, r *http.Request) {
 	defer peer.close()
 	c := &lspConnection{editorSocket: peer, server: s, documents: map[string]lspBuffer{}, replies: map[string]chan json.RawMessage{}}
 	defer func() {
-		s.lspDocumentsMu.Lock()
-		delete(s.lspRefreshers, c)
-		s.lspDocumentsMu.Unlock()
+		s.editor.lspDocumentsMu.Lock()
+		delete(s.editor.lspRefreshers, c)
+		s.editor.lspDocumentsMu.Unlock()
 	}()
 	// Document notifications are processed in receive order. Requests begin only
 	// after preceding changes have been applied; cancellation never queues behind
@@ -99,12 +99,12 @@ func (s *Project) handleLSP(w http.ResponseWriter, r *http.Request) {
 					} `json:"capabilities"`
 				}
 				if json.Unmarshal(request.Params, &params) == nil && params.Capabilities.Workspace.Diagnostics.RefreshSupport {
-					s.lspDocumentsMu.Lock()
-					if s.lspRefreshers == nil {
-						s.lspRefreshers = map[*lspConnection]struct{}{}
+					s.editor.lspDocumentsMu.Lock()
+					if s.editor.lspRefreshers == nil {
+						s.editor.lspRefreshers = map[*lspConnection]struct{}{}
 					}
-					s.lspRefreshers[c] = struct{}{}
-					s.lspDocumentsMu.Unlock()
+					s.editor.lspRefreshers[c] = struct{}{}
+					s.editor.lspDocumentsMu.Unlock()
 				}
 				peer.reply(request.ID, map[string]any{"serverInfo": map[string]any{"name": "Wingman"}, "capabilities": c.capabilities()}, nil)
 				continue
@@ -307,7 +307,7 @@ func (c *lspConnection) capabilities() map[string]any {
 		"inlayHintProvider":                true, "diagnosticProvider": map[string]any{"interFileDependencies": true, "workspaceDiagnostics": true},
 		"executeCommandProvider": map[string]any{"commands": []string{}},
 		"workspace":              map[string]any{"textDocumentContent": map[string]any{"schemes": []string{lspSourceScheme}}},
-		"experimental":           map[string]any{"wingman": map[string]any{"workspaceURI": fileuri.FromPath(c.server.workspace.RootPath), "scope": c.server.scope, "documentCapabilities": true}},
+		"experimental":           map[string]any{"wingman": map[string]any{"workspaceURI": fileuri.FromPath(c.server.Project.workspace.RootPath), "scope": c.server.Project.scope, "documentCapabilities": true}},
 	}
 }
 
@@ -316,16 +316,16 @@ func (c *lspConnection) path(uri string) (string, error) {
 	if !ok {
 		return "", ahp.InvalidParams("expected a file URI")
 	}
-	rel, err := filepath.Rel(c.server.workspace.RootPath, p)
+	rel, err := filepath.Rel(c.server.Project.workspace.RootPath, p)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return "", ahp.InvalidParams("document is outside the workspace")
 	}
 	// os.Root also rejects symlinks escaping the workspace.
-	info, err := c.server.workspace.Root.Stat(rel)
+	info, err := c.server.Project.workspace.Root.Stat(rel)
 	if errors.Is(err, fs.ErrNotExist) {
 		// Editors may open a buffer before its file is first saved.
-		if parent, statErr := c.server.workspace.Root.Stat(filepath.Dir(rel)); statErr == nil && parent.IsDir() {
-			return filepath.Join(c.server.workspace.RootPath, rel), nil
+		if parent, statErr := c.server.Project.workspace.Root.Stat(filepath.Dir(rel)); statErr == nil && parent.IsDir() {
+			return filepath.Join(c.server.Project.workspace.RootPath, rel), nil
 		}
 	}
 	if err != nil {
@@ -334,7 +334,7 @@ func (c *lspConnection) path(uri string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", ahp.InvalidParams("document is not a regular file")
 	}
-	return filepath.Join(c.server.workspace.RootPath, rel), nil
+	return filepath.Join(c.server.Project.workspace.RootPath, rel), nil
 }
 
 func (c *lspConnection) documentNotification(method string, raw json.RawMessage) error {
@@ -417,17 +417,17 @@ func (c *lspConnection) documentNotification(method string, raw json.RawMessage)
 	c.documents[uri] = doc
 	c.mu.Unlock()
 	s := c.server
-	s.lspDocumentsMu.Lock()
-	if s.lspDocuments == nil {
-		s.lspDocuments = map[string]*lspDocument{}
+	s.editor.lspDocumentsMu.Lock()
+	if s.editor.lspDocuments == nil {
+		s.editor.lspDocuments = map[string]*lspDocument{}
 	}
-	shared := s.lspDocuments[path]
+	shared := s.editor.lspDocuments[path]
 	if shared == nil {
 		shared = &lspDocument{owners: map[*lspConnection]struct{}{}}
-		s.lspDocuments[path] = shared
+		s.editor.lspDocuments[path] = shared
 	}
 	shared.owners[c] = struct{}{}
-	s.lspDocumentsMu.Unlock()
+	s.editor.lspDocumentsMu.Unlock()
 	// This connection's queue keeps updates ordered while a cold language
 	// server starts; only this document waits.
 	shared.mu.Lock()
@@ -458,7 +458,7 @@ func (c *lspConnection) syncShared(ctx context.Context, shared *lspDocument, pat
 		shared.writer = c
 		shared.changes++
 	}
-	if err := c.server.workspace.SyncEditorDocument(ctx, path, doc.text, doc.saved); err != nil {
+	if err := c.server.Project.workspace.SyncEditorDocument(ctx, path, doc.text, doc.saved); err != nil {
 		shared.writer = nil
 		return err
 	}
@@ -469,9 +469,9 @@ func (c *lspConnection) syncShared(ctx context.Context, shared *lspDocument, pat
 // for a request. The returned check reports whether it still does.
 func (c *lspConnection) claimDocument(ctx context.Context, path string) (func() bool, error) {
 	s := c.server
-	s.lspDocumentsMu.Lock()
-	shared := s.lspDocuments[path]
-	s.lspDocumentsMu.Unlock()
+	s.editor.lspDocumentsMu.Lock()
+	shared := s.editor.lspDocuments[path]
+	s.editor.lspDocumentsMu.Unlock()
 	if shared == nil {
 		return nil, nil
 	}
@@ -523,22 +523,22 @@ func (c *lspConnection) applyEdit(ctx context.Context, origin json.RawMessage, l
 // leaves, or restores a remaining owner's buffer in place of this one.
 func (c *lspConnection) releaseDocument(path string) error {
 	s := c.server
-	s.lspDocumentsMu.Lock()
-	shared := s.lspDocuments[path]
-	s.lspDocumentsMu.Unlock()
+	s.editor.lspDocumentsMu.Lock()
+	shared := s.editor.lspDocuments[path]
+	s.editor.lspDocumentsMu.Unlock()
 	if shared == nil {
 		return nil
 	}
 	shared.mu.Lock()
 	defer shared.mu.Unlock()
-	s.lspDocumentsMu.Lock()
+	s.editor.lspDocumentsMu.Lock()
 	delete(shared.owners, c)
 	_, current := shared.owners[shared.writer]
 	owners := make([]*lspConnection, 0, len(shared.owners))
 	for owner := range shared.owners {
 		owners = append(owners, owner)
 	}
-	s.lspDocumentsMu.Unlock()
+	s.editor.lspDocumentsMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if len(owners) > 0 {
@@ -554,13 +554,13 @@ func (c *lspConnection) releaseDocument(path string) error {
 		return nil
 	}
 	shared.writer = nil
-	err := s.workspace.CloseEditorDocument(ctx, path)
+	err := s.Project.workspace.CloseEditorDocument(ctx, path)
 	// The entry stays registered during the close so a new owner waits for it.
-	s.lspDocumentsMu.Lock()
-	if len(shared.owners) == 0 && s.lspDocuments[path] == shared {
-		delete(s.lspDocuments, path)
+	s.editor.lspDocumentsMu.Lock()
+	if len(shared.owners) == 0 && s.editor.lspDocuments[path] == shared {
+		delete(s.editor.lspDocuments, path)
 	}
-	s.lspDocumentsMu.Unlock()
+	s.editor.lspDocumentsMu.Unlock()
 	return err
 }
 
@@ -579,13 +579,13 @@ func (c *lspConnection) releaseDocuments() {
 
 // refreshDiagnostics asks clients to pull diagnostics again (LSP
 // workspace/diagnostic/refresh). Their responses carry nothing to wait for.
-func (s *Project) refreshDiagnostics() {
-	s.lspDocumentsMu.Lock()
-	clients := make([]*lspConnection, 0, len(s.lspRefreshers))
-	for c := range s.lspRefreshers {
+func (s *Server) refreshDiagnostics() {
+	s.editor.lspDocumentsMu.Lock()
+	clients := make([]*lspConnection, 0, len(s.editor.lspRefreshers))
+	for c := range s.editor.lspRefreshers {
 		clients = append(clients, c)
 	}
-	s.lspDocumentsMu.Unlock()
+	s.editor.lspDocumentsMu.Unlock()
 	for _, c := range clients {
 		c.send(map[string]any{"jsonrpc": "2.0", "id": fmt.Sprintf("refresh:%d", c.sequence.Add(1)), "method": "workspace/diagnostic/refresh"})
 	}

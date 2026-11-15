@@ -7,9 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -22,8 +20,6 @@ import (
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 	"golang.org/x/sync/singleflight"
 )
-
-const instanceHeader = "X-Wingman-Instance"
 
 type WorkspaceScope struct {
 	WorkspaceID string `json:"workspaceId"`
@@ -56,29 +52,10 @@ func workspaceScope(root string) WorkspaceScope {
 
 func (s *Project) InstanceID() string { return s.scope.InstanceID }
 
-func (s *Project) checkInstance(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		instance := r.Header.Get(instanceHeader)
-		if instance == "" {
-			instance = r.URL.Query().Get("instance")
-		}
-		// Discovery is initially unscoped. Later refreshes carry the instance
-		// and must reject a replacement workspace like all other operations.
-		protected := (strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/workspace") || r.URL.Path == "/lsp" || r.URL.Path == "/dap" || r.URL.Path == "/content" || r.URL.Path == "/preview"
-		if protected || r.URL.Path == "/api/workspace" && instance != "" {
-			if instance != s.scope.InstanceID || s.ctx.Err() != nil {
-				http.Error(w, "workspace instance changed; reload the workspace", http.StatusConflict)
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 // Each backend owns its agent, turn manager, and session controllers for the
 // workspace lifetime. Browser navigation never replaces execution ownership.
 type backendRuntime struct {
-	*Project
+	Project        *Project
 	id             string
 	agent          code.Agent
 	turns          *code.TurnManager
@@ -100,7 +77,7 @@ func (s *Project) bindBackend(id string, a code.Agent) *backendRuntime {
 				return
 			}
 			b.session(sid).refreshSettings()
-			b.broadcast(Frame{Type: EvtSkillsChanged})
+			b.Project.workspaceChanged(Frame{Type: EvtSkillsChanged})
 		})
 	}
 	return b
@@ -246,8 +223,7 @@ type Receipt struct {
 type commandReceipt struct {
 	fingerprint [32]byte
 	receipt     Receipt
-	status      int
-	message     string
+	err         error
 	done        chan struct{}
 }
 
@@ -259,39 +235,35 @@ func commandFingerprint(command Command) [32]byte {
 // createSession creates a native session, or forks one. Callers own retries:
 // AHP creation is serialised per URI and recorded in the session's alias.
 func (b *backendRuntime) createSession(command Command) commandReceipt {
-	failure := func(status int, message string) commandReceipt {
-		return commandReceipt{status: status, message: message}
+	failure := func(message string) commandReceipt {
+		return commandReceipt{err: errors.New(message)}
 	}
-	if !b.beginOperation() {
-		return failure(409, "workspace closed")
+	if !b.Project.beginOperation() {
+		return failure("workspace closed")
 	}
-	defer b.operations.Done()
+	defer b.Project.operations.Done()
 	if command.Type != "create" && command.Type != "fork" {
-		return failure(400, "create or fork command required")
+		return failure("create or fork command required")
 	}
 	forker, canFork := b.agent.(code.SessionForker)
 	if command.Type == "fork" && (!canFork || command.Source == "") {
-		return failure(400, "fork requires a source session on an agent that supports forking")
+		return failure("fork requires a source session on an agent that supports forking")
 	}
 	var id string
 	var err error
 	if command.Type == "fork" && command.InputID != "" {
 		through, ok := b.agent.(code.SessionTurnForker)
 		if !ok {
-			return failure(400, "agent cannot fork through an earlier turn")
+			return failure("agent cannot fork through an earlier turn")
 		}
-		id, err = through.ForkSessionThrough(code.WithSessionID(b.ctx, command.Source), command.Source, command.InputID, command.Title)
+		id, err = through.ForkSessionThrough(code.WithSessionID(b.Project.ctx, command.Source), command.Source, command.InputID, command.Title)
 	} else if command.Type == "fork" {
-		id, err = forker.ForkSession(code.WithSessionID(b.ctx, command.Source), command.Source, command.Title)
+		id, err = forker.ForkSession(code.WithSessionID(b.Project.ctx, command.Source), command.Source, command.Title)
 	} else {
-		id, err = b.agent.NewSession(b.ctx)
+		id, err = b.agent.NewSession(b.Project.ctx)
 	}
 	if err != nil {
-		status := 502
-		if errors.Is(err, code.ErrTurnInProgress) {
-			status = 409
-		}
-		return failure(status, err.Error())
+		return commandReceipt{err: err}
 	}
 	c := b.session(id)
 	c.opMu.Lock()
@@ -311,21 +283,20 @@ func (b *backendRuntime) createSession(command Command) commandReceipt {
 // waiting on opMu so an in-flight operation cannot have its ID reused to answer
 // its own prompt. Never hold a receipt/projection lock while doing backend I/O.
 func (c *sessionController) command(ctx context.Context, command Command) commandReceipt {
-	failure := func(message string) commandReceipt { return commandReceipt{status: 409, message: message} }
 	fingerprint := commandFingerprint(command)
 	c.mu.Lock()
 	if previous := c.receipts[command.ID]; previous != nil {
 		c.mu.Unlock()
 		if previous.fingerprint != fingerprint {
-			return failure("request id reused with different content")
+			return commandReceipt{err: errors.New("request id reused with different content")}
 		}
 		select {
 		case <-previous.done:
 			return *previous
 		case <-ctx.Done():
-			return failure(ctx.Err().Error())
-		case <-c.backend.ctx.Done():
-			return failure("workspace closed")
+			return commandReceipt{err: ctx.Err()}
+		case <-c.backend.Project.ctx.Done():
+			return commandReceipt{err: errors.New("workspace closed")}
 		}
 	}
 	record := &commandReceipt{fingerprint: fingerprint, done: make(chan struct{}), receipt: Receipt{Ref: c.ref}}
@@ -345,9 +316,7 @@ func (c *sessionController) command(ctx context.Context, command Command) comman
 			err = c.execute(command)
 		}
 	}
-	if err != nil {
-		record.status, record.message = http.StatusConflict, err.Error()
-	}
+	record.err = err
 	return *record
 }
 
@@ -383,7 +352,7 @@ func (c *sessionController) cuttable(inputID string) bool {
 
 func (c *sessionController) execute(command Command) error {
 	b, sid := c.backend, c.ref.SessionID
-	if err := b.ctx.Err(); err != nil {
+	if err := b.Project.ctx.Err(); err != nil {
 		return err
 	}
 	switch command.Type {
@@ -411,9 +380,9 @@ func (c *sessionController) execute(command Command) error {
 		case command.Type == "queue_update":
 			err = b.turns.ReplaceQueued(sid, id, input)
 		case command.requireIdle:
-			_, err = b.turns.Start(b.ctx, sid, input)
+			_, err = b.turns.Start(b.Project.ctx, sid, input)
 		default:
-			_, err = b.turns.Submit(b.ctx, sid, input)
+			_, err = b.turns.Submit(b.Project.ctx, sid, input)
 		}
 		if err != nil {
 			return err
@@ -438,7 +407,7 @@ func (c *sessionController) execute(command Command) error {
 				return err
 			}
 		}
-		ctx := code.WithSessionID(b.ctx, sid)
+		ctx := code.WithSessionID(b.Project.ctx, sid)
 		// Always refresh, including partial failures or provider-normalized values.
 		defer c.refreshSettings()
 		if command.Model != nil {
@@ -474,10 +443,10 @@ func (c *sessionController) execute(command Command) error {
 			return errors.New("history can only be cut after a turn of the conversation")
 		}
 		// What runs or waits belongs to the history that goes.
-		if err := b.turns.StopSession(b.ctx, sid); err != nil {
+		if err := b.turns.StopSession(b.Project.ctx, sid); err != nil {
 			return err
 		}
-		if err := truncator.TruncateSession(b.ctx, sid, command.InputID); err != nil {
+		if err := truncator.TruncateSession(b.Project.ctx, sid, command.InputID); err != nil {
 			return err
 		}
 		kept := len(transcriptEntries(b.agent.Messages(sid)))
@@ -496,10 +465,10 @@ func (c *sessionController) execute(command Command) error {
 		}
 		// A terminal tombstone is retained for this server lifetime. Late callbacks
 		// cannot recreate a deleted view or admit a new input under the old identity.
-		if err := b.turns.StopSession(b.ctx, sid); err != nil {
+		if err := b.turns.StopSession(b.Project.ctx, sid); err != nil {
 			return err
 		}
-		if err := b.agent.DeleteSession(b.ctx, sid); err != nil {
+		if err := b.agent.DeleteSession(b.Project.ctx, sid); err != nil {
 			return err
 		}
 		c.mu.Lock()

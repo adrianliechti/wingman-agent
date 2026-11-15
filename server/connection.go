@@ -483,12 +483,12 @@ func (h *Host) root() (types.RootState, error) {
 				info.Capabilities.MultipleChats = &types.MultipleChatsCapability{Fork: new(true)}
 			}
 		}
-		if runtime != nil && runtime.beginOperation() {
+		if runtime != nil && runtime.Project.beginOperation() {
 			models, _ := runtime.agent.Models("")
 			for _, m := range models {
 				info.Models = append(info.Models, modelInfo(entry.ID, m))
 			}
-			runtime.operations.Done()
+			runtime.Project.operations.Done()
 		}
 		root.Agents = append(root.Agents, info)
 	}
@@ -626,10 +626,10 @@ func (c *connection) request(req ahp.Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !b.beginOperation() {
+		if !b.Project.beginOperation() {
 			return nil, errors.New("workspace closed")
 		}
-		defer b.operations.Done()
+		defer b.Project.operations.Done()
 		cfg := configFromSettings(b.settings(""))
 		// An agent that just started may know its models.
 		if !started {

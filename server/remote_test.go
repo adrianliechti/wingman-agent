@@ -22,10 +22,10 @@ import (
 
 func connectTestRemote(t *testing.T, s *Server, relayURL string, credentials remote.Credentials) func() {
 	t.Helper()
-	ctx, cancel := context.WithCancel(s.ctx)
+	ctx, cancel := context.WithCancel(s.Project.ctx)
 	ready, done := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	s.background.Go(func() {
+	s.Project.background.Go(func() {
 		defer close(done)
 		err := remote.Serve(ctx, remote.ClientOptions{Relay: relayURL, Token: "test-token", Credentials: credentials, OnStatus: func(connected bool, _ error) {
 			if connected {
@@ -198,11 +198,11 @@ func TestRemoteUsesExistingReceiptsAndRecoversLiveSessionAfterTunnelRestart(t *t
 	if status, _ := remoteCommand(t, client, web.URL, "old-instance", c, command); status != 409 {
 		t.Fatalf("old instance accepted: %d", status)
 	}
-	status, first := remoteCommand(t, client, web.URL, s.scope.InstanceID, c, command)
+	status, first := remoteCommand(t, client, web.URL, s.Project.scope.InstanceID, c, command)
 	if status != 200 {
 		t.Fatalf("send: %d %s", status, first)
 	}
-	status, duplicate := remoteCommand(t, client, web.URL, s.scope.InstanceID, c, command)
+	status, duplicate := remoteCommand(t, client, web.URL, s.Project.scope.InstanceID, c, command)
 	if status != 200 || first != duplicate {
 		t.Fatalf("receipt changed on retry: %d %s", status, duplicate)
 	}
@@ -213,7 +213,7 @@ func TestRemoteUsesExistingReceiptsAndRecoversLiveSessionAfterTunnelRestart(t *t
 	})
 	before := remoteSnapshot(t, client, web.URL, c)
 	stop()
-	if s.ctx.Err() != nil {
+	if s.Project.ctx.Err() != nil {
 		t.Fatal("losing the tunnel closed the workspace")
 	}
 	connectTestRemote(t, s, web.URL, credentials)
@@ -230,12 +230,12 @@ func TestRemoteUsesExistingReceiptsAndRecoversLiveSessionAfterTunnelRestart(t *t
 func TestRemotePairingSwitchCannotRedirectAnOldWorkspaceCommand(t *testing.T) {
 	first, _, _ := newProtocolServer(t)
 	second, b, a := newProtocolServer(t)
-	second.scope = WorkspaceScope{WorkspaceID: "second-workspace", InstanceID: "second-instance"}
+	second.Project.scope = WorkspaceScope{WorkspaceID: "second-workspace", InstanceID: "second-instance"}
 	workspace, err := code.NewWorkspace(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	second.workspace = workspace
+	second.Project.workspace = workspace
 	second.mux.Get("/api/workspace", second.handleWorkspace)
 	c := b.session("saved")
 	c.load()
@@ -249,7 +249,7 @@ func TestRemotePairingSwitchCannotRedirectAnOldWorkspaceCommand(t *testing.T) {
 	client := &http.Client{Jar: jar, Timeout: 5 * time.Second}
 	pairTestRemote(t, client, web.URL, firstCredentials)
 	pairTestRemote(t, client, web.URL, secondCredentials)
-	status, _ := remoteCommand(t, client, web.URL, first.scope.InstanceID, c, Command{ID: "old-page", Type: "send", Text: "must not run here"})
+	status, _ := remoteCommand(t, client, web.URL, first.Project.scope.InstanceID, c, Command{ID: "old-page", Type: "send", Text: "must not run here"})
 	if status != 409 || a.sent.Load() != 0 {
 		t.Fatalf("old browser mutated newly paired workspace: status=%d sends=%d", status, a.sent.Load())
 	}

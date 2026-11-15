@@ -24,7 +24,7 @@ type managedToolsStatus struct {
 
 func (s *Project) setManagedToolsStatus(status managedToolsStatus) {
 	s.managedTools.Store(&status)
-	s.broadcast(Frame{Type: EvtWorkspaceChanged})
+	s.workspaceChanged(Frame{Type: EvtWorkspaceChanged})
 }
 
 func (s *Project) managedToolsStatus() managedToolsStatus {
@@ -48,6 +48,19 @@ func (s *Project) debugAvailable(ctx context.Context) bool {
 	return available
 }
 
+// refreshDiagnostics notifies the optional editor adapter outside the host lock.
+func (s *Project) refreshDiagnostics() {
+	if s.host == nil {
+		return
+	}
+	s.host.mu.Lock()
+	refresh := s.onDiagnostics
+	s.host.mu.Unlock()
+	if refresh != nil {
+		refresh()
+	}
+}
+
 func (s *Project) hasClients() bool {
 	return s != nil && s.host != nil && s.host.connected()
 }
@@ -56,7 +69,7 @@ func (s *Project) flushFiles() {
 	if s.fileMonitor != nil {
 		s.fileMonitor.Flush()
 	}
-	s.broadcast(Frame{Type: EvtFilesChanged})
+	s.workspaceChanged(Frame{Type: EvtFilesChanged})
 }
 
 func (s *Project) checkWorkspace() {
@@ -65,7 +78,7 @@ func (s *Project) checkWorkspace() {
 	gitNow := ws.IsGitRepo()
 	if gitNow != s.prevGit {
 		ws.SyncProjectMode()
-		s.broadcast(Frame{Type: EvtWorkspaceChanged})
+		s.workspaceChanged(Frame{Type: EvtWorkspaceChanged})
 		if ws.HasLSP() {
 			s.refreshDiagnostics()
 		}
@@ -75,7 +88,7 @@ func (s *Project) checkWorkspace() {
 	lspNow := ws.HasLSP()
 	if lspNow != s.prevLSP {
 		s.prevLSP = lspNow
-		s.broadcast(Frame{Type: EvtWorkspaceChanged})
+		s.workspaceChanged(Frame{Type: EvtWorkspaceChanged})
 		if lspNow {
 			s.refreshDiagnostics()
 		}
@@ -84,14 +97,14 @@ func (s *Project) checkWorkspace() {
 	debugNow := s.debugAvailable(s.ctx)
 	if debugNow != s.prevDebug {
 		s.prevDebug = debugNow
-		s.broadcast(Frame{Type: EvtWorkspaceChanged})
+		s.workspaceChanged(Frame{Type: EvtWorkspaceChanged})
 	}
 
 	if ws.HasLSP() {
 		s.scanWorkspaceFiles()
 	}
 	if !ws.HasChanges() {
-		s.broadcast(Frame{Type: EvtFilesChanged})
+		s.workspaceChanged(Frame{Type: EvtFilesChanged})
 		if ws.HasLSP() {
 			s.refreshDiagnostics()
 		}
@@ -100,7 +113,7 @@ func (s *Project) checkWorkspace() {
 	fp := ws.ChangesFingerprint(s.ctx)
 	if fp != s.prevFingerprint {
 		s.prevFingerprint = fp
-		s.broadcast(Frame{Type: EvtFilesChanged})
+		s.workspaceChanged(Frame{Type: EvtFilesChanged})
 		if ws.HasLSP() {
 			s.refreshDiagnostics()
 		}
@@ -138,6 +151,6 @@ func (s *Project) syncWorkspaceFiles(ctx context.Context) {
 
 func (s *Project) refreshSkills() {
 	if s.workspace.RefreshSkills() {
-		s.broadcast(Frame{Type: EvtSkillsChanged})
+		s.workspaceChanged(Frame{Type: EvtSkillsChanged})
 	}
 }

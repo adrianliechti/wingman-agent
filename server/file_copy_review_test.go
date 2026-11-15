@@ -42,7 +42,7 @@ func TestFileCopyRejectsOwnDescendants(test *testing.T) {
 			if err := copyResource(test, app, "source", tc.to); err == nil {
 				test.Error("copy into its own source was accepted")
 			}
-			if _, err := app.workspace.Root.Lstat(tc.to); !os.IsNotExist(err) {
+			if _, err := app.Project.workspace.Root.Lstat(tc.to); !os.IsNotExist(err) {
 				test.Errorf("rejected copy created its destination: %v", err)
 			}
 		})
@@ -61,7 +61,7 @@ func TestFileCopyAllowsSiblingDirectory(test *testing.T) {
 	if err := copyResource(test, app, "source", "source-copy"); err != nil {
 		test.Fatal(err)
 	}
-	content, err := app.workspace.Root.ReadFile("source-copy/file.txt")
+	content, err := app.Project.workspace.Root.ReadFile("source-copy/file.txt")
 	if err != nil || string(content) != "contents" {
 		test.Fatalf("copy content = %q, error = %v", content, err)
 	}
@@ -91,7 +91,7 @@ func TestFileCopyPreservesSymlinks(test *testing.T) {
 				want = map[string]string{".": "file.txt"}
 			}
 			for name, target := range want {
-				got, err := app.workspace.Root.Readlink(filepath.Join(to, name))
+				got, err := app.Project.workspace.Root.Readlink(filepath.Join(to, name))
 				if err != nil || got != target {
 					test.Errorf("copied link %s = %q, %v; want %q", name, got, err, target)
 				}

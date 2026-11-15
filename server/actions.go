@@ -96,16 +96,13 @@ func (c *connection) executeAction(a *Session, ch *Chat, p types.DispatchActionP
 	h := c.host
 	h.mu.Lock()
 	run, err := c.applyAction(a, ch, p)
-	unsaved := a.unsaved
 	h.mu.Unlock()
+	defer a.project.saveAliases()
 	if err != nil {
 		return err
 	}
 	if run != nil {
 		return run()
-	}
-	if unsaved {
-		a.save()
 	}
 	return nil
 }

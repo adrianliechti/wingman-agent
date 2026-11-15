@@ -151,11 +151,8 @@ func (a *Chat) chatAction(action types.StateAction) {
 func (a *Chat) syncLocked(c *sessionController, changes []SessionChange) {
 	a.project.host.mu.Lock()
 	defer func() {
-		unsaved := a.session.unsaved
 		a.project.host.mu.Unlock()
-		if unsaved {
-			a.session.save()
-		}
+		a.project.saveAliases()
 	}()
 	if !a.project.availableLocked() || a.project.host.chats[a.chat.Resource] != a {
 		return

@@ -207,7 +207,7 @@ func reviewSessionsReceipt(c *sessionController, id string) (reserved, done bool
 func TestReviewSessionsLostCancelDoesNotStopTheNextTurn(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
 	agent := &reviewSessionsAgent{protocolAgent: &protocolAgent{}, modelGate: make(chan struct{}), inModel: make(chan struct{}, 1)}
-	s.backends["review"] = &backendEntry{runtime: s.bindBackend("review", agent)}
+	s.Project.backends["review"] = &backendEntry{runtime: s.Project.bindBackend("review", agent)}
 	var releaseModel sync.Once
 	t.Cleanup(func() { releaseModel.Do(func() { close(agent.modelGate) }) })
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -385,7 +385,7 @@ func cmpOr(value, fallback string) string {
 func TestReviewSessionsNormalizedConfigReachesSubscribers(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
 	agent := &reviewSessionsModeAgent{protocolAgent: &protocolAgent{}}
-	s.backends["modes"] = &backendEntry{runtime: s.bindBackend("modes", agent)}
+	s.Project.backends["modes"] = &backendEntry{runtime: s.Project.bindBackend("modes", agent)}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	client := protocolTestClient(t, endpoint, "settings")
@@ -419,7 +419,7 @@ func TestReviewSessionsDisposeSessionForgetsItsAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(s.Project.host.aliasPath(dir, sessionAlias{Resource: session})); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(aliasPath(dir, sessionAlias{Resource: session})); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("disposed session's alias file remains: %v", err)
 	}
 	s.Project.host.mu.Lock()
@@ -451,7 +451,7 @@ func TestReviewSessionsCreateSessionCannotClaimACanonicalURI(t *testing.T) {
 func TestReviewSessionsCanonicalForkURIRedirectsToTheForkChat(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
 	agent := &turnForkingAgent{protocolAgent: &protocolAgent{}}
-	s.backends["fork"] = &backendEntry{runtime: s.bindBackend("fork", agent)}
+	s.Project.backends["fork"] = &backendEntry{runtime: s.Project.bindBackend("fork", agent)}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	client := protocolTestClient(t, endpoint, "forks")
@@ -558,7 +558,7 @@ func TestReviewSessionsForkThroughACompactionTurn(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
 	agent := &reviewSessionsCompactForkAgent{&compactingProtocolAgent{protocolAgent: &protocolAgent{}, focus: make(chan string, 4), release: make(chan error, 4)}}
 	agent.release <- nil
-	s.backends["compact"] = &backendEntry{runtime: s.bindBackend("compact", agent)}
+	s.Project.backends["compact"] = &backendEntry{runtime: s.Project.bindBackend("compact", agent)}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	client := protocolTestClient(t, endpoint, "compactor")
@@ -681,10 +681,10 @@ func TestReviewSessionsAttachmentContentStaysOutOfTheMessageText(t *testing.T) {
 // Bug: controller command receipts are never evicted, so every action a client ever sent stays in memory for the host's lifetime although the docs promise bounded receipts.
 func TestReviewSessionsCommandReceiptsAreBounded(t *testing.T) {
 	_, b, _, c, _ := reviewSessionsAttach(t)
-	if !b.beginOperation() {
+	if !b.Project.beginOperation() {
 		t.Fatal("workspace closed")
 	}
-	defer b.operations.Done()
+	defer b.Project.operations.Done()
 	const commands = 10000
 	for i := range commands {
 		c.command(t.Context(), Command{ID: "answer-" + strconv.Itoa(i), Type: "prompt_response", PromptID: "gone", Action: "accept"})
@@ -746,7 +746,7 @@ func TestReviewSessionsConcurrentCreateSessionCreatesOnce(t *testing.T) {
 func TestReviewSessionsConcurrentReloadAttachesEachForkOnce(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
 	agent := &turnForkingAgent{protocolAgent: &protocolAgent{}}
-	s.backends["fork"] = &backendEntry{runtime: s.bindBackend("fork", agent)}
+	s.Project.backends["fork"] = &backendEntry{runtime: s.Project.bindBackend("fork", agent)}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	client := protocolTestClient(t, endpoint, "forks")
@@ -768,7 +768,7 @@ func TestReviewSessionsConcurrentReloadAttachesEachForkOnce(t *testing.T) {
 	}
 
 	other, _, _ := newProtocolServer(t)
-	other.backends["fork"] = &backendEntry{runtime: other.bindBackend("fork", agent)}
+	other.Project.backends["fork"] = &backendEntry{runtime: other.Project.bindBackend("fork", agent)}
 	h := other.Project
 	var wg sync.WaitGroup
 	for i := range 24 {
@@ -927,7 +927,7 @@ func TestReviewSessionsHostileActionsAreRejected(t *testing.T) {
 func TestReviewSessionsForkCutsAtTheChosenTurnWhileTheSourceRuns(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
 	agent := &turnForkingAgent{protocolAgent: &protocolAgent{}}
-	s.backends["fork"] = &backendEntry{runtime: s.bindBackend("fork", agent)}
+	s.Project.backends["fork"] = &backendEntry{runtime: s.Project.bindBackend("fork", agent)}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	client := protocolTestClient(t, endpoint, "brancher")

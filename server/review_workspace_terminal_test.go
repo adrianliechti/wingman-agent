@@ -33,10 +33,10 @@ func reviewWorkspaceTerminalServer(t *testing.T) (*Server, string) {
 		t.Skip("no PTY support")
 	}
 	s, _, _, endpoint := protocolTestServer(t)
-	s.terminals = terminal.NewManager(t.TempDir())
+	s.Project.terminals = terminal.NewManager(t.TempDir())
 	// Closing sessions (not the manager) first releases any PTY write a test left blocked.
 	t.Cleanup(func() {
-		for _, session := range s.terminals.List() {
+		for _, session := range s.Project.terminals.List() {
 			_ = session.Close()
 		}
 	})
@@ -153,7 +153,7 @@ func TestReviewWorkspaceTerminalDisposeNotBlockedByStalledInput(t *testing.T) {
 	if err := client.Request(ctx, "disposeTerminal", types.DisposeTerminalParams{Channel: uri}, nil); err != nil {
 		t.Fatalf("dispose hung behind a stalled input write: %v", err)
 	}
-	if s.terminals.Get(view.session.ID()) != nil {
+	if s.Project.terminals.Get(view.session.ID()) != nil {
 		t.Fatal("disposed terminal still runs")
 	}
 }
@@ -164,7 +164,7 @@ func TestReviewWorkspaceTerminalExitWhileBehindKeepsFinalOutput(t *testing.T) {
 	client := protocolTestClient(t, endpoint, "observer")
 	gate := filepath.Join(t.TempDir(), "go")
 	script := `while [ ! -e "$GATE" ]; do sleep 0.01; done; head -c 600000 /dev/zero | tr '\0' a; printf '\nfinal-marker\n'; exit 3`
-	session, err := s.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", script}, Env: map[string]*string{"GATE": &gate}}, 80, 24)
+	session, err := s.Project.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", script}, Env: map[string]*string{"GATE": &gate}}, 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestReviewWorkspaceTerminalSlowOwnerIsDisconnectedAndReleased(t *testing.T)
 func TestReviewWorkspaceTerminalConcurrentClaimsHaveOneWinner(t *testing.T) {
 	s, endpoint := reviewWorkspaceTerminalServer(t)
 	_ = protocolTestClient(t, endpoint, "starter")
-	session, err := s.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", "sleep 30"}}, 80, 24)
+	session, err := s.Project.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", "sleep 30"}}, 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,8 +567,8 @@ func testReviewWorkspaceTerminalCreateValidation(t *testing.T, scheme string) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if len(s.terminals.List()) != 0 {
-		t.Fatalf("rejected requests started %d terminals", len(s.terminals.List()))
+	if len(s.Project.terminals.List()) != 0 {
+		t.Fatalf("rejected requests started %d terminals", len(s.Project.terminals.List()))
 	}
 	uri := scheme + ":/dup"
 	createTestTerminal(t, client, uri, "owner")
@@ -577,7 +577,7 @@ func testReviewWorkspaceTerminalCreateValidation(t *testing.T, scheme string) {
 	if !errors.As(err, &rpc) || rpc.Code != types.ErrorCodeAlreadyExists {
 		t.Fatalf("duplicate channel: %v", err)
 	}
-	if len(s.terminals.List()) != 1 {
+	if len(s.Project.terminals.List()) != 1 {
 		t.Fatal("duplicate create started another shell")
 	}
 }
@@ -588,7 +588,7 @@ func TestReviewWorkspaceTerminalTrimKeepsValidUTF8(t *testing.T) {
 	gate := filepath.Join(t.TempDir(), "go")
 	// 75,000 two-byte characters on one line: no newline or escape to trim at.
 	script := `while [ ! -e "$GATE" ]; do sleep 0.01; done; yes é | tr -d '\n' | head -c 150000; printf 'utf8-end'; exit 0`
-	session, err := s.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", script}, Env: map[string]*string{"GATE": &gate}}, 80, 24)
+	session, err := s.Project.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", script}, Env: map[string]*string{"GATE": &gate}}, 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -641,21 +641,21 @@ func TestReviewWorkspaceTerminalCatalogueRecoversFromOverflow(t *testing.T) {
 	// Stall the catalogue pump so the manager drops it as a slow observer.
 	h.host.terminalMu.Lock()
 	for range 40 {
-		session, err := s.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", "true"}}, 80, 24)
+		session, err := s.Project.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", "true"}}, 80, 24)
 		if err != nil {
 			h.host.terminalMu.Unlock()
 			t.Fatal(err)
 		}
 		<-session.Done()
 	}
-	running, err := s.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", "sleep 30"}}, 80, 24)
+	running, err := s.Project.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", "sleep 30"}}, 80, 24)
 	h.host.terminalMu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := func() []string {
 		var ids []string
-		for _, session := range s.terminals.List() {
+		for _, session := range s.Project.terminals.List() {
 			ids = append(ids, "ahp-terminal:/"+s.Project.namespace+"/"+session.ID())
 		}
 		slices.Sort(ids)
@@ -683,7 +683,7 @@ func TestReviewWorkspaceTerminalDebugTerminalsReplaceExitedOnes(t *testing.T) {
 	client := protocolTestClient(t, endpoint, "observer")
 	launch := func(script string) dap.TerminalProcess {
 		t.Helper()
-		process, err := s.LaunchTerminal(t.Context(), dap.TerminalLaunch{Title: "Debug", Path: "/bin/sh", Args: []string{"-c", script}})
+		process, err := s.Project.LaunchTerminal(t.Context(), dap.TerminalLaunch{Title: "Debug", Path: "/bin/sh", Args: []string{"-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -744,23 +744,23 @@ func TestReviewWorkspaceTerminalStatusRoute(t *testing.T) {
 	if code, _ := status(uri, "stale-instance"); code != http.StatusConflict {
 		t.Fatalf("stale instance: %d", code)
 	}
-	if code, _ := status("ahp-terminal:/review/üA x", s.scope.InstanceID); code != http.StatusNotFound {
+	if code, _ := status("ahp-terminal:/review/üA x", s.Project.scope.InstanceID); code != http.StatusNotFound {
 		t.Fatalf("decoded twice: %d", code)
 	}
-	if code, busy := status(uri, s.scope.InstanceID); code != http.StatusOK || busy {
+	if code, busy := status(uri, s.Project.scope.InstanceID); code != http.StatusOK || busy {
 		t.Fatalf("idle shell: %d busy=%v", code, busy)
 	}
 	if reason := reviewWorkspaceTerminalDispatch(t, client, sub, "owner", uri, 1, reviewWorkspaceTerminalInput("sleep 30\n")); reason != nil {
 		t.Fatal(*reason)
 	}
 	reviewWorkspaceTerminalEventually(t, "busy status", func() bool {
-		code, busy := status(uri, s.scope.InstanceID)
+		code, busy := status(uri, s.Project.scope.InstanceID)
 		return code == http.StatusOK && busy
 	})
 	if err := client.Request(t.Context(), "disposeTerminal", types.DisposeTerminalParams{Channel: uri}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if code, _ := status(uri, s.scope.InstanceID); code != http.StatusNotFound {
+	if code, _ := status(uri, s.Project.scope.InstanceID); code != http.StatusNotFound {
 		t.Fatalf("disposed terminal: %d", code)
 	}
 }

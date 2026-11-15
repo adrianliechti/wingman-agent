@@ -22,9 +22,9 @@ func TestSchedulesAPI(t *testing.T) {
 	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
-	record := app.backends["wingman"].runtime.createSession(Command{ID: "create-test", Type: "create"})
-	if record.status != 0 {
-		t.Fatal(record.message)
+	record := app.Project.backends["wingman"].runtime.createSession(Command{ID: "create-test", Type: "create"})
+	if record.err != nil {
+		t.Fatal(record.err)
 	}
 	receipt := record.receipt
 	created := struct{ ID string }{receipt.Ref.SessionID}
@@ -33,7 +33,7 @@ func TestSchedulesAPI(t *testing.T) {
 		t.Fatalf("schedules = %+v, want empty", got)
 	}
 
-	store := app.backends["wingman"].runtime.sessionSchedules(created.ID)
+	store := app.Project.backends["wingman"].runtime.sessionSchedules(created.ID)
 	if store == nil {
 		t.Fatal("session has no schedule store")
 	}

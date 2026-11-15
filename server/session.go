@@ -22,7 +22,6 @@ type Session struct {
 	modified string // the session's last change before it was loaded
 	state    types.SessionState
 	chats    []*Chat
-	unsaved  bool // the alias holds changes that are not saved yet
 	pending  map[string]*pendingAction
 	acks     map[types.ActionOrigin]ack
 	ackOrder []types.ActionOrigin
@@ -172,30 +171,7 @@ func (a *Session) keep(summary types.SessionSummary) {
 	}
 	alias.Title, alias.Status, alias.Modified = a.state.Title, own, modified
 	a.project.host.rememberAliasLocked(alias)
-	a.unsaved = true
-}
-
-// save writes the kept alias outside the host's lock, which the actions of every project wait for.
-func (a *Session) save() {
-	p := a.project
-	p.aliasMu.Lock()
-	defer p.aliasMu.Unlock()
-	p.host.mu.Lock()
-	alias, saved := p.host.aliases[a.resource]
-	unsaved := a.unsaved
-	a.unsaved = false
-	p.host.mu.Unlock()
-	if !saved || !unsaved {
-		return
-	}
-	_ = p.saveAlias(alias)
-	// Disposing the session meanwhile removed its alias.
-	p.host.mu.Lock()
-	_, saved = p.host.aliases[a.resource]
-	p.host.mu.Unlock()
-	if !saved {
-		p.removeAlias(alias)
-	}
+	a.project.stageAliasLocked(alias, false)
 }
 
 func (a *Session) removeClient(id string) {

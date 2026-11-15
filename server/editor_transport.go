@@ -6,12 +6,24 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/server/ahp"
 	"github.com/coder/websocket"
 	"go.lsp.dev/jsonrpc2"
 )
+
+// editorState belongs to the web adapter. Headless projects have no editor
+// connections, document ownership or browser-facing debug references.
+type editorState struct {
+	dapReferenceSeq  atomic.Uint64
+	lspDocumentsMu   sync.Mutex
+	lspDocuments     map[string]*lspDocument
+	lspRefreshers    map[*lspConnection]struct{}
+	lspExternalMu    sync.Mutex
+	lspExternalPaths map[string]bool
+}
 
 // The browser transports use one UTF-8 JSON message per WebSocket frame.
 // Native language servers and debug adapters keep their Content-Length framing.
@@ -29,7 +41,7 @@ var (
 	errEditorTimeout   = errors.New("request timed out")
 )
 
-func (s *Project) acceptEditorSocket(w http.ResponseWriter, r *http.Request) (*editorSocket, error) {
+func (s *Server) acceptEditorSocket(w http.ResponseWriter, r *http.Request) (*editorSocket, error) {
 	// Only the same-origin Web UI uses /lsp and /dap; the default origin check
 	// keeps other pages from driving language servers and debuggers.
 	conn, err := websocket.Accept(w, r, nil)
@@ -37,7 +49,7 @@ func (s *Project) acceptEditorSocket(w http.ResponseWriter, r *http.Request) (*e
 		return nil, err
 	}
 	conn.SetReadLimit(8 << 20)
-	ctx, cancel := context.WithCancel(s.ctx)
+	ctx, cancel := context.WithCancel(s.Project.ctx)
 	p := &editorSocket{ctx: ctx, cancel: cancel, writer: newWSClient(conn), pending: map[string]context.CancelCauseFunc{}}
 	go p.writer.run()
 	go func() { <-ctx.Done(); _ = conn.CloseNow() }()

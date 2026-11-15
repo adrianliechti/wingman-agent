@@ -612,7 +612,7 @@ func TestReviewLSPDocumentClosedDuringRestartIsNotRestored(t *testing.T) {
 		t.Fatalf("hover = %q", got)
 	}
 	reviewLSPKillFakes(control)
-	for deadline := time.Now().Add(10 * time.Second); len(app.workspace.LSPActivities()) != 0; time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(10 * time.Second); len(app.Project.workspace.LSPActivities()) != 0; time.Sleep(20 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("the killed language server still reports as alive")
 		}
@@ -770,15 +770,15 @@ func TestReviewLSPDocumentsAreReleasedWhenTheLastConnectionLeaves(t *testing.T) 
 
 	_ = a.conn.Close(websocket.StatusNormalClosure, "")
 	time.Sleep(200 * time.Millisecond)
-	if content, open := app.workspace.EditorLSPDocumentContent(path); !open || content != "package main // shared\n" {
+	if content, open := app.Project.workspace.EditorLSPDocumentContent(path); !open || content != "package main // shared\n" {
 		t.Fatalf("closing one of two connections released the document: %q, %v", content, open)
 	}
 	_ = b.conn.Close(websocket.StatusNormalClosure, "")
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		app.lspDocumentsMu.Lock()
-		owners := len(app.lspDocuments)
-		app.lspDocumentsMu.Unlock()
-		if _, open := app.workspace.EditorLSPDocumentContent(path); !open && owners == 0 {
+		app.editor.lspDocumentsMu.Lock()
+		owners := len(app.editor.lspDocuments)
+		app.editor.lspDocumentsMu.Unlock()
+		if _, open := app.Project.workspace.EditorLSPDocumentContent(path); !open && owners == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -842,12 +842,12 @@ func TestReviewLSPConcurrentConnectionsStress(t *testing.T) {
 	}
 	wait.Wait()
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		app.lspDocumentsMu.Lock()
-		owners, refreshers := len(app.lspDocuments), len(app.lspRefreshers)
-		app.lspDocumentsMu.Unlock()
+		app.editor.lspDocumentsMu.Lock()
+		owners, refreshers := len(app.editor.lspDocuments), len(app.editor.lspRefreshers)
+		app.editor.lspDocumentsMu.Unlock()
 		open := 0
 		for i := range 4 {
-			if _, ok := app.workspace.EditorLSPDocumentContent(filepath.Join(root, fmt.Sprintf("f%d.go", i))); ok {
+			if _, ok := app.Project.workspace.EditorLSPDocumentContent(filepath.Join(root, fmt.Sprintf("f%d.go", i))); ok {
 				open++
 			}
 		}
@@ -1103,9 +1103,9 @@ func TestReviewLSPDocumentURIConfinement(t *testing.T) {
 			t.Errorf("documentSymbol of %q answered %v", uri, response["result"])
 		}
 	}
-	app.lspDocumentsMu.Lock()
-	owned := len(app.lspDocuments)
-	app.lspDocumentsMu.Unlock()
+	app.editor.lspDocumentsMu.Lock()
+	owned := len(app.editor.lspDocuments)
+	app.editor.lspDocumentsMu.Unlock()
 	if owned != 0 {
 		t.Fatalf("%d escaping documents were registered", owned)
 	}

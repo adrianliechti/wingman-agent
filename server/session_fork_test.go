@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -32,8 +34,8 @@ func newForkProtocolServer(t *testing.T, a code.Agent) *Server {
 	ctx, cancel := context.WithCancel(t.Context())
 	s := &Server{Project: &Project{ctx: ctx, cancel: cancel, scope: workspaceScope(protocolProject), backends: map[string]*backendEntry{}}}
 	s.Project = webProject(s, protocolProject)
-	b := s.bindBackend("one", a)
-	s.backends[b.id] = &backendEntry{runtime: b}
+	b := s.Project.bindBackend("one", a)
+	s.Project.backends[b.id] = &backendEntry{runtime: b}
 	s.mux = chi.NewRouter()
 	s.mux.Route("/api", s.registerSessionRoutes)
 	s.handler = s.checkInstance(s.mux)
@@ -60,7 +62,7 @@ func TestForkSessionCreates(t *testing.T) {
 	if receipt.Ref.SessionID != "forked-saved" {
 		t.Fatalf("receipt = %+v", receipt)
 	}
-	if !s.backends["one"].runtime.settings("").CanFork {
+	if !s.Project.backends["one"].runtime.settings("").CanFork {
 		t.Fatal("settings do not advertise forking")
 	}
 }
@@ -68,18 +70,19 @@ func TestForkSessionCreates(t *testing.T) {
 func TestForkSessionRejectsBusyMissingAndUnsupported(t *testing.T) {
 	a := &forkingProtocolAgent{protocolAgent: &protocolAgent{}, busySources: map[string]bool{"busy": true}}
 	s := newForkProtocolServer(t, a)
-	if rec := protocolRequest(t, s, "/api/v2/backends/one/sessions", Command{ID: "busy-fork", Type: "fork", Source: "busy"}); rec.Code != 409 {
-		t.Fatalf("busy fork: %d %s", rec.Code, rec.Body)
+	b := s.Project.backends["one"].runtime
+	if result := b.createSession(Command{ID: "busy-fork", Type: "fork", Source: "busy"}); !errors.Is(result.err, code.ErrTurnInProgress) {
+		t.Fatalf("busy fork: %v", result.err)
 	}
-	if rec := protocolRequest(t, s, "/api/v2/backends/one/sessions", Command{ID: "no-source", Type: "fork"}); rec.Code != 400 {
-		t.Fatalf("fork without source: %d %s", rec.Code, rec.Body)
+	if result := b.createSession(Command{ID: "no-source", Type: "fork"}); result.err == nil || !strings.Contains(result.err.Error(), "source session") {
+		t.Fatalf("fork without source: %v", result.err)
 	}
 
 	plain := newForkProtocolServer(t, &protocolAgent{})
-	if rec := protocolRequest(t, plain, "/api/v2/backends/one/sessions", Command{ID: "unsupported", Type: "fork", Source: "saved"}); rec.Code != 400 {
-		t.Fatalf("fork on a non-forking agent: %d %s", rec.Code, rec.Body)
+	if result := plain.Project.backends["one"].runtime.createSession(Command{ID: "unsupported", Type: "fork", Source: "saved"}); result.err == nil || !strings.Contains(result.err.Error(), "supports forking") {
+		t.Fatalf("fork on a non-forking agent: %v", result.err)
 	}
-	if plain.backends["one"].runtime.settings("").CanFork {
+	if plain.Project.backends["one"].runtime.settings("").CanFork {
 		t.Fatal("non-forking agent advertises forking")
 	}
 }

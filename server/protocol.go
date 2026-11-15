@@ -31,7 +31,7 @@ const (
 )
 
 // Frame carries internal adapter updates and workspace resource invalidations.
-// Session frames are projected by sessionController; only sessionEvent is public.
+// Session frames are internal; workspace invalidations are sent to browser clients.
 type Frame struct {
 	Type    string `json:"type"`
 	Session string `json:"session,omitempty"`
@@ -64,49 +64,6 @@ type TurnQueueEntry struct {
 	Compact  bool     `json:"compact,omitempty"`
 
 	Source json.RawMessage `json:"source,omitempty"`
-}
-
-type ConversationMessage struct {
-	InputID string                `json:"input_id,omitempty"`
-	Role    string                `json:"role"`
-	Content []ConversationContent `json:"content"`
-}
-
-type ConversationContent struct {
-	Text       string                 `json:"text,omitempty"`
-	TextID     string                 `json:"text_id,omitempty"`
-	Image      *ConversationImage     `json:"image,omitempty"`
-	Reasoning  *ConversationReasoning `json:"reasoning,omitempty"`
-	ToolCall   *ConversationTool      `json:"tool_call,omitempty"`
-	ToolResult *ConversationResult    `json:"tool_result,omitempty"`
-}
-
-type ConversationImage struct {
-	Data string `json:"data"`
-	Name string `json:"name,omitempty"`
-}
-
-type ConversationReasoning struct {
-	ID      string `json:"id,omitempty"`
-	Summary string `json:"summary,omitempty"`
-}
-
-type ConversationTool struct {
-	ID        string                 `json:"id,omitempty"`
-	Name      string                 `json:"name"`
-	Kind      string                 `json:"kind,omitempty"`
-	Args      string                 `json:"args,omitempty"`
-	Locations []harness.ToolLocation `json:"locations,omitempty"`
-	Hint      string                 `json:"hint,omitempty"`
-}
-
-type ConversationResult struct {
-	ID        string                 `json:"id,omitempty"`
-	Name      string                 `json:"name"`
-	Kind      string                 `json:"kind,omitempty"`
-	Args      string                 `json:"args,omitempty"`
-	Locations []harness.ToolLocation `json:"locations,omitempty"`
-	Content   string                 `json:"content"`
 }
 
 type DiffEntry struct {

@@ -36,7 +36,7 @@ func TestProjectCloseJoinsAllBackendOperations(t *testing.T) {
 				b = installProtocolAgent(s, a)
 			} else {
 				var err error
-				b, err = s.resolveBackend(id, func(context.Context) (code.Agent, error) { return a, nil })
+				b, err = s.Project.resolveBackend(id, func(context.Context) (code.Agent, error) { return a, nil })
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -49,8 +49,8 @@ func TestProjectCloseJoinsAllBackendOperations(t *testing.T) {
 		go func() { s.Close(); close(closed) }()
 		synctest.Wait()
 		for _, b := range backends {
-			if b.beginOperation() {
-				b.operations.Done()
+			if b.Project.beginOperation() {
+				b.Project.operations.Done()
 				t.Errorf("backend %s admitted work after cancellation", b.id)
 			}
 		}
@@ -81,7 +81,7 @@ func TestBackendStartupIsSharedWithoutBlockingResidentBackends(t *testing.T) {
 	var wg sync.WaitGroup
 	for range cap(results) {
 		wg.Go(func() {
-			b, err := s.resolveBackend("slow", create)
+			b, err := s.Project.resolveBackend("slow", create)
 			if err != nil {
 				t.Error(err)
 			}
@@ -90,7 +90,7 @@ func TestBackendStartupIsSharedWithoutBlockingResidentBackends(t *testing.T) {
 	}
 	<-started
 	fast := make(chan *backendRuntime, 1)
-	go func() { b, _ := s.backend("one"); fast <- b }()
+	go func() { b, _ := s.Project.backend("one"); fast <- b }()
 	select {
 	case b := <-fast:
 		if b != resident {
@@ -123,7 +123,7 @@ func TestBackendStartupAfterShutdownIsDisposedAndJoined(t *testing.T) {
 	a := &lifecycleAgent{protocolAgent: base, closeAgent: func() error { disposed.Store(true); return nil }}
 	resolved := make(chan error, 1)
 	go func() {
-		_, err := s.resolveBackend("late", func(ctx context.Context) (code.Agent, error) {
+		_, err := s.Project.resolveBackend("late", func(ctx context.Context) (code.Agent, error) {
 			close(started)
 			<-ctx.Done()
 			close(cancelled)
@@ -172,7 +172,7 @@ func TestFailedBackendStartupCanBeRetried(t *testing.T) {
 		results := make(chan error, 2)
 		for range cap(results) {
 			go func() {
-				backend, err := s.resolveBackend("retry", create)
+				backend, err := s.Project.resolveBackend("retry", create)
 				if backend != nil {
 					t.Error("failed startup published a backend")
 				}
@@ -192,7 +192,7 @@ func TestFailedBackendStartupCanBeRetried(t *testing.T) {
 
 		var want *backendRuntime
 		for range 2 {
-			backend, err := s.resolveBackend("retry", func(context.Context) (code.Agent, error) {
+			backend, err := s.Project.resolveBackend("retry", func(context.Context) (code.Agent, error) {
 				calls.Add(1)
 				return &protocolAgent{}, nil
 			})

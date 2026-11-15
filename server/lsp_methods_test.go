@@ -264,7 +264,7 @@ func TestLSPVirtualSourcesAreOnlyServedOnceReported(t *testing.T) {
 	if _, _, ok := app.lspSourceTarget(forged); ok {
 		t.Fatal("an unreported source was allowed")
 	}
-	if _, ok := app.lspSource(fileuri.FromPath(filepath.Join(app.workspace.RootPath, "main.go"))); ok {
+	if _, ok := app.lspSource(fileuri.FromPath(filepath.Join(app.Project.workspace.RootPath, "main.go"))); ok {
 		t.Fatal("a workspace file was rewritten to a source URI")
 	}
 }
@@ -314,7 +314,7 @@ func TestLSPDiagnosticRefreshReachesCapableClients(t *testing.T) {
 	conn, ctx := dialEditorTest(t, app, "/lsp")
 	initialize := map[string]any{"capabilities": map[string]any{"workspace": map[string]any{"diagnostics": map[string]any{"refreshSupport": true}}}}
 	editorTestReply(t, conn, ctx, map[string]any{"jsonrpc": "2.0", "id": float64(1), "method": "initialize", "params": initialize})
-	app.refreshDiagnostics()
+	app.Project.refreshDiagnostics()
 	var request struct {
 		ID     string `json:"id"`
 		Method string `json:"method"`

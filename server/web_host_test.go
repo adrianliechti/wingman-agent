@@ -63,8 +63,8 @@ func TestWebServerHostsOtherProjects(t *testing.T) {
 		t.Fatal("a directory below the web UI's did not open a project of its own")
 	}
 	record := other.backends["wingman"].runtime.createSession(Command{ID: "create-other", Type: "create"})
-	if record.status != 0 {
-		t.Fatal(record.message)
+	if record.err != nil {
+		t.Fatal(record.err)
 	}
 	res, err := http.Get(web.URL + chatAPIPath(&Server{Project: other}, "wingman", record.receipt.Ref.SessionID) + "/tasks")
 	if err != nil {

@@ -42,17 +42,17 @@ func TestAgentAPIContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertWorkspaceInfo(t, info)
-	if info["path"] != app.workspace.RootPath {
+	if info["path"] != app.Project.workspace.RootPath {
 		t.Fatalf("workspace path = %v", info["path"])
 	}
 	// Startup is unscoped; refreshes must detect that the server was replaced.
-	for _, instance := range []string{app.scope.InstanceID, "old-instance"} {
+	for _, instance := range []string{app.Project.scope.InstanceID, "old-instance"} {
 		req := httptest.NewRequest(http.MethodGet, "http://localhost/api/workspace", nil)
 		req.Header.Set(instanceHeader, instance)
 		rec := httptest.NewRecorder()
 		app.ServeHTTP(rec, req)
 		want := http.StatusOK
-		if instance != app.scope.InstanceID {
+		if instance != app.Project.scope.InstanceID {
 			want = http.StatusConflict
 		}
 		if rec.Code != want {

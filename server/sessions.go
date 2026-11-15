@@ -129,6 +129,7 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 			p.host.mu.Lock()
 			p.forgetChatAlias(fork.Chat)
 			p.host.mu.Unlock()
+			p.saveAliases()
 			continue
 		}
 		// A chat that does not load stays saved; its session opens without it.
@@ -145,10 +146,10 @@ func (p *Project) loadController(backend, id string) (*sessionController, string
 	if err != nil {
 		return nil, "", time.Time{}, err
 	}
-	if !b.beginOperation() {
+	if !b.Project.beginOperation() {
 		return nil, "", time.Time{}, errors.New("workspace closed")
 	}
-	defer b.operations.Done()
+	defer b.Project.operations.Done()
 	c := b.session(id)
 	c.opMu.Lock()
 	err = c.loadLocked()
@@ -162,7 +163,7 @@ func (p *Project) loadController(backend, id string) (*sessionController, string
 	}
 	// Attaching must not make an old session look recently modified.
 	title, updated := "", time.Now()
-	if sessions, err := b.agent.ListSessions(b.ctx); err == nil {
+	if sessions, err := b.agent.ListSessions(b.Project.ctx); err == nil {
 		if i := slices.IndexFunc(sessions, func(info code.SessionInfo) bool { return info.ID == id }); i >= 0 {
 			title, updated = sessions[i].Title, sessions[i].UpdatedAt
 		}
@@ -256,17 +257,17 @@ func (p *Project) createSession(raw json.RawMessage, clientID string) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	if !b.beginOperation() {
+	if !b.Project.beginOperation() {
 		return nil, errors.New("workspace closed")
 	}
-	defer b.operations.Done()
+	defer b.Project.operations.Done()
 	if exists {
 		// A creation that a restart cut off starts over.
 		p.discard(b.session(alias.Session), alias)
 	}
 	record := b.createSession(Command{ID: "ahp-create:" + params.Channel, Type: "create"})
-	if record.status != 0 {
-		return nil, ahp.InvalidParams(record.message)
+	if record.err != nil {
+		return nil, ahp.InvalidParams(record.err.Error())
 	}
 	id := record.receipt.Ref.SessionID
 	c := b.session(id)
@@ -393,13 +394,13 @@ func (h *Host) createChat(raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !b.beginOperation() {
+	if !b.Project.beginOperation() {
 		return nil, errors.New("workspace closed")
 	}
-	defer b.operations.Done()
+	defer b.Project.operations.Done()
 	record := b.createSession(command)
-	if record.status != 0 {
-		return nil, ahp.InvalidParams(record.message)
+	if record.err != nil {
+		return nil, ahp.InvalidParams(record.err.Error())
 	}
 	alias := sessionAlias{Resource: a.resource, Chat: p.Chat, Backend: provider, Session: record.receipt.Ref.SessionID, Created: time.Now().UTC()}
 	if fork != nil {
@@ -490,11 +491,11 @@ func (p *Project) nativeSessions(agents []types.AgentInfo, seen map[string]bool)
 		// Listing must not launch every installed external CLI. An external
 		// backend becomes available here after first use/config discovery.
 		b := p.startedBackend(info.Provider)
-		if b == nil || !b.beginOperation() {
+		if b == nil || !b.Project.beginOperation() {
 			continue
 		}
-		sessions, err := b.agent.ListSessions(b.ctx)
-		b.operations.Done()
+		sessions, err := b.agent.ListSessions(b.Project.ctx)
+		b.Project.operations.Done()
 		// An agent that cannot list its sessions has its saved ones listed.
 		if err != nil {
 			continue
@@ -550,15 +551,11 @@ func (p *Project) nativeSessions(agents []types.AgentInfo, seen map[string]bool)
 
 func (a *Chat) command(command Command) error {
 	b := a.controller.backend
-	if !b.beginOperation() {
+	if !b.Project.beginOperation() {
 		return errors.New("workspace closed")
 	}
-	defer b.operations.Done()
-	r := a.controller.command(b.ctx, command)
-	if r.status != 0 {
-		return errors.New(r.message)
-	}
-	return nil
+	defer b.Project.operations.Done()
+	return a.controller.command(b.Project.ctx, command).err
 }
 
 // canonicalURI names a native session that no client named; the host finds it by its project.

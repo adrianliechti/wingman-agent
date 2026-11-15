@@ -88,10 +88,10 @@ func (h *Host) completions(raw json.RawMessage) (types.CompletionsResult, error)
 	}
 	query := strings.ToLower(string(utf16.Decode(text[start+1 : offset])))
 	b := ch.controller.backend
-	if !b.beginOperation() {
+	if !b.Project.beginOperation() {
 		return result, ahp.InvalidParams("workspace closed")
 	}
-	defer b.operations.Done()
+	defer b.Project.operations.Done()
 	seen := map[string]bool{}
 	appendItem := func(entry SkillEntry, kind string) {
 		key := strings.ToLower(entry.Name)

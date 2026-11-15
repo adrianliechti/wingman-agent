@@ -236,8 +236,8 @@ func stuckTool(t *testing.T, fail error) (*sdk.Client, string, *types.ChatState,
 	t.Helper()
 	s, _, _, endpoint := protocolTestServer(t)
 	agent := &toolStuckAgent{protocolAgent: &protocolAgent{}, fail: fail}
-	b := s.bindBackend("stuck", agent)
-	s.backends["stuck"] = &backendEntry{runtime: b}
+	b := s.Project.bindBackend("stuck", agent)
+	s.Project.backends["stuck"] = &backendEntry{runtime: b}
 	client := protocolTestClient(t, endpoint, "stuck")
 	if err := client.Request(t.Context(), "createSession", types.CreateSessionParams{Channel: "ahp-session:/stuck", Provider: new("stuck")}, nil); err != nil {
 		t.Fatal(err)
@@ -320,8 +320,8 @@ func (a *modeAgent) SetMode(_ context.Context, id, mode string) error {
 func TestAHPSessionChangeKeepsAChatsOwnValue(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
 	agent := &modeAgent{protocolAgent: &protocolAgent{}, modes: map[string]string{}}
-	b := s.bindBackend("modes", agent)
-	s.backends["modes"] = &backendEntry{runtime: b}
+	b := s.Project.bindBackend("modes", agent)
+	s.Project.backends["modes"] = &backendEntry{runtime: b}
 	client := protocolTestClient(t, endpoint, "modes")
 	session := "ahp-session:/modes"
 	if err := client.Request(t.Context(), "createSession", types.CreateSessionParams{Channel: session, Provider: new("modes")}, nil); err != nil {
@@ -385,8 +385,8 @@ func (a *slowHistoryAgent) Messages(id string) []harness.Message {
 func TestAHPTurnStartedWhileTheLastTurnSettlesStarts(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
 	agent := &slowHistoryAgent{protocolAgent: &protocolAgent{gate: make(chan struct{})}, release: make(chan struct{})}
-	b := s.bindBackend("slow", agent)
-	s.backends["slow"] = &backendEntry{runtime: b}
+	b := s.Project.bindBackend("slow", agent)
+	s.Project.backends["slow"] = &backendEntry{runtime: b}
 	client := protocolTestClient(t, endpoint, "slow")
 	if err := client.Request(t.Context(), "createSession", types.CreateSessionParams{Channel: "ahp-session:/slow", Provider: new("slow")}, nil); err != nil {
 		t.Fatal(err)
@@ -426,7 +426,7 @@ func TestAHPTurnStartedWhileTheLastTurnSettlesStarts(t *testing.T) {
 func TestAHPNormalizedSessionValueKeepsTheDefaultChatFollowing(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
 	agent := &reviewSessionsModeAgent{protocolAgent: &protocolAgent{}}
-	s.backends["modes"] = &backendEntry{runtime: s.bindBackend("modes", agent)}
+	s.Project.backends["modes"] = &backendEntry{runtime: s.Project.bindBackend("modes", agent)}
 	client := protocolTestClient(t, endpoint, "settings")
 	session := "ahp-session:/normalized"
 	if err := client.Request(t.Context(), "createSession", types.CreateSessionParams{Channel: session, Provider: new("modes")}, nil); err != nil {

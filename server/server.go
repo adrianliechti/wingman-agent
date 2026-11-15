@@ -40,7 +40,9 @@ type ServerOptions struct {
 
 // Server serves the web UI and HTTP adapters for its host's default project.
 type Server struct {
-	*Project
+	Project          *Project
+	editor           editorState
+	searches         atomic.Int32
 	noBrowser        bool
 	mux              chi.Router
 	handler          http.Handler
@@ -75,7 +77,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 
 // startWeb adds what only the web UI uses; a host's projects go without it.
 func (s *Server) startWeb(opts *ServerOptions) (err error) {
-	if s.preview, err = newFilePreviewServer(s.workspace.Root); err != nil {
+	if s.preview, err = newFilePreviewServer(s.Project.workspace.Root); err != nil {
 		return err
 	}
 	s.terminalPosition.Store(settings.WindowTerminalPositionTab)
@@ -104,16 +106,18 @@ func (s *Server) Close() {
 	if s.Project == nil {
 		return
 	}
-	if s.host != nil {
-		s.host.Close()
+	if s.Project.host != nil {
+		s.Project.host.Close()
 	} else {
-		s.close()
+		s.Project.close()
 	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
 }
+
+func (s *Server) InstanceID() string { return s.Project.InstanceID() }
 
 func (s *Server) Run(ctx context.Context, port int) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
@@ -133,11 +137,15 @@ func (s *Server) Run(ctx context.Context, port int) error {
 	if !s.noBrowser {
 		openBrowser(url)
 	}
-	return serveLocal(s, listeners, ctx, s.ctx)
+	return serveLocal(s, listeners, ctx, s.Project.ctx)
 }
 
 func (s *Server) registerRoutes(r chi.Router) {
-	r.Get("/ahp", s.host.handleAHP)
+	s.Project.host.mu.Lock()
+	s.Project.onDiagnostics = s.refreshDiagnostics
+	s.Project.host.mu.Unlock()
+
+	r.Get("/ahp", s.Project.host.handleAHP)
 	r.Get("/lsp", s.handleLSP)
 	r.Get("/dap", s.handleDAP)
 	r.Get("/content", s.handleFileDownload)
@@ -202,21 +210,21 @@ type workspaceResponse struct {
 }
 
 func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
-	ws := s.workspace
+	ws := s.Project.workspace
 	info := workspaceResponse{
-		WorkspaceScope:         s.scope,
-		Namespace:              s.namespace,
+		WorkspaceScope:         s.Project.scope,
+		Namespace:              s.Project.namespace,
 		Protocol:               2,
 		Name:                   filepath.Base(ws.RootPath),
 		Path:                   ws.RootPath,
 		Shells:                 append([]terminal.Shell{}, terminal.Shells()...),
 		LSP:                    ws.HasLSP(),
-		Debug:                  s.debugAvailable(r.Context()),
+		Debug:                  s.Project.debugAvailable(r.Context()),
 		WindowTerminalPosition: s.windowTerminalPosition(),
 		WindowSidebarPosition:  s.windowSidebarPosition(),
 		Platform:               runtime.GOOS,
 	}
-	if status := s.managedToolsStatus(); status.State != "" {
+	if status := s.Project.managedToolsStatus(); status.State != "" {
 		info.ManagedTools = &status
 	}
 	writeJSON(w, info)

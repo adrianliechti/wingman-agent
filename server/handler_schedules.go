@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 )
 
@@ -20,15 +19,7 @@ type ScheduleEntry struct {
 	Failures int    `json:"failures,omitempty"`
 }
 
-func (s *backendRuntime) sessionSchedules(sessionID string) schedule.Store {
-	ca, ok := s.agent.(*agent.Agent)
-	if !ok {
-		return nil
-	}
-	return ca.Schedules(sessionID)
-}
-
-func (c *sessionController) handleSchedules(w http.ResponseWriter, r *http.Request) {
+func handleSchedules(c *sessionController, w http.ResponseWriter, r *http.Request) {
 	store := c.backend.sessionSchedules(c.ref.SessionID)
 	if store == nil {
 		writeJSON(w, []ScheduleEntry{})
@@ -69,7 +60,7 @@ func (c *sessionController) handleSchedules(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, out)
 }
 
-func (c *sessionController) handleScheduleDelete(w http.ResponseWriter, r *http.Request) {
+func handleScheduleDelete(c *sessionController, w http.ResponseWriter, r *http.Request) {
 	store := c.backend.sessionSchedules(c.ref.SessionID)
 	if store == nil {
 		http.Error(w, "scheduled tasks unavailable", http.StatusNotFound)
@@ -94,15 +85,15 @@ func (c *sessionController) handleScheduleDelete(w http.ResponseWriter, r *http.
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (c *sessionController) handleSchedulePause(w http.ResponseWriter, r *http.Request) {
-	c.handleScheduleStatus(w, r, schedule.StatusPaused)
+func handleSchedulePause(c *sessionController, w http.ResponseWriter, r *http.Request) {
+	handleScheduleStatus(c, w, r, schedule.StatusPaused)
 }
 
-func (c *sessionController) handleScheduleResume(w http.ResponseWriter, r *http.Request) {
-	c.handleScheduleStatus(w, r, schedule.StatusActive)
+func handleScheduleResume(c *sessionController, w http.ResponseWriter, r *http.Request) {
+	handleScheduleStatus(c, w, r, schedule.StatusActive)
 }
 
-func (c *sessionController) handleScheduleStatus(w http.ResponseWriter, r *http.Request, status string) {
+func handleScheduleStatus(c *sessionController, w http.ResponseWriter, r *http.Request, status string) {
 	store := c.backend.sessionSchedules(c.ref.SessionID)
 	if store == nil {
 		http.Error(w, "scheduled tasks unavailable", http.StatusNotFound)

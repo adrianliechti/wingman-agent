@@ -1,17 +1,13 @@
 package server
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/shell"
 )
@@ -64,133 +60,7 @@ func execSessionID(taskID string) (int, bool) {
 	return id, err == nil && id > 0
 }
 
-func (s *backendRuntime) sessionTasks(sessionID string) *task.Registry {
-	ca, ok := s.agent.(*agent.Agent)
-	if !ok {
-		return nil
-	}
-	return ca.Tasks(sessionID)
-}
-
-// ensureTaskPump starts (once per registry) the goroutine that forwards
-// background-agent completions of a session into its turn queue — the web
-// counterpart of the TUI pump.
-func (s *backendRuntime) ensureTaskPump(sessionID string) {
-	if !s.beginOperation() {
-		return
-	}
-	reg := s.sessionTasks(sessionID)
-	if reg == nil {
-		s.operations.Done()
-		return
-	}
-
-	s.mu.Lock()
-	if s.taskPumps == nil {
-		s.taskPumps = map[*task.Registry]bool{}
-	}
-	if s.taskPumps[reg] {
-		s.mu.Unlock()
-		s.operations.Done()
-		return
-	}
-	s.taskPumps[reg] = true
-	s.mu.Unlock()
-
-	go func() {
-		defer s.operations.Done()
-		defer func() {
-			s.mu.Lock()
-			delete(s.taskPumps, reg)
-			s.mu.Unlock()
-		}()
-
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
-			case <-reg.Done():
-				return
-			case ev := <-reg.Events():
-				batch := []task.Event{ev}
-				for {
-					select {
-					case more := <-reg.Events():
-						batch = append(batch, more)
-						continue
-					default:
-					}
-					break
-				}
-				// Retry failed delivery with the same input identity. Runtime
-				// ownership stays fixed for the lifetime of this pump.
-				for attempt := 0; !s.deliverTaskResults(sessionID, batch); attempt++ {
-					if attempt >= 24 {
-						fmt.Fprintf(os.Stderr, "giving up delivering %d background agent result(s) for session %s\n", len(batch), sessionID)
-						break
-					}
-					select {
-					case <-s.ctx.Done():
-						return
-					case <-reg.Done():
-						return
-					case <-time.After(5 * time.Second):
-					}
-				}
-			}
-		}
-	}()
-}
-
-func (s *backendRuntime) deliverTaskResults(sessionID string, batch []task.Event) bool {
-	c := s.session(sessionID)
-	c.opMu.Lock()
-	defer c.opMu.Unlock()
-	c.mu.Lock()
-	deleted := c.state.Status == sessionDeleted
-	c.mu.Unlock()
-	if deleted || s.ctx.Err() != nil || len(batch) == 0 {
-		return true
-	}
-	receiptID := fmt.Sprintf("task:%s:%d", batch[0].ID, batch[0].Seq)
-	if _, ok := c.deliveredTasks[receiptID]; ok {
-		return true
-	}
-
-	s.sendSession(sessionID, Frame{Type: EvtTasksChanged})
-
-	var blocks []string
-	for _, ev := range batch {
-		blocks = append(blocks, ev.Notification())
-	}
-
-	turns := s.turns
-	if turns == nil {
-		return false
-	}
-
-	first := batch[0]
-	_, err := turns.Submit(s.ctx, sessionID, code.TurnInput{
-		ID:     fmt.Sprintf("task-%s-%d", first.ID, first.Seq),
-		Intent: code.TurnInputSteer,
-		Origin: "task",
-		Content: []harness.Content{{
-			Text:   strings.Join(blocks, "\n\n"),
-			Hidden: true,
-		}},
-	})
-	if err != nil {
-		if errors.Is(err, code.ErrDuplicateInput) {
-			return true
-		}
-		fmt.Fprintf(os.Stderr, "deliver background agent results (%s): %v\n", sessionID, err)
-		return false
-	}
-	c.deliveredTasks[receiptID] = true
-	return true
-}
-
-func (c *sessionController) handleTasks(w http.ResponseWriter, r *http.Request) {
+func handleTasks(c *sessionController, w http.ResponseWriter, r *http.Request) {
 	reg := c.backend.sessionTasks(c.ref.SessionID)
 	out := []TaskEntry{}
 	if reg != nil {
@@ -206,7 +76,7 @@ func (c *sessionController) handleTasks(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, out)
 }
 
-func (c *sessionController) handleTask(w http.ResponseWriter, r *http.Request) {
+func handleTask(c *sessionController, w http.ResponseWriter, r *http.Request) {
 	reg := c.backend.sessionTasks(c.ref.SessionID)
 	if reg == nil {
 		http.Error(w, "background agents unavailable", http.StatusNotFound)
@@ -247,7 +117,7 @@ func (c *sessionController) handleTask(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "task not found", http.StatusNotFound)
 }
 
-func (c *sessionController) handleTaskStop(w http.ResponseWriter, r *http.Request) {
+func handleTaskStop(c *sessionController, w http.ResponseWriter, r *http.Request) {
 	reg := c.backend.sessionTasks(c.ref.SessionID)
 	if reg == nil {
 		http.Error(w, "background agents unavailable", http.StatusNotFound)

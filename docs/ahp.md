@@ -106,7 +106,16 @@ In the server package, `Host` owns connections, ordered publication, saved
 session identities, and the project registry. `Project` owns the workspace,
 agents, controllers, terminals, watches, and changesets. `Server` is the web
 adapter: HTTP routing, browser preferences, preview hosting, and the embedded
-UI. The standalone host opens projects without constructing a web server.
+UI. Its editor state owns browser LSP document ownership, diagnostic subscribers,
+external-source permissions, and DAP reference IDs. Language servers and debug
+adapters remain workspace resources. Projects notify the optional editor adapter
+of diagnostic invalidation through a callback invoked outside the host lock.
+The standalone host opens projects without constructing a web server.
+
+Both `Server` and each backend hold an explicit `Project` reference. HTTP
+handlers belong to the web adapter; native controllers and backends expose
+operations without HTTP request or response types. Command receipts retain
+the operation's error directly, with protocol error mapping at the boundary.
 
 `host.go` and `projects.go` handle host lifetime and project routing;
 `project.go` owns project startup, teardown, and channel attachment.
@@ -115,8 +124,12 @@ JSON-RPC framing, errors, origin checks, and channel URI rules, with no
 project or web dependencies. `aliases.go` persists protocol-to-native session
 identities, `sessions.go` creates and loads sessions, and `session.go` and
 `chat.go` maintain their protocol state. `controller.go` and `runtime.go` own
-native execution. `routes.go` resolves HTTP chat routes directly to their
-controllers.
+native execution, with turn processing in `turns.go`, prompts in `prompts.go`,
+and background task delivery in `tasks.go`. `routes.go` resolves HTTP chat routes
+directly to their controllers. `handler_*.go` files adapt project services to
+HTTP; file operations, search, Git, skills, and model discovery keep their service
+code in separate files. Retained messages convert directly to transcript entries,
+preserving their existing identities without an intermediate conversation model.
 
 The host publication mutex orders snapshots and actions. Controller state
 locks precede it and also protect command receipts; backend I/O runs outside
@@ -126,6 +139,13 @@ operations under its backend registry lock; cancellation closes admission,
 and teardown joins all admitted operations before closing agents. Project
 startup and teardown remain serialized so a replacement cannot open files
 while the previous instance is closing.
+
+Alias persistence has one writer per project. Updates and deletions are staged
+under the host lock, then written outside it. A successful write clears only the
+change it wrote; a newer change remains pending. Failed changes retry on the next
+update and at project teardown. Session creation waits for its own alias to be
+saved, independently of failures for other sessions. This also orders deletion
+against reuse of the same URI without a separate per-session dirty flag.
 
 Context cancellation determines host and project lifetime. A controller's
 status is its session lifecycle, including the retained deletion tombstone.

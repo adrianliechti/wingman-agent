@@ -49,7 +49,7 @@ func TestWorkspaceContentSearchStreamsFilteredReplaceableMatches(t *testing.T) {
 	app := &Server{Project: &Project{workspace: &code.Workspace{Root: root, RootPath: workDir}}}
 
 	var events []workspaceSearchEvent
-	err = app.searchWorkspace(t.Context(), workspaceSearchRequest{
+	err = app.Project.searchWorkspace(t.Context(), workspaceSearchRequest{
 		Query:         "cat",
 		Replacement:   "dog",
 		CaseSensitive: true,

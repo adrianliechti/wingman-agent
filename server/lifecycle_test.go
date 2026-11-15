@@ -164,7 +164,7 @@ func TestAHPDisposedURIsCanBeUsedAgain(t *testing.T) {
 	defer cancel()
 	session := "ahp-session:/recreate"
 	create(t, client, session)
-	oldSession, oldChat, err := s.host.ensureSession(ahp.ChatURI(session))
+	oldSession, oldChat, err := s.Project.host.ensureSession(ahp.ChatURI(session))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,20 +183,20 @@ func TestAHPDisposedURIsCanBeUsedAgain(t *testing.T) {
 	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("one")}, nil); err != nil {
 		t.Fatalf("creating a disposed session again: %v", err)
 	}
-	replacement, _, err := s.host.ensureSession(session)
+	replacement, _, err := s.Project.host.ensureSession(session)
 	if err != nil {
 		t.Fatal(err)
 	}
-	actor := &connection{host: s.host, id: "recreate"}
+	actor := &connection{host: s.Project.host, id: "recreate"}
 	if err := actor.executeAction(oldSession, nil, types.DispatchActionParams{Channel: session, Action: types.StateAction{Value: &types.SessionTitleChangedAction{Type: types.ActionTypeSessionTitleChanged, Title: "stale"}}}); err == nil {
 		t.Fatal("a stale session accepted an action after its URI was reused")
 	}
 	oldChat.controller.mu.Lock()
 	oldChat.syncLocked(oldChat.controller, nil)
 	oldChat.controller.mu.Unlock()
-	s.host.mu.Lock()
-	registered := s.host.sessions[session] == replacement && s.host.chats[oldChat.chat.Resource] == replacement.chats[0]
-	s.host.mu.Unlock()
+	s.Project.host.mu.Lock()
+	registered := s.Project.host.sessions[session] == replacement && s.Project.host.chats[oldChat.chat.Resource] == replacement.chats[0]
+	s.Project.host.mu.Unlock()
 	if !registered {
 		t.Fatal("a late deletion removed the replacement session or chat")
 	}
@@ -371,7 +371,7 @@ func TestSavedPausedQueueLetsItsProjectClose(t *testing.T) {
 	if !b.turns.Snapshot("saved").Paused {
 		t.Fatal("the recovered queue is not paused")
 	}
-	if s.busy() {
+	if s.Project.busy() {
 		t.Fatal("a saved queue keeps its project open")
 	}
 }

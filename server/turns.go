@@ -19,14 +19,14 @@ func (s *backendRuntime) buildInput(sessionID string, msg Command) []harness.Con
 	if msg.Text != "" {
 		input = append(input, harness.Content{Text: msg.Text})
 		if !s.isPromptCommand(sessionID, msg.Text) {
-			for _, block := range s.skillBlocks(msg.Text) {
+			for _, block := range s.Project.skillBlocks(msg.Text) {
 				input = append(input, harness.Content{Text: block, Hidden: true})
 			}
 		}
 	}
 	var rootPath string
-	if s.workspace != nil {
-		rootPath = s.workspace.RootPath
+	if s.Project.workspace != nil {
+		rootPath = s.Project.workspace.RootPath
 	}
 	for _, f := range msg.Files {
 		input = append(input, harness.Content{Text: fmt.Sprintf("[File: %s]", f)})
@@ -159,8 +159,8 @@ func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
 					s.sendSession(ev.SessionID, Frame{Type: EvtImage, Content: url})
 				}
 
-				if s.fileMonitor != nil {
-					s.fileMonitor.Notify()
+				if s.Project.fileMonitor != nil {
+					s.Project.fileMonitor.Notify()
 				}
 				s.sendSession(ev.SessionID, Frame{Type: EvtTasksChanged})
 
@@ -226,9 +226,9 @@ func (s *backendRuntime) finalizeTurn(sid string) {
 		return
 	}
 	s.session(sid).replaceHistory()
-	s.flushFiles()
-	if ws := s.workspace; ws != nil && ws.HasLSP() {
-		s.refreshDiagnostics()
+	s.Project.flushFiles()
+	if ws := s.Project.workspace; ws != nil && ws.HasLSP() {
+		s.Project.refreshDiagnostics()
 	}
 }
 
