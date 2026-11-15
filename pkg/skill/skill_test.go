@@ -411,6 +411,93 @@ func TestDiscoverPrefersWingmanOverAgentsAndClaude(t *testing.T) {
 	}
 }
 
+func TestDiscoverMergesProjectLocations(t *testing.T) {
+	root := t.TempDir()
+
+	writeSkill(t, filepath.Join(root, ".claude", "skills", "release"), "release", "from claude")
+	writeSkill(t, filepath.Join(root, ".github", "skills", "triage"), "triage", "from github")
+	writeSkill(t, filepath.Join(root, ".agents", "skills", "deploy"), "deploy", "from agents")
+	writeSkill(t, filepath.Join(root, ".wingman", "skills", "review"), "review", "from wingman")
+
+	skills, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover error: %v", err)
+	}
+	var names []string
+	for _, sk := range skills {
+		names = append(names, sk.Name)
+	}
+	if want := []string{"review", "deploy", "triage", "release"}; !slices.Equal(names, want) {
+		t.Fatalf("skills = %v, want %v", names, want)
+	}
+}
+
+func TestDiscoverReadsLinkedProjectLocationsOnce(t *testing.T) {
+	root := t.TempDir()
+
+	claude := filepath.Join(root, ".claude", "skills")
+	writeSkill(t, filepath.Join(claude, "deploy"), "deploy", "from claude")
+	writeSkill(t, filepath.Join(claude, "release"), "release", "from claude")
+	for _, dir := range []string{".agents", filepath.Join(".github", "skills")} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testenv.DirLink(t, "symlink", claude, filepath.Join(root, ".agents", "skills"))
+	testenv.DirLink(t, "symlink", filepath.Join(claude, "release"), filepath.Join(root, ".github", "skills", "release"))
+
+	var skills []Skill
+	warning := captureStderr(t, func() { skills, _ = Discover(root) })
+	if len(skills) != 2 {
+		t.Fatalf("skills = %#v, want each linked skill once", skills)
+	}
+	if strings.Contains(warning, "shadowed") {
+		t.Fatalf("warning = %q, want no shadowing for links to the same skill", warning)
+	}
+}
+
+func TestDiscoverIgnoresReservedSystemSkillsInWorkspace(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("WINGMAN_HOME", filepath.Join(root, ".wingman"))
+
+	writeSkill(t, filepath.Join(root, ".wingman", "skills", ".system", "bundled"), "bundled", "system")
+	writeSkill(t, filepath.Join(root, ".claude", "skills", "release"), "release", "from claude")
+
+	skills, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover error: %v", err)
+	}
+	if len(skills) != 1 || skills[0].Name != "release" {
+		t.Fatalf("skills = %#v, want only the .claude skill", skills)
+	}
+}
+
+func TestDiscoverPersonalStopsAtFirstLocationWithSkills(t *testing.T) {
+	home := testenv.UserHome(t)
+	wingmanHome := testenv.WingmanHome(t)
+
+	writeSkill(t, filepath.Join(wingmanHome, "skills", ".system", "bundled"), "bundled", "system")
+	writeSkill(t, filepath.Join(home, ".claude", "skills", "release"), "release", "from claude")
+
+	skills, err := DiscoverPersonal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skills) != 1 || skills[0].Name != "release" {
+		t.Fatalf("personal skills = %#v, want the .claude fallback", skills)
+	}
+
+	writeSkill(t, filepath.Join(wingmanHome, "skills", "deploy"), "deploy", "from wingman")
+
+	skills, err = DiscoverPersonal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skills) != 1 || skills[0].Name != "deploy" {
+		t.Fatalf("personal skills = %#v, want only the Wingman skill", skills)
+	}
+}
+
 func TestDiscoverIgnoresOpencode(t *testing.T) {
 	root := t.TempDir()
 

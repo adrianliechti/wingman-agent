@@ -283,7 +283,13 @@ func splitArguments(value string) []string {
 }
 
 func Discover(root string) ([]Skill, error) {
-	return discover(projectDiscoveryRoots(root), root, true, ""), nil
+	return discoverProject(root, true), nil
+}
+
+func discoverProject(root string, report bool) []Skill {
+	// A workspace at the home directory shares its roots with the personal ones.
+	systemRoot, _ := SystemSkillsRoot()
+	return discover(projectDiscoveryRoots(root), root, report, systemRoot)
 }
 
 func DiscoverPersonal() ([]Skill, error) {
@@ -301,7 +307,13 @@ func discoverPersonal(report bool) ([]Skill, error) {
 	if err != nil {
 		return nil, err
 	}
-	return discover(sources, "", report, systemRoot), nil
+	// Personal roots belong to different tools, so the first with skills wins.
+	for _, source := range sources {
+		if skills := discover([]string{source}, "", report, systemRoot); len(skills) > 0 {
+			return skills, nil
+		}
+	}
+	return nil, nil
 }
 
 func MustDiscoverPersonal() []Skill {
@@ -312,7 +324,7 @@ func MustDiscoverPersonal() []Skill {
 // Rediscover repeats project discovery without reprinting diagnostics already
 // reported at startup. It is intended for runtime catalog reconciliation.
 func Rediscover(root string) ([]Skill, error) {
-	return discover(projectDiscoveryRoots(root), root, false, ""), nil
+	return discoverProject(root, false), nil
 }
 
 // RediscoverPersonal repeats personal discovery without reprinting diagnostics
@@ -336,11 +348,8 @@ func DiscoveryRoots(root string) []string {
 
 func projectDiscoveryRoots(root string) []string {
 	sources := []string{filepath.Join(root, ".wingman", "skills")}
-	for _, dir := range skillDirsThroughRepo(root, ".agents") {
-		sources = append(sources, dir)
-	}
-	for _, dir := range skillDirsThroughRepo(root, ".claude") {
-		sources = append(sources, dir)
+	for _, configDir := range [...]string{".agents", ".github", ".claude"} {
+		sources = append(sources, skillDirsThroughRepo(root, configDir)...)
 	}
 	return sources
 }
@@ -351,15 +360,15 @@ func projectDiscoveryRoots(root string) []string {
 // Symbolic links and Windows junctions are followed once, with their resolved
 // paths used to prevent cycles.
 func LoadDir(dir string) []Skill {
-	return loadDir(dir, true, "", "")
+	return loadDir(dir, true, "", "", make(map[string]bool))
 }
 
 // loadDir skips directories and SKILL.md files that resolve into a credential
 // store: a repository controls its skill links, and loaded text reaches the
 // prompt. workspace keeps a project located inside such a store usable.
-func loadDir(dir string, report bool, excludedRoot, workspace string) []Skill {
+// visited holds the resolved directories already read.
+func loadDir(dir string, report bool, excludedRoot, workspace string, visited map[string]bool) []Skill {
 	var skills []Skill
-	visited := make(map[string]bool)
 	credentials := sandboxpolicy.NewCredentialGuard(workspace)
 	var excludedInfo fs.FileInfo
 	if excludedRoot != "" {
@@ -465,9 +474,11 @@ func skillDirsThroughRepo(root, configDir string) []string {
 func discover(sources []string, relativeTo string, report bool, excludedRoot string) []Skill {
 	var skills []Skill
 	seen := make(map[string]string)
+	// Shared across sources so a root linked to another one is read once.
+	visited := make(map[string]bool)
 
 	for _, source := range sources {
-		for _, sk := range loadDir(source, report, excludedRoot, relativeTo) {
+		for _, sk := range loadDir(source, report, excludedRoot, relativeTo, visited) {
 			key := strings.ToLower(sk.Name)
 
 			if winner, ok := seen[key]; ok {
