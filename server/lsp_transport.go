@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -146,9 +147,7 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 			// Capture buffers before the next notification is processed.
 			c.mu.Lock()
 			buffers := make(map[string]lspBuffer, len(c.documents))
-			for uri, doc := range c.documents {
-				buffers[uri] = doc
-			}
+			maps.Copy(buffers, c.documents)
 			c.mu.Unlock()
 			go func() {
 				defer done()

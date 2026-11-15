@@ -237,7 +237,8 @@ what only the host knows of them: their timing, usage and messages as sent. `dis
 forked chat, and `disposeSession` deletes the session with all its chats. Each
 chat has its own queue, turns and settings: `chat/configChanged` changes one
 chat, while `session/configChanged` and the session's config values address the
-default chat.
+default chat. The default chat has an empty title, which inherits the
+session's, as in VS Code's host: 1.1 has no action that renames a chat.
 
 `chat/queuedMessagesReordered` moves the named pending messages to the head of
 the queue in the given order; the others keep theirs, and the host answers with

@@ -65,7 +65,7 @@ func TestAHPUpstreamConformance(t *testing.T) {
 	// Provision the shared scratch tree so independent resource tests can run.
 	client := ahpTestClient(t, endpoint, "conformance-fixture")
 	if err := client.Request(t.Context(), "createSession", types.CreateSessionParams{
-		Channel: "ahp-session:/conformance-workspace", Provider: ahpPtr("wingman"),
+		Channel: "ahp-session:/conformance-workspace", Provider: new("wingman"),
 		WorkingDirectories: []string{fileuri.FromPath(root)},
 	}, nil); err != nil {
 		t.Fatal(err)

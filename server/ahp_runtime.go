@@ -62,7 +62,7 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 			kind = t.PendingMessageKindSteering
 		}
 		message := a.project.message(input.Source, input.Text, input.Files, input.Images)
-		next[input.ID] = t.PendingMessage{Id: input.ID, Kind: ahpPtr(kind), Message: message}
+		next[input.ID] = t.PendingMessage{Id: input.ID, Kind: new(kind), Message: message}
 		kinds[input.ID] = kind
 		order = append(order, input.ID)
 	}
@@ -73,7 +73,7 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 	}
 	previous := append([]t.PendingMessage{}, a.chat.QueuedMessages...)
 	for _, old := range previous {
-		if _, exists := next[old.Id]; !exists && old.Id != starting && !a.waiting[old.Id] {
+		if _, exists := next[old.Id]; !exists && old.Id != starting {
 			kind := t.PendingMessageKindQueued
 			if old.Kind != nil {
 				kind = *old.Kind
@@ -99,7 +99,7 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 	}
 	shown := []string{}
 	for _, message := range a.chat.QueuedMessages {
-		if message.Id != starting && !a.waiting[message.Id] {
+		if message.Id != starting {
 			shown = append(shown, message.Id)
 		}
 	}
@@ -111,7 +111,7 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 func (a *ahpChat) syncConfig(c *sessionController) {
 	a.config = ahpConfig(c.state.Settings)
 	if a.chat.Config == nil || !reflect.DeepEqual(a.chat.Config.Values, a.config.Values) {
-		a.chatAction(t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: a.config.Values, Replace: ahpPtr(true)}})
+		a.chatAction(t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: a.config.Values, Replace: new(true)}})
 	}
 }
 
@@ -123,7 +123,7 @@ func (a *ahpChat) syncUsage(c *sessionController) {
 		return
 	}
 	total := c.state.Usage
-	usage := t.UsageInfo{InputTokens: ahpPtr(total.LastInputTokens), OutputTokens: ahpPtr(total.OutputTokens - a.usageStart.OutputTokens), CacheReadTokens: ahpPtr(total.CachedTokens - a.usageStart.CachedTokens)}
+	usage := t.UsageInfo{InputTokens: new(total.LastInputTokens), OutputTokens: new(total.OutputTokens - a.usageStart.OutputTokens), CacheReadTokens: new(total.CachedTokens - a.usageStart.CachedTokens)}
 	if model := c.state.Settings.Model; model != "" {
 		usage.Model = &model
 	}
@@ -173,9 +173,8 @@ func (a *ahpChat) syncActivity(c *sessionController) {
 	a.chatAction(t.StateAction{Value: &t.ChatActivityChangedAction{Type: t.ActionTypeChatActivityChanged, Activity: value}})
 }
 
-// syncTitle names an untitled session after the first user message. The
-// session lists its default chat under that name; the chat's own state keeps
-// its title, because the protocol has no action that renames a chat.
+// syncTitle names an untitled session after the first user message; its
+// default chat inherits the name.
 func (a *ahpChat) syncTitle(c *sessionController) {
 	if a.session.chats[0] != a || a.session.state.Title != "New session" {
 		return
@@ -185,9 +184,6 @@ func (a *ahpChat) syncTitle(c *sessionController) {
 			title := []rune(strings.SplitN(e.Content, "\n", 2)[0])
 			if len(title) > 80 {
 				title = title[:80]
-			}
-			if a.title == a.session.state.Title {
-				a.title = string(title)
 			}
 			a.session.sessionAction(t.StateAction{Value: &t.SessionTitleChangedAction{Type: t.ActionTypeSessionTitleChanged, Title: string(title)}})
 			a.session.rememberTitle()

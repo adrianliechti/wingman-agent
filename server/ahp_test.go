@@ -65,7 +65,7 @@ func ahpCreate(t *testing.T, client *ahp.Client, uri string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: uri, Provider: ahpPtr("one")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: uri, Provider: new("one")}, nil); err != nil {
 		t.Fatal(err)
 	}
 	result, sub, err := client.Subscribe(ctx, uri)
@@ -358,14 +358,14 @@ func TestAHPBuiltinAgentRoundTrip(t *testing.T) {
 	defer server.Close()
 	client := ahpTestClient(t, "ws"+strings.TrimPrefix(server.URL, "http")+"/ahp", "builtin")
 	var config types.ResolveSessionConfigResult
-	if err := client.Request(t.Context(), "resolveSessionConfig", types.ResolveSessionConfigParams{Channel: types.RootResourceURI, Provider: ahpPtr("wingman")}, &config); err != nil {
+	if err := client.Request(t.Context(), "resolveSessionConfig", types.ResolveSessionConfigParams{Channel: types.RootResourceURI, Provider: new("wingman")}, &config); err != nil {
 		t.Fatal(err)
 	}
 	if string(config.Values["model"]) != `"gpt-6-sol"` {
 		t.Fatalf("model configuration missing: %+v", config)
 	}
 	uri := "ahp-session:/builtin"
-	if err := client.Request(t.Context(), "createSession", types.CreateSessionParams{Channel: uri, Provider: ahpPtr("wingman"), WorkingDirectories: []string{app.ahp.directoryURI()}, Config: config.Values}, nil); err != nil {
+	if err := client.Request(t.Context(), "createSession", types.CreateSessionParams{Channel: uri, Provider: new("wingman"), WorkingDirectories: []string{app.ahp.directoryURI()}, Config: config.Values}, nil); err != nil {
 		t.Fatal(err)
 	}
 	state, sub := ahpSubscribeChat(t, client, ahpChatURI(uri))
@@ -492,7 +492,7 @@ func TestAHPSlowRequestDoesNotBlockTheConnection(t *testing.T) {
 	client := ahpTestClient(t, endpoint, "slow")
 	created := make(chan error, 1)
 	go func() {
-		created <- client.Request(t.Context(), "createSession", types.CreateSessionParams{Channel: "ahp-session:/slow", Provider: ahpPtr("one")}, nil)
+		created <- client.Request(t.Context(), "createSession", types.CreateSessionParams{Channel: "ahp-session:/slow", Provider: new("one")}, nil)
 	}()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()

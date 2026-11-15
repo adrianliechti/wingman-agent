@@ -842,3 +842,229 @@ func TestTurnManagerContainsAgentPanicAndContinuesQueue(t *testing.T) {
 	}
 	a.releases <- struct{}{}
 }
+
+func waitingSteer(id, text string) TurnInput {
+	input := turnInput(id, text, TurnInputSteer)
+	input.Wait = true
+	return input
+}
+
+func TestTurnManagerSteeringWaitsForATurn(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	a.steer = true
+	events := make(chan TurnEvent, 32)
+	m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
+	defer m.Close()
+
+	for _, id := range []string{"a", "b"} {
+		if snap, err := m.Submit(context.Background(), "s", waitingSteer(id, "steer "+id)); err != nil || snap.State != TurnInputQueued || snap.Intent != TurnInputSteer {
+			t.Fatalf("waiting steer %s = %+v, %v", id, snap, err)
+		}
+	}
+	select {
+	case got := <-a.starts:
+		t.Fatalf("steering started a turn: %q", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := m.ReorderQueued("s", []string{"b", "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp)); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitValue(t, a.starts); got != "one" {
+		t.Fatalf("started = %q", got)
+	}
+	a.mu.Lock()
+	steers, persisted := slices.Clone(a.steers), a.queues["s"]
+	a.mu.Unlock()
+	if !slices.Equal(steers, []string{"steer b", "steer a"}) || len(persisted.Inputs) != 0 {
+		t.Fatalf("steers = %v, persisted = %+v", steers, persisted)
+	}
+	a.releases <- struct{}{}
+	waitForState(t, events, "a", TurnInputCompleted)
+}
+
+func TestTurnManagerWaitingSteeringRetriesWhenItsTurnAnswers(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	a.steer, a.steerErr = true, ErrNoActiveTurn
+	events := make(chan TurnEvent, 32)
+	m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", waitingSteer("w", "guide"))
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	_ = waitValue(t, a.starts)
+	if snap := m.Snapshot("s"); len(snap.Inputs) != 2 || snap.Inputs[1].State != TurnInputQueued {
+		t.Fatalf("refused steering left the queue: %+v", snap)
+	}
+	a.mu.Lock()
+	a.steerErr = nil
+	a.mu.Unlock()
+	a.releases <- struct{}{}
+	waitForState(t, events, "w", TurnInputSteered)
+	waitForState(t, events, "w", TurnInputCompleted)
+}
+
+func TestTurnManagerUnsteerableTurnAnswersWaitingSteeringAfterIt(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", waitingSteer("w", "later"))
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	_ = waitValue(t, a.starts)
+	if snap := m.Snapshot("s"); len(snap.Inputs) != 2 || snap.Inputs[1].Intent != TurnInputFollowUp {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	a.releases <- struct{}{}
+	if got := waitValue(t, a.starts); got != "later" {
+		t.Fatalf("started = %q", got)
+	}
+	a.releases <- struct{}{}
+}
+
+func TestTurnManagerWaitingSteeringLeavesWithTheQueue(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	a.steer = true
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", waitingSteer("w", "old instructions"))
+	if err := m.StopSession(context.Background(), "s"); err != nil {
+		t.Fatal(err)
+	}
+	if snap := m.Snapshot("s"); len(snap.Inputs) != 0 {
+		t.Fatalf("snapshot after stop = %+v", snap)
+	}
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	_ = waitValue(t, a.starts)
+	a.mu.Lock()
+	steers := slices.Clone(a.steers)
+	a.mu.Unlock()
+	if len(steers) != 0 {
+		t.Fatalf("a stopped session's steering reached the next turn: %v", steers)
+	}
+	a.releases <- struct{}{}
+}
+
+func TestTurnManagerWaitingSteeringQueuedAgainStartsATurn(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	a.steer = true
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", waitingSteer("w", "steer"))
+	if err := m.ReplaceQueued("s", "w", waitingSteer("", "still steering")); err != nil {
+		t.Fatal(err)
+	}
+	if snap := m.Snapshot("s"); len(snap.Inputs) != 1 || snap.Inputs[0].Intent != TurnInputSteer {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	if err := m.ReplaceQueued("s", "w", turnInput("", "now", TurnInputFollowUp)); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitValue(t, a.starts); got != "now" {
+		t.Fatalf("started = %q", got)
+	}
+	a.releases <- struct{}{}
+}
+
+func TestTurnManagerSteeringBeingDeliveredCannotBeEdited(t *testing.T) {
+	base := newTurnManagerTestAgent()
+	base.steer = true
+	a := &blockingSteerAgent{turnManagerTestAgent: base, started: make(chan struct{}), release: make(chan struct{})}
+	events := make(chan TurnEvent, 32)
+	m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", waitingSteer("w", "old instructions"))
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	waitValue(t, a.started)
+	if err := m.ReplaceQueued("s", "w", waitingSteer("", "new instructions")); !errors.Is(err, ErrInputNotQueued) {
+		t.Fatalf("edit during delivery = %v", err)
+	}
+	if err := m.RemoveQueued("s", "w"); !errors.Is(err, ErrInputNotQueued) {
+		t.Fatalf("removal during delivery = %v", err)
+	}
+	close(a.release)
+	if ev := waitForState(t, events, "w", TurnInputSteered); ev.Input.Content[0].Text != "old instructions" {
+		t.Fatalf("steered %q, delivered old instructions", ev.Input.Content[0].Text)
+	}
+	_ = waitValue(t, base.starts)
+	base.releases <- struct{}{}
+}
+
+type cancelOnSteerAgent struct {
+	*turnManagerTestAgent
+	once   sync.Once
+	cancel func()
+}
+
+func (a *cancelOnSteerAgent) Steer(ctx context.Context, sessionID string, input TurnInput) error {
+	if err := a.turnManagerTestAgent.Steer(ctx, sessionID, input); err != nil {
+		return err
+	}
+	a.once.Do(a.cancel)
+	return nil
+}
+
+func TestTurnManagerSteeringTakenBeforeACancelIsNotDeliveredAgain(t *testing.T) {
+	base := newTurnManagerTestAgent()
+	base.steer = true
+	a := &cancelOnSteerAgent{turnManagerTestAgent: base}
+	events := make(chan TurnEvent, 32)
+	m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
+	defer m.Close()
+	a.cancel = func() { _ = m.CancelCurrent("s") }
+
+	_, _ = m.Submit(context.Background(), "s", waitingSteer("w", "apply once"))
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	waitForState(t, events, "w", TurnInputCancelled) // it ends with the turn that took it
+	_, _ = m.Submit(context.Background(), "s", turnInput("2", "two", TurnInputFollowUp))
+	for _, want := range []string{"one", "two"} {
+		if got := waitValue(t, base.starts); got != want {
+			t.Fatalf("started %q, want %q", got, want)
+		}
+	}
+	base.mu.Lock()
+	steers := slices.Clone(base.steers)
+	base.mu.Unlock()
+	if len(steers) != 1 {
+		t.Fatalf("steering delivered %d times: %v", len(steers), steers)
+	}
+	base.releases <- struct{}{}
+}
+
+type chattyTestAgent struct {
+	*turnManagerTestAgent
+	done chan struct{}
+}
+
+func (a *chattyTestAgent) Send(context.Context, string, []harness.Content) (iter.Seq2[harness.Message, error], error) {
+	return func(yield func(harness.Message, error) bool) {
+		defer close(a.done)
+		for range 500 {
+			if !yield(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "delta"}}}, nil) {
+				return
+			}
+		}
+	}, nil
+}
+
+func TestTurnManagerEditsWaitingSteeringWhileItsTurnStreams(t *testing.T) {
+	base := newTurnManagerTestAgent()
+	base.steer, base.steerErr = true, ErrNoActiveTurn
+	a := &chattyTestAgent{turnManagerTestAgent: base, done: make(chan struct{})}
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", waitingSteer("w", "old instructions"))
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	for range 500 {
+		if err := m.ReplaceQueued("s", "w", waitingSteer("", "new instructions")); err != nil && !errors.Is(err, ErrInputNotQueued) {
+			t.Fatal(err)
+		}
+	}
+	waitValue(t, a.done)
+}

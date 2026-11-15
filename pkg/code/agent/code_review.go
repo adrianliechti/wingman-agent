@@ -244,8 +244,8 @@ func (s *sessionState) prepareIsolatedReview(ctx context.Context, rawInput []har
 		// includes commentary and retries, so take the settled child history.
 		messages := reviewer.MessagesSnapshot()
 		var report strings.Builder
-		for i := len(messages) - 1; i >= 0; i-- {
-			m := messages[i]
+		for _, m := range slices.Backward(messages) {
+
 			if m.Role != harness.RoleAssistant || m.Phase == harness.PhaseCommentary || m.Phase == harness.PhasePartialAnswer {
 				continue
 			}

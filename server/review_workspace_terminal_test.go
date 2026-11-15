@@ -491,7 +491,7 @@ func testReviewWorkspaceTerminalActionValidation(t *testing.T, scheme string) {
 		title(""), title("   "), title(strings.Repeat("t", 1025)),
 		reviewWorkspaceTerminalInput(strings.Repeat("x", 1<<20+1)),
 		{Value: &types.TerminalDataAction{Type: types.ActionTypeTerminalData, Data: "forged output"}},
-		{Value: &types.TerminalExitedAction{Type: types.ActionTypeTerminalExited, ExitCode: ahpPtr(int64(0))}},
+		{Value: &types.TerminalExitedAction{Type: types.ActionTypeTerminalExited, ExitCode: new(int64(0))}},
 		{Value: &types.TerminalCwdChangedAction{Type: types.ActionTypeTerminalCwdChanged, Cwd: "file:///etc"}},
 		{Value: &types.TerminalClaimedAction{Type: types.ActionTypeTerminalClaimed, Claim: types.TerminalClaim{Value: &types.TerminalClientClaim{Kind: types.TerminalClaimKindClient}}}},
 	} {
@@ -557,9 +557,9 @@ func testReviewWorkspaceTerminalCreateValidation(t *testing.T, scheme string) {
 		"query":            {Channel: scheme + ":/x?y=1", Claim: claim},
 		"foreign claim":    {Channel: scheme + ":/x", Claim: types.TerminalClaim{Value: &types.TerminalClientClaim{Kind: types.TerminalClaimKindClient, ClientId: "someone-else"}}},
 		"host claim":       {Channel: scheme + ":/x", Claim: ahpHostTerminalClaim()},
-		"zero cols":        {Channel: scheme + ":/x", Claim: claim, Cols: ahpPtr(int64(0))},
-		"huge rows":        {Channel: scheme + ":/x", Claim: claim, Rows: ahpPtr(int64(5000))},
-		"outside cwd":      {Channel: scheme + ":/x", Claim: claim, Cwd: ahpPtr((&url.URL{Scheme: "file", Path: filepath.ToSlash(outside)}).String())},
+		"zero cols":        {Channel: scheme + ":/x", Claim: claim, Cols: new(int64(0))},
+		"huge rows":        {Channel: scheme + ":/x", Claim: claim, Rows: new(int64(5000))},
+		"outside cwd":      {Channel: scheme + ":/x", Claim: claim, Cwd: new((&url.URL{Scheme: "file", Path: filepath.ToSlash(outside)}).String())},
 		"unknown shell":    {Channel: scheme + ":/x", Claim: claim, Meta: map[string]json.RawMessage{"wingman.shell": json.RawMessage(`"/bin/rm"`)}},
 		"malformed shell":  {Channel: scheme + ":/x", Claim: claim, Meta: map[string]json.RawMessage{"wingman.shell": json.RawMessage(`42`)}},
 	} {

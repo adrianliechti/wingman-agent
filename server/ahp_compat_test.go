@@ -31,7 +31,7 @@ func TestAHPCreationRetriesPreserveParametersAndErrors(test *testing.T) {
 			test.Fatalf("want error %d, got %v", code, err)
 		}
 	}
-	params := t.CreateSessionParams{Channel: "ahp-session:/retry", Provider: ahpPtr("one")}
+	params := t.CreateSessionParams{Channel: "ahp-session:/retry", Provider: new("one")}
 	if err := create(params); err != nil {
 		test.Fatal(err)
 	}

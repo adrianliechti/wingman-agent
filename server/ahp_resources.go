@@ -114,7 +114,7 @@ func (p *ahpProject) resource(req ahpRequest) (any, error) {
 		case "resourceRead":
 			return resourceContent([]byte(content), params.Encoding), nil
 		case "resourceResolve":
-			return t.ResourceResolveResult{Uri: params.URI, Type: t.ResourceTypeFile, Size: ahpPtr(int64(len(content))), Etag: ahpPtr(fileRevision([]byte(content)))}, nil
+			return t.ResourceResolveResult{Uri: params.URI, Type: t.ResourceTypeFile, Size: new(int64(len(content))), Etag: new(fileRevision([]byte(content)))}, nil
 		case "resourceRequest":
 			if !params.Write {
 				return struct{}{}, nil
@@ -172,7 +172,7 @@ func (f ahpFiles) read(method string, p ahpResourceParams, rel string) (any, err
 		} else if info.Mode()&fs.ModeSymlink != 0 {
 			kind = t.ResourceTypeSymlink
 		}
-		result := t.ResourceResolveResult{Uri: p.URI, Type: kind, Size: ahpPtr(info.Size()), Mtime: ahpPtr(info.ModTime().UTC().Format(time.RFC3339Nano))}
+		result := t.ResourceResolveResult{Uri: p.URI, Type: kind, Size: new(info.Size()), Mtime: new(info.ModTime().UTC().Format(time.RFC3339Nano))}
 		if info.Mode().IsRegular() {
 			if contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(rel))); contentType != "" {
 				result.ContentType = &contentType
@@ -183,7 +183,7 @@ func (f ahpFiles) read(method string, p ahpResourceParams, rel string) (any, err
 			if err != nil {
 				return nil, err
 			}
-			result.Etag, result.Size = ahpPtr(fileRevision(data)), ahpPtr(int64(len(data)))
+			result.Etag, result.Size = new(fileRevision(data)), new(int64(len(data)))
 			detected := http.DetectContentType(data)
 			// Extensions can name both source files and media (.ts is also an
 			// MPEG transport stream). Prefer actual text over a media guess,
@@ -225,7 +225,7 @@ func resourceContent(data []byte, encoding t.ContentEncoding) t.ResourceReadResu
 	if encoding == t.ContentEncodingBase64 || !utf8.Valid(data) || isBinary(data) {
 		encoding, content = t.ContentEncodingBase64, base64.StdEncoding.EncodeToString(data)
 	}
-	return t.ResourceReadResult{Data: content, Encoding: encoding, ContentType: ahpPtr(http.DetectContentType(data))}
+	return t.ResourceReadResult{Data: content, Encoding: encoding, ContentType: new(http.DetectContentType(data))}
 }
 func (p *ahpProject) readResourceFile(rel string) ([]byte, error) {
 	return p.files().readFile(rel)

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -60,7 +61,7 @@ func (p *ahpProject) changesetCatalogue() []t.Changeset {
 		return nil
 	}
 	return []t.Changeset{
-		{Label: "Uncommitted Changes", UriTemplate: p.changesChannel(changes.DiffCombined), ChangeKind: "uncommitted", Description: ahpPtr("Current workspace changes, shared by all sessions")},
+		{Label: "Uncommitted Changes", UriTemplate: p.changesChannel(changes.DiffCombined), ChangeKind: "uncommitted", Description: new("Current workspace changes, shared by all sessions")},
 		{Label: "Staged Changes", UriTemplate: p.changesChannel(changes.DiffStaged), ChangeKind: "staged"},
 		{Label: "Unstaged Changes", UriTemplate: p.changesChannel(changes.DiffUnstaged), ChangeKind: "unstaged"},
 	}
@@ -133,7 +134,7 @@ func (p *ahpProject) buildChangeset(diffs []changes.FileDiff, editing map[string
 			bytes += len(text)
 		}
 		next.contents[uri] = text
-		return t.ContentRef{Uri: uri, Nonce: ahpPtr(id), SizeHint: ahpPtr(int64(len(text))), ContentType: ahpPtr(contentType)}
+		return t.ContentRef{Uri: uri, Nonce: new(id), SizeHint: new(int64(len(text))), ContentType: new(contentType)}
 	}
 	for _, diff := range diffs {
 		edit := t.FileEdit{}
@@ -152,7 +153,7 @@ func (p *ahpProject) buildChangeset(diffs []changes.FileDiff, editing map[string
 			edit.After = &t.FileEditSide{Uri: p.fileURI(diff.Path), Content: contentRef(diff.Modified, contentType)}
 		}
 		var added, removed int64
-		for _, line := range strings.Split(diff.Patch, "\n") {
+		for line := range strings.SplitSeq(diff.Patch, "\n") {
 			if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
 				added++
 			}
@@ -168,7 +169,7 @@ func (p *ahpProject) buildChangeset(diffs []changes.FileDiff, editing map[string
 		}{edit, diff.Patch})
 		nonce := sha256.Sum256(identity)
 		next.state.Files = append(next.state.Files, t.ChangesetFile{
-			Id: p.fileURI(diff.Path), Edit: edit, Nonce: ahpPtr(hex.EncodeToString(nonce[:])),
+			Id: p.fileURI(diff.Path), Edit: edit, Nonce: new(hex.EncodeToString(nonce[:])),
 			Status: changesetFileStatus(editing[filepath.Clean(diff.Path)]),
 		})
 		if bytes > 64<<20 {
@@ -198,7 +199,7 @@ func changesetOperations(layer changes.DiffLayer, isGit bool, hasFiles bool) []t
 		ops = append(ops, t.ChangesetOperation{Id: "unstage", Label: "Unstage", Scopes: []t.ChangesetOperationScope{t.ChangesetOperationScopeChangeset, t.ChangesetOperationScopeResource}, Status: t.ChangesetOperationStatusIdle})
 	}
 	if layer == changes.DiffUnstaged {
-		confirmation := t.StringOrMarkdown{Plain: ahpPtr("Discard this file's working changes? This cannot be undone in Wingman.")}
+		confirmation := t.StringOrMarkdown{Plain: new("Discard this file's working changes? This cannot be undone in Wingman.")}
 		ops = append(ops, t.ChangesetOperation{Id: "discard-changes", Label: "Discard changes", Confirmation: &confirmation,
 			Scopes: []t.ChangesetOperationScope{t.ChangesetOperationScopeResource}, Status: t.ChangesetOperationStatusIdle})
 	}
@@ -264,14 +265,10 @@ func (p *ahpProject) changesetFitsLocked(channel string, next *ahpChangeset) boo
 	content := map[string]string{}
 	for uri, c := range p.changesets {
 		if uri != channel {
-			for key, value := range c.contents {
-				content[key] = value
-			}
+			maps.Copy(content, c.contents)
 		}
 	}
-	for key, value := range next.contents {
-		content[key] = value
-	}
+	maps.Copy(content, next.contents)
 	bytes := 0
 	for _, value := range content {
 		bytes += len(value)

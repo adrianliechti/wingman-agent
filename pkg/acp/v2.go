@@ -79,8 +79,7 @@ func protocolError(err error) *acp.RequestError {
 	if err == nil {
 		return nil
 	}
-	var rpc *acp.RequestError
-	if errors.As(err, &rpc) {
+	if rpc, ok := errors.AsType[*acp.RequestError](err); ok {
 		return rpc
 	}
 	if errors.Is(err, context.Canceled) {

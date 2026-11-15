@@ -5,6 +5,7 @@ package server
 import (
 	"bytes"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -37,9 +38,7 @@ func TestReviewWorkspaceContentConfinesAndStreams(t *testing.T) {
 	get := func(route, path string, header http.Header) *http.Response {
 		t.Helper()
 		req, _ := http.NewRequest("GET", web.URL+route+"?path="+url.QueryEscape(path), nil)
-		for key, values := range header {
-			req.Header[key] = values
-		}
+		maps.Copy(req.Header, header)
 		res, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("%s %s: %v", route, path, err)

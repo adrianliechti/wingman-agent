@@ -13,9 +13,10 @@ import (
 )
 
 type managedTurnInput struct {
-	input    TurnInput
-	terminal TurnInputState
-	err      error
+	input      TurnInput
+	terminal   TurnInputState
+	err        error
+	delivering bool // steering handed to the agent, which no edit may change
 }
 
 type managedTurnSession struct {
@@ -117,8 +118,16 @@ func (m *TurnManager) session(id string) *managedTurnSession {
 		s.queued = append(s.queued, &managedTurnInput{input: input})
 	}
 	// Reading a recovered queue never authorizes execution.
-	s.paused = len(s.queued) > 0
+	s.paused = runnable(s.queued) >= 0
 	return s
+}
+
+// waits reports whether item is steering that waits in the queue for a turn.
+func waits(item *managedTurnInput) bool { return item.input.Intent == TurnInputSteer }
+
+// runnable is the index of the first queued input that may start a turn.
+func runnable(queued []*managedTurnInput) int {
+	return slices.IndexFunc(queued, func(item *managedTurnInput) bool { return !waits(item) })
 }
 
 // Admission and worker registration share the shutdown barrier. Close waits for
@@ -221,54 +230,30 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 	}
 	s.ids[input.ID] = struct{}{}
 	s.mu.Unlock()
-	if input.Intent == TurnInputSteer && m.Features(sessionID).Steer {
+	steerer, _ := m.agent.(TurnSteerer)
+	steerable := m.Features(sessionID).Steer
+	item := &managedTurnInput{input: input}
+	if input.Intent == TurnInputSteer && steerable {
 		s.mu.Lock()
 		target := s.active
 		hasActive := target != nil && !s.cancelRequested
 		s.mu.Unlock()
 		if hasActive {
-			if steerer, ok := m.agent.(TurnSteerer); ok {
-				steered := input
-				steered.Content = input.content() // the running turn reads the context with the input
-				err := callSteer(ctx, steerer, sessionID, steered)
-				if err == nil {
-					item := &managedTurnInput{input: input}
-					s.mu.Lock()
-					if s.active == target {
-						s.steered = append(s.steered, item)
-						s.mu.Unlock()
-						snap := TurnInputSnapshot{ID: input.ID, State: TurnInputSteered, Intent: input.Intent}
-						m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(input), InputID: input.ID, State: TurnInputSteered, Intent: input.Intent})
-						return snap, nil
-					}
-					state, runErr := target.terminal, target.err
-					s.mu.Unlock()
-					// The active turn completed after the backend accepted the steer.
-					// Surface the accepted user input before completing it; re-queueing
-					// here would duplicate an input the backend already owns.
-					m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(input), InputID: input.ID, State: TurnInputSteered, Intent: input.Intent})
-					m.releaseID(s, input.ID)
-					m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(input), InputID: input.ID, State: state, Intent: input.Intent, Err: runErr})
-					return TurnInputSnapshot{ID: input.ID, State: state, Intent: input.Intent}, nil
-				}
-				if errors.Is(err, ErrNoActiveTurn) || errors.Is(err, ErrTurnNotSteerable) {
-					// Turn-boundary races and explicitly non-steerable turn kinds are
-					// safe to preserve as FIFO follow-ups.
-					input.Intent = TurnInputFollowUp
-				} else {
-					m.releaseID(s, input.ID)
-					return TurnInputSnapshot{}, fmt.Errorf("steer active turn: %w", err)
-				}
+			state, err := m.steer(ctx, sessionID, s, steerer, target, item, input)
+			switch {
+			case err == nil:
+				return TurnInputSnapshot{ID: input.ID, State: state, Intent: input.Intent}, nil
+			case errors.Is(err, ErrNoActiveTurn) && input.Wait:
+			case errors.Is(err, ErrNoActiveTurn) || errors.Is(err, ErrTurnNotSteerable):
+				// Turn-boundary races and explicitly non-steerable turn kinds are
+				// safe to preserve as FIFO follow-ups.
+				item.input.Intent = TurnInputFollowUp
+			default:
+				m.releaseID(s, input.ID)
+				return TurnInputSnapshot{}, fmt.Errorf("steer active turn: %w", err)
 			}
 		}
 	}
-	// A steer that could not target an active native turn is an ordinary
-	// follow-up from this point onward, whether it starts now or waits in FIFO.
-	if input.Intent == TurnInputSteer {
-		input.Intent = TurnInputFollowUp
-	}
-
-	item := &managedTurnInput{input: input}
 	s.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		delete(s.ids, input.ID)
@@ -280,7 +265,13 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 		s.mu.Unlock()
 		return TurnInputSnapshot{}, err
 	}
-	if s.active == nil && !s.running && !s.paused {
+	// A steer that could not join a turn is a follow-up from here on, unless it
+	// waits for one; a turn that cannot be steered answers it after itself.
+	if waits(item) && (!input.Wait || !steerable && s.active != nil) {
+		item.input.Intent = TurnInputFollowUp
+	}
+	input = item.input
+	if s.active == nil && !s.running && !s.paused && !waits(item) {
 		s.active = item
 		s.running = true
 		s.done = make(chan struct{})
@@ -301,6 +292,95 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 	s.mu.Unlock()
 	m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(input), InputID: input.ID, State: TurnInputQueued, Intent: input.Intent, Position: position})
 	return TurnInputSnapshot{ID: input.ID, State: TurnInputQueued, Intent: input.Intent, Position: position}, nil
+}
+
+// steer delivers a copy of item's input, taken with item reserved, to target's
+// running turn. Steering the agent took leaves the queue and joins that turn, or
+// shares its outcome if it ended meanwhile, whatever happened to ctx since.
+func (m *TurnManager) steer(ctx context.Context, sessionID string, s *managedTurnSession, steerer TurnSteerer, target, item *managedTurnInput, input TurnInput) (TurnInputState, error) {
+	delivered := input
+	delivered.Content = input.content() // the running turn reads the context with the input
+	err := callSteer(ctx, steerer, sessionID, delivered)
+	s.mu.Lock()
+	item.delivering = false
+	if err != nil {
+		s.mu.Unlock()
+		return "", err
+	}
+	var persistErr error
+	// Removing or clearing the queue meanwhile leaves it nothing to give up.
+	if i := slices.Index(s.queued, item); i >= 0 {
+		s.queued = slices.Delete(s.queued, i, i+1)
+		persistErr = m.persistLocked(sessionID, s)
+	}
+	state, runErr := TurnInputSteered, error(nil)
+	if s.active == target {
+		s.steered = append(s.steered, item)
+	} else {
+		// The turn ended after the agent took the input; re-queueing it would deliver it twice.
+		state, runErr = target.terminal, target.err
+		delete(s.ids, input.ID)
+	}
+	s.mu.Unlock()
+	m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(input), InputID: input.ID, State: TurnInputSteered, Intent: input.Intent})
+	if state != TurnInputSteered {
+		m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(input), InputID: input.ID, State: state, Intent: input.Intent, Err: runErr})
+	}
+	if persistErr != nil {
+		m.emit(TurnEvent{SessionID: sessionID, State: TurnInputFailed, Err: persistErr})
+	}
+	return state, nil
+}
+
+// steerWaiting hands the running turn the steering that waits in the queue.
+// Steering its agent cannot take yet waits for the turn's next message.
+func (m *TurnManager) steerWaiting(ctx context.Context, sessionID string, s *managedTurnSession) {
+	steerer, _ := m.agent.(TurnSteerer)
+	steerable := steerer != nil && m.Features(sessionID).Steer
+	for {
+		s.mu.Lock()
+		i := slices.IndexFunc(s.queued, waits)
+		if i < 0 || s.cancelRequested {
+			s.mu.Unlock()
+			return
+		}
+		item, target := s.queued[i], s.active
+		item.delivering = steerable
+		input := CloneTurnInput(item.input)
+		s.mu.Unlock()
+		err := ErrTurnNotSteerable
+		if steerable {
+			if _, err = m.steer(ctx, sessionID, s, steerer, target, item, input); err == nil {
+				continue
+			}
+		}
+		if errors.Is(err, ErrNoActiveTurn) || ctx.Err() != nil {
+			return
+		}
+		s.mu.Lock()
+		var persistErr error
+		if i = slices.Index(s.queued, item); i >= 0 {
+			if errors.Is(err, ErrTurnNotSteerable) {
+				item.input.Intent = TurnInputFollowUp // a turn that cannot be steered answers it after itself
+			} else {
+				s.queued = slices.Delete(s.queued, i, i+1)
+				delete(s.ids, item.input.ID)
+			}
+			persistErr = m.persistLocked(sessionID, s)
+		}
+		input = CloneTurnInput(item.input)
+		s.mu.Unlock()
+		switch {
+		case i < 0:
+		case errors.Is(err, ErrTurnNotSteerable):
+			m.emit(TurnEvent{SessionID: sessionID, Input: input, InputID: input.ID, State: TurnInputQueued, Intent: input.Intent, Position: i + 1})
+		default:
+			m.emit(TurnEvent{SessionID: sessionID, Input: input, InputID: input.ID, State: TurnInputFailed, Intent: input.Intent, Err: fmt.Errorf("steer active turn: %w", err)})
+		}
+		if persistErr != nil {
+			m.emit(TurnEvent{SessionID: sessionID, State: TurnInputFailed, Err: persistErr})
+		}
+	}
 }
 
 func callSteer(ctx context.Context, steerer TurnSteerer, sessionID string, input TurnInput) (err error) {
@@ -341,7 +421,7 @@ func (m *TurnManager) runSession(sessionID string, s *managedTurnSession) {
 			cancel(nil)
 			runErr = context.Canceled
 		} else {
-			runErr = m.executeInput(runCtx, sessionID, item)
+			runErr = m.executeInput(runCtx, sessionID, s, item)
 		}
 		cancel(nil)
 
@@ -391,7 +471,7 @@ func (m *TurnManager) runSession(sessionID string, s *managedTurnSession) {
 	}
 }
 
-func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *managedTurnInput) (err error) {
+func (m *TurnManager) executeInput(ctx context.Context, sessionID string, s *managedTurnSession, item *managedTurnInput) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("agent turn panicked: %v", recovered)
@@ -412,6 +492,7 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 		}
 		return err
 	}
+	steerCtx := ctx
 	ctx = harness.WithInputID(ctx, item.input.ID)
 	ctx = harness.WithStreamEventHandlers(ctx, harness.StreamEventHandlers{
 		Retry: func(info harness.RetryInfo) {
@@ -432,12 +513,14 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 	if stream == nil {
 		return errors.New("agent returned a nil turn stream")
 	}
+	m.steerWaiting(steerCtx, sessionID, s)
 	for msg, streamErr := range stream {
 		if streamErr != nil {
 			return streamErr
 		}
 		copy := msg
 		m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, Message: &copy})
+		m.steerWaiting(steerCtx, sessionID, s)
 	}
 	return nil
 }
@@ -505,15 +588,16 @@ func (m *TurnManager) StartCompact(sessionID, focus string, done func(harness.Co
 // promoteLocked activates the next queued input unless paused and persists the queue.
 func (m *TurnManager) promoteLocked(sessionID string, s *managedTurnSession) (*managedTurnInput, error) {
 	var next *managedTurnInput
-	if m.ctx.Err() == nil && !s.paused && len(s.queued) > 0 {
-		next = s.queued[0]
-		s.queued = s.queued[1:]
+	i := runnable(s.queued)
+	if m.ctx.Err() == nil && !s.paused && i >= 0 {
+		next = s.queued[i]
+		s.queued = slices.Delete(s.queued, i, i+1)
 		s.active = next
 	}
 	if err := m.persistLocked(sessionID, s); err != nil {
 		if next != nil {
 			s.active = nil
-			s.queued = append([]*managedTurnInput{next}, s.queued...)
+			s.queued = slices.Insert(s.queued, i, next)
 		}
 		s.paused = len(s.queued) > 0
 		s.queueErr = err
@@ -533,7 +617,7 @@ func (m *TurnManager) RemoveQueued(sessionID, inputID string) error {
 	idx := -1
 	var removed *managedTurnInput
 	for i, item := range s.queued {
-		if item.input.ID == inputID {
+		if item.input.ID == inputID && !item.delivering {
 			idx = i
 			removed = item
 			break
@@ -611,13 +695,19 @@ func (m *TurnManager) ReplaceQueued(sessionID, inputID string, replacement TurnI
 	}
 	position := 0
 	var previous TurnInput
+	// Only steering that asks to wait keeps waiting for a turn; any other replacement is a follow-up.
+	replacement.ID = inputID
+	if replacement.Intent != TurnInputSteer || !replacement.Wait {
+		replacement.Intent, replacement.Wait = TurnInputFollowUp, false
+	}
+	replacement = CloneTurnInput(replacement)
+	start := false
 	for i, item := range s.queued {
-		if item.input.ID != inputID {
+		if item.input.ID != inputID || item.delivering {
 			continue
 		}
-		replacement.ID = inputID
-		replacement.Intent = TurnInputFollowUp
-		replacement = CloneTurnInput(replacement)
+		// Steering that waited while no turn ran starts one as a follow-up.
+		start = waits(item) && !replacement.Wait && !s.paused
 		previous = item.input
 		item.input = replacement
 		position = i + 1
@@ -634,6 +724,9 @@ func (m *TurnManager) ReplaceQueued(sessionID, inputID string, replacement TurnI
 	}
 	s.mu.Unlock()
 	m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(replacement), InputID: inputID, State: TurnInputQueued, Intent: replacement.Intent, Position: position})
+	if start {
+		m.Resume(sessionID)
+	}
 	return nil
 }
 
@@ -670,7 +763,7 @@ func (m *TurnManager) cancelSession(sessionID, inputID string, clearQueue bool) 
 	}
 	previousQueue, previousPaused, previousCancelled := s.queued, s.paused, s.cancelRequested
 	s.cancelRequested = s.active != nil
-	if !clearQueue && len(s.queued) > 0 {
+	if !clearQueue && runnable(s.queued) >= 0 {
 		s.paused = true
 	}
 	queued := []*managedTurnInput(nil)
@@ -790,21 +883,22 @@ func (m *TurnManager) Resume(sessionID string) bool {
 	}
 	previousPaused := s.paused
 	s.paused = false
-	if s.active != nil || s.running || len(s.queued) == 0 {
+	i := runnable(s.queued)
+	if s.active != nil || s.running || i < 0 {
 		if err := m.persistLocked(sessionID, s); err != nil {
 			s.paused = previousPaused
 		}
 		s.mu.Unlock()
 		return false
 	}
-	next := s.queued[0]
-	s.queued = s.queued[1:]
+	next := s.queued[i]
+	s.queued = slices.Delete(s.queued, i, i+1)
 	s.active = next
 	s.running = true
 	s.cancelRequested = false
 	if err := m.persistLocked(sessionID, s); err != nil {
 		s.active = nil
-		s.queued = append([]*managedTurnInput{next}, s.queued...)
+		s.queued = slices.Insert(s.queued, i, next)
 		s.running = false
 		s.paused = true
 		s.mu.Unlock()

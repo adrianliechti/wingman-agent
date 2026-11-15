@@ -280,6 +280,7 @@ func (s *Server) chatRoute(next http.Handler) http.Handler {
 
 type Command struct {
 	requireIdle bool
+	wait        bool                  // steering that waits for a turn instead of starting one
 	option      *t.ConfirmationOption // the approval option an AHP client chose
 
 	ID         string               `json:"id"`
@@ -491,7 +492,7 @@ func (c *sessionController) execute(command Command) error {
 		if id == "" {
 			id = command.ID
 		}
-		input := code.TurnInput{ID: id, Intent: command.Intent, Origin: "user", Context: command.Context, Display: &code.TurnInputDisplay{Text: command.Text, Files: command.Files, Images: command.Images, Source: command.Message}}
+		input := code.TurnInput{ID: id, Intent: command.Intent, Wait: command.wait, Origin: "user", Context: command.Context, Display: &code.TurnInputDisplay{Text: command.Text, Files: command.Files, Images: command.Images, Source: command.Message}}
 		if _, canCompact := b.agent.(code.Compactor); canCompact && isCompactCommand(command.Text) {
 			input.Compact = true
 			if focus := compactFocus(command.Text); focus != "" {
@@ -502,7 +503,7 @@ func (c *sessionController) execute(command Command) error {
 		}
 		// A queue recovered after a restart waits for the user; sending continues
 		// it, after the input when that input must start now.
-		if command.Type == "send" && b.turns.Snapshot(sid).Paused {
+		if command.Type == "send" && !command.wait && b.turns.Snapshot(sid).Paused {
 			if command.requireIdle {
 				if err := b.turns.Unpause(sid); err != nil {
 					return err

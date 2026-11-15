@@ -55,7 +55,7 @@ func hostTestSession(t *testing.T, client *ahp.Client, uri, directory string) *t
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: uri, Provider: ahpPtr("wingman"), WorkingDirectories: []string{directory}}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: uri, Provider: new("wingman"), WorkingDirectories: []string{directory}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	result, sub, err := client.Subscribe(ctx, uri)
@@ -111,15 +111,15 @@ func TestHostServesSeveralProjects(t *testing.T) {
 	hostTestCode(t, err, types.ErrorCodePermissionDenied)
 
 	// A session's directory opens its project; other directories stay closed.
-	err = client.Request(ctx, "createSession", types.CreateSessionParams{Channel: "ahp-session:/outside", Provider: ahpPtr("wingman"), WorkingDirectories: []string{fileuri.FromPath(filepath.Dir(root))}}, nil)
+	err = client.Request(ctx, "createSession", types.CreateSessionParams{Channel: "ahp-session:/outside", Provider: new("wingman"), WorkingDirectories: []string{fileuri.FromPath(filepath.Dir(root))}}, nil)
 	hostTestCode(t, err, types.ErrorCodePermissionDenied)
 	// The protocol makes the directory optional; the host's default one is used.
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: "ahp-session:/default", Provider: ahpPtr("wingman")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: "ahp-session:/default", Provider: new("wingman")}, nil); err != nil {
 		t.Fatal(err)
 	}
 
 	var config types.ResolveSessionConfigResult
-	if err := client.Request(ctx, "resolveSessionConfig", types.ResolveSessionConfigParams{Channel: types.RootResourceURI, Provider: ahpPtr("wingman"), WorkingDirectory: &uriA}, &config); err != nil {
+	if err := client.Request(ctx, "resolveSessionConfig", types.ResolveSessionConfigParams{Channel: types.RootResourceURI, Provider: new("wingman"), WorkingDirectory: &uriA}, &config); err != nil {
 		t.Fatal(err)
 	}
 	if string(config.Values["model"]) != `"gpt-6-sol"` {
@@ -293,6 +293,20 @@ func TestHostClosesIdleProjects(t *testing.T) {
 		}
 	}
 
+	// A rename outlives the project's closing.
+	rename := types.DispatchActionParams{Channel: session, ClientSeq: 2, Action: types.StateAction{Value: &types.SessionTitleChangedAction{Type: types.ActionTypeSessionTitleChanged, Title: "Renamed session"}}}
+	if err := client.Notify(ctx, "dispatchAction", rename); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if items := reviewHostCatalog(t, host.ahp); len(items) == 1 && items[0].Title == "Renamed session" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the rename did not take")
+		}
+	}
+
 	// A client that follows the session keeps its project open.
 	host.ahp.closeIdle(0)
 	if loaded := host.ahp.loaded(); len(loaded) != 1 {
@@ -319,12 +333,15 @@ func TestHostClosesIdleProjects(t *testing.T) {
 	if err := client.Request(ctx, "listSessions", types.ListSessionsParams{Channel: types.RootResourceURI}, &sessions); err != nil {
 		t.Fatal(err)
 	}
-	if len(sessions.Items) != 1 || sessions.Items[0].Resource != session {
+	if len(sessions.Items) != 1 || sessions.Items[0].Resource != session || sessions.Items[0].Title != "Renamed session" {
 		t.Fatalf("sessions of a closed project: %+v", sessions.Items)
 	}
 	state, _ = ahpSubscribeChat(t, client, ahpChatURI(session))
 	if len(state.Turns) != 1 || state.Turns[0].Id != "only-turn" {
 		t.Fatalf("history after reopening: %+v", state.Turns)
+	}
+	if items := reviewHostCatalog(t, host.ahp); len(items) != 1 || items[0].Title != "Renamed session" {
+		t.Fatalf("reopening lost the rename: %+v", items)
 	}
 	if loaded := host.ahp.loaded(); len(loaded) != 1 {
 		t.Fatalf("reopening left %d projects open", len(loaded))

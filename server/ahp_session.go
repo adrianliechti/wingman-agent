@@ -36,9 +36,10 @@ func newAHPSession(h *ahpProject, resource, provider, title string, updated time
 }
 
 // addChat projects a native session as a chat. Chats after the default one
-// are announced with session/chatAdded.
+// are announced with session/chatAdded. The default chat's empty title
+// inherits the session's, as in VS Code's host.
 func (a *ahpSession) addChat(c *sessionController, resource, title string, origin *t.ChatOrigin, created time.Time) *ahpChat {
-	if title == "" {
+	if title == "" && len(a.chats) > 0 {
 		title = a.state.Title
 	}
 	stamp := a.created
@@ -195,7 +196,7 @@ func (a *ahpSession) syncChats(previous t.SessionSummary) {
 		a.state.Config = config
 	}
 	if !reflect.DeepEqual(a.state.Config.Values, config.Values) {
-		a.sessionAction(t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: config.Values, Replace: ahpPtr(true)}})
+		a.sessionAction(t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: config.Values, Replace: new(true)}})
 	}
 	// Choices change when a provider discovers models; snapshots carry the new schema.
 	a.state.Config.Schema = config.Schema

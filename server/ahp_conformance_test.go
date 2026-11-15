@@ -99,7 +99,7 @@ func testAHPRecoveryConformance(t *testing.T, version string) {
 	// A client must not be able to forge server-owned chat activity. Rejection
 	// still carries its origin so optimistic clients can reconcile the action.
 	before := second.subscribe(chat)
-	forged := types.StateAction{Value: &types.ChatActivityChangedAction{Type: types.ActionTypeChatActivityChanged, Activity: ahpPtr("forged activity")}}
+	forged := types.StateAction{Value: &types.ChatActivityChangedAction{Type: types.ActionTypeChatActivityChanged, Activity: new("forged activity")}}
 	rejected := second.dispatch(chat, forged)
 	if rejected.RejectionReason == nil || *rejected.RejectionReason == "" {
 		t.Fatalf("server-only action was accepted: %+v", rejected)
@@ -205,7 +205,7 @@ func (p *ahpConformancePeer) initialize(version string, channels ...string) {
 
 func (p *ahpConformancePeer) createSession(uri string) string {
 	p.t.Helper()
-	p.call("createSession", types.CreateSessionParams{Channel: uri, Provider: ahpPtr("one")}, nil)
+	p.call("createSession", types.CreateSessionParams{Channel: uri, Provider: new("one")}, nil)
 	snapshot := p.subscribe(uri)
 	if snapshot.State.Session == nil || snapshot.State.Session.DefaultChat == nil {
 		p.t.Fatalf("session has no default chat: %+v", snapshot)

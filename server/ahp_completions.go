@@ -115,7 +115,7 @@ func (h *ahpHost) completions(raw json.RawMessage) (t.CompletionsResult, error) 
 		}
 		result.Items = append(result.Items, t.CompletionItem{
 			InsertText: "/" + entry.Name,
-			RangeStart: ahpPtr(int64(start)), RangeEnd: ahpPtr(int64(end)),
+			RangeStart: new(int64(start)), RangeEnd: new(int64(end)),
 			Attachment: t.MessageAttachment{Value: &t.SimpleMessageAttachment{
 				Type: t.MessageAttachmentKindSimple, Label: "/" + entry.Name,
 				DisplayKind: &kind, Meta: meta,

@@ -761,7 +761,7 @@ func (c *ahpConnection) subscribeRequest(req ahpRequest) error {
 		if runtime.GOOS == "windows" {
 			pathStyle = t.PathStyleWindows
 		}
-		c.reply(req.ID, t.InitializeResult{ProtocolVersion: version, ServerSeq: h.seq, ServerInfo: &t.Implementation{Name: "wingman", Title: ahpPtr("Wingman")}, Snapshots: snapshots, DefaultDirectory: &dir, Environment: &t.HostEnvironment{PathStyle: &pathStyle}, CompletionTriggerCharacters: []string{"/"}}, nil)
+		c.reply(req.ID, t.InitializeResult{ProtocolVersion: version, ServerSeq: h.seq, ServerInfo: &t.Implementation{Name: "wingman", Title: new("Wingman")}, Snapshots: snapshots, DefaultDirectory: &dir, Environment: &t.HostEnvironment{PathStyle: &pathStyle}, CompletionTriggerCharacters: []string{"/"}}, nil)
 	case "reconnect":
 		// AHP explicitly permits snapshot recovery when replay is unavailable.
 		c.reply(req.ID, t.ReconnectResult{Value: &t.ReconnectSnapshotResult{Snapshots: snapshots}}, nil)
@@ -853,7 +853,7 @@ func (h *ahpHost) root() (t.RootState, error) {
 		runtime := startedBackend(projects, entry.ID)
 		if runtime != nil {
 			if _, ok := runtime.agent.(code.SessionForker); ok {
-				info.Capabilities.MultipleChats = &t.MultipleChatsCapability{Fork: ahpPtr(true)}
+				info.Capabilities.MultipleChats = &t.MultipleChatsCapability{Fork: new(true)}
 			}
 		}
 		if runtime != nil && runtime.beginOperation() {
@@ -900,11 +900,11 @@ func ahpModelInfo(provider string, m model.Model) t.SessionModelInfo {
 		info.Vendor = &m.Namespace
 	}
 	if m.Context > 0 {
-		info.MaxContextWindow = ahpPtr(int64(m.Context))
-		info.MaxPromptTokens = ahpPtr(int64(m.InputTokens()))
+		info.MaxContextWindow = new(int64(m.Context))
+		info.MaxPromptTokens = new(int64(m.InputTokens()))
 	}
 	if m.Output > 0 {
-		info.MaxOutputTokens = ahpPtr(int64(m.Output))
+		info.MaxOutputTokens = new(int64(m.Output))
 	}
 	if len(m.Efforts) > 0 {
 		effort := t.ConfigPropertySchema{Type: "string", Title: "Reasoning effort"}
@@ -914,7 +914,7 @@ func ahpModelInfo(provider string, m model.Model) t.SessionModelInfo {
 		}
 		if m.Effort != "" {
 			data, _ := json.Marshal(m.Effort)
-			effort.Default = ahpPtr(json.RawMessage(data))
+			effort.Default = new(json.RawMessage(data))
 		}
 		info.ConfigSchema = &t.ConfigSchema{Type: "object", Properties: map[string]t.ConfigPropertySchema{"effort": effort}}
 	}
@@ -1041,7 +1041,8 @@ func (p *ahpProject) loadSession(resource string, chat bool) (*ahpSession, error
 	if err != nil {
 		return nil, err
 	}
-	main, err := p.attachSession(c, resource, title, updated)
+	// The saved title holds a client's rename and the title the host gave the session.
+	main, err := p.attachSession(c, resource, cmp.Or(alias.Title, title), updated)
 	if err != nil {
 		return nil, err
 	}
@@ -1516,12 +1517,12 @@ func (h *ahpHost) savedSummaryLocked(alias ahpAlias) t.SessionSummary {
 	stamp := alias.Created.UTC().Format(time.RFC3339Nano)
 	title := cmp.Or(alias.Title, "Session")
 	chat := ahpChatURI(alias.Resource)
-	return t.SessionSummary{Resource: alias.Resource, Provider: alias.Backend, Title: title, Status: t.SessionStatusIdle, CreatedAt: stamp, ModifiedAt: stamp, Project: projectInfo(alias.Project), WorkingDirectories: []string{fileuri.FromPath(alias.Project)}, DefaultChat: &chat, Chats: h.chatSummariesLocked(alias.Resource, chat, title)}
+	return t.SessionSummary{Resource: alias.Resource, Provider: alias.Backend, Title: title, Status: t.SessionStatusIdle, CreatedAt: stamp, ModifiedAt: stamp, Project: projectInfo(alias.Project), WorkingDirectories: []string{fileuri.FromPath(alias.Project)}, DefaultChat: &chat, Chats: h.chatSummariesLocked(alias.Resource, chat)}
 }
 
 // chatSummariesLocked lists a session's default chat and its saved forks.
-func (h *ahpHost) chatSummariesLocked(resource, chat, title string) []t.SessionChatSummary {
-	chats := []t.SessionChatSummary{{Resource: chat, Title: title}}
+func (h *ahpHost) chatSummariesLocked(resource, chat string) []t.SessionChatSummary {
+	chats := []t.SessionChatSummary{{Resource: chat}} // the default chat inherits the session's title
 	forks := []ahpAlias{}
 	for _, fork := range h.chatAliases {
 		if fork.Resource == resource {
@@ -1573,7 +1574,7 @@ func (p *ahpProject) nativeSessions(agents []t.AgentInfo, seen map[string]bool) 
 			}
 			stamp := session.UpdatedAt.UTC().Format(time.RFC3339Nano)
 			chat := ahpChatURI(resource)
-			chats := p.chatSummariesLocked(resource, chat, session.Title)
+			chats := p.chatSummariesLocked(resource, chat)
 			p.mu.Unlock()
 			items = append(items, t.SessionSummary{Resource: resource, Provider: b.id, Title: session.Title, Status: t.SessionStatusIdle, CreatedAt: stamp, ModifiedAt: stamp, Project: p.info(), WorkingDirectories: []string{p.directoryURI()}, DefaultChat: &chat, Chats: chats})
 			seen[resource] = true
@@ -1605,8 +1606,6 @@ func (c *ahpConnection) unsubscribe(raw json.RawMessage) {
 		c.host.removeDetachedClient(a, c.id)
 	}
 }
-
-func ahpPtr[T any](value T) *T { return &value }
 
 func (a *ahpChat) command(command Command) error {
 	b := a.controller.backend

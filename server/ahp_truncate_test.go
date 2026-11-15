@@ -58,9 +58,9 @@ func (m *truncateModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (m *truncateModel) asked(question string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for i := len(m.requests) - 1; i >= 0; i-- {
-		if strings.Contains(m.requests[i], question) {
-			return m.requests[i]
+	for _, v := range slices.Backward(m.requests) {
+		if strings.Contains(v, question) {
+			return v
 		}
 	}
 	return ""
@@ -68,6 +68,7 @@ func (m *truncateModel) asked(question string) string {
 
 type truncateChat struct {
 	t         *testing.T
+	app       *Server
 	client    *ahp.Client
 	other     *ahp.Client
 	directory string
@@ -79,7 +80,7 @@ type truncateChat struct {
 // open creates another session for the same clients and follows its chat.
 func (c *truncateChat) open(session string) *truncateChat {
 	c.t.Helper()
-	if err := c.client.Request(c.t.Context(), "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("wingman"), WorkingDirectories: []string{c.directory}}, nil); err != nil {
+	if err := c.client.Request(c.t.Context(), "createSession", types.CreateSessionParams{Channel: session, Provider: new("wingman"), WorkingDirectories: []string{c.directory}}, nil); err != nil {
 		c.t.Fatal(err)
 	}
 	next := *c
@@ -105,7 +106,7 @@ func truncateTest(t *testing.T) (*truncateModel, *truncateChat) {
 	endpoint := "ws" + strings.TrimPrefix(server.URL, "http") + "/ahp"
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	t.Cleanup(cancel)
-	c := &truncateChat{t: t, client: ahpTestClient(t, endpoint, ""), other: ahpTestClient(t, endpoint, ""), directory: app.ahp.directoryURI(), seq: new(int64)}
+	c := &truncateChat{t: t, app: app, client: ahpTestClient(t, endpoint, ""), other: ahpTestClient(t, endpoint, ""), directory: app.ahp.directoryURI(), seq: new(int64)}
 	for id, client := range map[string]*ahp.Client{"editor": c.client, "reader": c.other} {
 		if _, err := client.Initialize(ctx, id, []string{"1.1.0"}, []string{types.RootResourceURI}); err != nil {
 			t.Fatal(err)
@@ -178,11 +179,11 @@ func TestAHPTruncateKeepsHistoryThroughATurn(t *testing.T) {
 	model, c := truncateTest(t)
 	c.complete("one", "first question")
 	c.complete("two", "second question")
-	if echo, _ := c.dispatch(types.StateAction{Value: &types.ChatTruncatedAction{Type: types.ActionTypeChatTruncated, TurnId: ahpPtr("unknown")}}); echo.RejectionReason == nil {
+	if echo, _ := c.dispatch(types.StateAction{Value: &types.ChatTruncatedAction{Type: types.ActionTypeChatTruncated, TurnId: new("unknown")}}); echo.RejectionReason == nil {
 		t.Fatal("a cut after an unknown turn was accepted")
 	}
 	kept := truncateJSON(t, c.state.Turns[:1])
-	echo, seen := c.dispatch(types.StateAction{Value: &types.ChatTruncatedAction{Type: types.ActionTypeChatTruncated, TurnId: ahpPtr("one")}})
+	echo, seen := c.dispatch(types.StateAction{Value: &types.ChatTruncatedAction{Type: types.ActionTypeChatTruncated, TurnId: new("one")}})
 	if echo.RejectionReason != nil {
 		t.Fatal(*echo.RejectionReason)
 	}
@@ -263,7 +264,7 @@ func TestAHPTruncateKeepsAFailedTurnAsItWas(t *testing.T) {
 		t.Fatalf("the turn did not fail as the model did: %s", failed)
 	}
 	kept := truncateJSON(t, c.state.Turns)
-	echo, seen := c.dispatch(types.StateAction{Value: &types.ChatTruncatedAction{Type: types.ActionTypeChatTruncated, TurnId: ahpPtr("two")}})
+	echo, seen := c.dispatch(types.StateAction{Value: &types.ChatTruncatedAction{Type: types.ActionTypeChatTruncated, TurnId: new("two")}})
 	if echo.RejectionReason != nil {
 		t.Fatal(*echo.RejectionReason)
 	}
@@ -320,5 +321,49 @@ func TestAHPIdleSteeringWaitsForATurn(t *testing.T) {
 	}
 	if len(c.state.Turns) != 1 || !strings.Contains(truncateJSON(t, c.state.Turns[0].ResponseParts), "keep it very short") {
 		t.Fatalf("the turn does not show the steering: %s", truncateJSON(t, c.state.Turns))
+	}
+}
+
+func TestAHPWaitingSteeringBelongsToTheQueue(t *testing.T) {
+	model, c := truncateTest(t)
+	c.complete("one", "first question")
+	for _, action := range []types.StateAction{
+		truncateSteer("first", "mind the tests"),
+		truncateSteer("second", "keep it short"),
+		{Value: &types.ChatQueuedMessagesReorderedAction{Type: types.ActionTypeChatQueuedMessagesReordered, Order: []string{"second", "first"}}},
+	} {
+		if echo, _ := c.dispatch(action); echo.RejectionReason != nil {
+			t.Fatal(*echo.RejectionReason)
+		}
+	}
+	queued := func(state *types.ChatState) (ids []string) {
+		for _, m := range state.QueuedMessages {
+			ids = append(ids, m.Id)
+		}
+		return ids
+	}
+	for name, state := range map[string]*types.ChatState{"mirror": c.state, "snapshot": c.snapshot()} {
+		if !slices.Equal(queued(state), []string{"second", "first"}) {
+			t.Fatalf("%s: %s", name, truncateJSON(t, state.QueuedMessages))
+		}
+	}
+	if !c.app.busy() {
+		t.Fatal("waiting steering let its project close")
+	}
+	// Clearing the conversation drops what waited with the history.
+	if echo, _ := c.dispatch(types.StateAction{Value: &types.ChatTruncatedAction{Type: types.ActionTypeChatTruncated}}); echo.RejectionReason != nil {
+		t.Fatal(*echo.RejectionReason)
+	}
+	for name, state := range map[string]*types.ChatState{"mirror": c.state, "snapshot": c.snapshot()} {
+		if len(state.QueuedMessages) != 0 || state.SteeringMessage != nil || len(state.Turns) != 0 {
+			t.Fatalf("%s after the cut: %s", name, truncateJSON(t, state))
+		}
+	}
+	if c.app.busy() {
+		t.Fatal("a cleared chat stayed busy")
+	}
+	c.complete("two", "second question")
+	if request := model.asked("second question"); strings.Contains(request, "mind the tests") || strings.Contains(request, "keep it short") {
+		t.Fatalf("old steering reached the next turn: %s", request)
 	}
 }

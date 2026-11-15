@@ -28,8 +28,6 @@ type ahpChat struct {
 	usageStart       UsageView         // the controller's totals when the active turn started
 	offered          map[string]string // the client behind each tool the agent was last given
 	clientCalls      map[string]*ahpClientCall
-	waiting          map[string]bool // steering messages that wait in the queue for a turn
-	steering         bool            // the waiting ones are being handed to the running turn
 	removed          bool
 	projected        bool // turns created after the first projection are live, not history
 	projectedInput   string
@@ -88,7 +86,7 @@ type ahpPendingAction struct {
 
 func newAHPChat(a *ahpSession, c *sessionController, resource, title, stamp string) *ahpChat {
 	config := ahpConfig(c.state.Settings)
-	return &ahpChat{project: a.project, session: a, controller: c, title: title, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{}, clientCalls: map[string]*ahpClientCall{}, waiting: map[string]bool{},
+	return &ahpChat{project: a.project, session: a, controller: c, title: title, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{}, clientCalls: map[string]*ahpClientCall{},
 		chat: t.ChatState{Resource: resource, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}, Config: &t.ChatConfigState{Values: config.Values}},
 	}
 }
@@ -302,11 +300,6 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 				a.chatAction(t.StateAction{Value: &t.ChatTurnStartedAction{Type: t.ActionTypeChatTurnStarted, TurnId: active.Id, StartedAt: active.StartedAt, Message: active.Message}})
 				a.syncParts(active.ResponseParts)
 			}
-			// A turn that answers takes steering; before then its agent may still refuse it.
-			if len(a.waiting) > 0 && !a.steering && len(a.chat.ActiveTurn.ResponseParts) > 0 {
-				a.steering = true
-				go a.steer()
-			}
 		}
 	}
 	a.syncConfig(c)
@@ -335,36 +328,6 @@ func (a *ahpChat) startTurn(active *t.ActiveTurn) {
 		started.QueuedMessageId = &active.Id
 	}
 	a.chatAction(t.StateAction{Value: started})
-}
-
-// steer hands the steering messages that waited for a turn to the running one.
-func (a *ahpChat) steer() {
-	h := a.project
-	for {
-		h.mu.Lock()
-		i := slices.IndexFunc(a.chat.QueuedMessages, func(m t.PendingMessage) bool { return a.waiting[m.Id] })
-		if i < 0 || a.removed {
-			a.steering = false
-			h.mu.Unlock()
-			return
-		}
-		next := a.chat.QueuedMessages[i]
-		delete(a.waiting, next.Id)
-		h.mu.Unlock()
-		command := Command{ID: next.Id, Epoch: a.controller.epoch, Type: "send", Text: next.Message.Text, Intent: code.TurnInputSteer}
-		command.Message, _ = json.Marshal(next.Message)
-		err := a.project.attachments(next.Message, &command)
-		if err == nil {
-			err = a.command(command)
-		}
-		// A message the turn took left the queue with its projection; one it
-		// could not take leaves it now.
-		h.mu.Lock()
-		if err != nil && slices.ContainsFunc(a.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == next.Id }) && !a.waiting[next.Id] {
-			a.chatAction(t.StateAction{Value: &t.ChatPendingMessageRemovedAction{Type: t.ActionTypeChatPendingMessageRemoved, Kind: t.PendingMessageKindSteering, Id: next.Id}})
-		}
-		h.mu.Unlock()
-	}
 }
 
 func (a *ahpChat) finishTurn(id string, state t.TurnState, message *string) {
@@ -437,7 +400,7 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 					message.Text = e.Content
 				}
 			} else if a.projected {
-				startedAt = ahpPtr(time.Now().UTC().Format(time.RFC3339Nano))
+				startedAt = new(time.Now().UTC().Format(time.RFC3339Nano))
 			}
 			turns = append(turns, t.Turn{Id: id, StartedAt: startedAt, Duration: duration, Usage: usage, Message: message, ResponseParts: []t.ResponsePart{}, State: t.TurnStateComplete})
 			anchors = append(anchors, []string{e.ID})
@@ -522,11 +485,12 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 func (p *ahpProject) entryPart(e TranscriptEntry) (t.ResponsePart, bool) {
 	switch e.Type {
 	case "assistant":
-		content := e.Content
+		var content strings.Builder
+		content.WriteString(e.Content)
 		for _, image := range e.Images {
-			content += "\n\n![Image](" + image + ")"
+			content.WriteString("\n\n![Image](" + image + ")")
 		}
-		return t.ResponsePart{Value: &t.MarkdownResponsePart{Kind: t.ResponsePartKindMarkdown, Id: e.ID, Content: content}}, true
+		return t.ResponsePart{Value: &t.MarkdownResponsePart{Kind: t.ResponsePartKindMarkdown, Id: e.ID, Content: content.String()}}, true
 	case "reasoning":
 		return t.ResponsePart{Value: &t.ReasoningResponsePart{Kind: t.ResponsePartKindReasoning, Id: e.ID, Content: e.Content}}, true
 	case "notice":
@@ -668,7 +632,7 @@ func (a *ahpChat) closeReasoning() {
 		if timing == nil || timing.duration != nil {
 			continue
 		}
-		timing.duration = ahpPtr(max(0, time.Since(timing.started).Milliseconds()))
+		timing.duration = new(max(0, time.Since(timing.started).Milliseconds()))
 		a.chatAction(t.StateAction{Value: &t.ChatReasoningAction{Type: t.ActionTypeChatReasoning, TurnId: active.Id, PartId: p.Id, Duration: timing.duration}})
 	}
 }
@@ -715,7 +679,7 @@ func (a *ahpChat) syncTool(turn string, previous, next t.ToolCallState) bool {
 		if !ok || p.ToolCallId != n.ToolCallId || p.PartialInput == nil || n.PartialInput == nil || !strings.HasPrefix(*n.PartialInput, *p.PartialInput) {
 			return false
 		}
-		a.chatAction(t.StateAction{Value: &t.ChatToolCallDeltaAction{Type: t.ActionTypeChatToolCallDelta, TurnId: turn, ToolCallId: n.ToolCallId, Content: ahpPtr(strings.TrimPrefix(*n.PartialInput, *p.PartialInput))}})
+		a.chatAction(t.StateAction{Value: &t.ChatToolCallDeltaAction{Type: t.ActionTypeChatToolCallDelta, TurnId: turn, ToolCallId: n.ToolCallId, Content: new(strings.TrimPrefix(*n.PartialInput, *p.PartialInput))}})
 	case *t.ToolCallRunningState:
 		var content []t.ToolResultContent
 		if p, ok := previous.Value.(*t.ToolCallPendingConfirmationState); ok && p.ToolCallId == n.ToolCallId {
@@ -810,11 +774,11 @@ func ahpPromptPart(p *ahpPrompt) t.ResponsePart {
 					o.Description = &f.EnumDescriptions[i]
 				}
 				if promptDefaultIncludes(f.Default, v) {
-					o.Recommended = ahpPtr(true)
+					o.Recommended = new(true)
 				}
 				options = append(options, o)
 			}
-			freeform := ahpPtr(!f.Strict || companions[f.Name])
+			freeform := new(!f.Strict || companions[f.Name])
 			if f.Multiple {
 				q.Value = &t.ChatInputMultiSelectQuestion{Id: f.Name, Title: &f.Title, Message: message, Required: &f.Required, Kind: t.ChatInputQuestionKindMultiSelect, Options: options, AllowFreeformInput: freeform}
 			} else {
@@ -876,7 +840,7 @@ func ahpConfig(settings SessionSettings) *t.SessionConfigState {
 			return
 		}
 		// A default that followed the value would change the schema without an action.
-		property := t.SessionConfigPropertySchema{Type: "string", Title: title, SessionMutable: ahpPtr(true), ChatMutable: ahpPtr(true), EnumLabels: labels}
+		property := t.SessionConfigPropertySchema{Type: "string", Title: title, SessionMutable: new(true), ChatMutable: new(true), EnumLabels: labels}
 		for _, value := range values {
 			data, _ := json.Marshal(value)
 			property.Enum = append(property.Enum, data)
@@ -903,7 +867,7 @@ func ahpConfig(settings SessionSettings) *t.SessionConfigState {
 	add("mode", "Mode", settings.Mode, modes, labels)
 	if settings.Unattended != nil {
 		value, _ := json.Marshal(*settings.Unattended)
-		cfg.Schema.Properties["unattended"] = t.SessionConfigPropertySchema{Type: "boolean", Title: "Unattended", SessionMutable: ahpPtr(true), ChatMutable: ahpPtr(true)}
+		cfg.Schema.Properties["unattended"] = t.SessionConfigPropertySchema{Type: "boolean", Title: "Unattended", SessionMutable: new(true), ChatMutable: new(true)}
 		cfg.Values["unattended"] = value
 	}
 	// Every setting always has a value.

@@ -51,8 +51,8 @@ func TestAHPChatAttachmentSuppliesAPinnedTranscript(t *testing.T) {
 	source.start("running", "slow question")
 	for name, attachment := range map[string]types.MessageAttachment{
 		"unknown chat": attachedChat("ahp-chat:/missing", nil),
-		"unknown turn": attachedChat(source.state.Resource, ahpPtr("missing")),
-		"running turn": attachedChat(source.state.Resource, ahpPtr("running")),
+		"unknown turn": attachedChat(source.state.Resource, new("missing")),
+		"running turn": attachedChat(source.state.Resource, new("running")),
 	} {
 		if echo := target.start("rejected", "anything", attachment); echo.RejectionReason == nil || target.state.ActiveTurn != nil || len(target.state.Turns) != 0 {
 			t.Fatalf("%s: %+v left %s", name, echo, truncateJSON(t, target.state))
@@ -61,7 +61,7 @@ func TestAHPChatAttachmentSuppliesAPinnedTranscript(t *testing.T) {
 	close(model.hold)
 	ahpUntil(t, source.state, source.events, func(types.ActionEnvelope) bool { return truncateTurns(source.state, "running") })
 
-	target.complete("t1", "what flies?", attachedChat(source.state.Resource, ahpPtr("s1")))
+	target.complete("t1", "what flies?", attachedChat(source.state.Resource, new("s1")))
 	inputs := truncateInputs(t, model.asked("what flies?"))
 	question := len(inputs) - 1
 	if question < 1 || inputs[question] != "what flies?" {
@@ -85,7 +85,7 @@ func TestAHPChatAttachmentSuppliesAPinnedTranscript(t *testing.T) {
 	}
 
 	// The transcript leaves the history with the turn it came with.
-	if echo, _ := target.dispatch(types.StateAction{Value: &types.ChatTruncatedAction{Type: types.ActionTypeChatTruncated, TurnId: ahpPtr("t1")}}); echo.RejectionReason != nil {
+	if echo, _ := target.dispatch(types.StateAction{Value: &types.ChatTruncatedAction{Type: types.ActionTypeChatTruncated, TurnId: new("t1")}}); echo.RejectionReason != nil {
 		t.Fatal(*echo.RejectionReason)
 	}
 	target.complete("t3", "still there?")
@@ -133,7 +133,7 @@ func TestAHPQueuedMessageKeepsItsAttachments(t *testing.T) {
 	for model.asked("slow question") == "" {
 		time.Sleep(5 * time.Millisecond)
 	}
-	message := types.Message{Text: "what flies?", Origin: types.MessageOrigin{Kind: types.MessageKindUser}, Attachments: []types.MessageAttachment{attachedChat(source.state.Resource, ahpPtr("s1"))}}
+	message := types.Message{Text: "what flies?", Origin: types.MessageOrigin{Kind: types.MessageKindUser}, Attachments: []types.MessageAttachment{attachedChat(source.state.Resource, new("s1"))}}
 	if echo, _ := target.dispatch(types.StateAction{Value: &types.ChatPendingMessageSetAction{Type: types.ActionTypeChatPendingMessageSet, Kind: types.PendingMessageKindQueued, Id: "later", Message: message}}); echo.RejectionReason != nil {
 		t.Fatal(*echo.RejectionReason)
 	}

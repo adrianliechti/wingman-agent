@@ -395,7 +395,7 @@ func TestReviewWorkspaceResourceResolveSymlinks(t *testing.T) {
 	if _, err := reviewWorkspaceResourceCall(h, "resourceRead", map[string]any{"uri": followed.Uri}); err != nil {
 		t.Fatalf("canonical URI is not readable: %v", err)
 	}
-	link, err := resolve(h.fileURI("link.txt"), ahpPtr(false))
+	link, err := resolve(h.fileURI("link.txt"), new(false))
 	if err != nil || link.Type != types.ResourceTypeSymlink || link.Uri != h.fileURI("link.txt") || link.Etag != nil {
 		t.Fatalf("lstat = %+v, %v", link, err)
 	}
@@ -405,7 +405,7 @@ func TestReviewWorkspaceResourceResolveSymlinks(t *testing.T) {
 	}
 	_, err = resolve(h.fileURI("dangling"), nil)
 	reviewWorkspaceResourceCode(t, err, int(types.ErrorCodeNotFound))
-	if dangling, err := resolve(h.fileURI("dangling"), ahpPtr(false)); err != nil || dangling.Type != types.ResourceTypeSymlink {
+	if dangling, err := resolve(h.fileURI("dangling"), new(false)); err != nil || dangling.Type != types.ResourceTypeSymlink {
 		t.Fatalf("dangling lstat = %+v, %v", dangling, err)
 	}
 	_, err = resolve(h.fileURI("missing"), nil)

@@ -74,7 +74,7 @@ func TestAHPForkChatsLiveInTheirSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	session := "ahp-session:/forks"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("fork")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("fork")}, nil); err != nil {
 		t.Fatal(err)
 	}
 	_, sessionSub, err := client.Subscribe(ctx, session)

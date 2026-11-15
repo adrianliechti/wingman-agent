@@ -186,7 +186,7 @@ func (p *ahpProject) attachTerminal(session *terminal.Session, resource string, 
 	}
 	cols, rows := session.Size()
 	cwd := fileuri.FromPath(session.Cwd())
-	a := &ahpTerminal{project: p, resource: resource, session: session, state: t.TerminalState{Title: session.Title(), Cwd: &cwd, Cols: ahpPtr(int64(cols)), Rows: ahpPtr(int64(rows)), Content: []t.TerminalContentPart{}, Claim: claim, IsPty: ahpPtr(true), SupportsCommandDetection: ahpPtr(false), Lifecycle: t.TerminalLifecycleState{Value: &t.TerminalRunningLifecycleState{Status: t.TerminalLifecycleStatusRunning}}}}
+	a := &ahpTerminal{project: p, resource: resource, session: session, state: t.TerminalState{Title: session.Title(), Cwd: &cwd, Cols: new(int64(cols)), Rows: new(int64(rows)), Content: []t.TerminalContentPart{}, Claim: claim, IsPty: new(true), SupportsCommandDetection: new(false), Lifecycle: t.TerminalLifecycleState{Value: &t.TerminalRunningLifecycleState{Status: t.TerminalLifecycleStatusRunning}}}}
 	snapshot, offset, output, cancel := session.SubscribeAt()
 	p.mu.Lock()
 	p.terminals[resource] = a
@@ -215,7 +215,7 @@ func (p *ahpProject) attachTerminal(session *terminal.Session, resource string, 
 				if session.Exited() && offset == session.Written() {
 					var code *int64
 					if value, known := session.ExitCode(); known {
-						code = ahpPtr(int64(value))
+						code = new(int64(value))
 					}
 					action := t.StateAction{Value: &t.TerminalExitedAction{Type: t.ActionTypeTerminalExited, ExitCode: code}}
 					ahp.ApplyActionToTerminal(&a.state, action)

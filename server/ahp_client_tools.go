@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"mime"
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
@@ -119,9 +121,17 @@ func clientToolResult(result t.ToolCallResult) tool.Result {
 		case *t.ToolResultTextContent:
 			content = append(content, tool.TextBlock(c.Text))
 		case *t.ToolResultEmbeddedResourceContent:
-			image := tool.ImageContent{MIMEType: c.ContentType}
-			if image.Data, _ = base64.StdEncoding.DecodeString(c.Data); image.Valid() {
+			data, err := base64.StdEncoding.DecodeString(c.Data)
+			image := tool.ImageContent{MIMEType: c.ContentType, Data: data}
+			switch {
+			case err != nil:
+				content = append(content, tool.TextBlock("[invalid base64 "+c.ContentType+" content]"))
+			case image.Valid():
 				content = append(content, tool.ContentBlock{Image: &image})
+			case textual(c.ContentType) && utf8.Valid(data):
+				content = append(content, tool.TextBlock(string(data)))
+			default:
+				content = append(content, tool.TextBlock("[unsupported "+c.ContentType+" content]"))
 			}
 		case *t.ToolResultResourceContent:
 			content = append(content, tool.TextBlock(c.Uri))
@@ -138,6 +148,11 @@ func clientToolResult(result t.ToolCallResult) tool.Result {
 		content = tool.TextContent(result.PastTenseMessage.AsText())
 	}
 	return tool.Result{Content: content, IsError: !result.Success}
+}
+
+func textual(contentType string) bool {
+	mediaType, _, _ := mime.ParseMediaType(contentType)
+	return strings.HasPrefix(mediaType, "text/") || mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") || mediaType == "application/xml" || strings.HasSuffix(mediaType, "+xml")
 }
 
 // runningCall finds a running tool call of the active turn. Caller holds host.mu.

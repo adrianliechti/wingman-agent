@@ -213,7 +213,7 @@ func TestReviewSessionsLostCancelDoesNotStopTheNextTurn(t *testing.T) {
 	defer cancel()
 	client := ahpTestClient(t, endpoint, "stopper")
 	session := "ahp-session:/race"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("review")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("review")}, nil); err != nil {
 		t.Fatal(err)
 	}
 	chat := ahpChatURI(session)
@@ -389,7 +389,7 @@ func TestReviewSessionsNormalizedConfigReachesSubscribers(t *testing.T) {
 	defer cancel()
 	client := ahpTestClient(t, endpoint, "settings")
 	session := "ahp-session:/modes"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("modes")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("modes")}, nil); err != nil {
 		t.Fatal(err)
 	}
 	chat := ahpChatURI(session)
@@ -436,7 +436,7 @@ func TestReviewSessionsCreateSessionCannotClaimACanonicalURI(t *testing.T) {
 	existing := canonicalAHPURI("one", "saved")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	_ = client.Request(ctx, "createSession", types.CreateSessionParams{Channel: existing, Provider: ahpPtr("one")}, nil)
+	_ = client.Request(ctx, "createSession", types.CreateSessionParams{Channel: existing, Provider: new("one")}, nil)
 	_, ch, err := s.ahp.ensureSession(ahpChatURI(existing))
 	if err != nil {
 		t.Fatal(err)
@@ -455,7 +455,7 @@ func TestReviewSessionsCanonicalForkURIRedirectsToTheForkChat(t *testing.T) {
 	defer cancel()
 	client := ahpTestClient(t, endpoint, "forks")
 	session := "ahp-session:/parent"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("fork")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("fork")}, nil); err != nil {
 		t.Fatal(err)
 	}
 	main := ahpChatURI(session)
@@ -517,8 +517,8 @@ func TestReviewSessionsQuestionOutsideATurnIsSurfaced(t *testing.T) {
 	t.Fatalf("question %s is invisible: inputNeeded=%+v active=%v", id, ch.session.state.InputNeeded, ch.chat.ActiveTurn != nil)
 }
 
-// Bug: naming a new session after its first message renames only the session; its default chat keeps "New session" until a restart, where the catalog title appears instead.
-func TestReviewSessionsDefaultChatTakesTheSessionTitle(t *testing.T) {
+// Bug: naming a new session after its first message renames only the session; its default chat keeps "New session" until a restart, where the catalog title appears instead. The default chat now inherits the session's title.
+func TestReviewSessionsDefaultChatInheritsTheSessionTitle(t *testing.T) {
 	s, _, _, endpoint := ahpTestServer(t)
 	client := ahpTestClient(t, endpoint, "titles")
 	session := "ahp-session:/titled"
@@ -529,8 +529,8 @@ func TestReviewSessionsDefaultChatTakesTheSessionTitle(t *testing.T) {
 	s.ahp.mu.Lock()
 	defer s.ahp.mu.Unlock()
 	a := s.ahp.sessions[session]
-	if summary := a.summary(); summary.Title != "Fix the login bug" || summary.Chats[0].Title != summary.Title {
-		t.Fatalf("session %q lists its default chat as %q", summary.Title, summary.Chats[0].Title)
+	if summary := a.summary(); summary.Title != "Fix the login bug" || summary.Chats[0].Title != "" || a.chats[0].chat.Title != "" {
+		t.Fatalf("session %q lists its default chat as %q, which calls itself %q", summary.Title, summary.Chats[0].Title, a.chats[0].chat.Title)
 	}
 }
 
@@ -562,7 +562,7 @@ func TestReviewSessionsForkThroughACompactionTurn(t *testing.T) {
 	defer cancel()
 	client := ahpTestClient(t, endpoint, "compactor")
 	session := "ahp-session:/compacted"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("compact")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("compact")}, nil); err != nil {
 		t.Fatal(err)
 	}
 	main := ahpChatURI(session)
@@ -700,7 +700,7 @@ func TestReviewSessionsConcurrentCreateSessionCreatesOnce(t *testing.T) {
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, _, agent := newProtocolServer(t)
 	h := s.ahpHost()
-	raw, _ := json.Marshal(types.CreateSessionParams{Channel: "ahp-session:/contended", Provider: ahpPtr("one")})
+	raw, _ := json.Marshal(types.CreateSessionParams{Channel: "ahp-session:/contended", Provider: new("one")})
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	succeeded := 0
@@ -721,7 +721,7 @@ func TestReviewSessionsConcurrentCreateSessionCreatesOnce(t *testing.T) {
 	}
 	for i := range 8 {
 		wg.Go(func() {
-			other, _ := json.Marshal(types.CreateSessionParams{Channel: "ahp-session:/distinct-" + strconv.Itoa(i), Provider: ahpPtr("one")})
+			other, _ := json.Marshal(types.CreateSessionParams{Channel: "ahp-session:/distinct-" + strconv.Itoa(i), Provider: new("one")})
 			if _, err := h.createSession(other, "client"); err != nil {
 				t.Error(err)
 			}
@@ -750,7 +750,7 @@ func TestReviewSessionsConcurrentReloadAttachesEachForkOnce(t *testing.T) {
 	defer cancel()
 	client := ahpTestClient(t, endpoint, "forks")
 	session := "ahp-session:/family"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("fork")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("fork")}, nil); err != nil {
 		t.Fatal(err)
 	}
 	main := ahpChatURI(session)
@@ -931,7 +931,7 @@ func TestReviewSessionsForkCutsAtTheChosenTurnWhileTheSourceRuns(t *testing.T) {
 	defer cancel()
 	client := ahpTestClient(t, endpoint, "brancher")
 	session := "ahp-session:/running-source"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("fork")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("fork")}, nil); err != nil {
 		t.Fatal(err)
 	}
 	main := ahpChatURI(session)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -883,9 +884,7 @@ func TestReviewLSPCommandEditReviewRoundTrip(t *testing.T) {
 			t.Fatal(err)
 		}
 		reply := map[string]any{"jsonrpc": "2.0", "id": review["id"]}
-		for key, value := range answer {
-			reply[key] = value
-		}
+		maps.Copy(reply, answer)
 		if err := c.write(reply); err != nil {
 			t.Fatal(err)
 		}

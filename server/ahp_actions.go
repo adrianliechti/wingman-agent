@@ -68,7 +68,7 @@ func (c *ahpConnection) dispatch(raw json.RawMessage) {
 		}
 		var reason *string
 		if err != nil {
-			reason = ahpPtr(err.Error())
+			reason = new(err.Error())
 		}
 		envelope := h.publish(p.Channel, p.Action, &pending.origin, reason)
 		pending.envelope = &envelope
@@ -109,21 +109,13 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			h.mu.Unlock()
 			return ahpInvalid("valid user pending message required")
 		}
-		// Steering waits for a turn to steer, and the host keeps it until then.
-		if action.Kind == t.PendingMessageKindSteering && (ch.chat.ActiveTurn == nil || ch.waiting[action.Id]) {
-			ch.waiting[action.Id] = true
-			ch.chatAction(p.Action)
-			h.mu.Unlock()
-			return nil
-		}
-		waited := ch.waiting[action.Id]
-		delete(ch.waiting, action.Id) // a steering message the client now queues
 		command.Type, command.ID, command.Text, command.Intent = "send", action.Id, action.Message.Text, code.TurnInputFollowUp
 		command.Message, _ = json.Marshal(action.Message)
 		if action.Kind == t.PendingMessageKindSteering {
-			command.Intent = code.TurnInputSteer
+			// Steering waits in the queue for a turn to take it and never starts one.
+			command.Intent, command.wait = code.TurnInputSteer, true
 		}
-		queued := !waited && (slices.ContainsFunc(ch.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == action.Id }) || ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id)
+		queued := slices.ContainsFunc(ch.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == action.Id }) || ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id
 		if queued {
 			command.Type, command.InputID, command.ID = "queue_update", action.Id, ahpCommandID("queue-update", p.Channel, c.id, p.ClientSeq)
 		}
@@ -165,12 +157,6 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 		if !chat || action.Id == "" {
 			h.mu.Unlock()
 			return ahpInvalid("chat and pending message required")
-		}
-		if ch.waiting[action.Id] && action.Kind == t.PendingMessageKindSteering {
-			delete(ch.waiting, action.Id)
-			ch.chatAction(p.Action)
-			h.mu.Unlock()
-			return nil
 		}
 		command.Type, command.InputID, command.ID = "queue_remove", action.Id, ahpCommandID("queue-remove", action.Id)
 		h.mu.Unlock()
@@ -274,7 +260,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 		}
 		// The backend may have normalized the values; acknowledge what it holds.
 		h.mu.Lock()
-		a.acknowledge(p.Channel, p.Action, t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: a.state.Config.Values, Replace: ahpPtr(true)}})
+		a.acknowledge(p.Channel, p.Action, t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: a.state.Config.Values, Replace: new(true)}})
 		h.mu.Unlock()
 		return nil
 	case *t.ChatConfigChangedAction:
@@ -287,7 +273,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			return err
 		}
 		h.mu.Lock()
-		a.acknowledge(p.Channel, p.Action, t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: ch.chat.Config.Values, Replace: ahpPtr(true)}})
+		a.acknowledge(p.Channel, p.Action, t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: ch.chat.Config.Values, Replace: new(true)}})
 		h.mu.Unlock()
 		return nil
 	case *t.SessionActiveClientSetAction:

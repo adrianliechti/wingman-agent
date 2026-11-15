@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -141,10 +142,10 @@ func clientToolTurn(t *testing.T) (model *clientToolModel, app *Server, owner, o
 	owner, observer = peer("owner"), peer("observer")
 	schema := json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"line":{"type":"integer"}}}`)
 	tools := []types.ToolDefinition{
-		{Name: clientToolName, Description: ahpPtr("Returns the editor's selection."), InputSchema: &schema, Annotations: &types.ToolAnnotations{ReadOnlyHint: ahpPtr(true)}},
-		{Name: "read", Description: ahpPtr("The client's file reader.")},
+		{Name: clientToolName, Description: new("Returns the editor's selection."), InputSchema: &schema, Annotations: &types.ToolAnnotations{ReadOnlyHint: new(true)}},
+		{Name: "read", Description: new("The client's file reader.")},
 	}
-	if err := owner.client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("wingman"), WorkingDirectories: []string{app.ahp.directoryURI()},
+	if err := owner.client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("wingman"), WorkingDirectories: []string{app.ahp.directoryURI()},
 		ActiveClient: &types.SessionActiveClient{ClientId: owner.id, Tools: tools}}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -282,5 +283,18 @@ func TestAHPClientToolFailsWhenItsOwnerLeaves(t *testing.T) {
 	}
 	if text := clientToolJSON(t, observer.chat.Turns[0].ResponseParts); !strings.Contains(text, "The model read") || !strings.Contains(text, "disconnected") {
 		t.Fatalf("the model did not continue after the failure: %s", text)
+	}
+}
+
+func TestAHPClientToolResultReadsEmbeddedText(t *testing.T) {
+	embedded := func(contentType, data string) types.ToolResultContent {
+		return types.ToolResultContent{Value: &types.ToolResultEmbeddedResourceContent{Type: types.ToolResultContentTypeEmbeddedResource, ContentType: contentType, Data: base64.StdEncoding.EncodeToString([]byte(data))}}
+	}
+	result := clientToolResult(types.ToolCallResult{Success: true, PastTenseMessage: types.NewStringOrMarkdownPlain("Read the selection"), Content: []types.ToolResultContent{
+		embedded("text/plain; charset=utf-8", "line 3 is selected"),
+		embedded("application/zip", "PK"),
+	}})
+	if got, want := result.Content.Text(), "line 3 is selected\n[unsupported application/zip content]"; got != want || result.IsError {
+		t.Fatalf("result = %q (error %v), want %q", got, result.IsError, want)
 	}
 }
