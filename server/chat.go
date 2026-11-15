@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 	"reflect"
 	"slices"
@@ -522,7 +523,7 @@ func (p *Project) entryPart(e TranscriptEntry) (types.ResponsePart, bool) {
 		var content strings.Builder
 		content.WriteString(e.Content)
 		for _, image := range e.Images {
-			content.WriteString("\n\n![Image](" + image + ")")
+			fmt.Fprintf(&content, "\n\n![Image](%s)", image)
 		}
 		return types.ResponsePart{Value: &types.MarkdownResponsePart{Kind: types.ResponsePartKindMarkdown, Id: e.ID, Content: content.String()}}, true
 	case "reasoning":

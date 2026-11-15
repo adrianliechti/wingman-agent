@@ -70,7 +70,7 @@ func (p *Project) validateDirectory(uri string) error {
 		return err
 	}
 	if rel != "." {
-		return ahp.InvalidParams("start wingman server in the directory you want to use")
+		return ahp.InvalidParams("a session works in a single directory")
 	}
 	return nil
 }

@@ -259,6 +259,24 @@ func (p *Project) discard(c *sessionController, alias sessionAlias) {
 	_ = c.command(c.backend.Project.ctx, Command{ID: "ahp-discard:" + c.ref.SessionID, Type: "delete"})
 }
 
+// discardSaved discards a session whose creation was cut off, in its own project and agent.
+func (h *Host) discardSaved(alias sessionAlias) error {
+	p, err := h.projectAt(alias.Project)
+	if err != nil {
+		return err
+	}
+	b, err := p.backend(alias.Backend)
+	if err != nil {
+		return err
+	}
+	if !p.beginOperation() {
+		return errors.New("workspace closed")
+	}
+	defer p.operations.Done()
+	p.discard(b.session(alias.Session), alias)
+	return nil
+}
+
 // storeAlias saves a session's or chat's alias and makes it known to the host.
 func (p *Project) storeAlias(alias sessionAlias) error {
 	alias.Project = p.dir

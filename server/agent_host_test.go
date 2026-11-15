@@ -70,6 +70,52 @@ func hostTestSession(t *testing.T, client *sdk.Client, uri, directory string) *t
 	return result.Snapshot.State.Session
 }
 
+func TestHostRejectsAMissingRoot(t *testing.T) {
+	if _, err := NewHost(t.Context(), &HostOptions{Roots: []string{filepath.Join(t.TempDir(), "missing")}, disableManagedTools: true}); err == nil {
+		t.Fatal("a host started for a root that does not exist")
+	}
+}
+
+// A cut-off creation retried in another directory is discarded by the project that began it.
+func TestHostRetriedCreationDiscardsWhatAnotherProjectSaved(t *testing.T) {
+	testenv.WingmanHome(t)
+	protocolTestGateway(t)
+	root := canonicalPath(t.TempDir())
+	dirA, _ := hostTestProject(t, root, "a")
+	_, uriB := hostTestProject(t, root, "b")
+	host, endpoint := hostTestStart(t, root, "")
+	a, err := host.projectAt(dirA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := a.backend("wingman")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := b.createSession(Command{ID: "cut-off", Type: "create"})
+	if record.err != nil {
+		t.Fatal(record.err)
+	}
+	uri, native := "ahp-session:/retried", record.receipt.Ref.SessionID
+	if err := a.storeAlias(sessionAlias{Resource: uri, Backend: "wingman", Session: native, Created: time.Now().UTC(), CreationError: "session configuration is incomplete"}); err != nil {
+		t.Fatal(err)
+	}
+	created := hostTestSession(t, protocolTestClient(t, endpoint, "retry"), uri, uriB)
+	if created.Project == nil || created.Project.Uri != uriB {
+		t.Fatalf("project: %+v", created.Project)
+	}
+	dir, err := a.aliasDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(readAliases(dir), func(alias sessionAlias) bool { return alias.Resource == uri }) {
+		t.Fatal("the cut-off creation stays saved in the project that began it")
+	}
+	if err := b.agent.LoadSession(t.Context(), native); err == nil {
+		t.Fatal("the cut-off native session was kept")
+	}
+}
+
 func TestHostServesSeveralProjects(t *testing.T) {
 	testenv.WingmanHome(t)
 	protocolTestGateway(t)

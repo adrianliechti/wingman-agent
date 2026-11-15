@@ -151,6 +151,38 @@ func TestAHPFailedCreationLeavesNoSession(t *testing.T) {
 	}
 }
 
+// A chat whose first message fails, before or after its native session exists, is not created.
+func TestAHPChatWhoseFirstMessageFailsIsNotCreated(t *testing.T) {
+	s, _, _, endpoint := protocolTestServer(t)
+	client := protocolTestClient(t, endpoint, "first-message")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	session, chat := "ahp-session:/first-message", "ahp-chat:/first-message-side"
+	create(t, client, session)
+	user := types.MessageOrigin{Kind: types.MessageKindUser}
+	archive := types.MessageAttachment{Value: &types.MessageEmbeddedResourceAttachment{Type: "embeddedResource", ContentType: "application/zip", Label: "archive", Data: "AA=="}}
+	for name, message := range map[string]types.Message{
+		"unsupported attachment": {Text: "unpack this", Origin: user, Attachments: []types.MessageAttachment{archive}},
+		"empty message":          {Origin: user},
+	} {
+		if err := client.Request(ctx, "createChat", types.CreateChatParams{Channel: session, Chat: chat, InitialMessage: &message}, nil); err == nil {
+			t.Fatalf("%s: the chat was created", name)
+		}
+		h := s.Project.host
+		h.mu.Lock()
+		_, saved := h.chatAliases[chat]
+		live := h.chats[chat] != nil
+		h.mu.Unlock()
+		if saved || live {
+			t.Fatalf("%s: the failed creation left its chat (saved %v, live %v)", name, saved, live)
+		}
+	}
+	first := types.Message{Text: "hello", Origin: user}
+	if err := client.Request(ctx, "createChat", types.CreateChatParams{Channel: session, Chat: chat, InitialMessage: &first}, nil); err != nil {
+		t.Fatalf("a corrected chat was rejected: %v", err)
+	}
+}
+
 type settingsProtocolAgent struct{ *protocolAgent }
 
 func (settingsProtocolAgent) SetEffort(context.Context, string, string) error { return nil }

@@ -253,6 +253,12 @@ func (p *Project) createSession(raw json.RawMessage, clientID string) (any, erro
 	if exists && alias.CreationError == "" {
 		return nil, &ahp.Error{Code: -32003, Message: "session already exists"}
 	}
+	// A creation that a restart cut off starts over.
+	if exists {
+		if err := p.host.discardSaved(alias); err != nil {
+			return nil, err
+		}
+	}
 	b, err := p.backend(provider)
 	if err != nil {
 		return nil, err
@@ -261,10 +267,6 @@ func (p *Project) createSession(raw json.RawMessage, clientID string) (any, erro
 		return nil, errors.New("workspace closed")
 	}
 	defer b.Project.operations.Done()
-	if exists {
-		// A creation that a restart cut off starts over.
-		p.discard(b.session(alias.Session), alias)
-	}
 	record := b.createSession(Command{ID: "ahp-create:" + params.Channel, Type: "create"})
 	if record.err != nil {
 		return nil, ahp.InvalidParams(record.err.Error())
@@ -390,6 +392,13 @@ func (h *Host) createChat(raw json.RawMessage) (any, error) {
 		command.Title = *p.Title
 	}
 	project := a.project
+	// A creation that fails leaves no chat, so the first message is resolved before it exists.
+	var initial Command
+	if p.InitialMessage != nil {
+		if initial, err = project.turnCommand(commandID("initial", p.Chat), *p.InitialMessage); err != nil {
+			return nil, err
+		}
+	}
 	b, err := project.backend(provider)
 	if err != nil {
 		return nil, err
@@ -424,7 +433,10 @@ func (h *Host) createChat(raw json.RawMessage) (any, error) {
 	// A new chat sets nothing of its own, and a fork what its source set; a value its backend refuses shows as the chat's.
 	_ = ch.syncSettings(commandID("chat-config", p.Chat))
 	if p.InitialMessage != nil {
-		return nil, ch.start(commandID("initial", p.Chat), *p.InitialMessage)
+		if err := ch.run(initial, p.InitialMessage.Model); err != nil {
+			project.discard(c, alias)
+			return nil, err
+		}
 	}
 	return nil, nil
 }

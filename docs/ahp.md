@@ -90,8 +90,9 @@ the folder picker starts in the host's root.
 - Sessions the host created are listed after a restart without opening their
   projects, with their title, read and archived flags and last change;
   subscribing to one opens its project. A session or chat opens again even if
-  it never ran a turn. A creation that fails leaves no session behind, and a
-  disposed session's or chat's URI can be used again.
+  it never ran a turn. A creation that fails leaves no session behind, nor
+  does a chat whose initial message fails, and a disposed session's or chat's
+  URI can be used again.
 
 A host owns the connections, the order of their actions and the channel
 namespace. A project owns its agents, sessions, terminals, file watches and
@@ -344,8 +345,9 @@ progress and compaction are reported as the chat's `activity`. A steering
 message consumed by a running turn appears as a system notification with the
 user's text. A steering message sent while no turn runs waits in the queue
 (`kind: "steering"`), where it can be edited and removed; several can wait. The
-next turn takes them as soon as its agent accepts steering; while one is handed
-over it can no longer be edited. The builtin agent saves them with its queue. An
+next turn takes them as soon as its agent accepts steering, in their order;
+while one is handed over it can no longer be edited, and stopping the turn
+removes it unless the agent took it. The builtin agent saves them with its queue. An
 agent that cannot steer answers them after the turn. A question or approval
 that a turn did not raise itself, such as one from a background task, is the
 session's: it is listed in `inputNeeded` and answered with `chat/inputCompleted`.

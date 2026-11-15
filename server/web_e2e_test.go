@@ -376,7 +376,7 @@ func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
 	cmd.Dir = filepath.Join("ui")
 	cmd.Env = append(os.Environ(),
 		"E2E_BASE_URL="+web.URL,
-		"E2E_INSTANCE="+app.scope.InstanceID,
+		"E2E_INSTANCE="+app.InstanceID(),
 		"E2E_CONTROL_URL="+modelServer.URL,
 		"E2E_WORKSPACE="+workDir,
 		"E2E_RELAY_URL="+relayWeb.URL,

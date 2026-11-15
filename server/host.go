@@ -69,6 +69,13 @@ func NewHost(ctx context.Context, opts *HostOptions) (*Host, error) {
 		}
 		roots = []string{home}
 	}
+	for _, root := range roots {
+		if info, err := os.Stat(root); err != nil {
+			return nil, err
+		} else if !info.IsDir() {
+			return nil, fmt.Errorf("%s is not a directory", root)
+		}
+	}
 	h := newHost(ctx)
 	h.token = opts.Token
 	h.disableManagedTools = opts.disableManagedTools
@@ -161,12 +168,12 @@ func (h *Host) Close() {
 			_ = c.writer.conn.CloseNow()
 		}
 		h.mu.Unlock()
+		// Join teardown and startup, then close without the lock their operations may wait for.
 		h.background.Wait()
-		// Join startup and idle teardown before returning ownership of resources.
-		// A project still opening sees cancellation and disposes itself under this lock.
 		h.projectMu.Lock()
-		defer h.projectMu.Unlock()
-		for _, p := range h.loaded() {
+		projects := h.loaded()
+		h.projectMu.Unlock()
+		for _, p := range projects {
 			p.close()
 		}
 	})

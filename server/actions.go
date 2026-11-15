@@ -454,17 +454,27 @@ func configValues(values map[string]json.RawMessage) (map[string]json.RawMessage
 
 // start runs a client's message as a turn of the idle chat.
 func (a *Chat) start(id string, message types.Message) error {
+	command, err := a.project.turnCommand(id, message)
+	if err != nil {
+		return err
+	}
+	return a.run(command, message.Model)
+}
+
+// turnCommand checks a client's message for a turn and resolves its attachments.
+func (p *Project) turnCommand(id string, message types.Message) (Command, error) {
 	if message.Agent != nil {
-		return ahp.InvalidParams("custom agent selection is not supported")
+		return Command{}, ahp.InvalidParams("custom agent selection is not supported")
 	}
 	command := Command{ID: id, Type: "send", Text: message.Text, requireIdle: true}
 	command.Message, _ = json.Marshal(message)
-	if err := a.project.attachments(message, &command); err != nil {
-		return err
-	}
-	if message.Model != nil {
-		model := message.Model.Id
-		if err := a.command(Command{ID: id + ":model", Type: "settings", Model: &model}); err != nil {
+	return command, p.attachments(message, &command)
+}
+
+// run starts a turn, with the model its message chose.
+func (a *Chat) run(command Command, model *types.ModelSelection) error {
+	if model != nil {
+		if err := a.command(Command{ID: command.ID + ":model", Type: "settings", Model: &model.Id}); err != nil {
 			return err
 		}
 	}
@@ -534,10 +544,10 @@ func (h *Host) chatTranscript(attachment *types.MessageChatAttachment) (string, 
 	fmt.Fprintf(&b, "<attached_chat label=%q resource=%q>\n", attachment.Label, attachment.Resource)
 	for _, turn := range turns {
 		// Attachments of its messages stay references.
-		b.WriteString("User:\n" + turn.Message.Text + "\n\nAssistant:\n")
+		fmt.Fprintf(&b, "User:\n%s\n\nAssistant:\n", turn.Message.Text)
 		for _, part := range turn.ResponseParts {
 			if markdown, ok := part.Value.(*types.MarkdownResponsePart); ok {
-				b.WriteString(markdown.Content + "\n")
+				fmt.Fprintln(&b, markdown.Content)
 			}
 		}
 		b.WriteString("\n")

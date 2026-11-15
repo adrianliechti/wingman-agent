@@ -138,6 +138,18 @@ func settled(input TurnInput) (TurnInput, error) {
 // waits reports whether item is steering that waits in the queue for a turn.
 func waits(item *managedTurnInput) bool { return item.input.Intent == TurnInputSteer }
 
+// clearLocked empties the queue; steering being delivered ends with its delivery.
+func (s *managedTurnSession) clearLocked() (cancelled []*managedTurnInput) {
+	for _, item := range s.queued {
+		if !item.delivering {
+			cancelled = append(cancelled, item)
+			delete(s.ids, item.input.ID)
+		}
+	}
+	s.queued, s.paused = nil, false
+	return cancelled
+}
+
 // runnable is the index of the first queued input that may start a turn.
 func runnable(queued []*managedTurnInput) int {
 	return slices.IndexFunc(queued, func(item *managedTurnInput) bool { return !waits(item) })
@@ -281,7 +293,8 @@ func (m *TurnManager) submit(ctx context.Context, sessionID string, input TurnIn
 	if input.Intent == TurnInputSteer && steerable {
 		s.mu.Lock()
 		target := s.active
-		hasActive := target != nil && !s.cancelRequested
+		// Steering that waits keeps its place behind older steering that waits.
+		hasActive := target != nil && !s.cancelRequested && !(input.Wait && slices.ContainsFunc(s.queued, waits))
 		s.mu.Unlock()
 		if hasActive {
 			state, err := m.steer(ctx, sessionID, s, steerer, target, item, input)
@@ -347,9 +360,17 @@ func (m *TurnManager) steer(ctx context.Context, sessionID string, s *managedTur
 	delivered.Content = input.content() // the running turn reads the context with the input
 	err := callSteer(ctx, steerer, sessionID, delivered)
 	s.mu.Lock()
+	// A stop cleared it from the queue meanwhile: it ends unless the agent took it.
+	cleared := item.delivering && !slices.Contains(s.queued, item)
 	item.delivering = false
 	if err != nil {
+		if cleared {
+			delete(s.ids, input.ID)
+		}
 		s.mu.Unlock()
+		if cleared {
+			m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(input), InputID: input.ID, State: TurnInputCancelled, Intent: input.Intent})
+		}
 		return "", err
 	}
 	var persistErr error
@@ -644,7 +665,7 @@ func (m *TurnManager) promoteLocked(sessionID string, s *managedTurnSession) (*m
 			s.active = nil
 			s.queued = slices.Insert(s.queued, i, next)
 		}
-		s.paused = len(s.queued) > 0
+		s.paused = runnable(s.queued) >= 0
 		s.queueErr = err
 		return nil, err
 	}
@@ -675,7 +696,7 @@ func (m *TurnManager) RemoveQueued(sessionID, inputID string) error {
 	previousPaused := s.paused
 	s.queued = append(s.queued[:idx], s.queued[idx+1:]...)
 	delete(s.ids, inputID)
-	if len(s.queued) == 0 {
+	if runnable(s.queued) < 0 {
 		s.paused = false
 	}
 	if err := m.persistLocked(sessionID, s); err != nil {
@@ -731,15 +752,6 @@ func (m *TurnManager) ReplaceQueued(sessionID, inputID string, replacement TurnI
 	if len(replacement.Content) == 0 && !replacement.Compact {
 		return errors.New("input content required")
 	}
-	s := m.session(sessionID)
-	s.mu.Lock()
-	if !s.queueLoaded {
-		err := s.queueErr
-		s.mu.Unlock()
-		return err
-	}
-	position := 0
-	var previous TurnInput
 	replacement.ID = inputID
 	replacement, err := settled(replacement)
 	if err != nil {
@@ -749,6 +761,15 @@ func (m *TurnManager) ReplaceQueued(sessionID, inputID string, replacement TurnI
 	if !replacement.Wait {
 		replacement.Intent = TurnInputFollowUp
 	}
+	s := m.session(sessionID)
+	s.mu.Lock()
+	if !s.queueLoaded {
+		err := s.queueErr
+		s.mu.Unlock()
+		return err
+	}
+	position := 0
+	var previous TurnInput
 	start := false
 	for i, item := range s.queued {
 		if item.input.ID != inputID || item.delivering {
@@ -816,12 +837,7 @@ func (m *TurnManager) cancelSession(sessionID, inputID string, clearQueue bool) 
 	}
 	queued := []*managedTurnInput(nil)
 	if clearQueue {
-		queued = append(queued, s.queued...)
-		for _, item := range queued {
-			delete(s.ids, item.input.ID)
-		}
-		s.queued = nil
-		s.paused = false
+		queued = s.clearLocked()
 	}
 	if err := m.persistLocked(sessionID, s); err != nil {
 		s.queued = previousQueue
@@ -854,15 +870,10 @@ func (m *TurnManager) ClearQueue(sessionID string) error {
 		s.mu.Unlock()
 		return err
 	}
-	previousPaused := s.paused
-	queued := append([]*managedTurnInput(nil), s.queued...)
-	for _, item := range queued {
-		delete(s.ids, item.input.ID)
-	}
-	s.queued = nil
-	s.paused = false
+	previousQueue, previousPaused := s.queued, s.paused
+	queued := s.clearLocked()
 	if err := m.persistLocked(sessionID, s); err != nil {
-		s.queued = queued
+		s.queued = previousQueue
 		s.paused = previousPaused
 		for _, item := range queued {
 			s.ids[item.input.ID] = struct{}{}

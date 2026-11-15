@@ -1036,6 +1036,150 @@ func TestTurnManagerSteeringTakenBeforeACancelIsNotDeliveredAgain(t *testing.T) 
 	base.releases <- struct{}{}
 }
 
+// handoverSteerAgent holds steering in delivery until released with nil, which takes it, or an error.
+type handoverSteerAgent struct {
+	*turnManagerTestAgent
+	started chan struct{}
+	release chan error
+}
+
+func (a *handoverSteerAgent) Steer(ctx context.Context, sessionID string, input TurnInput) error {
+	close(a.started)
+	if err := <-a.release; err != nil {
+		return err
+	}
+	return a.turnManagerTestAgent.Steer(ctx, sessionID, input)
+}
+
+func TestTurnManagerStopDuringSteeringDelivery(t *testing.T) {
+	for name, refusal := range map[string]error{"taken": nil, "refused": ErrNoActiveTurn} {
+		t.Run(name, func(t *testing.T) {
+			base := newTurnManagerTestAgent()
+			base.steer = true
+			a := &handoverSteerAgent{turnManagerTestAgent: base, started: make(chan struct{}), release: make(chan error, 1)}
+			events := make(chan TurnEvent, 32)
+			m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
+			defer m.Close()
+
+			_, _ = m.Submit(context.Background(), "s", waitingSteer("w", "guide"))
+			_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+			waitValue(t, a.started)
+			if err := m.CancelTurn("s", "1", true); err != nil {
+				t.Fatal(err)
+			}
+			a.release <- refusal
+			var states []TurnInputState
+			stopped := false
+			for deadline := time.After(2 * time.Second); !stopped || len(states) == 0 || states[len(states)-1] != TurnInputCancelled; {
+				select {
+				case ev := <-events:
+					if ev.InputID == "w" {
+						states = append(states, ev.State)
+					}
+					stopped = stopped || ev.InputID == "1" && ev.State == TurnInputCancelled
+				case <-deadline:
+					t.Fatalf("steering states: %v", states)
+				}
+			}
+			// Steering the agent took ends with its turn; refused steering ends with the stop.
+			want := []TurnInputState{TurnInputQueued, TurnInputSteered, TurnInputCancelled}
+			if refusal != nil {
+				want = []TurnInputState{TurnInputQueued, TurnInputCancelled}
+			}
+			if !slices.Equal(states, want) {
+				t.Fatalf("steering states = %v, want %v", states, want)
+			}
+			if snap := m.Snapshot("s"); len(snap.Inputs) != 0 {
+				t.Fatalf("the stop left %+v", snap.Inputs)
+			}
+		})
+	}
+}
+
+// slowSetupAgent accepts steering while its turn's setup has not returned yet.
+type slowSetupAgent struct {
+	*turnManagerTestAgent
+	setup, proceed chan struct{}
+}
+
+func (a *slowSetupAgent) Send(ctx context.Context, id string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
+	close(a.setup)
+	<-a.proceed
+	return a.turnManagerTestAgent.Send(ctx, id, input)
+}
+
+func TestTurnManagerWaitingSteeringKeepsItsOrder(t *testing.T) {
+	base := newTurnManagerTestAgent()
+	base.steer = true
+	a := &slowSetupAgent{turnManagerTestAgent: base, setup: make(chan struct{}), proceed: make(chan struct{})}
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", waitingSteer("a", "first"))
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	<-a.setup
+	snap, err := m.Submit(context.Background(), "s", waitingSteer("b", "second"))
+	close(a.proceed)
+	if err != nil || snap.State != TurnInputQueued {
+		t.Fatalf("steering behind waiting steering = %+v, %v", snap, err)
+	}
+	_ = waitValue(t, base.starts)
+	base.mu.Lock()
+	steers := slices.Clone(base.steers)
+	base.mu.Unlock()
+	if !slices.Equal(steers, []string{"first", "second"}) {
+		t.Fatalf("steering arrived as %v", steers)
+	}
+	base.releases <- struct{}{}
+}
+
+func TestTurnManagerInvalidReplacementLeavesTheSessionUsable(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	m := NewTurnManager(context.Background(), a, nil)
+
+	_, _ = m.Submit(context.Background(), "s", waitingSteer("w", "guide"))
+	if err := m.ReplaceQueued("s", "w", turnInput("", "guide", "bogus")); !errors.Is(err, ErrInvalidIntent) {
+		t.Fatalf("invalid replacement = %v", err)
+	}
+	snapshot := make(chan TurnSnapshot, 1)
+	go func() { snapshot <- m.Snapshot("s") }()
+	select {
+	case snap := <-snapshot:
+		if len(snap.Inputs) != 1 || snap.Inputs[0].Input.Content[0].Text != "guide" {
+			t.Fatalf("snapshot = %+v", snap)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("an invalid replacement left the session locked") // Close would wait for it too
+	}
+	m.Close()
+}
+
+func TestTurnManagerQueueOfWaitingSteeringIsNotPaused(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	a.steer, a.steerErr = true, ErrNoActiveTurn
+	events := make(chan TurnEvent, 32)
+	m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	_ = waitValue(t, a.starts)
+	_, _ = m.Submit(context.Background(), "s", waitingSteer("w", "guide"))
+	_, _ = m.Submit(context.Background(), "s", turnInput("2", "two", TurnInputFollowUp))
+	if err := m.CancelCurrent("s"); err != nil {
+		t.Fatal(err)
+	}
+	waitForState(t, events, "1", TurnInputCancelled)
+	if !m.Snapshot("s").Paused {
+		t.Fatal("stopping the turn did not pause its queue")
+	}
+	if err := m.RemoveQueued("s", "2"); err != nil {
+		t.Fatal(err)
+	}
+	if snap := m.Snapshot("s"); snap.Paused || len(snap.Inputs) != 1 {
+		t.Fatalf("waiting steering alone stays paused: %+v", snap)
+	}
+}
+
 type chattyTestAgent struct {
 	*turnManagerTestAgent
 	done chan struct{}
