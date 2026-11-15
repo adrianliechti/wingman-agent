@@ -313,7 +313,7 @@ func TestDAPWebSocketBreakpointsAndReferenceLifetime(t *testing.T) {
 	}
 	// Adapter reference numbers may be reused at the next stop. Browser IDs
 	// must not be reusable across either stops or WebSocket connections.
-	c := &dapConnection{server: app, references: map[int]dapReference{}}
+	c := &dapConnection{server: app.Project, references: map[int]dapReference{}}
 	status := dap.Status{SessionID: "debug", State: dap.StateStopped, StateVersion: 1}
 	first, _ := c.reference(status, 1, "frame")
 	status.StateVersion++
@@ -324,7 +324,7 @@ func TestDAPWebSocketBreakpointsAndReferenceLifetime(t *testing.T) {
 	if _, err := c.nativeReference(status, first, "frame"); err == nil {
 		t.Fatal("stale frame accepted")
 	}
-	other := &dapConnection{server: app, references: map[int]dapReference{}}
+	other := &dapConnection{server: app.Project, references: map[int]dapReference{}}
 	third, _ := other.reference(status, 1, "frame")
 	if third == second {
 		t.Fatal("frame id reused after reconnect")

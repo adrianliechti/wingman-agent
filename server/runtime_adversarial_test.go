@@ -12,6 +12,61 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
+func TestProjectCloseJoinsAllBackendOperations(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, _, _ := newProtocolServer(t)
+		var disposed atomic.Int32
+		var backends []*backendRuntime
+		var releases []func()
+		for _, id := range []string{"one", "two"} {
+			release := make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			defer unblock()
+			releases = append(releases, unblock)
+			a := &lifecycleAgent{protocolAgent: &protocolAgent{}, load: func(ctx context.Context, _ string) error {
+				<-ctx.Done()
+				<-release
+				return ctx.Err()
+			}, closeAgent: func() error {
+				disposed.Add(1)
+				return nil
+			}}
+			var b *backendRuntime
+			if id == "one" {
+				b = installProtocolAgent(s, a)
+			} else {
+				var err error
+				b, err = s.resolveBackend(id, func(context.Context) (code.Agent, error) { return a, nil })
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			backends = append(backends, b)
+			go b.session("saved").load()
+		}
+		synctest.Wait()
+		closed := make(chan struct{})
+		go func() { s.Close(); close(closed) }()
+		synctest.Wait()
+		for _, b := range backends {
+			if b.beginOperation() {
+				b.operations.Done()
+				t.Errorf("backend %s admitted work after cancellation", b.id)
+			}
+		}
+		releases[0]()
+		synctest.Wait()
+		if n := disposed.Load(); n != 0 {
+			t.Errorf("closed %d agents while project operations still used them", n)
+		}
+		releases[1]()
+		<-closed
+		if n := disposed.Load(); n != 2 {
+			t.Fatalf("closed %d agents, want 2", n)
+		}
+	})
+}
+
 func TestBackendStartupIsSharedWithoutBlockingResidentBackends(t *testing.T) {
 	s, resident, _ := newProtocolServer(t)
 	started, release := make(chan struct{}), make(chan struct{})

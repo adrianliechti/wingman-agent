@@ -48,7 +48,7 @@ type debugLaunchPlan struct {
 	PreLaunch           *dap.ProcessLaunch    `json:"prelaunch,omitempty"`
 }
 
-func (s *Server) handleDebugTargets(w http.ResponseWriter, r *http.Request) {
+func (s *Project) handleDebugTargets(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Path    string  `json:"path"`
 		Content *string `json:"content,omitempty"`
@@ -95,7 +95,7 @@ type debugPlanEvent struct {
 	Warning  string                `json:"warning,omitempty"`
 }
 
-func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
+func (s *Project) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 	var request debugPlanRequest
 	if err := decodeDebugJSON(w, r, &request); err != nil {
 		return
@@ -301,7 +301,7 @@ func decodeDebugJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	return decodeJSONRequest(w, r, target, debugRequestLimit)
 }
 
-func (s *Server) detectDebugTargets(currentFile string) ([]debugadapter.Target, error) {
+func (s *Project) detectDebugTargets(currentFile string) ([]debugadapter.Target, error) {
 	source, err := s.workspace.Root.ReadFile(currentFile)
 	if err != nil {
 		return nil, err
@@ -375,7 +375,7 @@ func debugStatusChanged(before, after dap.Status) bool {
 	return before.SessionID != after.SessionID || before.StateVersion != after.StateVersion
 }
 
-func (s *Server) debugStartOptions(plan debugLaunchPlan) dap.StartOptions {
+func (s *Project) debugStartOptions(plan debugLaunchPlan) dap.StartOptions {
 	options := dap.StartOptions{
 		Adapter:       plan.Adapter,
 		ProjectDir:    plan.ProjectDir,
@@ -412,7 +412,7 @@ func cloneDebugLaunchPlan(plan debugLaunchPlan) debugLaunchPlan {
 // change only what its review dialog offers: I/O, adapter options and whether
 // the plan's initial breakpoints apply. Commands such as prelaunch never come
 // from the client.
-func (s *Server) reviewedDebugPlan(manager *dap.Manager, id string, edits *debugLaunchPlan) (debugLaunchPlan, error) {
+func (s *Project) reviewedDebugPlan(manager *dap.Manager, id string, edits *debugLaunchPlan) (debugLaunchPlan, error) {
 	value, ok := manager.ReviewedPlan(id)
 	stored, valid := value.(debugLaunchPlan)
 	if !ok || !valid {
@@ -459,7 +459,7 @@ func cloneJSONMap(value map[string]any) map[string]any {
 	return maps.Clone(value)
 }
 
-func (s *Server) validateDebugPlan(plan *debugLaunchPlan, adapters []dap.AdapterInfo) error {
+func (s *Project) validateDebugPlan(plan *debugLaunchPlan, adapters []dap.AdapterInfo) error {
 	plan.Action = strings.ToLower(strings.TrimSpace(plan.Action))
 	if plan.Action == "" {
 		plan.Action = "debug"

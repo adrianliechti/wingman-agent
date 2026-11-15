@@ -59,11 +59,11 @@ type lspServiceActivity struct {
 	Operations []lsp.WorkProgress `json:"operations"`
 }
 
-func (s *Server) handleWorkspaceActivity(w http.ResponseWriter, r *http.Request) {
+func (s *Project) handleWorkspaceActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.lspActivity())
 }
 
-func (s *Server) lspActivity() lspActivityResponse {
+func (s *Project) lspActivity() lspActivityResponse {
 	activities := s.workspace.LSPActivities()
 	services := make([]lspServiceActivity, 0, len(activities))
 	analyzing := false
@@ -85,7 +85,7 @@ func (s *Server) lspActivity() lspActivityResponse {
 	return lspActivityResponse{Analyzing: analyzing, Services: services}
 }
 
-func (s *Server) lspEditorCapabilities(ctx context.Context, filePath string) editorCapabilitiesResponse {
+func (s *Project) lspEditorCapabilities(ctx context.Context, filePath string) editorCapabilitiesResponse {
 	capabilities, hasServer, err := s.workspace.EditorLSPCapabilities(ctx, filePath)
 	if err != nil {
 		// A missing or failed server must not disable structural fallbacks.
@@ -170,7 +170,7 @@ const lspSourceScheme = "wingman-source"
 // lspSource maps a location a language server reported outside the workspace
 // to its wingman-source URI and allows workspace/textDocumentContent to serve
 // exactly that URI. It reports false for workspace files and unreadable files.
-func (s *Server) lspSource(location string) (string, bool) {
+func (s *Project) lspSource(location string) (string, bool) {
 	u, err := url.Parse(location)
 	if err != nil || u.Scheme == "" {
 		return "", false
@@ -218,7 +218,7 @@ func canonicalLSPSource(value string) (string, bool) {
 
 // lspSourceTarget resolves an allowed wingman-source URI to a file path or to
 // the language server's original virtual URI.
-func (s *Server) lspSourceTarget(source string) (path, virtual string, ok bool) {
+func (s *Project) lspSourceTarget(source string) (path, virtual string, ok bool) {
 	canonical, ok := canonicalLSPSource(source)
 	if !ok {
 		return "", "", false
@@ -247,7 +247,7 @@ type lspWorkspaceDocument struct {
 	Exists   bool   `json:"exists"`
 }
 
-func (s *Server) workspaceEditDocuments(edits ...*lsp.WorkspaceEdit) (map[string]lspWorkspaceDocument, error) {
+func (s *Project) workspaceEditDocuments(edits ...*lsp.WorkspaceEdit) (map[string]lspWorkspaceDocument, error) {
 	documents := make(map[string]lspWorkspaceDocument)
 	for _, edit := range edits {
 		for _, key := range workspaceEditURIs(edit) {

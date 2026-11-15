@@ -15,6 +15,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/remote"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 )
@@ -69,7 +70,7 @@ type remoteAHPFrame struct {
 	ID     int             `json:"id"`
 	Result json.RawMessage `json:"result"`
 	Params json.RawMessage `json:"params"`
-	Error  *ahpRPCError    `json:"error"`
+	Error  *ahp.Error      `json:"error"`
 	Method string          `json:"method"`
 }
 
@@ -133,7 +134,7 @@ func remoteCommand(t *testing.T, client *http.Client, relayURL, instance string,
 	if remoteInitialize(t, conn) != instance {
 		return 409, "workspace replaced"
 	}
-	snapshot := remoteRPC(t, conn, "subscribe", map[string]string{"channel": c.backend.ahp.canonicalURI(c.ref.BackendID, c.ref.SessionID)})
+	snapshot := remoteRPC(t, conn, "subscribe", map[string]string{"channel": c.backend.Project.canonicalURI(c.ref.BackendID, c.ref.SessionID)})
 	var session struct {
 		Snapshot struct {
 			State struct {
@@ -177,7 +178,7 @@ func remoteSnapshot(t *testing.T, client *http.Client, relayURL string, c *sessi
 	conn := remoteAHP(t, client, relayURL)
 	defer conn.CloseNow()
 	remoteInitialize(t, conn)
-	return remoteRPC(t, conn, "subscribe", map[string]string{"channel": ahpChatURI(c.backend.ahp.canonicalURI(c.ref.BackendID, c.ref.SessionID))})
+	return remoteRPC(t, conn, "subscribe", map[string]string{"channel": ahp.ChatURI(c.backend.Project.canonicalURI(c.ref.BackendID, c.ref.SessionID))})
 }
 
 func TestRemoteUsesExistingReceiptsAndRecoversLiveSessionAfterTunnelRestart(t *testing.T) {

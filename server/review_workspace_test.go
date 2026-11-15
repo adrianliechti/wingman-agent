@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/remote"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 )
@@ -470,7 +471,7 @@ func TestReviewWorkspaceChatRoutesResolveOnlyKnownChats(t *testing.T) {
 	if code := get(chatAPIPath(app, "wingman", id) + "/tasks"); code != http.StatusOK {
 		t.Fatalf("known chat: %d", code)
 	}
-	session := "/api/v2/chats/" + url.PathEscape(app.ahp.canonicalURI("wingman", id))
+	session := "/api/v2/chats/" + url.PathEscape(app.Project.canonicalURI("wingman", id))
 	for path, want := range map[string]int{
 		chatAPIPath(app, "wingman", "missing") + "/tasks":          http.StatusNotFound,
 		chatAPIPath(app, "review-unknown-backend", "x") + "/tasks": http.StatusNotFound,
@@ -512,7 +513,7 @@ func TestReviewWorkspaceChatRoutesResolveOnlyKnownChats(t *testing.T) {
 
 func reviewWorkspaceDeleteChat(t *testing.T, app *Server, id string) {
 	t.Helper()
-	_, ch, err := app.ahp.ensureSession(ahpChatURI(app.ahp.canonicalURI("wingman", id)))
+	_, ch, err := app.Project.host.ensureSession(ahp.ChatURI(app.Project.canonicalURI("wingman", id)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,18 +543,18 @@ func reviewWorkspaceRawAHP(t *testing.T, ctx context.Context, endpoint, clientID
 }
 
 func TestReviewWorkspaceAHPDropsSlowConsumerWithoutBlockingHost(t *testing.T) {
-	s, _, _, endpoint := ahpTestServer(t)
+	s, _, _, endpoint := protocolTestServer(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	reviewWorkspaceRawAHP(t, ctx, endpoint, "never-reads")
-	healthy := ahpTestClient(t, endpoint, "")
+	healthy := protocolTestClient(t, endpoint, "")
 	if _, err := healthy.Initialize(ctx, "healthy", []string{"1.0.0"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	h := s.ahp
-	h.mu.Lock()
-	connected := len(h.clients)
-	h.mu.Unlock()
+	h := s.Project
+	h.host.mu.Lock()
+	connected := len(h.host.clients)
+	h.host.mu.Unlock()
 	if connected != 2 {
 		t.Fatalf("clients = %d", connected)
 	}
@@ -567,12 +568,12 @@ func TestReviewWorkspaceAHPDropsSlowConsumerWithoutBlockingHost(t *testing.T) {
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		h.mu.Lock()
+		h.host.mu.Lock()
 		remaining := []string{}
-		for c := range h.clients {
+		for c := range h.host.clients {
 			remaining = append(remaining, c.id)
 		}
-		h.mu.Unlock()
+		h.host.mu.Unlock()
 		if len(remaining) == 1 && remaining[0] == "healthy" {
 			break
 		}
@@ -589,7 +590,7 @@ func TestReviewWorkspaceAHPDropsSlowConsumerWithoutBlockingHost(t *testing.T) {
 }
 
 func TestReviewWorkspaceAHPMalformedFramesKeepConnection(t *testing.T) {
-	_, _, _, endpoint := ahpTestServer(t)
+	_, _, _, endpoint := protocolTestServer(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	conn := reviewWorkspaceRawAHP(t, ctx, endpoint, "")

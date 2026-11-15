@@ -14,7 +14,8 @@ import (
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
-	"github.com/microsoft/agent-host-protocol/clients/go/ahp"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
+	sdk "github.com/microsoft/agent-host-protocol/clients/go/ahp"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 	"github.com/microsoft/agent-host-protocol/clients/go/ahpws"
 )
@@ -45,13 +46,13 @@ func hostTestProject(t *testing.T, root, name string) (dir, uri string) {
 
 func hostTestCode(t *testing.T, err error, want int32) {
 	t.Helper()
-	var rpc *ahp.RPCError
+	var rpc *sdk.RPCError
 	if !errors.As(err, &rpc) || rpc.Code != want {
 		t.Fatalf("want error %d, got %v", want, err)
 	}
 }
 
-func hostTestSession(t *testing.T, client *ahp.Client, uri, directory string) *types.SessionState {
+func hostTestSession(t *testing.T, client *sdk.Client, uri, directory string) *types.SessionState {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
@@ -71,7 +72,7 @@ func hostTestSession(t *testing.T, client *ahp.Client, uri, directory string) *t
 
 func TestHostServesSeveralProjects(t *testing.T) {
 	testenv.WingmanHome(t)
-	ahpTestGateway(t)
+	protocolTestGateway(t)
 	root := canonicalPath(t.TempDir())
 	_, endpoint := hostTestStart(t, root, "")
 	dirA, uriA := hostTestProject(t, root, "a")
@@ -79,7 +80,7 @@ func TestHostServesSeveralProjects(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	client := ahpTestClient(t, endpoint, "")
+	client := protocolTestClient(t, endpoint, "")
 	hello, err := client.Initialize(ctx, "editor", []string{"1.1.0"}, []string{types.RootResourceURI})
 	if err != nil {
 		t.Fatal(err)
@@ -173,9 +174,9 @@ func TestHostServesSeveralProjects(t *testing.T) {
 	}
 
 	// Turns run in their own project, and its files become writable.
-	state, sub := ahpSubscribeChat(t, client, *a.DefaultChat)
-	ahpSend(t, client, state.Resource, "turn-in-a", 1)
-	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool {
+	state, sub := subscribeChat(t, client, *a.DefaultChat)
+	send(t, client, state.Resource, "turn-in-a", 1)
+	until(t, state, sub, func(e types.ActionEnvelope) bool {
 		_, complete := e.Action.Value.(*types.ChatTurnCompleteAction)
 		return complete
 	})
@@ -207,7 +208,7 @@ func TestHostServesSeveralProjects(t *testing.T) {
 
 func TestHostRestoresSavedSessions(t *testing.T) {
 	testenv.WingmanHome(t)
-	ahpTestGateway(t)
+	protocolTestGateway(t)
 	root := canonicalPath(t.TempDir())
 	_, uri := hostTestProject(t, root, "project")
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -215,11 +216,11 @@ func TestHostRestoresSavedSessions(t *testing.T) {
 	const session = "ahp-session:/remembered"
 
 	first, endpoint := hostTestStart(t, root, "")
-	client := ahpTestClient(t, endpoint, "editor")
+	client := protocolTestClient(t, endpoint, "editor")
 	created := hostTestSession(t, client, session, uri)
-	state, sub := ahpSubscribeChat(t, client, *created.DefaultChat)
-	ahpSend(t, client, state.Resource, "first-turn", 1)
-	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool {
+	state, sub := subscribeChat(t, client, *created.DefaultChat)
+	send(t, client, state.Resource, "first-turn", 1)
+	until(t, state, sub, func(e types.ActionEnvelope) bool {
 		_, complete := e.Action.Value.(*types.ChatTurnCompleteAction)
 		return complete
 	})
@@ -228,7 +229,7 @@ func TestHostRestoresSavedSessions(t *testing.T) {
 
 	// A restarted host lists the session without opening its project.
 	second, endpoint := hostTestStart(t, root, "")
-	client = ahpTestClient(t, endpoint, "editor")
+	client = protocolTestClient(t, endpoint, "editor")
 	var sessions types.ListSessionsResult
 	if err := client.Request(ctx, "listSessions", types.ListSessionsParams{Channel: types.RootResourceURI}, &sessions); err != nil {
 		t.Fatal(err)
@@ -239,22 +240,22 @@ func TestHostRestoresSavedSessions(t *testing.T) {
 	if project := sessions.Items[0].Project; project == nil || project.Uri != uri || project.DisplayName != "project" {
 		t.Fatalf("saved session lost its project: %+v", project)
 	}
-	if loaded := second.ahp.loaded(); len(loaded) != 0 {
+	if loaded := second.loaded(); len(loaded) != 0 {
 		t.Fatalf("listing opened %d projects", len(loaded))
 	}
 	// Opening it loads the project and its history.
-	state, _ = ahpSubscribeChat(t, client, ahpChatURI(session))
+	state, _ = subscribeChat(t, client, ahp.ChatURI(session))
 	if len(state.Turns) != 1 || state.Turns[0].Id != "first-turn" {
 		t.Fatalf("history was not restored: %+v", state.Turns)
 	}
-	if loaded := second.ahp.loaded(); len(loaded) != 1 {
+	if loaded := second.loaded(); len(loaded) != 1 {
 		t.Fatalf("subscribing opened %d projects", len(loaded))
 	}
 }
 
 func TestHostClosesIdleProjects(t *testing.T) {
 	testenv.WingmanHome(t)
-	ahpTestGateway(t)
+	protocolTestGateway(t)
 	root := canonicalPath(t.TempDir())
 	_, uri := hostTestProject(t, root, "project")
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -262,19 +263,19 @@ func TestHostClosesIdleProjects(t *testing.T) {
 	const session = "ahp-session:/resting"
 
 	host, endpoint := hostTestStart(t, root, "")
-	client := ahpTestClient(t, endpoint, "editor")
+	client := protocolTestClient(t, endpoint, "editor")
 	created := hostTestSession(t, client, session, uri)
-	state, sub := ahpSubscribeChat(t, client, *created.DefaultChat)
-	ahpSend(t, client, state.Resource, "only-turn", 1)
-	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool {
+	state, sub := subscribeChat(t, client, *created.DefaultChat)
+	send(t, client, state.Resource, "only-turn", 1)
+	until(t, state, sub, func(e types.ActionEnvelope) bool {
 		_, complete := e.Action.Value.(*types.ChatTurnCompleteAction)
 		return complete
 	})
 
 	// A running terminal is work that closing would cut off.
-	project := host.ahp.loaded()[0]
+	project := host.loaded()[0]
 	// The turn's last action reaches clients just before its session settles.
-	for settled := time.Now().Add(5 * time.Second); project.server.busy(); time.Sleep(10 * time.Millisecond) {
+	for settled := time.Now().Add(5 * time.Second); project.busy(); time.Sleep(10 * time.Millisecond) {
 		if time.Now().After(settled) {
 			t.Fatal("project stayed busy after its turn completed")
 		}
@@ -285,7 +286,7 @@ func TestHostClosesIdleProjects(t *testing.T) {
 		if err := client.Request(ctx, "createTerminal", types.CreateTerminalParams{Channel: shell, Cwd: &uri, Claim: claim}, nil); err != nil {
 			t.Fatal(err)
 		}
-		if !project.server.busy() {
+		if !project.busy() {
 			t.Fatal("a running terminal did not keep its project busy")
 		}
 		if err := client.Request(ctx, "disposeTerminal", types.DisposeTerminalParams{Channel: shell}, nil); err != nil {
@@ -299,7 +300,7 @@ func TestHostClosesIdleProjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if items := reviewHostCatalog(t, host.ahp); len(items) == 1 && items[0].Title == "Renamed session" {
+		if items := reviewHostCatalog(t, host); len(items) == 1 && items[0].Title == "Renamed session" {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -308,27 +309,27 @@ func TestHostClosesIdleProjects(t *testing.T) {
 	}
 
 	// A client that follows the session keeps its project open.
-	host.ahp.closeIdle(0)
-	if loaded := host.ahp.loaded(); len(loaded) != 1 {
+	host.closeIdle(0)
+	if loaded := host.loaded(); len(loaded) != 1 {
 		t.Fatalf("closed a project a client follows: %d open", len(loaded))
 	}
 	_ = client.Shutdown(ctx)
 	deadline := time.Now().Add(5 * time.Second)
-	for host.ahp.connected() && time.Now().Before(deadline) {
+	for host.connected() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	// Recent use keeps it open too; after the idle time it closes.
-	host.ahp.closeIdle(time.Hour)
-	if loaded := host.ahp.loaded(); len(loaded) != 1 {
+	host.closeIdle(time.Hour)
+	if loaded := host.loaded(); len(loaded) != 1 {
 		t.Fatalf("closed a project that was just used: %d open", len(loaded))
 	}
-	host.ahp.closeIdle(0)
-	if loaded := host.ahp.loaded(); len(loaded) != 0 {
+	host.closeIdle(0)
+	if loaded := host.loaded(); len(loaded) != 0 {
 		t.Fatalf("idle project stayed open: %d", len(loaded))
 	}
 
 	// Its session stays listed and reopens the project with its history.
-	client = ahpTestClient(t, endpoint, "editor")
+	client = protocolTestClient(t, endpoint, "editor")
 	var sessions types.ListSessionsResult
 	if err := client.Request(ctx, "listSessions", types.ListSessionsParams{Channel: types.RootResourceURI}, &sessions); err != nil {
 		t.Fatal(err)
@@ -336,14 +337,14 @@ func TestHostClosesIdleProjects(t *testing.T) {
 	if len(sessions.Items) != 1 || sessions.Items[0].Resource != session || sessions.Items[0].Title != "Renamed session" {
 		t.Fatalf("sessions of a closed project: %+v", sessions.Items)
 	}
-	state, _ = ahpSubscribeChat(t, client, ahpChatURI(session))
+	state, _ = subscribeChat(t, client, ahp.ChatURI(session))
 	if len(state.Turns) != 1 || state.Turns[0].Id != "only-turn" {
 		t.Fatalf("history after reopening: %+v", state.Turns)
 	}
-	if items := reviewHostCatalog(t, host.ahp); len(items) != 1 || items[0].Title != "Renamed session" {
+	if items := reviewHostCatalog(t, host); len(items) != 1 || items[0].Title != "Renamed session" {
 		t.Fatalf("reopening lost the rename: %+v", items)
 	}
-	if loaded := host.ahp.loaded(); len(loaded) != 1 {
+	if loaded := host.loaded(); len(loaded) != 1 {
 		t.Fatalf("reopening left %d projects open", len(loaded))
 	}
 }
@@ -361,7 +362,7 @@ func TestHostRequiresItsToken(t *testing.T) {
 		_ = transport.Close(ctx)
 		t.Fatal("connected with a wrong token")
 	}
-	client := ahpTestClient(t, endpoint+"?tkn=secret", "editor")
+	client := protocolTestClient(t, endpoint+"?tkn=secret", "editor")
 	var sessions types.ListSessionsResult
 	if err := client.Request(ctx, "listSessions", types.ListSessionsParams{Channel: types.RootResourceURI}, &sessions); err != nil {
 		t.Fatal(err)

@@ -46,7 +46,7 @@ func TestWorkspaceContentSearchStreamsFilteredReplaceableMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	app := &Server{workspace: &code.Workspace{Root: root, RootPath: workDir}}
+	app := &Server{Project: &Project{workspace: &code.Workspace{Root: root, RootPath: workDir}}}
 
 	var events []workspaceSearchEvent
 	err = app.searchWorkspace(t.Context(), workspaceSearchRequest{

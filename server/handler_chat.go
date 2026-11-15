@@ -159,8 +159,8 @@ func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
 					s.sendSession(ev.SessionID, Frame{Type: EvtImage, Content: url})
 				}
 
-				if s.files != nil {
-					s.files.Notify()
+				if s.fileMonitor != nil {
+					s.fileMonitor.Notify()
 				}
 				s.sendSession(ev.SessionID, Frame{Type: EvtTasksChanged})
 
@@ -248,7 +248,7 @@ func (s *backendRuntime) sendTurnSnapshot(sessionID string) {
 	c := s.session(sessionID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.state.Status == "deleted" {
+	if c.state.Status == sessionDeleted {
 		return
 	}
 	snapshot := s.turns.Snapshot(sessionID)

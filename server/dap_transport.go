@@ -45,7 +45,7 @@ type dapJob struct {
 }
 type dapConnection struct {
 	*editorSocket
-	server     *Server
+	server     *Project
 	outMu      sync.Mutex
 	sequence   int
 	mu         sync.Mutex
@@ -56,7 +56,7 @@ type dapConnection struct {
 	ids        map[dapReference]int
 }
 
-func (s *Server) handleDAP(w http.ResponseWriter, r *http.Request) {
+func (s *Project) handleDAP(w http.ResponseWriter, r *http.Request) {
 	peer, err := s.acceptEditorSocket(w, r)
 	if err != nil {
 		return

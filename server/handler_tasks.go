@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -77,41 +76,38 @@ func (s *backendRuntime) sessionTasks(sessionID string) *task.Registry {
 // background-agent completions of a session into its turn queue — the web
 // counterpart of the TUI pump.
 func (s *backendRuntime) ensureTaskPump(sessionID string) {
+	if !s.beginOperation() {
+		return
+	}
 	reg := s.sessionTasks(sessionID)
 	if reg == nil {
+		s.operations.Done()
 		return
 	}
 
-	s.taskPumpMu.Lock()
+	s.mu.Lock()
 	if s.taskPumps == nil {
 		s.taskPumps = map[*task.Registry]bool{}
 	}
 	if s.taskPumps[reg] {
-		s.taskPumpMu.Unlock()
-		return
-	}
-	if !s.beginOperation() {
-		s.taskPumpMu.Unlock()
+		s.mu.Unlock()
+		s.operations.Done()
 		return
 	}
 	s.taskPumps[reg] = true
-	s.taskPumpMu.Unlock()
-	serverCtx := s.ctx
-	if serverCtx == nil {
-		serverCtx = context.Background()
-	}
+	s.mu.Unlock()
 
 	go func() {
 		defer s.operations.Done()
 		defer func() {
-			s.taskPumpMu.Lock()
+			s.mu.Lock()
 			delete(s.taskPumps, reg)
-			s.taskPumpMu.Unlock()
+			s.mu.Unlock()
 		}()
 
 		for {
 			select {
-			case <-serverCtx.Done():
+			case <-s.ctx.Done():
 				return
 			case <-reg.Done():
 				return
@@ -150,7 +146,10 @@ func (s *backendRuntime) deliverTaskResults(sessionID string, batch []task.Event
 	c := s.session(sessionID)
 	c.opMu.Lock()
 	defer c.opMu.Unlock()
-	if c.deleted || s.ctx.Err() != nil || len(batch) == 0 {
+	c.mu.Lock()
+	deleted := c.state.Status == sessionDeleted
+	c.mu.Unlock()
+	if deleted || s.ctx.Err() != nil || len(batch) == 0 {
 		return true
 	}
 	receiptID := fmt.Sprintf("task:%s:%d", batch[0].ID, batch[0].Seq)
@@ -191,24 +190,24 @@ func (s *backendRuntime) deliverTaskResults(sessionID string, batch []task.Event
 	return true
 }
 
-func (s *backendRuntime) handleTasks(w http.ResponseWriter, r *http.Request) {
-	reg := s.sessionTasks(r.PathValue("id"))
+func (c *sessionController) handleTasks(w http.ResponseWriter, r *http.Request) {
+	reg := c.backend.sessionTasks(c.ref.SessionID)
 	out := []TaskEntry{}
 	if reg != nil {
 		for _, t := range reg.List() {
 			out = append(out, taskEntry(t.Info()))
 		}
 	}
-	if agent, ok := s.agent.(*agent.Agent); ok {
-		for _, session := range agent.ExecSessions(r.PathValue("id")) {
+	if agent, ok := c.backend.agent.(*agent.Agent); ok {
+		for _, session := range agent.ExecSessions(c.ref.SessionID) {
 			out = append(out, execTaskEntry(session))
 		}
 	}
 	writeJSON(w, out)
 }
 
-func (s *backendRuntime) handleTask(w http.ResponseWriter, r *http.Request) {
-	reg := s.sessionTasks(r.PathValue("id"))
+func (c *sessionController) handleTask(w http.ResponseWriter, r *http.Request) {
+	reg := c.backend.sessionTasks(c.ref.SessionID)
 	if reg == nil {
 		http.Error(w, "background agents unavailable", http.StatusNotFound)
 		return
@@ -227,8 +226,8 @@ func (s *backendRuntime) handleTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if id, ok := execSessionID(r.PathValue("taskID")); ok {
-		if agent, agentOK := s.agent.(*agent.Agent); agentOK {
-			if session, found := agent.ExecSession(r.PathValue("id"), id); found {
+		if agent, agentOK := c.backend.agent.(*agent.Agent); agentOK {
+			if session, found := agent.ExecSession(c.ref.SessionID, id); found {
 				transcript := []TranscriptEntry{}
 				if session.Output != "" {
 					transcript = append(transcript, TranscriptEntry{
@@ -248,8 +247,8 @@ func (s *backendRuntime) handleTask(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "task not found", http.StatusNotFound)
 }
 
-func (s *backendRuntime) handleTaskStop(w http.ResponseWriter, r *http.Request) {
-	reg := s.sessionTasks(r.PathValue("id"))
+func (c *sessionController) handleTaskStop(w http.ResponseWriter, r *http.Request) {
+	reg := c.backend.sessionTasks(c.ref.SessionID)
 	if reg == nil {
 		http.Error(w, "background agents unavailable", http.StatusNotFound)
 		return
@@ -261,12 +260,12 @@ func (s *backendRuntime) handleTaskStop(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	} else if id, ok := execSessionID(taskID); ok {
-		agent, agentOK := s.agent.(*agent.Agent)
+		agent, agentOK := c.backend.agent.(*agent.Agent)
 		if !agentOK {
 			http.Error(w, "background command unavailable", http.StatusNotFound)
 			return
 		}
-		if err := agent.StopExecSession(r.PathValue("id"), id); err != nil {
+		if err := agent.StopExecSession(c.ref.SessionID, id); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -274,6 +273,6 @@ func (s *backendRuntime) handleTaskStop(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "task not found", http.StatusNotFound)
 		return
 	}
-	s.sendSession(r.PathValue("id"), Frame{Type: EvtTasksChanged})
+	c.backend.sendSession(c.ref.SessionID, Frame{Type: EvtTasksChanged})
 	w.WriteHeader(http.StatusNoContent)
 }

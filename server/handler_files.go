@@ -45,7 +45,7 @@ func isBinary(data []byte) bool {
 	return bytes.IndexByte(head, 0) >= 0
 }
 
-func (s *Server) workspaceRel(p string) (string, bool) {
+func (s *Project) workspaceRel(p string) (string, bool) {
 	if p == "" {
 		return "", false
 	}
@@ -56,7 +56,7 @@ func (s *Server) workspaceRel(p string) (string, bool) {
 	return filepath.FromSlash(cleaned), true
 }
 
-func (s *Server) resolveExistingRegularFile(w http.ResponseWriter, p string) (string, bool) {
+func (s *Project) resolveExistingRegularFile(w http.ResponseWriter, p string) (string, bool) {
 	rel, info, ok := s.resolveExistingPath(w, p)
 	if !ok {
 		return "", false
@@ -72,7 +72,7 @@ func (s *Server) resolveExistingRegularFile(w http.ResponseWriter, p string) (st
 	return rel, true
 }
 
-func (s *Server) resolveExistingPath(w http.ResponseWriter, p string) (string, os.FileInfo, bool) {
+func (s *Project) resolveExistingPath(w http.ResponseWriter, p string) (string, os.FileInfo, bool) {
 	rel, ok := s.workspaceRel(p)
 	if !ok {
 		http.Error(w, "invalid path", http.StatusBadRequest)
@@ -134,7 +134,7 @@ func copyPathInRoot(root *os.Root, src, dst string, info os.FileInfo) error {
 	return err
 }
 
-func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
+func (s *Project) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 	rel, ok := s.resolveExistingRegularFile(w, r.URL.Query().Get("path"))
 	if !ok {
 		return
@@ -178,7 +178,7 @@ type fileSearchHit struct {
 
 // handleFileSearch serves the file picker: up to 50 visible files whose path
 // contains the query.
-func (s *Server) handleFileSearch(w http.ResponseWriter, r *http.Request) {
+func (s *Project) handleFileSearch(w http.ResponseWriter, r *http.Request) {
 	hits := []fileSearchHit{}
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -219,7 +219,7 @@ func (s *Server) handleFileSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleReveal shows a workspace file or folder in the host's file manager.
-func (s *Server) handleReveal(w http.ResponseWriter, r *http.Request) {
+func (s *Project) handleReveal(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Path string `json:"path"`
 	}

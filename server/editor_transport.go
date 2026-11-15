@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 	"github.com/coder/websocket"
 	"go.lsp.dev/jsonrpc2"
 )
@@ -28,7 +29,7 @@ var (
 	errEditorTimeout   = errors.New("request timed out")
 )
 
-func (s *Server) acceptEditorSocket(w http.ResponseWriter, r *http.Request) (*editorSocket, error) {
+func (s *Project) acceptEditorSocket(w http.ResponseWriter, r *http.Request) (*editorSocket, error) {
 	// Only the same-origin Web UI uses /lsp and /dap; the default origin check
 	// keeps other pages from driving language servers and debuggers.
 	conn, err := websocket.Accept(w, r, nil)
@@ -101,8 +102,8 @@ func (p *editorSocket) reply(id json.RawMessage, result any, err error) {
 		p.send(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 		return
 	}
-	rpc := &ahpRPCError{Code: -32603, Message: err.Error()}
-	var typed *ahpRPCError
+	rpc := &ahp.Error{Code: -32603, Message: err.Error()}
+	var typed *ahp.Error
 	var native *jsonrpc2.Error
 	switch {
 	case errors.Is(err, errEditorCancelled):
@@ -113,7 +114,7 @@ func (p *editorSocket) reply(id json.RawMessage, result any, err error) {
 		rpc = typed
 	case errors.As(err, &native):
 		// Language server errors such as ContentModified keep their meaning.
-		rpc = &ahpRPCError{Code: int(native.Code), Message: native.Message}
+		rpc = &ahp.Error{Code: int(native.Code), Message: native.Message}
 		if len(native.Data) > 0 {
 			rpc.Data = json.RawMessage(native.Data)
 		}

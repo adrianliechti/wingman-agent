@@ -7,14 +7,15 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
+	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
 func copyResource(test *testing.T, app *Server, from, to string) error {
 	test.Helper()
-	h := app.ahp
-	raw, _ := json.Marshal(map[string]any{"channel": t.RootResourceURI, "source": h.fileURI(from), "destination": h.fileURI(to), "failIfExists": true})
-	_, err := h.resource(ahpRequest{Method: "resourceCopy", Params: raw})
+	h := app.Project
+	raw, _ := json.Marshal(map[string]any{"channel": types.RootResourceURI, "source": h.fileURI(from), "destination": h.fileURI(to), "failIfExists": true})
+	_, err := h.resource(ahp.Request{Method: "resourceCopy", Params: raw})
 	return err
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/language"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 )
 
 type lspFeatureParams struct {
@@ -50,7 +51,7 @@ type lspQuery struct {
 	unchanged func() bool
 }
 
-var errLSPContentModified = &ahpRPCError{Code: -32801, Message: "another editor changed the document"}
+var errLSPContentModified = &ahp.Error{Code: -32801, Message: "another editor changed the document"}
 
 func (q lspQuery) textEdits(edits []lsp.TextEdit, err error) ([]lsp.TextEdit, error) {
 	if err == nil && q.unchanged != nil && !q.unchanged() {
@@ -105,13 +106,13 @@ func lspNull(lspQuery) any             { return nil }
 func lspUnchanged(q lspQuery) any      { return q.raw }
 func lspEmptyDiagnostics(lspQuery) any { return map[string]any{"kind": "full", "items": []any{}} }
 
-func (c *lspConnection) request(ctx context.Context, req ahpRequest, buffers map[string]lspBuffer) (any, error) {
+func (c *lspConnection) request(ctx context.Context, req ahp.Request, buffers map[string]lspBuffer) (any, error) {
 	if handle := lspWorkspaceMethods[req.Method]; handle != nil {
 		return handle(c, ctx, req.Params)
 	}
 	method, ok := lspDocumentMethods[req.Method]
 	if !ok {
-		return nil, &ahpRPCError{Code: -32601, Message: "unsupported language method: " + req.Method}
+		return nil, &ahp.Error{Code: -32601, Message: "unsupported language method: " + req.Method}
 	}
 	q := lspQuery{id: req.ID, raw: req.Params, buffers: buffers}
 	if method.resolve {
@@ -120,7 +121,7 @@ func (c *lspConnection) request(ctx context.Context, req ahpRequest, buffers map
 			Data json.RawMessage `json:"data"`
 		}
 		if json.Unmarshal(req.Params, &item) != nil {
-			return nil, ahpInvalid("invalid language request")
+			return nil, ahp.InvalidParams("invalid language request")
 		}
 		uri, raw, err := unwrapLSPResolve(item.Data, req.Params)
 		if err != nil {
@@ -129,7 +130,7 @@ func (c *lspConnection) request(ctx context.Context, req ahpRequest, buffers map
 		q.uri, q.raw = uri, raw
 	} else {
 		if err := lsp.Unmarshal(req.Params, &q.params); err != nil {
-			return nil, ahpInvalid("invalid language request")
+			return nil, ahp.InvalidParams("invalid language request")
 		}
 		q.uri = q.params.TextDocument.URI
 	}
@@ -148,7 +149,7 @@ func (c *lspConnection) request(ctx context.Context, req ahpRequest, buffers map
 	}
 	q.line, q.column = q.params.Position.Line, q.params.Position.Character
 	if q.line < 0 || q.column < 0 {
-		return nil, ahpInvalid("negative document position")
+		return nil, ahp.InvalidParams("negative document position")
 	}
 	return method.handle(c, ctx, q)
 }
@@ -162,7 +163,7 @@ func unwrapLSPResolve(data, params json.RawMessage) (string, json.RawMessage, er
 	}
 	var wrapper map[string]json.RawMessage
 	if json.Unmarshal(data, &wrapper) != nil || json.Unmarshal(wrapper["wingman"], &route) != nil || route.URI == "" {
-		return "", nil, ahpInvalid("missing resolve routing data")
+		return "", nil, ahp.InvalidParams("missing resolve routing data")
 	}
 	var item map[string]json.RawMessage
 	_ = json.Unmarshal(params, &item)
@@ -180,11 +181,11 @@ func (c *lspConnection) textDocumentContent(ctx context.Context, raw json.RawMes
 		URI string `json:"uri"`
 	}
 	if json.Unmarshal(raw, &p) != nil {
-		return nil, ahpInvalid("invalid content request")
+		return nil, ahp.InvalidParams("invalid content request")
 	}
 	path, virtual, ok := c.server.lspSourceTarget(p.URI)
 	if !ok {
-		return nil, &ahpRPCError{Code: -32803, Message: "source not found"}
+		return nil, &ahp.Error{Code: -32803, Message: "source not found"}
 	}
 	if virtual != "" {
 		text, err := c.server.workspace.LSPVirtualContent(ctx, virtual)
@@ -202,15 +203,15 @@ func (c *lspConnection) textDocumentContent(ctx context.Context, raw json.RawMes
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > ahpResourceLimit {
-		return nil, ahpInvalid("source is not a readable text file")
+	if !info.Mode().IsRegular() || info.Size() > resourceLimit {
+		return nil, ahp.InvalidParams("source is not a readable text file")
 	}
-	data, err := io.ReadAll(io.LimitReader(f, ahpResourceLimit+1))
+	data, err := io.ReadAll(io.LimitReader(f, resourceLimit+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > ahpResourceLimit || isBinary(data) || !utf8.Valid(data) {
-		return nil, ahpInvalid("source is not a readable text file")
+	if len(data) > resourceLimit || isBinary(data) || !utf8.Valid(data) {
+		return nil, ahp.InvalidParams("source is not a readable text file")
 	}
 	return map[string]string{"text": string(data)}, nil
 }
@@ -242,7 +243,7 @@ func (c *lspConnection) diagnostic(ctx context.Context, q lspQuery) (any, error)
 		return nil, err
 	}
 	if !known {
-		return nil, &ahpRPCError{Code: -32802, Message: "diagnostics are not available yet", Data: map[string]any{"retriggerRequest": true}}
+		return nil, &ahp.Error{Code: -32802, Message: "diagnostics are not available yet", Data: map[string]any{"retriggerRequest": true}}
 	}
 	return map[string]any{"kind": "full", "items": lspDiagnostics(diagnostics)}, nil
 }
@@ -275,7 +276,7 @@ func (c *lspConnection) references(ctx context.Context, q lspQuery) (any, error)
 		IncludeDeclaration bool `json:"includeDeclaration"`
 	}
 	if len(q.params.Context) > 0 && json.Unmarshal(q.params.Context, &reference) != nil {
-		return nil, ahpInvalid("invalid reference context")
+		return nil, ahp.InvalidParams("invalid reference context")
 	}
 	locations, err := c.server.workspace.ReferenceLocations(ctx, q.path, q.content, q.line, q.column, reference.IncludeDeclaration)
 	return c.allowLocations(locations), err
@@ -362,7 +363,7 @@ func (c *lspConnection) prepareRename(ctx context.Context, q lspQuery) (any, err
 
 func (c *lspConnection) rename(ctx context.Context, q lspQuery) (any, error) {
 	if strings.TrimSpace(q.params.NewName) == "" {
-		return nil, ahpInvalid("newName is required")
+		return nil, ahp.InvalidParams("newName is required")
 	}
 	edit, err := c.server.workspace.Rename(ctx, q.path, q.content, q.line, q.column, q.params.NewName)
 	if err != nil {
@@ -435,14 +436,14 @@ func (c *lspConnection) resolveCodeAction(ctx context.Context, q lspQuery) (any,
 func (c *lspConnection) executeCommand(ctx context.Context, q lspQuery) (any, error) {
 	w := c.server.workspace
 	if q.params.Command == "" {
-		return nil, ahpInvalid("command is required")
+		return nil, ahp.InvalidParams("command is required")
 	}
 	capabilities, _, err := w.EditorLSPCapabilities(ctx, q.path)
 	if err != nil {
 		return nil, err
 	}
 	if !slices.Contains(capabilities.ExecuteCommandProvider.Commands, q.params.Command) {
-		return nil, ahpInvalid("the language server does not provide command " + q.params.Command)
+		return nil, ahp.InvalidParams("the language server does not provide command " + q.params.Command)
 	}
 	// The native call stays bounded, except while the user reviews an edit.
 	native, cancel := context.WithCancelCause(ctx)

@@ -68,7 +68,7 @@ func TestWorkspaceFilesRevealAndTerminalStatus(t *testing.T) {
 	if err != nil {
 		t.Skipf("no PTY: %v", err)
 	}
-	uri := "ahp-terminal:/" + app.ahp.namespace + "/" + session.ID()
+	uri := "ahp-terminal:/" + app.Project.namespace + "/" + session.ID()
 	deadline := time.Now().Add(2 * time.Second)
 	rec = status(uri)
 	for rec.Code == http.StatusNotFound && time.Now().Before(deadline) {

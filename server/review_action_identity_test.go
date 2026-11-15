@@ -9,7 +9,6 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
-
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
@@ -29,7 +28,7 @@ func TestReviewAHPRepeatedConfigChangesTakeEffect(t *testing.T) {
 	for _, channel := range []string{"chat", "session"} {
 		t.Run(channel, func(t *testing.T) {
 			s, b, _, c, ch := reviewSessionsAttach(t)
-			observer := reviewSessionsObserver(t, s.ahp, "1.1.0", ch.chat.Resource, ch.session.resource)
+			observer := reviewSessionsObserver(t, s.Project, "1.1.0", ch.chat.Resource, ch.session.resource)
 			for i, model := range []string{"one", "two", "one"} {
 				value, _ := json.Marshal(model)
 				config := map[string]json.RawMessage{"model": value}
@@ -63,11 +62,11 @@ func TestReviewAHPRepeatedQueueEditsReachBackend(t *testing.T) {
 	a.queue.Inputs = []code.TurnInput{{ID: "queued", Content: []harness.Content{{Text: "original"}}}}
 	c := b.session("saved")
 	c.load()
-	ch, err := s.ahp.attachSession(c, s.ahp.canonicalURI("one", "saved"), "Test", time.Now())
+	ch, err := s.Project.attachSession(c, s.Project.canonicalURI("one", "saved"), "Test", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	observer := reviewSessionsObserver(t, s.ahp, "1.1.0", ch.chat.Resource)
+	observer := reviewSessionsObserver(t, s.Project, "1.1.0", ch.chat.Resource)
 	for i, text := range []string{"first edit", "second edit", "first edit"} {
 		params := types.DispatchActionParams{Channel: ch.chat.Resource, ClientSeq: int64(i + 1), Action: types.StateAction{Value: &types.ChatPendingMessageSetAction{
 			Type: types.ActionTypeChatPendingMessageSet, Id: "queued", Kind: types.PendingMessageKindQueued,
@@ -96,11 +95,11 @@ func TestReviewAHPRepeatedUnattendedChangesTakeEffect(t *testing.T) {
 	b.agent = agent
 	c := b.session("saved")
 	c.load()
-	ch, err := s.ahp.attachSession(c, s.ahp.canonicalURI("one", "saved"), "Test", time.Now())
+	ch, err := s.Project.attachSession(c, s.Project.canonicalURI("one", "saved"), "Test", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	observer := reviewSessionsObserver(t, s.ahp, "1.1.0", ch.chat.Resource)
+	observer := reviewSessionsObserver(t, s.Project, "1.1.0", ch.chat.Resource)
 	for i, enabled := range []bool{false, true, false} {
 		value, _ := json.Marshal(enabled)
 		raw, err := json.Marshal(types.DispatchActionParams{Channel: ch.chat.Resource, ClientSeq: int64(i + 1), Action: types.StateAction{Value: &types.ChatConfigChangedAction{
@@ -130,12 +129,12 @@ func TestAHPActionRetriesDoNotReplayOlderEdits(t *testing.T) {
 			b.agent = agent
 			c := b.session("saved")
 			c.load()
-			ch, err := s.ahp.attachSession(c, s.ahp.canonicalURI("one", "saved"), "Test", time.Now())
+			ch, err := s.Project.attachSession(c, s.Project.canonicalURI("one", "saved"), "Test", time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}
-			observer := reviewSessionsObserver(t, s.ahp, "1.1.0", ch.chat.Resource)
-			dispatch := func(peer *ahpConnection, seq int64, action types.StateAction) {
+			observer := reviewSessionsObserver(t, s.Project, "1.1.0", ch.chat.Resource)
+			dispatch := func(peer *connection, seq int64, action types.StateAction) {
 				t.Helper()
 				raw, err := json.Marshal(types.DispatchActionParams{Channel: ch.chat.Resource, ClientSeq: seq, Action: action})
 				if err != nil {
@@ -168,14 +167,14 @@ func TestAHPActionRetriesDoNotReplayOlderEdits(t *testing.T) {
 				} else if count := agent.modelChanges.Load(); count != changes {
 					t.Fatalf("model changed %d times, want %d", count, changes)
 				}
-				s.ahp.mu.Lock()
+				s.Project.host.mu.Lock()
 				projected := string(ch.chat.Config.Values["model"])
 				if kind == "queue" {
 					projected = ch.chat.QueuedMessages[0].Message.Text
 				} else {
 					_ = json.Unmarshal(ch.chat.Config.Values["model"], &projected)
 				}
-				s.ahp.mu.Unlock()
+				s.Project.host.mu.Unlock()
 				if got != want || projected != want {
 					t.Fatalf("backend=%q projected=%q, want %q", got, projected, want)
 				}
@@ -186,14 +185,14 @@ func TestAHPActionRetriesDoNotReplayOlderEdits(t *testing.T) {
 			check("two", 2)
 			// Other actions can evict the wire acknowledgement while the domain
 			// receipt is still retained. The retry must preserve newer state here too.
-			for i := range ahpAckLimit {
+			for i := range ackLimit {
 				dispatch(observer, int64(i+3), types.StateAction{Value: &types.ChatDraftChangedAction{Type: types.ActionTypeChatDraftChanged}})
 			}
 			dispatch(observer, 1, action("one"))
 			check("two", 2)
 			// Sequence numbers belong to the client: another client's first action
 			// must not collide with either retained receipt.
-			other := reviewSessionsObserver(t, s.ahp, "1.1.1", ch.chat.Resource)
+			other := reviewSessionsObserver(t, s.Project, "1.1.1", ch.chat.Resource)
 			dispatch(other, 1, action("one"))
 			check("one", 3)
 		})

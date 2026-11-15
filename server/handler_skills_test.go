@@ -37,7 +37,7 @@ Specify $ARGUMENTS.
 		t.Fatal(err)
 	}
 
-	server := &Server{workspace: workspace}
+	server := &Server{Project: &Project{workspace: workspace}}
 	response := httptest.NewRecorder()
 	server.handleSkills(response, httptest.NewRequest("GET", "/api/workspace/skills", nil))
 	if response.Code != 200 {
@@ -86,7 +86,7 @@ Plan $ARGUMENTS in small phases.
 		t.Fatal(err)
 	}
 
-	server := &Server{workspace: workspace}
+	server := &Server{Project: &Project{workspace: workspace}}
 	blocks := server.skillBlocks("$speckit-plan authentication")
 	if len(blocks) != 1 || !strings.Contains(blocks[0], "Plan authentication in small phases.") {
 		t.Fatalf("skill blocks = %#v", blocks)

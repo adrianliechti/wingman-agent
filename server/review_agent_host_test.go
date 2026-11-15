@@ -14,20 +14,21 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
-func reviewSaveHostAlias(t *testing.T, dir, resource, provider string) ahpAlias {
+func reviewSaveHostAlias(t *testing.T, dir, resource, provider string) sessionAlias {
 	t.Helper()
-	p := &ahpProject{server: &Server{scope: workspaceScope(dir)}, dir: dir, ahpHost: newAHPHost()}
-	a := ahpAlias{Resource: resource, Project: dir, Backend: provider, Session: "saved", Created: time.Now(), Title: "Private project title"}
+	p := &Project{scope: workspaceScope(dir), dir: dir, host: newHost(context.Background())}
+	a := sessionAlias{Resource: resource, Project: dir, Backend: provider, Session: "saved", Created: time.Now(), Title: "Private project title"}
 	if err := p.saveAlias(a); err != nil {
 		t.Fatal(err)
 	}
 	return a
 }
 
-func reviewHostCatalog(t *testing.T, h *ahpHost) []types.SessionSummary {
+func reviewHostCatalog(t *testing.T, h *Host) []types.SessionSummary {
 	t.Helper()
 	raw, _ := json.Marshal(types.ListSessionsParams{Channel: types.RootResourceURI})
 	result, err := h.listSessions(raw)
@@ -46,7 +47,7 @@ func TestReviewHostFiltersSavedRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.Close()
-	if items := reviewHostCatalog(t, h.ahp); len(items) != 0 {
+	if items := reviewHostCatalog(t, h); len(items) != 0 {
 		t.Fatalf("catalog leaked sessions outside configured roots: %+v", items)
 	}
 }
@@ -60,34 +61,34 @@ func TestReviewHostRetainsDormantProviderSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.Close()
-	if items := reviewHostCatalog(t, h.ahp); len(items) != 1 {
+	if items := reviewHostCatalog(t, h); len(items) != 1 {
 		t.Fatalf("initial catalog: %+v", items)
 	}
 	// Opening the project starts the builtin backend, leaving external providers dormant.
-	ahpTestGateway(t)
-	if _, err := h.ahp.projectAt(dir); err != nil {
+	protocolTestGateway(t)
+	if _, err := h.projectAt(dir); err != nil {
 		t.Fatal(err)
 	}
-	if items := reviewHostCatalog(t, h.ahp); len(items) != 1 {
+	if items := reviewHostCatalog(t, h); len(items) != 1 {
 		t.Fatalf("opening the project hid saved external sessions: %+v", items)
 	}
 }
 
 func TestReviewHostScopesNativeSessionIDs(t *testing.T) {
 	testenv.WingmanHome(t)
-	h := newAHPHost()
-	h.open = func(string) (*Server, error) { panic("unexpected open") }
-	makeProject := func(dir string) *ahpProject {
-		s := &Server{ctx: t.Context(), scope: workspaceScope(dir), workspace: &code.Workspace{RootPath: dir}, backends: map[string]*backendEntry{}}
+	h := newHost(context.Background())
+	h.open = func(string) (*Project, error) { panic("unexpected open") }
+	makeProject := func(dir string) *Project {
+		s := &Project{ctx: t.Context(), scope: workspaceScope(dir), workspace: &code.Workspace{RootPath: dir}, backends: map[string]*backendEntry{}}
 		p := h.attach(s)
 		agent := &lifecycleAgent{protocolAgent: &protocolAgent{}, list: func(context.Context) ([]code.SessionInfo, error) {
 			return []code.SessionInfo{{ID: "saved", Title: "Local session", UpdatedAt: time.Now()}}, nil
 		}}
-		s.backends["one"] = &backendEntry{runtime: &backendRuntime{Server: s, id: "one", agent: agent}}
+		s.backends["one"] = &backendEntry{runtime: &backendRuntime{Project: s, id: "one", agent: agent}}
 		return p
 	}
 	a, b := makeProject(canonicalPath(t.TempDir())), makeProject(canonicalPath(t.TempDir()))
-	h.aliases["ahp-session:/a"] = ahpAlias{Resource: "ahp-session:/a", Project: a.dir, Backend: "one", Session: "saved"}
+	h.aliases["ahp-session:/a"] = sessionAlias{Resource: "ahp-session:/a", Project: a.dir, Backend: "one", Session: "saved"}
 	items, err := b.nativeSessions([]types.AgentInfo{{Provider: "one"}}, map[string]bool{})
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +100,7 @@ func TestReviewHostScopesNativeSessionIDs(t *testing.T) {
 
 func TestReviewHostConcurrentOpening(t *testing.T) {
 	testenv.WingmanHome(t)
-	ahpTestGateway(t)
+	protocolTestGateway(t)
 	root := canonicalPath(t.TempDir())
 	h, err := NewHost(t.Context(), &HostOptions{Roots: []string{root}, disableManagedTools: true})
 	if err != nil {
@@ -115,7 +116,7 @@ func TestReviewHostConcurrentOpening(t *testing.T) {
 				return
 			default:
 			}
-			_, _ = h.ahp.root()
+			_, _ = h.root()
 		}
 	})
 	defer func() { close(stop); wg.Wait() }()
@@ -124,7 +125,7 @@ func TestReviewHostConcurrentOpening(t *testing.T) {
 		if err := os.Mkdir(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := h.ahp.projectAt(dir); err != nil {
+		if _, err := h.projectAt(dir); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -132,7 +133,7 @@ func TestReviewHostConcurrentOpening(t *testing.T) {
 
 func TestReviewHostCreatesSessionViaSymlink(t *testing.T) {
 	testenv.WingmanHome(t)
-	ahpTestGateway(t)
+	protocolTestGateway(t)
 	root := canonicalPath(t.TempDir())
 	dir, _ := hostTestProject(t, root, "real")
 	link := filepath.Join(root, "alias")
@@ -144,9 +145,9 @@ func TestReviewHostCreatesSessionViaSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.Close()
-	c := &ahpConnection{host: h.ahp, initialized: true, id: "review"}
+	c := &connection{host: h, id: "review"}
 	raw, _ := json.Marshal(types.CreateSessionParams{Channel: "ahp-session:/symlink", WorkingDirectories: []string{fileuri.FromPath(link)}})
-	if _, err := c.request(ahpRequest{Method: "createSession", Params: raw}); err != nil {
+	if _, err := c.request(ahp.Request{Method: "createSession", Params: raw}); err != nil {
 		t.Fatalf("valid symlink working directory rejected: %v", err)
 	}
 }
@@ -156,7 +157,7 @@ func TestReviewHostTerminalNamesAreAtomic(t *testing.T) {
 		t.Skip("PTY terminals are unsupported")
 	}
 	testenv.WingmanHome(t)
-	ahpTestGateway(t)
+	protocolTestGateway(t)
 	root := canonicalPath(t.TempDir())
 	h, err := NewHost(t.Context(), &HostOptions{Roots: []string{root}, disableManagedTools: true})
 	if err != nil {
@@ -169,12 +170,12 @@ func TestReviewHostTerminalNamesAreAtomic(t *testing.T) {
 		if err := os.Mkdir(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := h.ahp.projectAt(dir); err != nil {
+		if _, err := h.projectAt(dir); err != nil {
 			t.Fatal(err)
 		}
 		dirs = append(dirs, fileuri.FromPath(dir))
 	}
-	c := &ahpConnection{host: h.ahp, initialized: true, id: "review"}
+	c := &connection{host: h, id: "review"}
 	claim := types.TerminalClaim{Value: &types.TerminalClientClaim{Kind: types.TerminalClaimKindClient, ClientId: c.id}}
 	for i := range 5 {
 		start, errs := make(chan struct{}), make(chan error, 2)

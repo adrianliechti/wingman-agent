@@ -14,7 +14,7 @@ type SkillEntry struct {
 
 // skillBlocks expands leading or inline /skill and $skill invocations into
 // hidden instruction blocks.
-func (s *Server) skillBlocks(text string) []string {
+func (s *Project) skillBlocks(text string) []string {
 	if s.workspace == nil {
 		return nil
 	}
@@ -30,12 +30,12 @@ func (s *Server) skillBlocks(text string) []string {
 	return blocks
 }
 
-func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
+func (s *Project) handleSkills(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.skillCatalogue())
 }
 
 // The catalogue belongs to the workspace. Listing it never starts a backend.
-func (s *Server) skillCatalogue() []SkillEntry {
+func (s *Project) skillCatalogue() []SkillEntry {
 	if s.workspace == nil {
 		return []SkillEntry{}
 	}

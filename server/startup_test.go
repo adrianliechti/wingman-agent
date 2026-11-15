@@ -177,7 +177,7 @@ func TestModelDiscoverySharesConcurrentRetries(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		a := &blockedDiscoveryAgent{protocolAgent: &protocolAgent{}}
-		b := &backendRuntime{Server: &Server{ctx: ctx}, agent: a}
+		b := &backendRuntime{Project: &Project{ctx: ctx}, agent: a}
 		results := make(chan error, 2)
 		for range 2 {
 			go func() { results <- b.refreshModels() }()

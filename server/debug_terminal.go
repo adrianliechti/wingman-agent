@@ -11,7 +11,7 @@ import (
 // LaunchTerminal implements dap.TerminalLauncher with Wingman's existing PTY
 // service. DAP owns the reviewed command; the browser terminal API remains
 // limited to the user's configured shells.
-func (s *Server) LaunchTerminal(_ context.Context, launch dap.TerminalLaunch) (dap.TerminalProcess, error) {
+func (s *Project) LaunchTerminal(_ context.Context, launch dap.TerminalLaunch) (dap.TerminalProcess, error) {
 	if s.terminals == nil || !terminal.Supported() {
 		return nil, errors.New("terminals are not supported on this host")
 	}

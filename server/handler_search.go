@@ -70,7 +70,7 @@ type workspaceSearchConfig struct {
 	limit   int
 }
 
-func (s *Server) searchWorkspace(ctx context.Context, request workspaceSearchRequest, emit func(workspaceSearchEvent) error) error {
+func (s *Project) searchWorkspace(ctx context.Context, request workspaceSearchRequest, emit func(workspaceSearchEvent) error) error {
 	config, err := newWorkspaceSearchConfig(request)
 	if err != nil {
 		return err
@@ -313,7 +313,7 @@ func workspaceSearchTail(value string, limit int) string {
 
 // handleWorkspaceSearch streams matching files as NDJSON; aborting the request
 // cancels the search.
-func (s *Server) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
+func (s *Project) handleWorkspaceSearch(w http.ResponseWriter, r *http.Request) {
 	var request workspaceSearchRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
 	decoder.DisallowUnknownFields()

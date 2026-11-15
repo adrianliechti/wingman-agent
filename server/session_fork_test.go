@@ -30,8 +30,8 @@ func (a *forkingProtocolAgent) ForkSession(_ context.Context, id, title string) 
 func newForkProtocolServer(t *testing.T, a code.Agent) *Server {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &Server{ctx: ctx, cancel: cancel, scope: workspaceScope(protocolProject), backends: map[string]*backendEntry{}}
-	s.ahp = webProject(s, protocolProject)
+	s := &Server{Project: &Project{ctx: ctx, cancel: cancel, scope: workspaceScope(protocolProject), backends: map[string]*backendEntry{}}}
+	s.Project = webProject(s, protocolProject)
 	b := s.bindBackend("one", a)
 	s.backends[b.id] = &backendEntry{runtime: b}
 	s.mux = chi.NewRouter()

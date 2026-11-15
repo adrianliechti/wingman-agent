@@ -42,8 +42,8 @@ func (b *backendRuntime) refreshModels() error {
 		for _, view := range views {
 			view.refreshSettings()
 		}
-		if b.ahp != nil {
-			b.ahp.publishAgents()
+		if b.Project != nil {
+			b.Project.host.publishAgents()
 		}
 		return nil, err
 	})

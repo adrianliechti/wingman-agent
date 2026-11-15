@@ -102,13 +102,35 @@ leads to. On `wingman server` the web UI, `/lsp`, `/dap` and the REST routes
 describe the project of its directory, which stays open; projects below it
 open on demand as on any host, and the REST routes refuse their chats.
 
-In the server package, `ahp.go` handles connections and protocol dispatch;
-`ahp_projects.go` routes requests to projects and closes idle projects;
-`ahp_project.go` owns a project's attachment and live channels.
-`ahp_aliases.go` stores the mapping from protocol URIs to native sessions,
-while `ahp_sessions.go` creates, loads and lists those sessions. The singular
-`ahp_session.go` projects session state and its chats; native execution remains
-in `session.go` and `runtime.go`.
+In the server package, `Host` owns connections, ordered publication, saved
+session identities, and the project registry. `Project` owns the workspace,
+agents, controllers, terminals, watches, and changesets. `Server` is the web
+adapter: HTTP routing, browser preferences, preview hosting, and the embedded
+UI. The standalone host opens projects without constructing a web server.
+
+`host.go` and `projects.go` handle host lifetime and project routing;
+`project.go` owns project startup, teardown, and channel attachment.
+`connection.go` dispatches protocol requests. The `server/ahp` package contains
+JSON-RPC framing, errors, origin checks, and channel URI rules, with no
+project or web dependencies. `aliases.go` persists protocol-to-native session
+identities, `sessions.go` creates and loads sessions, and `session.go` and
+`chat.go` maintain their protocol state. `controller.go` and `runtime.go` own
+native execution. `routes.go` resolves HTTP chat routes directly to their
+controllers.
+
+The host publication mutex orders snapshots and actions. Controller state
+locks precede it and also protect command receipts; backend I/O runs outside
+them. The connection read loop owns its channel queues. Each backend uses one
+mutex for its session registry and task pumps. The project admits backend
+operations under its backend registry lock; cancellation closes admission,
+and teardown joins all admitted operations before closing agents. Project
+startup and teardown remain serialized so a replacement cannot open files
+while the previous instance is closing.
+
+Context cancellation determines host and project lifetime. A controller's
+status is its session lifecycle, including the retained deletion tombstone.
+Host registries determine which sessions, chats and terminals are live;
+stale handles cannot publish to a replacement using the same URI.
 
 Closing a project removes its live channels but keeps its saved aliases.
 Reopening waits for the previous instance to finish closing. Host shutdown

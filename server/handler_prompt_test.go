@@ -11,7 +11,7 @@ import (
 )
 
 func newPromptTestServer() *backendRuntime {
-	return &backendRuntime{Server: &Server{ctx: context.Background()}, sessions: map[string]*sessionController{}}
+	return &backendRuntime{Project: &Project{ctx: context.Background()}, sessions: map[string]*sessionController{}}
 }
 
 func waitForPendingPrompt(t *testing.T, s *backendRuntime, sessionID string) string {

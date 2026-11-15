@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 )
 
 func TestTasksAPI(t *testing.T) {
@@ -111,5 +112,5 @@ func TestTasksAPI(t *testing.T) {
 
 // chatAPIPath encodes the chat URI as the web UI's encodeURIComponent does.
 func chatAPIPath(s *Server, backend, id string) string {
-	return "/api/v2/chats/" + strings.ReplaceAll(url.PathEscape(ahpChatURI(s.ahp.canonicalURI(backend, id))), ":", "%3A")
+	return "/api/v2/chats/" + strings.ReplaceAll(url.PathEscape(ahp.ChatURI(s.Project.canonicalURI(backend, id))), ":", "%3A")
 }

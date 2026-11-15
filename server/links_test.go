@@ -28,7 +28,7 @@ func TestWorkspaceIdentityAndDebugFramesThroughDirectoryLinks(t *testing.T) {
 				t.Fatalf("workspace identity mismatch: actual = %+v, alias = %+v", actual, alias)
 			}
 			// Adapters report resolved paths; frames keep the workspace's own spelling.
-			c := &dapConnection{server: &Server{workspace: &code.Workspace{RootPath: root}}}
+			c := &dapConnection{server: &Project{workspace: &code.Workspace{RootPath: root}}}
 			resolvedRoot, _ := pathutil.Resolve(root)
 			for _, path := range []string{filepath.Join(target, "main.go"), filepath.Join(root, "main.go")} {
 				if got := c.framePath(path, resolvedRoot); got != filepath.Join(root, "main.go") {

@@ -45,7 +45,7 @@ func (b *backendRuntime) Warn(sessionID, message string) {
 	c := b.session(sessionID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.state.Status != "deleted" {
+	if c.state.Status != sessionDeleted {
 		c.warnLocked(message)
 	}
 }
@@ -59,7 +59,7 @@ func (b *backendRuntime) prompt(ctx context.Context, kind, message string, field
 	id := uuid.NewString()
 	p := pendingPrompt{view: PromptView{ID: id, Kind: kind, Message: message, Fields: fields, InputID: harness.InputIDFromContext(ctx)}, reply: make(chan Command, 1)}
 	c.mu.Lock()
-	if c.state.Status == "deleted" {
+	if c.state.Status == sessionDeleted {
 		c.mu.Unlock()
 		return Command{}, errors.New("session deleted")
 	}
@@ -98,7 +98,7 @@ func (c *sessionController) resolvePrompt(command Command) error {
 }
 
 func (c *sessionController) resolvePromptLocked(command Command) error {
-	if c.state.Status == "deleted" || c.backend.ctx.Err() != nil {
+	if c.state.Status == sessionDeleted || c.backend.ctx.Err() != nil {
 		return errors.New("session closed")
 	}
 	p, ok := c.prompts[command.PromptID]
@@ -107,8 +107,8 @@ func (c *sessionController) resolvePromptLocked(command Command) error {
 	}
 	// Removal is the atomic winner selection for responses from multiple clients.
 	delete(c.prompts, command.PromptID)
-	if c.ahp != nil {
-		c.ahp.resolvePromptLocked(command)
+	if c.chat != nil {
+		c.chat.resolvePromptLocked(command)
 	}
 	p.reply <- command
 	c.publishPromptsLocked()

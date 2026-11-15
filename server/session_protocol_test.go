@@ -115,9 +115,9 @@ func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Cont
 }
 
 // webProject makes a test server the project its own host's web UI shows.
-func webProject(s *Server, dir string) *ahpProject {
-	h := newAHPHost()
-	p := h.attach(s)
+func webProject(s *Server, dir string) *Project {
+	h := newHost(s.ctx)
+	p := h.attach(s.Project)
 	p.dir = canonicalPath(dir)
 	h.show(p)
 	return p
@@ -129,14 +129,14 @@ const protocolProject = "/workspace"
 func newProtocolServer(t *testing.T) (*Server, *backendRuntime, *protocolAgent) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &Server{ctx: ctx, cancel: cancel, scope: workspaceScope(protocolProject), backends: map[string]*backendEntry{}}
-	s.ahp = webProject(s, protocolProject)
+	s := &Server{Project: &Project{ctx: ctx, cancel: cancel, scope: workspaceScope(protocolProject), backends: map[string]*backendEntry{}}}
+	s.Project = webProject(s, protocolProject)
 	a := &protocolAgent{}
 	b := s.bindBackend("one", a)
 	s.backends[b.id] = &backendEntry{runtime: b}
 	s.mux = chi.NewRouter()
 	s.mux.Route("/api", s.registerSessionRoutes)
-	s.mux.Get("/ahp", s.handleAHP)
+	s.mux.Get("/ahp", s.Project.host.handleAHP)
 	s.handler = s.checkInstance(s.mux)
 	t.Cleanup(s.Close)
 	return s, b, a

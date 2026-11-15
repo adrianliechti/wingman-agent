@@ -1,0 +1,303 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"testing"
+	"time"
+
+	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
+	sdk "github.com/microsoft/agent-host-protocol/clients/go/ahp"
+	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
+)
+
+type turnForkingAgent struct {
+	*protocolAgent
+	forks []string // source>through for each fork
+}
+
+func (a *turnForkingAgent) ForkSession(_ context.Context, id, _ string) (string, error) {
+	return a.fork(id, "")
+}
+
+func (a *turnForkingAgent) ForkSessionThrough(_ context.Context, id, inputID, _ string) (string, error) {
+	return a.fork(id, inputID)
+}
+
+func (a *turnForkingAgent) fork(id, through string) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.forks = append(a.forks, id+">"+through)
+	return fmt.Sprintf("fork-%d", len(a.forks)), nil
+}
+
+func (a *turnForkingAgent) ListSessions(context.Context) ([]code.SessionInfo, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	sessions := []code.SessionInfo{}
+	for i := range a.created.Load() {
+		sessions = append(sessions, code.SessionInfo{ID: fmt.Sprintf("session-%d", i+1), Title: "Main"})
+	}
+	for i := range a.forks {
+		sessions = append(sessions, code.SessionInfo{ID: fmt.Sprintf("fork-%d", i+1), Title: "Fork of Main"})
+	}
+	return sessions, nil
+}
+
+func untilSession(t *testing.T, sub *sdk.Subscription, predicate func(types.ActionEnvelope) bool) types.ActionEnvelope {
+	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case event, ok := <-sub.Events():
+			if !ok {
+				t.Fatal("subscription closed")
+			}
+			if action, ok := event.(sdk.SubscriptionEventAction); ok && predicate(action.Envelope) {
+				return action.Envelope
+			}
+		case <-timer.C:
+			t.Fatal("timed out waiting for session action")
+		}
+	}
+}
+
+func TestAHPForkChatsLiveInTheirSession(t *testing.T) {
+	s, _, _, endpoint := protocolTestServer(t)
+	agent := &turnForkingAgent{protocolAgent: &protocolAgent{}}
+	s.backends["fork"] = &backendEntry{runtime: s.bindBackend("fork", agent)}
+	client := protocolTestClient(t, endpoint, "forks")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	session := "ahp-session:/forks"
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("fork")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, sessionSub, err := client.Subscribe(ctx, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sessionSub.Close()
+	main := ahp.ChatURI(session)
+	state, sub := subscribeChat(t, client, main)
+	for i, turn := range []string{"turn-1", "turn-2"} {
+		send(t, client, main, turn, int64(i+1))
+		until(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
+	}
+
+	fork := func(chat, turn string) error {
+		return client.Request(ctx, "createChat", types.CreateChatParams{Channel: session, Chat: chat, Source: &types.ChatSource{Value: &types.ForkChatSource{Kind: types.ChatSourceKindFork, Chat: main, TurnId: turn}}}, nil)
+	}
+	var rpc *sdk.RPCError
+	if err := fork("ahp-chat:/bad", "turn-9"); !errors.As(err, &rpc) || rpc.Code != types.ErrorCodeInvalidParams {
+		t.Fatalf("unknown turn: %v", err)
+	}
+	if err := fork("ahp-chat:/early", "turn-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fork("ahp-chat:/late", "turn-2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fork("ahp-chat:/late", "turn-2"); !errors.As(err, &rpc) || rpc.Code != types.ErrorCodeAlreadyExists {
+		t.Fatalf("reused chat URI: %v", err)
+	}
+	// Only a fork from an earlier turn needs the native journal cut.
+	if fmt.Sprint(agent.forks) != "[session-1>turn-1 session-1>]" {
+		t.Fatalf("forks = %v", agent.forks)
+	}
+	added := untilSession(t, sessionSub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.SessionChatAddedAction); return ok })
+	summary := added.Action.Value.(*types.SessionChatAddedAction).Summary
+	if origin, ok := summary.Origin.Value.(*types.ChatForkOrigin); summary.Resource != "ahp-chat:/early" || !ok || origin.TurnId != "turn-1" || origin.Chat != main {
+		t.Fatalf("added chat = %+v", summary)
+	}
+	if forked, _ := subscribeChat(t, client, "ahp-chat:/early"); forked.Origin == nil || forked.Title != "Fork of Main" {
+		t.Fatalf("fork chat = %+v", forked)
+	}
+
+	var listed types.ListSessionsResult
+	if err := client.Request(ctx, "listSessions", types.ListSessionsParams{Channel: types.RootResourceURI}, &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Items) != 1 || len(listed.Items[0].Chats) != 3 || listed.Items[0].Chats[1].Resource != "ahp-chat:/early" {
+		t.Fatalf("listed = %+v", listed.Items)
+	}
+
+	// A restarted host finds forks through their chat URI, in creation order.
+	other, _, _ := newProtocolServer(t)
+	other.backends["fork"] = &backendEntry{runtime: other.bindBackend("fork", agent)}
+	a, ch, err := other.Project.host.ensureSession("ahp-chat:/late")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.resource != session || ch.controller.ref.SessionID != "fork-2" || len(a.chats) != 3 || a.chats[1].chat.Resource != "ahp-chat:/early" {
+		t.Fatalf("reloaded session = %+v", a.state.Chats)
+	}
+
+	if err := client.Request(ctx, "disposeChat", types.DisposeChatParams{Channel: main}, nil); !errors.As(err, &rpc) {
+		t.Fatalf("disposed the default chat: %v", err)
+	}
+	if err := client.Request(ctx, "disposeChat", types.DisposeChatParams{Channel: "ahp-chat:/early"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	untilSession(t, sessionSub, func(e types.ActionEnvelope) bool {
+		removed, ok := e.Action.Value.(*types.SessionChatRemovedAction)
+		return ok && removed.Chat == "ahp-chat:/early"
+	})
+	h := s.Project
+	h.host.mu.Lock()
+	_, aliased := h.host.chatAliases["ahp-chat:/early"]
+	h.host.mu.Unlock()
+	if aliased {
+		t.Fatal("disposed fork kept its alias")
+	}
+	if err := client.Request(ctx, "disposeSession", types.DisposeSessionParams{Channel: session}, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.host.mu.Lock()
+	defer h.host.mu.Unlock()
+	if len(h.host.chats) != 0 || h.host.sessions[session] != nil {
+		t.Fatalf("session chats survived disposal: %v", h.host.chats)
+	}
+}
+
+func TestAHPCanonicalURIRedirectsToAlias(t *testing.T) {
+	s, _, _, endpoint := protocolTestServer(t)
+	client := protocolTestClient(t, endpoint, "redirect")
+	create(t, client, "ahp-session:/named")
+	_, _, err := client.Subscribe(t.Context(), s.Project.canonicalURI("one", "session-1"))
+	var rpc *sdk.RPCError
+	var data struct {
+		Resource string `json:"resource"`
+	}
+	if !errors.As(err, &rpc) || rpc.Code != types.ErrorCodeInvalidParams || json.Unmarshal(rpc.Data, &data) != nil || data.Resource != "ahp-session:/named" {
+		t.Fatalf("expected a redirect to the alias, got %v", err)
+	}
+}
+
+func TestAHPStopClearsQueueAndApprovalOptionsChooseScope(t *testing.T) {
+	_, b, agent, endpoint := protocolTestServer(t)
+	agent.gate = make(chan struct{})
+	defer close(agent.gate)
+	client := protocolTestClient(t, endpoint, "stop")
+	chat := create(t, client, "ahp-session:/stop")
+	state, sub := subscribeChat(t, client, chat)
+	send(t, client, chat, "turn-1", 1)
+	until(t, state, sub, func(types.ActionEnvelope) bool { return state.ActiveTurn != nil })
+	queue := types.DispatchActionParams{Channel: chat, ClientSeq: 2, Action: types.StateAction{Value: &types.ChatPendingMessageSetAction{Type: types.ActionTypeChatPendingMessageSet, Kind: types.PendingMessageKindQueued, Id: "later", Message: types.Message{Text: "later", Origin: types.MessageOrigin{Kind: types.MessageKindUser}}}}}
+	if err := client.Notify(t.Context(), "dispatchAction", queue); err != nil {
+		t.Fatal(err)
+	}
+	until(t, state, sub, func(types.ActionEnvelope) bool { return len(state.QueuedMessages) == 1 })
+	stop := types.DispatchActionParams{Channel: chat, ClientSeq: 3, Action: types.StateAction{Value: &types.ChatTurnCancelledAction{Type: types.ActionTypeChatTurnCancelled, TurnId: "turn-1"}}}
+	if err := client.Notify(t.Context(), "dispatchAction", stop); err != nil {
+		t.Fatal(err)
+	}
+	until(t, state, sub, func(types.ActionEnvelope) bool { return state.ActiveTurn == nil && len(state.QueuedMessages) == 0 })
+	if len(b.turns.Snapshot("session-1").Inputs) != 0 {
+		t.Fatal("stop left queued input behind")
+	}
+}
+
+func queue(id string) types.StateAction {
+	return types.StateAction{Value: &types.ChatPendingMessageSetAction{Type: types.ActionTypeChatPendingMessageSet, Kind: types.PendingMessageKindQueued, Id: id, Message: types.Message{Text: id, Origin: types.MessageOrigin{Kind: types.MessageKindUser}}}}
+}
+
+func TestAHPReorderedQueueRunsInItsNewOrder(t *testing.T) {
+	_, b, agent, endpoint := protocolTestServer(t)
+	gate := make(chan struct{})
+	agent.gate = gate
+	defer close(gate)
+	client := protocolTestClient(t, endpoint, "reorder")
+	chat := create(t, client, "ahp-session:/reorder")
+	state, sub := subscribeChat(t, client, chat)
+	send(t, client, chat, "turn-1", 1)
+	until(t, state, sub, func(types.ActionEnvelope) bool { return state.ActiveTurn != nil })
+	seq := int64(1)
+	dispatch := func(action types.StateAction) {
+		t.Helper()
+		seq++
+		if err := client.Notify(t.Context(), "dispatchAction", types.DispatchActionParams{Channel: chat, ClientSeq: seq, Action: action}); err != nil {
+			t.Fatal(err)
+		}
+		echo := until(t, state, sub, func(e types.ActionEnvelope) bool { return e.Origin != nil && e.Origin.ClientSeq == seq })
+		if echo.RejectionReason != nil {
+			t.Fatal(*echo.RejectionReason)
+		}
+	}
+	for _, id := range []string{"a", "b", "c"} {
+		dispatch(queue(id))
+	}
+	// Named messages move to the head; unknown and repeated names are ignored.
+	dispatch(types.StateAction{Value: &types.ChatQueuedMessagesReorderedAction{Type: types.ActionTypeChatQueuedMessagesReordered, Order: []string{"c", "missing", "c"}}})
+	order := []string{"c", "a", "b"}
+	queued := func(messages []types.PendingMessage) (ids []string) {
+		for _, message := range messages {
+			ids = append(ids, message.Id)
+		}
+		return ids
+	}
+	fresh, _ := subscribeChat(t, protocolTestClient(t, endpoint, "reader"), chat)
+	var backend []string
+	for _, input := range b.turns.Snapshot("session-1").Inputs {
+		if input.State == code.TurnInputQueued {
+			backend = append(backend, input.ID)
+		}
+	}
+	if !slices.Equal(queued(state.QueuedMessages), order) || !slices.Equal(queued(fresh.QueuedMessages), order) || !slices.Equal(backend, order) {
+		t.Fatalf("queue: mirror %v, snapshot %v, backend %v", queued(state.QueuedMessages), queued(fresh.QueuedMessages), backend)
+	}
+	// A message leaves the queue before the turn that consumes it starts.
+	for _, id := range order {
+		gate <- struct{}{}
+		var removed int64
+		start := until(t, state, sub, func(e types.ActionEnvelope) bool {
+			if r, ok := e.Action.Value.(*types.ChatPendingMessageRemovedAction); ok && r.Id == id {
+				removed = e.ServerSeq
+			}
+			started, ok := e.Action.Value.(*types.ChatTurnStartedAction)
+			return ok && started.TurnId == id
+		})
+		started := start.Action.Value.(*types.ChatTurnStartedAction)
+		if started.QueuedMessageId == nil || *started.QueuedMessageId != id || started.Message.Text != id || removed == 0 || removed > start.ServerSeq {
+			t.Fatalf("turn %q started as %+v, its message removed at %d of %d", id, started, removed, start.ServerSeq)
+		}
+	}
+}
+
+func TestAHPIdleChatConsumesAQueuedMessageAsItsTurn(t *testing.T) {
+	_, _, _, endpoint := protocolTestServer(t)
+	client := protocolTestClient(t, endpoint, "idle")
+	chat := create(t, client, "ahp-session:/idle")
+	state, sub := subscribeChat(t, client, chat)
+	if err := client.Notify(t.Context(), "dispatchAction", types.DispatchActionParams{Channel: chat, ClientSeq: 1, Action: queue("only")}); err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	until(t, state, sub, func(e types.ActionEnvelope) bool {
+		switch action := e.Action.Value.(type) {
+		case *types.ChatPendingMessageSetAction:
+			if e.Origin != nil && e.RejectionReason == nil {
+				seen = append(seen, "set")
+			}
+		case *types.ChatPendingMessageRemovedAction:
+			if action.Kind == types.PendingMessageKindQueued {
+				seen = append(seen, "removed")
+			}
+		case *types.ChatTurnStartedAction:
+			if action.QueuedMessageId != nil && *action.QueuedMessageId == "only" {
+				seen = append(seen, "started")
+			}
+		case *types.ChatTurnCompleteAction:
+			return true
+		}
+		return false
+	})
+	if !slices.Equal(seen, []string{"set", "removed", "started"}) || len(state.QueuedMessages) != 0 || len(state.Turns) != 1 || state.Turns[0].Id != "only" {
+		t.Fatalf("actions %v left %+v", seen, state)
+	}
+}

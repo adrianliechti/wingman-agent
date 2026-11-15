@@ -17,13 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/debugadapter"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
+	"github.com/go-chi/chi/v5"
 )
 
 func TestDebugTargetsReturnsGoCodeLensCandidates(t *testing.T) {
@@ -537,8 +536,10 @@ func newDebugTestServer(t *testing.T, root string) *Server {
 	}
 	workspace.WarmUp()
 	t.Cleanup(workspace.Close)
-	server := &Server{workspace: workspace, ctx: context.Background(), scope: workspaceScope(root)}
-	server.ahp = webProject(server, root)
+	ctx, cancel := context.WithCancel(t.Context())
+	server := &Server{Project: &Project{workspace: workspace, ctx: ctx, cancel: cancel, scope: workspaceScope(root)}}
+	server.Project = webProject(server, root)
+	t.Cleanup(server.Close)
 	router := chi.NewRouter()
 	server.registerRoutes(router)
 	server.mux = router

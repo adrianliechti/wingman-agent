@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -18,9 +17,9 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
-	"github.com/go-chi/chi/v5"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 	"github.com/google/uuid"
-	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
+	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -55,9 +54,9 @@ func workspaceScope(root string) WorkspaceScope {
 	return WorkspaceScope{WorkspaceID: hex.EncodeToString(sum[:]), InstanceID: uuid.NewString()}
 }
 
-func (s *Server) InstanceID() string { return s.scope.InstanceID }
+func (s *Project) InstanceID() string { return s.scope.InstanceID }
 
-func (s *Server) checkInstance(next http.Handler) http.Handler {
+func (s *Project) checkInstance(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		instance := r.Header.Get(instanceHeader)
 		if instance == "" {
@@ -79,48 +78,18 @@ func (s *Server) checkInstance(next http.Handler) http.Handler {
 // Each backend owns its agent, turn manager, and session controllers for the
 // workspace lifetime. Browser navigation never replaces execution ownership.
 type backendRuntime struct {
-	*Server
+	*Project
 	id             string
 	agent          code.Agent
 	turns          *code.TurnManager
-	mu             sync.Mutex
+	mu             sync.Mutex // protects sessions and task pumps
 	sessions       map[string]*sessionController
-	taskPumpMu     sync.Mutex
 	taskPumps      map[*task.Registry]bool
-	operationMu    sync.Mutex
-	operations     sync.WaitGroup
-	closing        bool
 	modelDiscovery singleflight.Group
 }
 
-// Operations may nest (commands refresh metadata), but admission closes before
-// shutdown waits. Backend resources outlive every admitted operation.
-func (b *backendRuntime) beginOperation() bool {
-	b.operationMu.Lock()
-	defer b.operationMu.Unlock()
-	if b.closing || b.ctx.Err() != nil {
-		return false
-	}
-	b.operations.Add(1)
-	return true
-}
-
-func (s *Server) backendOperation(fn func(*backendRuntime, http.ResponseWriter, *http.Request)) http.HandlerFunc {
-	return s.backendHandler(func(b *backendRuntime, w http.ResponseWriter, r *http.Request) {
-		if !b.beginOperation() {
-			http.Error(w, "workspace closed", http.StatusConflict)
-			return
-		}
-		defer b.operations.Done()
-		ctx, cancel := context.WithCancel(r.Context())
-		stop := context.AfterFunc(b.ctx, cancel)
-		defer func() { stop(); cancel() }()
-		fn(b, w, r.WithContext(ctx))
-	})
-}
-
-func (s *Server) bindBackend(id string, a code.Agent) *backendRuntime {
-	b := &backendRuntime{Server: s, id: id, agent: a, sessions: map[string]*sessionController{}}
+func (s *Project) bindBackend(id string, a code.Agent) *backendRuntime {
+	b := &backendRuntime{Project: s, id: id, agent: a, sessions: map[string]*sessionController{}}
 	if ui, ok := a.(interface{ SetUI(code.UI) }); ok {
 		ui.SetUI(b)
 	}
@@ -145,13 +114,27 @@ type backendEntry struct {
 	err     error
 }
 
-func (s *Server) backend(id string) (*backendRuntime, error) {
-	return s.resolveBackend(id, func(ctx context.Context) (code.Agent, error) {
-		return agents.NewExternal(ctx, s.workspace, id)
+// backend resolves an agent provider, reporting an unknown one as AHP's
+// ProviderNotFound rather than a startup failure.
+func (p *Project) backend(provider string) (*backendRuntime, error) {
+	b, err := p.resolveBackend(provider, func(ctx context.Context) (code.Agent, error) {
+		return agents.NewExternal(ctx, p.workspace, provider)
 	})
+	if err == nil {
+		return b, nil
+	}
+	known := provider == code.BuiltinAgentName
+	if p.workspace != nil && !known {
+		external, _ := agents.Available()
+		known = slices.ContainsFunc(external, func(a agents.Registration) bool { return a.ID == provider })
+	}
+	if !known {
+		return nil, &ahp.Error{Code: int(types.ErrorCodeProviderNotFound), Message: "unknown agent provider: " + provider}
+	}
+	return nil, err
 }
 
-func (s *Server) resolveBackend(id string, create func(context.Context) (code.Agent, error)) (*backendRuntime, error) {
+func (s *Project) resolveBackend(id string, create func(context.Context) (code.Agent, error)) (*backendRuntime, error) {
 	s.backendsMu.Lock()
 	if err := s.ctx.Err(); err != nil {
 		s.backendsMu.Unlock()
@@ -203,14 +186,16 @@ func (s *Server) resolveBackend(id string, create func(context.Context) (code.Ag
 // unknown session id, so lookups cannot grow the session map.
 func (b *backendRuntime) discard(id string, c *sessionController) {
 	c.opMu.Lock()
-	loaded := c.loaded
-	c.opMu.Unlock()
+	defer c.opMu.Unlock()
 	c.mu.Lock()
-	attached := c.ahp != nil
+	discard := c.chat == nil && (c.state.Status == sessionLoading || c.state.Status == sessionError)
 	c.mu.Unlock()
+	if !discard {
+		return
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !loaded && !attached && b.sessions[id] == c {
+	if b.sessions[id] == c {
 		delete(b.sessions, id)
 	}
 }
@@ -226,63 +211,12 @@ func (b *backendRuntime) session(id string) *sessionController {
 	return c
 }
 
-func (s *Server) backendHandler(fn func(*backendRuntime, http.ResponseWriter, *http.Request)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		b, err := s.backend(r.PathValue("backend"))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		fn(b, w, r)
-	}
-}
-
-func (s *Server) registerSessionRoutes(r chi.Router) {
-	r.Route("/v2", func(r chi.Router) {
-		r.Post("/backends/{backend}/models/refresh", s.backendOperation((*backendRuntime).handleRefreshModels))
-		r.Route("/chats/{chat}", func(r chi.Router) {
-			r.Use(s.chatRoute)
-			r.Get("/reviews", s.backendOperation((*backendRuntime).handleTurnReviews))
-			r.Get("/reviews/{turnID}", s.backendOperation((*backendRuntime).handleTurnReviews))
-			r.Post("/reviews/{turnID}/undo", s.backendOperation((*backendRuntime).handleTurnUndo))
-			r.Get("/tasks", s.backendOperation((*backendRuntime).handleTasks))
-			r.Get("/tasks/{taskID}", s.backendOperation((*backendRuntime).handleTask))
-			r.Post("/tasks/{taskID}/stop", s.backendOperation((*backendRuntime).handleTaskStop))
-			r.Get("/schedules", s.backendOperation((*backendRuntime).handleSchedules))
-			r.Delete("/schedules/{scheduleID}", s.backendOperation((*backendRuntime).handleScheduleDelete))
-			r.Post("/schedules/{scheduleID}/pause", s.backendOperation((*backendRuntime).handleSchedulePause))
-			r.Post("/schedules/{scheduleID}/resume", s.backendOperation((*backendRuntime).handleScheduleResume))
-		})
-	})
-}
-
-// chatRoute resolves the AHP chat URI in the path to the native session the
-// handlers address by backend and id.
-func (s *Server) chatRoute(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		chat, err := url.PathUnescape(chi.URLParam(r, "chat"))
-		if err != nil {
-			http.Error(w, "invalid chat URI", http.StatusBadRequest)
-			return
-		}
-		a, ch, err := s.ahp.ensureSession(chat)
-		// The host may serve other projects' chats too.
-		if err != nil || ch == nil || a.project != s.ahp {
-			http.Error(w, "chat not found", http.StatusNotFound)
-			return
-		}
-		r.SetPathValue("backend", ch.controller.backend.id)
-		r.SetPathValue("id", ch.controller.ref.SessionID)
-		next.ServeHTTP(w, r)
-	})
-}
-
 type Command struct {
 	requireIdle bool
-	wait        bool                         // steering that waits for a turn instead of starting one
-	sync        bool                         // settings that its AHP chat wants when they run
-	option      *t.ConfirmationOption        // the approval option an AHP client chose
-	answers     map[string]t.ChatInputAnswer // an AHP client's answers with its drafts, as its reducer keeps them
+	wait        bool                             // steering that waits for a turn instead of starting one
+	sync        bool                             // settings that its AHP chat wants when they run
+	option      *types.ConfirmationOption        // the approval option an AHP client chose
+	answers     map[string]types.ChatInputAnswer // an AHP client's answers with its drafts, as its reducer keeps them
 
 	ID         string               `json:"id"`
 	Type       string               `json:"type"`
@@ -362,10 +296,9 @@ func (b *backendRuntime) createSession(command Command) commandReceipt {
 	c := b.session(id)
 	c.opMu.Lock()
 	receipt := Receipt{Ref: c.ref}
-	c.loaded = true
 	c.replaceHistory()
 	c.mu.Lock()
-	c.state.Status = "ready"
+	c.state.Status = sessionReady
 	c.publishStateLocked()
 	c.mu.Unlock()
 	c.opMu.Unlock()
@@ -380,9 +313,9 @@ func (b *backendRuntime) createSession(command Command) commandReceipt {
 func (c *sessionController) command(ctx context.Context, command Command) commandReceipt {
 	failure := func(message string) commandReceipt { return commandReceipt{status: 409, message: message} }
 	fingerprint := commandFingerprint(command)
-	c.receiptMu.Lock()
+	c.mu.Lock()
 	if previous := c.receipts[command.ID]; previous != nil {
-		c.receiptMu.Unlock()
+		c.mu.Unlock()
 		if previous.fingerprint != fingerprint {
 			return failure("request id reused with different content")
 		}
@@ -399,7 +332,7 @@ func (c *sessionController) command(ctx context.Context, command Command) comman
 	c.receipts[command.ID] = record
 	c.receiptOrder = append(c.receiptOrder, command.ID)
 	c.pruneReceiptsLocked()
-	c.receiptMu.Unlock()
+	c.mu.Unlock()
 	defer close(record.done)
 	var err error
 	if command.Type == "prompt_response" {
@@ -421,7 +354,7 @@ func (c *sessionController) command(ctx context.Context, command Command) comman
 const receiptLimit = 1024
 
 // pruneReceiptsLocked forgets the oldest completed receipts beyond the limit;
-// in-flight ones stay so their IDs cannot be reused. Caller holds receiptMu.
+// in-flight ones stay so their IDs cannot be reused. Caller holds mu.
 func (c *sessionController) pruneReceiptsLocked() {
 	for i := 0; len(c.receipts) > receiptLimit && i < len(c.receiptOrder); {
 		id := c.receiptOrder[i]
@@ -452,9 +385,6 @@ func (c *sessionController) execute(command Command) error {
 	b, sid := c.backend, c.ref.SessionID
 	if err := b.ctx.Err(); err != nil {
 		return err
-	}
-	if c.deleted {
-		return errors.New("session deleted")
 	}
 	switch command.Type {
 	case "send", "queue_update":
@@ -572,13 +502,12 @@ func (c *sessionController) execute(command Command) error {
 		if err := b.agent.DeleteSession(b.ctx, sid); err != nil {
 			return err
 		}
-		c.deleted = true
 		c.mu.Lock()
 		for _, prompt := range c.prompts {
 			prompt.reply <- Command{Action: "cancel"}
 		}
 		c.prompts = map[string]pendingPrompt{}
-		c.state.Status = "deleted"
+		c.state.Status = sessionDeleted
 		c.state.Phase = "idle"
 		c.state.PendingInputs = []TurnQueueEntry{}
 		c.state.Prompts = []PromptView{}

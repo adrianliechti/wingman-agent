@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"net/http"
 	"net/http/httptest"
@@ -76,6 +77,33 @@ func installProtocolAgent(s *Server, a code.Agent) *backendRuntime {
 	b := s.bindBackend("one", a)
 	s.backends["one"] = &backendEntry{runtime: b}
 	return b
+}
+
+func TestSessionRetriesFailedLoadAndKeepsReadyState(t *testing.T) {
+	s, _, base := newProtocolServer(t)
+	attempts := 0
+	b := installProtocolAgent(s, &lifecycleAgent{protocolAgent: base, load: func(context.Context, string) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("temporary failure")
+		}
+		return nil
+	}})
+	c := b.session("saved")
+	c.load()
+	c.mu.Lock()
+	status, message := c.state.Status, c.state.Error
+	c.mu.Unlock()
+	if status != "error" || message == nil {
+		t.Fatalf("failed load: status=%q error=%v", status, message)
+	}
+	c.load()
+	c.load()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if attempts != 2 || c.state.Status != "ready" || c.state.Error != nil {
+		t.Fatalf("retried load: attempts=%d status=%q error=%v", attempts, c.state.Status, c.state.Error)
+	}
 }
 
 func TestSessionDeleteWaitsForFinalQueueWrite(t *testing.T) {

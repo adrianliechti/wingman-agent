@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/changes"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
@@ -48,26 +49,26 @@ func reviewWorkspaceChangesetRepo(t *testing.T, files map[string]string) string 
 	return dir
 }
 
-func reviewWorkspaceChangesetHost(t *testing.T, root string) *ahpProject {
+func reviewWorkspaceChangesetHost(t *testing.T, root string) *Project {
 	t.Helper()
-	h := newDebugTestServer(t, root).ahp
-	t.Cleanup(h.close)
+	h := newDebugTestServer(t, root).Project
+	t.Cleanup(h.host.Close)
 	return h
 }
 
-func reviewWorkspaceChangesetState(t *testing.T, h *ahpProject, channel string) types.ChangesetState {
+func reviewWorkspaceChangesetState(t *testing.T, h *Project, channel string) types.ChangesetState {
 	t.Helper()
 	if err := h.ensureChangeset(channel); err != nil {
 		t.Fatal(err)
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.host.mu.Lock()
+	defer h.host.mu.Unlock()
 	state := h.changesets[channel].state
 	state.Files = append([]types.ChangesetFile{}, state.Files...)
 	return state
 }
 
-func reviewWorkspaceChangesetFile(t *testing.T, h *ahpProject, channel, path string) types.ChangesetFile {
+func reviewWorkspaceChangesetFile(t *testing.T, h *Project, channel, path string) types.ChangesetFile {
 	t.Helper()
 	for _, file := range reviewWorkspaceChangesetState(t, h, channel).Files {
 		if strings.HasSuffix(file.Id, "/"+path) {
@@ -78,7 +79,7 @@ func reviewWorkspaceChangesetFile(t *testing.T, h *ahpProject, channel, path str
 	return types.ChangesetFile{}
 }
 
-func reviewWorkspaceChangesetInvoke(h *ahpProject, params map[string]any) error {
+func reviewWorkspaceChangesetInvoke(h *Project, params map[string]any) error {
 	raw, _ := json.Marshal(params)
 	_, err := h.invokeChangesetOperation(raw)
 	return err
@@ -90,8 +91,8 @@ func reviewWorkspaceChangesetTarget(file types.ChangesetFile, nonce string) map[
 
 func reviewWorkspaceChangesetCode(t *testing.T, err error, want int) {
 	t.Helper()
-	var rpc *ahpRPCError
-	if !errors.As(ahpResourceError(err), &rpc) || rpc.Code != want {
+	var rpc *ahp.Error
+	if !errors.As(resourceError(err), &rpc) || rpc.Code != want {
 		t.Fatalf("want error %d, got %v", want, err)
 	}
 }
@@ -130,11 +131,11 @@ func TestReviewWorkspaceChangesetIdleComparisonsDoNotStarveWorkspaceLayers(t *te
 			t.Fatal(err)
 		}
 	}
-	h.mu.Lock()
+	h.host.mu.Lock()
 	for _, c := range h.changesets {
 		c.touched = time.Now().Add(-2 * time.Minute)
 	}
-	h.mu.Unlock()
+	h.host.mu.Unlock()
 	state := reviewWorkspaceChangesetState(t, h, h.changesChannel(changes.DiffCombined))
 	if state.Status != types.ChangesetStatusReady {
 		t.Fatalf("workspace changes are unavailable while only idle comparisons hold content: %s", state.Error.Message)
@@ -253,11 +254,11 @@ func TestReviewWorkspaceChangesetBinaryChangesKeepIdentity(t *testing.T) {
 func TestReviewWorkspaceChangesetComparisonRetention(t *testing.T) {
 	root := t.TempDir()
 	app := newDebugTestServer(t, root)
-	h := app.ahp
-	t.Cleanup(h.close)
+	h := app.Project
+	t.Cleanup(h.host.Close)
 	web := httptest.NewServer(app)
 	t.Cleanup(web.Close)
-	client := ahpTestClient(t, "ws"+strings.TrimPrefix(web.URL, "http")+"/ahp", "comparison-retention")
+	client := protocolTestClient(t, "ws"+strings.TrimPrefix(web.URL, "http")+"/ahp", "comparison-retention")
 	compare := func(i int) string {
 		t.Helper()
 		channel, err := h.comparisonChangeset([]changes.FileDiff{{Path: fmt.Sprintf("f%d.txt", i), Status: changes.StatusAdded, Modified: fmt.Sprintf("content %d\n", i)}})
@@ -285,17 +286,17 @@ func TestReviewWorkspaceChangesetComparisonRetention(t *testing.T) {
 	}
 	defer sub.Close()
 	retained := result.Snapshot.State.Changeset.Files[0].Edit.After.Content.Uri
-	h.mu.Lock()
+	h.host.mu.Lock()
 	for i, channel := range channels {
 		h.changesets[channel].touched = time.Now().Add(-time.Hour + time.Duration(i)*time.Second)
 	}
 	evicted := h.changesets[channels[1]].state.Files[0].Edit.After.Content.Uri
-	h.mu.Unlock()
+	h.host.mu.Unlock()
 	compare(100)
-	h.mu.Lock()
+	h.host.mu.Lock()
 	_, kept := h.changesets[channels[0]]
 	_, dropped := h.changesets[channels[1]]
-	h.mu.Unlock()
+	h.host.mu.Unlock()
 	if !kept || dropped {
 		t.Fatalf("eviction kept subscribed=%v, dropped oldest idle=%v", kept, !dropped)
 	}
@@ -317,7 +318,7 @@ func TestReviewWorkspaceChangesetConcurrentWritesAndRefreshes(t *testing.T) {
 	resource := func(method string, params map[string]any) (any, error) {
 		params["channel"] = types.RootResourceURI
 		raw, _ := json.Marshal(params)
-		return h.resource(ahpRequest{Method: method, Params: raw})
+		return h.resource(ahp.Request{Method: method, Params: raw})
 	}
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -339,7 +340,7 @@ func TestReviewWorkspaceChangesetConcurrentWritesAndRefreshes(t *testing.T) {
 	}
 	wg.Go(func() {
 		for range 40 {
-			h.mu.Lock()
+			h.host.mu.Lock()
 			uris := []string{}
 			if c := h.changesets[h.changesChannel(changes.DiffCombined)]; c != nil {
 				for _, file := range c.state.Files {
@@ -348,7 +349,7 @@ func TestReviewWorkspaceChangesetConcurrentWritesAndRefreshes(t *testing.T) {
 					}
 				}
 			}
-			h.mu.Unlock()
+			h.host.mu.Unlock()
 			for _, uri := range uris {
 				if _, err := resource("resourceRead", map[string]any{"uri": uri}); err != nil && !strings.Contains(err.Error(), "no longer retained") {
 					t.Error(err)
@@ -360,7 +361,7 @@ func TestReviewWorkspaceChangesetConcurrentWritesAndRefreshes(t *testing.T) {
 		for range 6 {
 			for _, op := range []struct{ channel, id string }{{h.changesChannel(changes.DiffUnstaged), "stage"}, {h.changesChannel(changes.DiffStaged), "unstage"}} {
 				err := reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": op.channel, "operationId": op.id})
-				var rpc *ahpRPCError
+				var rpc *ahp.Error
 				if err != nil && (!errors.As(err, &rpc) || rpc.Code != -32602) {
 					t.Error(err)
 				}
