@@ -2,7 +2,6 @@ package server
 
 import (
 	"cmp"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"maps"
@@ -77,23 +76,27 @@ func (h *ahpHost) serves(dir string) bool {
 // projectAt opens the project of a directory unless it is open already.
 func (h *ahpHost) projectAt(dir string) (*ahpProject, error) {
 	dir = canonicalPath(dir)
-	opened := func() *ahpProject {
+	opened := func() (*ahpProject, error) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
+		if h.closed {
+			return nil, errHostClosed
+		}
 		p := h.projects[dir]
 		if p != nil {
 			p.used = time.Now()
 		}
-		return p
-	}
-	if p := opened(); p != nil {
 		return p, nil
 	}
-	// One project opens at a time; the sessions of open projects do not wait.
-	h.openMu.Lock()
-	defer h.openMu.Unlock()
-	if p := opened(); p != nil {
-		return p, nil
+	if p, err := opened(); p != nil || err != nil {
+		return p, err
+	}
+	// Wait for an earlier instance to finish closing before reopening its files.
+	// Requests for projects that are already open do not wait here.
+	h.projectMu.Lock()
+	defer h.projectMu.Unlock()
+	if p, err := opened(); p != nil || err != nil {
+		return p, err
 	}
 	if !h.serves(dir) {
 		return nil, &ahpRPCError{Code: int(t.ErrorCodePermissionDenied), Message: "this host does not serve " + dir}
@@ -227,25 +230,19 @@ func (h *ahpHost) subscribedLocked(p *ahpProject) bool {
 // closeIdle closes the projects that no client has reached for a while and
 // that have no work left. Their sessions stay listed and reopen them.
 func (h *ahpHost) closeIdle(idle time.Duration) {
+	h.projectMu.Lock()
+	defer h.projectMu.Unlock()
 	for _, p := range h.loaded() {
 		if p.server.busy() {
 			continue
 		}
 		h.mu.Lock()
 		// Any request that could start work reaches the project first, which counts as use.
-		if h.projects[p.dir] != p || time.Since(p.used) < idle || h.subscribedLocked(p) {
+		if h.closed || h.projects[p.dir] != p || time.Since(p.used) < idle || h.subscribedLocked(p) {
 			h.mu.Unlock()
 			continue
 		}
-		delete(h.projects, p.dir)
-		for resource, a := range h.sessions {
-			if a.project == p {
-				for _, ch := range a.chats {
-					delete(h.chats, ch.chat.Resource)
-				}
-				delete(h.sessions, resource)
-			}
-		}
+		p.detachLocked()
 		h.mu.Unlock()
 		p.server.Close()
 	}
@@ -307,34 +304,4 @@ func (h *ahpHost) browse(method string, p ahpResourceParams, path string) (any, 
 	}
 	defer root.Close()
 	return ahpFiles{root: root, dir: dir}.read(method, p, rel)
-}
-
-// canonicalAHPURI names a native session that no client named.
-func canonicalAHPURI(backend, id string) string {
-	return "ahp-session:/wingman/" + base64.RawURLEncoding.EncodeToString([]byte(backend)) + "/" + base64.RawURLEncoding.EncodeToString([]byte(id))
-}
-
-// A host for several projects finds an unnamed session by the project in its URI.
-func (p *ahpProject) canonicalURI(backend, id string) string {
-	uri := canonicalAHPURI(backend, id)
-	if p.pinned == nil {
-		uri += "/" + base64.RawURLEncoding.EncodeToString([]byte(p.dir))
-	}
-	return uri
-}
-
-func parseCanonicalURI(resource string) (backend, id, dir string, err error) {
-	parts := strings.Split(strings.TrimPrefix(resource, "ahp-session:/wingman/"), "/")
-	if !strings.HasPrefix(resource, "ahp-session:/wingman/") || len(parts) != 2 && len(parts) != 3 {
-		return "", "", "", &ahpRPCError{Code: int(t.ErrorCodeSessionNotFound), Message: "unknown session"}
-	}
-	values := make([]string, 3)
-	for i, part := range parts {
-		data, err := base64.RawURLEncoding.DecodeString(part)
-		if err != nil || len(data) == 0 {
-			return "", "", "", ahpInvalid("invalid session URI")
-		}
-		values[i] = string(data)
-	}
-	return values[0], values[1], values[2], nil
 }

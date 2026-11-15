@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -110,8 +111,20 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 
 func (a *ahpChat) syncConfig(c *sessionController) {
 	a.config = ahpConfig(c.state.Settings)
-	if a.chat.Config == nil || !reflect.DeepEqual(a.chat.Config.Values, a.config.Values) {
-		a.chatAction(t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: a.config.Values, Replace: new(true)}})
+	a.syncOverlay()
+}
+
+// syncOverlay shows what a chat sets over its session's values: what a client
+// set on it, and where its settings differ from them. Caller holds host.mu.
+func (a *ahpChat) syncOverlay() {
+	overlay := map[string]json.RawMessage{}
+	for key, value := range a.config.Values {
+		if session := a.session.state.Config; a.own[key] || session == nil || !bytes.Equal(session.Values[key], value) {
+			overlay[key] = value
+		}
+	}
+	if a.chat.Config == nil || !reflect.DeepEqual(a.chat.Config.Values, overlay) {
+		a.chatAction(t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: overlay, Replace: new(true)}})
 	}
 }
 

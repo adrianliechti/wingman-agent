@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"maps"
 	"reflect"
 	"slices"
@@ -92,6 +93,7 @@ func (a *ahpChat) inherit(source *ahpChat, through string) {
 		}
 	}
 	a.promptSeq = source.promptSeq
+	maps.Copy(a.own, source.own)
 }
 
 func (a *ahpSession) chat(resource string) *ahpChat {
@@ -190,13 +192,20 @@ func (a *ahpSession) activity() t.SessionStatus {
 
 // syncChats publishes session-level consequences of a chat's projection.
 func (a *ahpSession) syncChats(previous t.SessionSummary) {
-	// Session config mirrors the default chat for clients without per-chat config.
+	// The session's values are its own; a setting it lacks takes the default chat's value.
 	config := a.chats[0].config
-	if a.state.Config == nil {
-		a.state.Config = config
+	values := map[string]json.RawMessage{}
+	for key, value := range config.Values {
+		if own, ok := a.state.Config.Values[key]; ok {
+			value = own
+		}
+		values[key] = value
 	}
-	if !reflect.DeepEqual(a.state.Config.Values, config.Values) {
-		a.sessionAction(t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: config.Values, Replace: new(true)}})
+	if !reflect.DeepEqual(a.state.Config.Values, values) {
+		a.sessionAction(t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: values, Replace: new(true)}})
+		for _, ch := range a.chats {
+			ch.syncOverlay()
+		}
 	}
 	// Choices change when a provider discovers models; snapshots carry the new schema.
 	a.state.Config.Schema = config.Schema

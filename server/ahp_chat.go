@@ -22,6 +22,7 @@ type ahpChat struct {
 	chat             t.ChatState
 	title            string                // the session's name for the chat, which no action can give the chat itself
 	config           *t.SessionConfigState // the controller's, read without its lock
+	own              map[string]bool       // the config a client set on this chat, which it keeps over the session's
 	prompts          map[string]*ahpPrompt
 	promptSeq        int
 	reasoning        map[string]*ahpReasoningTiming
@@ -86,8 +87,8 @@ type ahpPendingAction struct {
 
 func newAHPChat(a *ahpSession, c *sessionController, resource, title, stamp string) *ahpChat {
 	config := ahpConfig(c.state.Settings)
-	return &ahpChat{project: a.project, session: a, controller: c, title: title, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{}, clientCalls: map[string]*ahpClientCall{},
-		chat: t.ChatState{Resource: resource, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}, Config: &t.ChatConfigState{Values: config.Values}},
+	return &ahpChat{project: a.project, session: a, controller: c, title: title, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{}, clientCalls: map[string]*ahpClientCall{}, own: map[string]bool{},
+		chat: t.ChatState{Resource: resource, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}, Config: &t.ChatConfigState{Values: map[string]json.RawMessage{}}},
 	}
 }
 
@@ -157,7 +158,7 @@ func (a *ahpChat) syncLocked(c *sessionController, changes []SessionChange) {
 			a.session.saveTitle()
 		}
 	}()
-	if a.session.deleted || a.removed {
+	if !a.project.availableLocked() || a.session.deleted || a.removed {
 		return
 	}
 	if c.state.Status == "deleted" {

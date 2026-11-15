@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/microsoft/agent-host-protocol/clients/go/ahp"
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
@@ -254,13 +256,43 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			h.mu.Unlock()
 			return ahpInvalid("session channel required")
 		}
-		h.mu.Unlock()
-		if err := ch.setConfig(ahpCommandID("config", p.Channel, c.id, p.ClientSeq), action.Config); err != nil {
+		values, err := ahpConfigValues(action.Config)
+		if err != nil {
+			h.mu.Unlock()
 			return err
 		}
-		// The backend may have normalized the values; acknowledge what it holds.
+		// The session's values change, and with them every chat that does not set its own.
+		type change struct {
+			chat   *ahpChat
+			values map[string]json.RawMessage
+		}
+		changes := []change{}
+		for _, ch := range a.chats {
+			inherited := map[string]json.RawMessage{}
+			for key, value := range values {
+				if !ch.own[key] && bytes.Equal(ch.config.Values[key], a.state.Config.Values[key]) {
+					inherited[key] = value
+				}
+			}
+			if len(inherited) > 0 {
+				changes = append(changes, change{ch, inherited})
+			}
+		}
+		h.mu.Unlock()
+		for _, change := range changes {
+			if err := change.chat.setConfig(ahpCommandID("config", p.Channel, c.id, p.ClientSeq, change.chat.chat.Resource), change.values); err != nil {
+				return err
+			}
+		}
 		h.mu.Lock()
-		a.acknowledge(p.Channel, p.Action, t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: a.state.Config.Values, Replace: new(true)}})
+		merged := maps.Clone(a.state.Config.Values)
+		maps.Copy(merged, values)
+		answer := t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: merged, Replace: new(true)}}
+		ahp.ApplyActionToSession(&a.state, answer)
+		a.acknowledge(p.Channel, p.Action, answer)
+		for _, ch := range a.chats {
+			ch.syncOverlay()
+		}
 		h.mu.Unlock()
 		return nil
 	case *t.ChatConfigChangedAction:
@@ -268,11 +300,32 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			h.mu.Unlock()
 			return ahpInvalid("chat channel required")
 		}
+		values, own := action.Config, maps.Clone(ch.own)
+		if action.Replace != nil && *action.Replace {
+			// A replaced overlay returns what it omits to the session's values.
+			values, own = maps.Clone(action.Config), map[string]bool{}
+			for key := range ch.chat.Config.Values {
+				if _, kept := values[key]; !kept {
+					values[key] = a.state.Config.Values[key]
+				}
+			}
+		}
+		for key := range action.Config {
+			own[key] = true
+		}
+		previous := ch.own
+		ch.own = own
 		h.mu.Unlock()
-		if err := ch.setConfig(ahpCommandID("config", p.Channel, c.id, p.ClientSeq), action.Config); err != nil {
+		if err := ch.setConfig(ahpCommandID("config", p.Channel, c.id, p.ClientSeq), values); err != nil {
+			h.mu.Lock()
+			ch.own = previous
+			ch.syncOverlay()
+			h.mu.Unlock()
 			return err
 		}
+		// The backend may have normalized the values; acknowledge what the chat holds.
 		h.mu.Lock()
+		ch.syncOverlay() // a value the chat already had changes no settings
 		a.acknowledge(p.Channel, p.Action, t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: ch.chat.Config.Values, Replace: new(true)}})
 		h.mu.Unlock()
 		return nil
@@ -389,19 +442,29 @@ func ahpAnswerValues(view PromptView, content map[string]any) map[string]t.ChatI
 }
 
 func (a *ahpChat) setConfig(id string, values map[string]json.RawMessage) error {
-	command := Command{ID: id, Epoch: a.controller.epoch, Type: "settings"}
+	command, err := ahpSettings(values)
+	if err != nil {
+		return err
+	}
+	command.ID, command.Epoch = id, a.controller.epoch
+	return a.command(command)
+}
+
+// ahpSettings is the settings command that applies config values.
+func ahpSettings(values map[string]json.RawMessage) (Command, error) {
+	command := Command{Type: "settings"}
 	for key, value := range values {
 		if key == "unattended" {
 			var enabled bool
 			if json.Unmarshal(value, &enabled) != nil {
-				return ahpInvalid("unattended must be a boolean")
+				return Command{}, ahpInvalid("unattended must be a boolean")
 			}
 			command.Unattended = &enabled
 			continue
 		}
 		var text string
 		if json.Unmarshal(value, &text) != nil {
-			return ahpInvalid("configuration values must be strings")
+			return Command{}, ahpInvalid("configuration values must be strings")
 		}
 		switch key {
 		case "model":
@@ -411,10 +474,25 @@ func (a *ahpChat) setConfig(id string, values map[string]json.RawMessage) error 
 		case "mode":
 			command.Mode = &text
 		default:
-			return ahpInvalid("unsupported configuration: " + key)
+			return Command{}, ahpInvalid("unsupported configuration: " + key)
 		}
 	}
-	return a.command(command)
+	return command, nil
+}
+
+// ahpConfigValues checks config values and writes them as the host does, so
+// that they compare with the values it projects.
+func ahpConfigValues(values map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	if _, err := ahpSettings(values); err != nil {
+		return nil, err
+	}
+	written := map[string]json.RawMessage{}
+	for key, raw := range values {
+		var value any
+		_ = json.Unmarshal(raw, &value)
+		written[key], _ = json.Marshal(value)
+	}
+	return written, nil
 }
 
 // start runs a client's message as a turn of the idle chat.

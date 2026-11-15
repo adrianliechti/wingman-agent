@@ -28,7 +28,7 @@ func ahpTestServer(t *testing.T) (*Server, *backendRuntime, *protocolAgent, stri
 	t.Helper()
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, b, a := newProtocolServer(t)
-	s.ahpHost()
+	s.ahpProject()
 	s.mux.Get("/ahp", s.handleAHP)
 	s.handler = LocalHostOnly(http.NewCrossOriginProtection().Handler(s.checkInstance(s.mux)))
 	httpServer := httptest.NewServer(s)
@@ -312,7 +312,7 @@ func TestAHPPersistedSessionURI(t *testing.T) {
 	uri := "ahp-session:/durable"
 	chat := ahpCreate(t, client, uri)
 	other, _, agent := newProtocolServer(t)
-	h := other.ahpHost()
+	h := other.ahpProject()
 	a, ch, err := h.ensureSession(chat)
 	if err != nil {
 		t.Fatal(err)

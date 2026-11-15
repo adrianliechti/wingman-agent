@@ -92,6 +92,6 @@ func (b *backendRuntime) handleTurnUndo(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	b.flushFiles()
-	b.ahpHost().refreshChangesets()
+	b.ahpProject().refreshChangesets()
 	w.WriteHeader(http.StatusNoContent)
 }

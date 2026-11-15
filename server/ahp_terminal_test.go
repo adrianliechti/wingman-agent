@@ -204,7 +204,7 @@ func testAHPTerminalOwnerDisconnectHandsOver(t *testing.T, scheme string) {
 	}
 	defer sub.Close()
 	_ = owner.Shutdown(t.Context())
-	h := s.ahpHost()
+	h := s.ahpProject()
 	for gone := false; !gone; {
 		h.mu.Lock()
 		gone = true

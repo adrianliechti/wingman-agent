@@ -12,7 +12,7 @@ import (
 
 func copyResource(test *testing.T, app *Server, from, to string) error {
 	test.Helper()
-	h := app.ahpHost()
+	h := app.ahpProject()
 	raw, _ := json.Marshal(map[string]any{"channel": t.RootResourceURI, "source": h.fileURI(from), "destination": h.fileURI(to), "failIfExists": true})
 	_, err := h.resource(ahpRequest{Method: "resourceCopy", Params: raw})
 	return err

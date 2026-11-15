@@ -549,7 +549,7 @@ func (s *Server) handleTerminalStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid terminal URI", http.StatusBadRequest)
 		return
 	}
-	h := s.ahpHost()
+	h := s.ahpProject()
 	h.startTerminals()
 	h.mu.Lock()
 	terminal := h.terminals[uri]

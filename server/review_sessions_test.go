@@ -26,7 +26,7 @@ func reviewSessionsAttach(t *testing.T) (*Server, *backendRuntime, *protocolAgen
 	s, b, a := newProtocolServer(t)
 	c := b.session("saved")
 	c.load()
-	ch, err := s.ahpHost().attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	ch, err := s.ahpProject().attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +699,7 @@ func TestReviewSessionsCommandReceiptsAreBounded(t *testing.T) {
 func TestReviewSessionsConcurrentCreateSessionCreatesOnce(t *testing.T) {
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, _, agent := newProtocolServer(t)
-	h := s.ahpHost()
+	h := s.ahpProject()
 	raw, _ := json.Marshal(types.CreateSessionParams{Channel: "ahp-session:/contended", Provider: new("one")})
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -768,7 +768,7 @@ func TestReviewSessionsConcurrentReloadAttachesEachForkOnce(t *testing.T) {
 
 	other, _, _ := newProtocolServer(t)
 	other.backends["fork"] = &backendEntry{runtime: other.bindBackend("fork", agent)}
-	h := other.ahpHost()
+	h := other.ahpProject()
 	var wg sync.WaitGroup
 	for i := range 24 {
 		channel := chats[i%len(chats)]
@@ -971,7 +971,7 @@ func TestReviewSessionsForkCutsAtTheChosenTurnWhileTheSourceRuns(t *testing.T) {
 func TestReviewSessionsCorruptAliasFilesAreSkipped(t *testing.T) {
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, _, _ := newProtocolServer(t)
-	h := s.ahpHost()
+	h := s.ahpProject()
 	if err := h.saveAlias(ahpAlias{Resource: "ahp-session:/kept", Backend: "one", Session: "saved"}); err != nil {
 		t.Fatal(err)
 	}
@@ -992,7 +992,7 @@ func TestReviewSessionsCorruptAliasFilesAreSkipped(t *testing.T) {
 		}
 	}
 	other, _, _ := newProtocolServer(t)
-	restarted := other.ahpHost()
+	restarted := other.ahpProject()
 	restarted.mu.Lock()
 	aliases := len(restarted.aliases) + len(restarted.chatAliases)
 	restarted.mu.Unlock()

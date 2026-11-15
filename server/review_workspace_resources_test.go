@@ -23,7 +23,7 @@ func reviewWorkspaceResourceHost(t *testing.T) (*Server, *ahpProject, string) {
 	t.Helper()
 	root := t.TempDir()
 	app := newDebugTestServer(t, root)
-	h := app.ahpHost()
+	h := app.ahpProject()
 	t.Cleanup(h.close)
 	return app, h, root
 }

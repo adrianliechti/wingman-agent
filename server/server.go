@@ -180,7 +180,7 @@ func newServer(ctx context.Context, workDir string, opts *ServerOptions, host *a
 	if host != nil {
 		s.ahpOnce.Do(func() { s.ahp = host.attach(s) })
 	}
-	s.ahpHost()
+	s.ahpProject()
 
 	s.terminals = terminal.NewManager(ws.RootPath)
 
@@ -361,7 +361,7 @@ func serveLocal(handler http.Handler, listeners []net.Listener, done ...context.
 }
 
 func (s *Server) registerRoutes(r chi.Router) {
-	s.ahpHost()
+	s.ahpProject()
 	r.Get("/ahp", s.handleAHP)
 	r.Get("/lsp", s.handleLSP)
 	r.Get("/dap", s.handleDAP)

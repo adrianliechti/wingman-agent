@@ -69,7 +69,7 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 	s.workspace = workspace
 	workspace.WarmUp()
 	s.terminals = terminal.NewManager(workspace.RootPath)
-	s.ahpHost()
+	s.ahpProject()
 	agent.gate = make(chan struct{})
 	var release sync.Once
 	t.Cleanup(func() { release.Do(func() { close(agent.gate) }) })
@@ -89,7 +89,7 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 	})
 	// The browser names sessions by chat URI only.
 	nativeSession := func(r *http.Request) string {
-		_, ch, err := s.ahpHost().ensureSession(r.URL.Query().Get("session"))
+		_, ch, err := s.ahpProject().ensureSession(r.URL.Query().Get("session"))
 		if err != nil || ch == nil {
 			return ""
 		}

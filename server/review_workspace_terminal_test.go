@@ -52,7 +52,7 @@ type reviewWorkspaceTerminalView struct {
 }
 
 func reviewWorkspaceTerminalLookup(s *Server, uri string) (reviewWorkspaceTerminalView, bool) {
-	h := s.ahpHost()
+	h := s.ahpProject()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	a := h.terminals[uri]
@@ -114,7 +114,7 @@ func reviewWorkspaceTerminalDispatch(t *testing.T, client *ahp.Client, sub *ahp.
 
 func reviewWorkspaceTerminalClientGone(s *Server, id string) func() bool {
 	return func() bool {
-		h := s.ahpHost()
+		h := s.ahpProject()
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		for c := range h.clients {
@@ -173,7 +173,7 @@ func TestReviewWorkspaceTerminalExitWhileBehindKeepsFinalOutput(t *testing.T) {
 		_, ok := reviewWorkspaceTerminalLookup(s, uri)
 		return ok
 	})
-	h := s.ahpHost()
+	h := s.ahpProject()
 	h.mu.Lock() // a busy host: the terminal's output pump cannot publish
 	if err := os.WriteFile(gate, nil, 0600); err != nil {
 		h.mu.Unlock()
@@ -291,7 +291,7 @@ func testReviewWorkspaceTerminalOwnerReconnectAndTakeover(t *testing.T, scheme s
 	defer secondSub.Close()
 	_ = first.Shutdown(t.Context())
 	reviewWorkspaceTerminalEventually(t, "first socket closed", func() bool {
-		h := s.ahpHost()
+		h := s.ahpProject()
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		n := 0
@@ -506,7 +506,7 @@ func testReviewWorkspaceTerminalActionValidation(t *testing.T, scheme string) {
 		t.Fatalf("PTY size %dx%d", cols, rows)
 	}
 	expect(owner, ownerSub, "owner", title("renamed"), true)
-	h := s.ahpHost()
+	h := s.ahpProject()
 	h.mu.Lock()
 	catalogue := h.terminalsLocked()
 	h.mu.Unlock()
@@ -637,7 +637,7 @@ func TestReviewWorkspaceTerminalTrimKeepsValidUTF8(t *testing.T) {
 func TestReviewWorkspaceTerminalCatalogueRecoversFromOverflow(t *testing.T) {
 	s, endpoint := reviewWorkspaceTerminalServer(t)
 	_ = ahpTestClient(t, endpoint, "observer")
-	h := s.ahpHost()
+	h := s.ahpProject()
 	// Stall the catalogue pump so the manager drops it as a slow observer.
 	h.terminalMu.Lock()
 	for range 40 {

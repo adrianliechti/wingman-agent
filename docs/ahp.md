@@ -95,6 +95,18 @@ directory resolved; a directory reached through a link opens the project it
 leads to. `wingman server` is a host with one fixed project plus the web UI,
 `/lsp`, `/dap` and the REST routes, which all describe that project.
 
+In the server package, `ahp.go` handles connections and protocol dispatch;
+`ahp_projects.go` routes requests to projects and closes idle projects;
+`ahp_project.go` owns a project's attachment and live channels.
+`ahp_aliases.go` stores the mapping from protocol URIs to native sessions,
+while `ahp_sessions.go` creates, loads and lists those sessions. The singular
+`ahp_session.go` projects session state and its chats; native execution remains
+in `session.go` and `runtime.go`.
+
+Closing a project removes its live channels but keeps its saved aliases.
+Reopening waits for the previous instance to finish closing. Host shutdown
+rejects new project lookups and joins any startup already in progress.
+
 Channels a project names itself carry the project on a host for several:
 `ahp-changeset:/wingman/<project>/uncommitted`,
 `ahp-terminal:/wingman/<project>/<id>`, and a third path segment with the
@@ -235,10 +247,17 @@ Forks from an earlier turn copy the journal up to the next input, so the source
 may keep running; only the builtin agent supports this. The fork's turns keep
 what only the host knows of them: their timing, usage and messages as sent. `disposeChat` deletes a
 forked chat, and `disposeSession` deletes the session with all its chats. Each
-chat has its own queue, turns and settings: `chat/configChanged` changes one
-chat, while `session/configChanged` and the session's config values address the
-default chat. The default chat has an empty title, which inherits the
-session's, as in VS Code's host: 1.1 has no action that renames a chat.
+chat has its own queue, turns and settings. As the proposed per-chat
+configuration describes, a chat's config is an overlay on its session's values:
+what a client set on that chat, and any setting that differs from the session's,
+such as a model a message chose or an effort its backend adjusted.
+`session/configChanged` changes the session's values and every chat that does
+not set them; a new chat starts with the session's values and a fork with its
+source's. A replaced overlay returns the values it omits to the session's.
+The session's values start from its default chat and, like the values clients
+set, last for the host process. The default chat has an empty title, which
+inherits the session's, as in VS Code's host: 1.1 has no action that renames a
+chat.
 
 `chat/queuedMessagesReordered` moves the named pending messages to the head of
 the queue in the given order; the others keep theirs, and the host answers with

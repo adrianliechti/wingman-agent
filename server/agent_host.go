@@ -9,12 +9,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/adrianliechti/wingman-agent/pkg/layout"
 )
 
 type HostOptions struct {
@@ -89,27 +86,6 @@ func NewHost(ctx context.Context, opts *HostOptions) (*Host, error) {
 	return h, nil
 }
 
-func (h *ahpHost) loadSavedSessions() {
-	dir, err := layout.WingmanPath("ahp")
-	if err != nil {
-		return
-	}
-	projects, _ := os.ReadDir(dir)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, project := range projects {
-		if !project.IsDir() {
-			continue
-		}
-		for _, alias := range readAliases(filepath.Join(dir, project.Name())) {
-			// Sessions saved before hosts served several projects name none.
-			if alias.Project != "" && h.serves(alias.Project) {
-				h.rememberAliasLocked(alias)
-			}
-		}
-	}
-}
-
 func (h *Host) handleAHP(w http.ResponseWriter, r *http.Request) {
 	if h.token != "" && subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("tkn")), []byte(h.token)) != 1 {
 		http.Error(w, "connection token required", http.StatusUnauthorized)
@@ -138,9 +114,12 @@ func (h *Host) Run(ctx context.Context, port int) error {
 func (h *Host) Close() {
 	h.closeOnce.Do(func() {
 		h.cancel()
-		h.background.Wait()
-		// A project still opening closes itself once it finds the host closed.
 		h.ahp.close()
+		h.background.Wait()
+		// Join startup and idle teardown before returning ownership of resources.
+		// A project still opening sees closed and disposes itself under this lock.
+		h.ahp.projectMu.Lock()
+		defer h.ahp.projectMu.Unlock()
 		for _, p := range h.ahp.loaded() {
 			p.server.Close()
 		}
