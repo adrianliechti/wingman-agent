@@ -58,9 +58,10 @@ same-origin Web UI.
 
 ## One host for every project
 
-`wingman server` serves the project it was started in. `wingman host` serves
-any project: a session names its working directory and the host opens that
-project when the session is created or reopened.
+`wingman host` serves any project: a session names its working directory and
+the host opens that project when the session is created or reopened.
+`wingman server` is the same host, rooted at the directory it was started in,
+with the web UI for that directory's project.
 
 ```bash
 wingman host --root ~/Projects --token "$(openssl rand -hex 16)"
@@ -97,8 +98,9 @@ namespace. A project owns its agents, sessions, terminals, file watches and
 changesets, and is the directory its sessions work in. Sessions carry it as
 the protocol's `project` (`uri` and `displayName`), with links in the
 directory resolved; a directory reached through a link opens the project it
-leads to. `wingman server` is a host with one fixed project plus the web UI,
-`/lsp`, `/dap` and the REST routes, which all describe that project.
+leads to. On `wingman server` the web UI, `/lsp`, `/dap` and the REST routes
+describe the project of its directory, which stays open; projects below it
+open on demand as on any host, and the REST routes refuse their chats.
 
 In the server package, `ahp.go` handles connections and protocol dispatch;
 `ahp_projects.go` routes requests to projects and closes idle projects;
@@ -112,12 +114,14 @@ Closing a project removes its live channels but keeps its saved aliases.
 Reopening waits for the previous instance to finish closing. Host shutdown
 rejects new project lookups and joins any startup already in progress.
 
-Channels a project names itself carry the project on a host for several:
+Channels a project names itself carry the project:
 `ahp-changeset:/wingman/<project>/uncommitted`,
 `ahp-terminal:/wingman/<project>/<id>`, and a third path segment with the
 project directory on unaliased session URIs. Clients read them from session
-and root state. The `wingman.workspace` root metadata and the
-`x-wingman/workspaceChanged` notification exist only on `wingman server`.
+and root state; the web UI takes its project's namespace (`wingman/<project>`)
+from `/api/workspace`. The `wingman.workspace` root metadata and the
+`x-wingman/workspaceChanged` notification exist only on `wingman server`, for
+the web UI's project.
 
 ## Shared host and browser architecture
 
@@ -202,8 +206,8 @@ Status and insights have workspace endpoints; stage, unstage, and discard
 operations use AHP.
 
 Three shared AHP channels describe workspace changes:
-`ahp-changeset:/wingman/uncommitted`, `ahp-changeset:/wingman/staged`, and
-`ahp-changeset:/wingman/unstaged`. The browser subscribes to standard
+`ahp-changeset:/<namespace>/uncommitted`, `ahp-changeset:/<namespace>/staged`,
+and `ahp-changeset:/<namespace>/unstaged`, in the project's namespace. The browser subscribes to standard
 `ChangesetState`, applies the official reducer, and retrieves immutable
 before/after `ContentRef`s through `resourceRead` and computes diffs from them.
 A rename has different before/after URIs; binary content has the
@@ -240,10 +244,12 @@ not survive a server restart. Session and chat URI mappings are saved under
 
 Sessions and chats are identified only by their AHP URIs. A native session that
 was never given an alias is reachable at
-`ahp-session:/wingman/<base64url(backend)>/<base64url(id)>`, with its default
-chat at the same path under `ahp-chat:`. When the session lives under an alias,
-subscribing to that canonical URI fails with InvalidParams and error data
-`{ "resource": "<alias>" }`.
+`ahp-session:/wingman/<base64url(backend)>/<base64url(id)>/<base64url(project)>`,
+with its default chat at the same path under `ahp-chat:`. When the session
+lives under an alias, subscribing to that canonical URI fails with
+InvalidParams and error data `{ "resource": "<alias>" }`. The same redirect
+answers the earlier form without the project segment on `wingman server`,
+pointing at the web UI's project.
 
 Each chat projects one native session. `createChat` with
 `source: { kind: "fork", chat, turnId }` forks a completed turn of a chat in the
@@ -341,7 +347,7 @@ Wingman accepts client-chosen schemes, including VS Code's `agenthost-terminal`
 and custom schemes such as `x-my-terminal`. URIs must have the form
 `<scheme>:/<id>`; other `ahp-*` namespaces remain reserved for protocol channels.
 The original URI is preserved in the catalogue, subscriptions, actions, and
-reconnection. Wingman-created terminals use `ahp-terminal:/wingman/<id>`.
+reconnection. Wingman-created terminals use `ahp-terminal:/<namespace>/<id>`.
 
 Terminals support discovery, creation, ownership, input, resize, titles,
 clear, disposal, reconnect scrollback, and retained exit status. A disconnected

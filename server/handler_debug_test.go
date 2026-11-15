@@ -537,8 +537,8 @@ func newDebugTestServer(t *testing.T, root string) *Server {
 	}
 	workspace.WarmUp()
 	t.Cleanup(workspace.Close)
-	server := &Server{workspace: workspace, ctx: context.Background()}
-	server.ahp = newAHPHost().attach(server)
+	server := &Server{workspace: workspace, ctx: context.Background(), scope: workspaceScope(root)}
+	server.ahp = webProject(server, root)
 	router := chi.NewRouter()
 	server.registerRoutes(router)
 	server.mux = router

@@ -121,7 +121,7 @@ func (h *Host) Close() {
 		h.ahp.projectMu.Lock()
 		defer h.ahp.projectMu.Unlock()
 		for _, p := range h.ahp.loaded() {
-			p.server.Close()
+			p.server.close()
 		}
 	})
 }

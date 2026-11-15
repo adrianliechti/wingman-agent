@@ -114,11 +114,23 @@ func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Cont
 	}, nil
 }
 
+// webProject makes a test server the project its own host's web UI shows.
+func webProject(s *Server, dir string) *ahpProject {
+	h := newAHPHost()
+	p := h.attach(s)
+	p.dir = canonicalPath(dir)
+	h.show(p)
+	return p
+}
+
+// A restarted protocol server finds its sessions under the same project.
+const protocolProject = "/workspace"
+
 func newProtocolServer(t *testing.T) (*Server, *backendRuntime, *protocolAgent) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, backends: map[string]*backendEntry{}}
-	s.ahp = newAHPHost().attach(s)
+	s := &Server{ctx: ctx, cancel: cancel, scope: workspaceScope(protocolProject), backends: map[string]*backendEntry{}}
+	s.ahp = webProject(s, protocolProject)
 	a := &protocolAgent{}
 	b := s.bindBackend("one", a)
 	s.backends[b.id] = &backendEntry{runtime: b}

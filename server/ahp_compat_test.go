@@ -74,7 +74,7 @@ func TestAHPSnapshotPrecedesConcurrentUpdates(test *testing.T) {
 	c := b.session("saved")
 	c.load()
 	h := s.ahp
-	a, _ := h.attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	a, _ := h.attachSession(c, h.canonicalURI("one", "saved"), "Test", time.Now())
 	entry := turnQueueEntry(code.TurnInput{ID: "turn", Content: []harness.Content{{Text: "hello"}}}, code.TurnInputActive, 0)
 	c.apply(Frame{Type: EvtTurnInput, Input: &entry})
 	for range 50 {
@@ -114,7 +114,7 @@ func TestAHPReasoningTimingEndsAtNextPartAndSurvivesCompletion(test *testing.T) 
 	c := b.session("saved")
 	c.load()
 	h := s.ahp
-	a, _ := h.attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	a, _ := h.attachSession(c, h.canonicalURI("one", "saved"), "Test", time.Now())
 	reasoning := func(parts []t.ResponsePart) t.ReasoningResponsePart {
 		test.Helper()
 		h.mu.Lock()
@@ -155,7 +155,7 @@ func TestAHPPendingMessagesPreserveKindsAndLegacySnapshots(test *testing.T) {
 	c := b.session("saved")
 	c.load()
 	h := s.ahp
-	a, _ := h.attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	a, _ := h.attachSession(c, h.canonicalURI("one", "saved"), "Test", time.Now())
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.state.PendingInputs = []TurnQueueEntry{{ID: "queued", Text: "queued", State: "queued", Intent: "follow_up"}, {ID: "steer-one", Text: "one", State: "queued", Intent: "steer"}, {ID: "steer-two", Text: "two", State: "queued", Intent: "steer"}}
@@ -201,7 +201,7 @@ func TestAHPToolCallsReduceToTheirProjection(test *testing.T) {
 	s, b, _ := newProtocolServer(test)
 	c := b.session("saved")
 	c.load()
-	a, _ := s.ahp.attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	a, _ := s.ahp.attachSession(c, s.ahp.canonicalURI("one", "saved"), "Test", time.Now())
 	check := func(step string) {
 		test.Helper()
 		c.mu.Lock()

@@ -26,7 +26,7 @@ func reviewSessionsAttach(t *testing.T) (*Server, *backendRuntime, *protocolAgen
 	s, b, a := newProtocolServer(t)
 	c := b.session("saved")
 	c.load()
-	ch, err := s.ahp.attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	ch, err := s.ahp.attachSession(c, s.ahp.canonicalURI("one", "saved"), "Test", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,11 +261,11 @@ func TestReviewSessionsLostCancelDoesNotStopTheNextTurn(t *testing.T) {
 
 // Bug: a turnStarted action on an idle chat whose recovered queue is paused resumes that queue and runs the recovered message first; the requested turn is queued and its acknowledgement is withheld until it eventually starts.
 func TestReviewSessionsTurnStartedIsNotQueuedBehindARecoveredQueue(t *testing.T) {
-	_, _, agent, endpoint := ahpTestServer(t)
+	s, _, agent, endpoint := ahpTestServer(t)
 	agent.gate = make(chan struct{})
 	agent.queue = code.TurnQueueState{Inputs: []code.TurnInput{{ID: "recovered", Content: []harness.Content{{Text: "from before the restart"}}}}}
 	client := ahpTestClient(t, endpoint, "ide")
-	chat := ahpChatURI(canonicalAHPURI("one", "saved"))
+	chat := ahpChatURI(s.ahp.canonicalURI("one", "saved"))
 	state, sub := ahpSubscribeChat(t, client, chat)
 	if state.ActiveTurn != nil || len(state.QueuedMessages) != 1 {
 		t.Fatalf("recovered queue = %+v", state.QueuedMessages)
@@ -433,7 +433,7 @@ func TestReviewSessionsDisposeSessionForgetsItsAlias(t *testing.T) {
 func TestReviewSessionsCreateSessionCannotClaimACanonicalURI(t *testing.T) {
 	s, _, _, endpoint := ahpTestServer(t)
 	client := ahpTestClient(t, endpoint, "squatter")
-	existing := canonicalAHPURI("one", "saved")
+	existing := s.ahp.canonicalURI("one", "saved")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	_ = client.Request(ctx, "createSession", types.CreateSessionParams{Channel: existing, Provider: new("one")}, nil)
@@ -465,7 +465,7 @@ func TestReviewSessionsCanonicalForkURIRedirectsToTheForkChat(t *testing.T) {
 	if err := client.Request(ctx, "createChat", types.CreateChatParams{Channel: session, Chat: "ahp-chat:/branch", Source: &types.ChatSource{Value: &types.ForkChatSource{Kind: types.ChatSourceKindFork, Chat: main, TurnId: "turn-1"}}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := client.Subscribe(ctx, ahpChatURI(canonicalAHPURI("fork", "fork-1")))
+	_, _, err := client.Subscribe(ctx, ahpChatURI(s.ahp.canonicalURI("fork", "fork-1")))
 	var rpc *ahp.RPCError
 	var data struct {
 		Resource string `json:"resource"`

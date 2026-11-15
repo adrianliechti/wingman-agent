@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { InMemoryTransport } from "@microsoft/agent-host-protocol/client";
 import { AHPConnection } from "../src/state/ahpConnection.ts";
-import {
-	ChangesetClient,
-	workspaceChangeset,
-} from "../src/state/changesetClient.ts";
+import { ChangesetClient } from "../src/state/changesetClient.ts";
 
 const reviewScope = { workspaceId: "workspace", instanceId: "instance" };
+const reviewNamespace = "wingman/0123456789abcdef";
+const workspaceChangeset = (layer = "uncommitted") =>
+	`ahp-changeset:/${reviewNamespace}/${layer}`;
 const reviewRoot = "file:///work%20dir";
 const reviewSide = (
 	path: string,
@@ -89,7 +89,7 @@ async function reviewChangesets(
 	t.after(() => ahp.stop());
 	ahp.start();
 	await ahp.ready();
-	const changesets = new ChangesetClient(ahp);
+	const changesets = new ChangesetClient(ahp, reviewNamespace);
 	t.after(() => changesets.close());
 	const sent = (method: string) => requests.filter((m) => m.method === method);
 	return { changesets, ahp, sent };
@@ -153,6 +153,7 @@ test("changeset files become git diffs: added, deleted, renamed, binary and unre
 			"ahp-content:/locked.txt:1": { error: -32603 },
 		},
 	);
+	assert.equal(changesets.layer(), channel);
 	const diffs = await changesets.files(channel);
 	assert.deepEqual(
 		diffs.map((diff) => [diff.path, diff.original_path, diff.status]),

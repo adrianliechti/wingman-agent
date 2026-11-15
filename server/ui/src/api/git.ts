@@ -2,7 +2,6 @@ import { queryOptions } from "@tanstack/react-query";
 import { queryKeys } from "./query.ts";
 import { fetchJSON, APIError } from "./http.ts";
 import { workspaceClient } from "../state/workspaceClient.ts";
-import { workspaceChangeset } from "../state/changesetClient.ts";
 import type {
 	CompareMode,
 	GitBranches,
@@ -46,14 +45,14 @@ export async function runGitCommand(
 		case "stage":
 		case "stage_all":
 			await client.changesets.operate(
-				workspaceChangeset("unstaged"),
+				client.changesets.layer("unstaged"),
 				"stage",
 				command.type === "stage" ? command.paths : undefined,
 			);
 			return;
 		case "unstage":
 			await client.changesets.operate(
-				workspaceChangeset("staged"),
+				client.changesets.layer("staged"),
 				"unstage",
 				command.paths,
 			);

@@ -106,7 +106,7 @@ func TestReviewWorkspaceEntryPointsRejectHostileHost(t *testing.T) {
 
 func TestReviewWorkspaceProtectedRoutesCheckInstance(t *testing.T) {
 	app, _ := reviewWorkspaceApp(t, map[string]string{"a.txt": "a", "index.html": "<p>x</p>"})
-	chat := chatAPIPath("wingman", "missing")
+	chat := chatAPIPath(app, "wingman", "missing")
 	routes := []string{
 		"GET /lsp", "GET /dap", "GET /content?path=a.txt", "GET /preview?path=index.html",
 		"GET /api/workspace/git", "GET /api/workspace/files?query=a", "POST /api/workspace/search",
@@ -467,13 +467,13 @@ func TestReviewWorkspaceChatRoutesResolveOnlyKnownChats(t *testing.T) {
 		res.Body.Close()
 		return res.StatusCode
 	}
-	if code := get(chatAPIPath("wingman", id) + "/tasks"); code != http.StatusOK {
+	if code := get(chatAPIPath(app, "wingman", id) + "/tasks"); code != http.StatusOK {
 		t.Fatalf("known chat: %d", code)
 	}
-	session := "/api/v2/chats/" + url.PathEscape(canonicalAHPURI("wingman", id))
+	session := "/api/v2/chats/" + url.PathEscape(app.ahp.canonicalURI("wingman", id))
 	for path, want := range map[string]int{
-		chatAPIPath("wingman", "missing") + "/tasks":          http.StatusNotFound,
-		chatAPIPath("review-unknown-backend", "x") + "/tasks": http.StatusNotFound,
+		chatAPIPath(app, "wingman", "missing") + "/tasks":          http.StatusNotFound,
+		chatAPIPath(app, "review-unknown-backend", "x") + "/tasks": http.StatusNotFound,
 		session + "/tasks": http.StatusNotFound,
 		"/api/v2/chats/" + url.PathEscape("ahp-chat:/wingman/!!/!!") + "/tasks":                      http.StatusNotFound,
 		"/api/v2/chats/" + url.PathEscape("file:///etc/passwd") + "/tasks":                           http.StatusNotFound,
@@ -492,27 +492,27 @@ func TestReviewWorkspaceChatRoutesResolveOnlyKnownChats(t *testing.T) {
 	if kept || started {
 		t.Fatalf("lookups left state behind: controller=%v backend=%v", kept, started)
 	}
-	if code := get(chatAPIPath("wingman", id) + "/tasks"); code != http.StatusOK {
+	if code := get(chatAPIPath(app, "wingman", id) + "/tasks"); code != http.StatusOK {
 		t.Fatalf("known chat after probes: %d", code)
 	}
 	var wg sync.WaitGroup
 	for range 16 {
 		wg.Go(func() {
-			if code := get(chatAPIPath("wingman", id) + "/reviews"); code != http.StatusOK {
+			if code := get(chatAPIPath(app, "wingman", id) + "/reviews"); code != http.StatusOK {
 				t.Errorf("concurrent reviews: %d", code)
 			}
 		})
 	}
 	wg.Wait()
 	reviewWorkspaceDeleteChat(t, app, id)
-	if code := get(chatAPIPath("wingman", id) + "/tasks"); code != http.StatusNotFound {
+	if code := get(chatAPIPath(app, "wingman", id) + "/tasks"); code != http.StatusNotFound {
 		t.Fatalf("deleted chat: %d", code)
 	}
 }
 
 func reviewWorkspaceDeleteChat(t *testing.T, app *Server, id string) {
 	t.Helper()
-	_, ch, err := app.ahp.ensureSession(ahpChatURI(canonicalAHPURI("wingman", id)))
+	_, ch, err := app.ahp.ensureSession(ahpChatURI(app.ahp.canonicalURI("wingman", id)))
 	if err != nil {
 		t.Fatal(err)
 	}

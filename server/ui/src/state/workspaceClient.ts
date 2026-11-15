@@ -1,5 +1,5 @@
 import type { WorkspaceInfo } from "../api/workspace.ts";
-import { ChangesetClient, workspaceChangeset } from "./changesetClient.ts";
+import { ChangesetClient } from "./changesetClient.ts";
 import { FileClient } from "./fileClient.ts";
 import { DAPClient } from "./dapClient.ts";
 import { LSPClient } from "./lspClient.ts";
@@ -46,12 +46,21 @@ import {
 	type WorkspaceScope,
 } from "./sessionStore.ts";
 
-export type Bootstrap = WorkspaceScope & { protocol: number };
+/** The namespace is where the host names this project's channels. */
+export type Bootstrap = WorkspaceScope & {
+	protocol: number;
+	namespace: string;
+};
 export async function fetchWorkspace(): Promise<WorkspaceInfo & Bootstrap> {
 	const response = await fetch("/api/workspace");
 	if (!response.ok) throw new APIError(await response.text(), response.status);
 	const scope = (await response.json()) as WorkspaceInfo;
-	if (scope.protocol !== 2 || !scope.instanceId || !scope.workspaceId)
+	if (
+		scope.protocol !== 2 ||
+		!scope.instanceId ||
+		!scope.workspaceId ||
+		!scope.namespace
+	)
 		throw new Error("Unsupported workspace protocol. Reload the application.");
 	return scope;
 }
@@ -109,7 +118,7 @@ export class WorkspaceClient {
 		this.lsp = new LSPClient(scope.instanceId);
 		this.dap = new DAPClient(scope.instanceId);
 		this.files = new FileClient(ahp, this.lsp);
-		this.changesets = new ChangesetClient(ahp);
+		this.changesets = new ChangesetClient(ahp, scope.namespace);
 		this.scope = scope;
 		this.ahp = ahp;
 		this.http = createWorkspaceHTTP(scope.instanceId);
@@ -148,7 +157,7 @@ export class WorkspaceClient {
 	start() {
 		this.ahp.start();
 		// Changeset actions are the client's only signal that workspace changes moved.
-		this.changesets.watch(workspaceChangeset());
+		this.changesets.watch(this.changesets.layer());
 	}
 	stop() {
 		this.changesets.close();

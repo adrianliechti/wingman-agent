@@ -13,7 +13,9 @@ import { ActionType } from "../state/ahpValues.ts";
 
 // Other clients name their terminals with their own schemes, such as VS Code's agenthost-terminal.
 export const terminalURI = (id: string) =>
-	/^[a-z][a-z0-9+.-]*:\//i.test(id) ? id : `ahp-terminal:/wingman/${id}`;
+	/^[a-z][a-z0-9+.-]*:\//i.test(id)
+		? id
+		: `ahp-terminal:/${workspaceClient().scope.namespace}/${id}`;
 export function terminalEntry(
 	uri: string,
 	state: TerminalInfo | TerminalState,

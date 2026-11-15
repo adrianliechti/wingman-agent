@@ -61,6 +61,7 @@ type DiagnosticSeverity = protocol.DiagnosticSeverity
 type String = protocol.String
 type MarkupContent = protocol.MarkupContent
 type Hover = protocol.Hover
+
 //lint:ignore SA1019 servers still answer hovers with marked strings
 type MarkedStringWithLanguage = protocol.MarkedStringWithLanguage
 type MarkedStringSlice = protocol.MarkedStringSlice

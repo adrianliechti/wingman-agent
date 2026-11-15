@@ -30,15 +30,10 @@ type ahpProject struct {
 
 // attach makes a project and its saved sessions reachable through the host.
 func (h *ahpHost) attach(s *Server) *ahpProject {
-	p := &ahpProject{ahpHost: h, server: s, terminals: map[string]*ahpTerminal{}, namespace: "wingman", used: time.Now()}
+	// Several projects share the host's channel names.
+	p := &ahpProject{ahpHost: h, server: s, terminals: map[string]*ahpTerminal{}, namespace: "wingman/" + s.scope.WorkspaceID[:16], used: time.Now()}
 	if s.workspace != nil {
 		p.dir = canonicalPath(s.workspace.RootPath)
-	}
-	if h.open == nil {
-		h.pinned = p
-	} else {
-		// Several projects share the host's channel names.
-		p.namespace += "/" + s.scope.WorkspaceID[:16]
 	}
 	var saved []ahpAlias
 	if dir, err := p.aliasDirectory(); err == nil {
@@ -53,14 +48,21 @@ func (h *ahpHost) attach(s *Server) *ahpProject {
 	return p
 }
 
-// Only the clients of a workspace server follow one project's files.
+// show makes a project the one the host's web UI shows.
+func (h *ahpHost) show(p *ahpProject) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.web = p
+	h.projects[p.dir] = p
+}
+
+// Only the web UI follows a project's files.
 func (p *ahpProject) workspaceChanged(f Frame) {
-	if p.pinned == nil {
-		return
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.notifyRoot("x-wingman/workspaceChanged", map[string]any{"channel": t.RootResourceURI, "event": f})
+	if p.ahpHost.web == p {
+		p.notifyRoot("x-wingman/workspaceChanged", map[string]any{"channel": t.RootResourceURI, "event": f})
+	}
 }
 
 // stop ends the project's own goroutines, which follow its server's context.
@@ -94,14 +96,11 @@ func (p *ahpProject) detachLocked() {
 	}
 }
 
-// detach ends the project. The host of a workspace server ends with it.
+// detach ends the project.
 func (p *ahpProject) detach() {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.detachLocked()
-	p.mu.Unlock()
-	if p.pinned != nil {
-		p.ahpHost.close()
-	}
 }
 
 // info is the spec's description of the project, which its sessions carry.

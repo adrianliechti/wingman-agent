@@ -165,10 +165,10 @@ func TestAHPForkChatsLiveInTheirSession(t *testing.T) {
 }
 
 func TestAHPCanonicalURIRedirectsToAlias(t *testing.T) {
-	_, _, _, endpoint := ahpTestServer(t)
+	s, _, _, endpoint := ahpTestServer(t)
 	client := ahpTestClient(t, endpoint, "redirect")
 	ahpCreate(t, client, "ahp-session:/named")
-	_, _, err := client.Subscribe(t.Context(), canonicalAHPURI("one", "session-1"))
+	_, _, err := client.Subscribe(t.Context(), s.ahp.canonicalURI("one", "session-1"))
 	var rpc *ahp.RPCError
 	var data struct {
 		Resource string `json:"resource"`

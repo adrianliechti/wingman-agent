@@ -66,6 +66,12 @@ test("legacy session keys migrate to the canonical chat URI", () => {
 		canonicalBackend(uri.replace("ahp-chat:", "ahp-session:")),
 		"claude-code",
 	);
+	// The host names the project of a native session in a third segment.
+	assert.equal(
+		canonicalBackend(`${uri}/${Buffer.from("/work").toString("base64url")}`),
+		"claude-code",
+	);
+	assert.equal(canonicalBackend(`${uri}/a/b`), undefined);
 	assert.equal(canonicalBackend("ahp-chat:/uuid"), undefined);
 	assert.equal(
 		migrateSessionKey(JSON.stringify(["claude-code", "sess/ü?"])),

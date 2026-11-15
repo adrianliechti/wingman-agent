@@ -39,7 +39,7 @@ type ahpHost struct {
 	chatAliases map[string]ahpAlias // forked chats by chat URI
 	versions    map[string]ahpClientVersion
 	closed      bool
-	pinned      *ahpProject // the one project of a workspace server; otherwise projects open on demand
+	web         *ahpProject // the project the host's web UI shows; it stays open and hears of its files
 	projects    map[string]*ahpProject
 	open        func(dir string) (*Server, error)
 	projectMu   sync.Mutex // serializes project startup and teardown, outside mu
@@ -519,7 +519,7 @@ func (c *ahpConnection) subscribeRequest(req ahpRequest) error {
 	}
 	switch req.Method {
 	case "initialize":
-		dir := h.defaultDirectory()
+		dir := h.defaultDirectoryLocked()
 		pathStyle := t.PathStylePosix
 		if runtime.GOOS == "windows" {
 			pathStyle = t.PathStyleWindows
@@ -556,12 +556,16 @@ func (h *ahpHost) pruneVersionsLocked() {
 
 // Models are known only for agents that a project has started.
 func (h *ahpHost) root() (t.RootState, error) {
-	projects := h.loaded()
+	h.mu.Lock()
+	projects, web := h.projectsLocked(), h.web
+	h.mu.Unlock()
 	for _, p := range projects {
 		p.startTerminals()
 	}
-	available := []AgentEntry{{ID: code.BuiltinAgentName, Name: "Wingman"}}
-	if h.pinned == nil || h.pinned.server.workspace != nil {
+	// A project without a workspace (tests) offers only the agents it runs.
+	var available []AgentEntry
+	if web == nil || web.server.workspace != nil {
+		available = append(available, AgentEntry{ID: code.BuiltinAgentName, Name: "Wingman"})
 		external, err := agents.Available()
 		if err != nil {
 			return t.RootState{}, err
@@ -569,8 +573,6 @@ func (h *ahpHost) root() (t.RootState, error) {
 		for _, a := range external {
 			available = append(available, AgentEntry{ID: a.ID, Name: a.Name})
 		}
-	} else {
-		available = nil
 	}
 	// Running backends are listed even when no registration names them.
 	for _, p := range projects {
@@ -590,8 +592,8 @@ func (h *ahpHost) root() (t.RootState, error) {
 	}
 	resources, _ := json.Marshal(map[string]any{"platform": platform, "architecture": runtime.GOARCH, "cpuCount": runtime.NumCPU()})
 	root := t.RootState{Agents: []t.AgentInfo{}, Meta: map[string]json.RawMessage{"vscode.agentHost.resources": resources}}
-	if h.pinned != nil {
-		scope := h.pinned.server.scope
+	if web != nil {
+		scope := web.server.scope
 		workspace, _ := json.Marshal(map[string]any{"workspaceId": scope.WorkspaceID, "instanceId": scope.InstanceID})
 		root.Meta["wingman.workspace"] = workspace
 	}
@@ -624,10 +626,11 @@ func startedBackend(projects []*ahpProject, provider string) *backendRuntime {
 	return nil
 }
 
-// defaultDirectory is where a client starts choosing a working directory.
-func (h *ahpHost) defaultDirectory() string {
-	if h.pinned != nil {
-		return h.pinned.directoryURI()
+// defaultDirectoryLocked is where a client starts choosing a working directory.
+// Caller holds h.mu.
+func (h *ahpHost) defaultDirectoryLocked() string {
+	if h.web != nil {
+		return h.web.directoryURI()
 	}
 	return fileuri.FromPath(h.roots[0])
 }

@@ -69,7 +69,7 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 	s.workspace = workspace
 	workspace.WarmUp()
 	s.terminals = terminal.NewManager(workspace.RootPath)
-	s.ahp = newAHPHost().attach(s) // the project of the workspace set above
+	s.ahp = webProject(s, workspace.RootPath) // the project of the workspace set above
 	agent.gate = make(chan struct{})
 	var release sync.Once
 	t.Cleanup(func() { release.Do(func() { close(agent.gate) }) })
@@ -113,7 +113,7 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 	})
 	server := httptest.NewServer(s)
 	defer server.Close()
-	scope, _ := json.Marshal(map[string]any{"workspaceId": s.scope.WorkspaceID, "instanceId": s.scope.InstanceID, "protocol": 2, "backends": []map[string]string{{"id": "one", "name": "Test"}}})
+	scope, _ := json.Marshal(map[string]any{"workspaceId": s.scope.WorkspaceID, "instanceId": s.scope.InstanceID, "namespace": s.ahp.namespace, "protocol": 2, "backends": []map[string]string{{"id": "one", "name": "Test"}}})
 	cmd := exec.CommandContext(t.Context(), node, "--test", "test/ahp.integration.ts")
 	cmd.Dir = "ui"
 	cmd.Env = append(os.Environ(), "AHP_TEST_URL=ws"+strings.TrimPrefix(server.URL, "http")+"/ahp", "AHP_TEST_HTTP="+server.URL, "AHP_TEST_SCOPE="+string(scope), "AHP_TEST_ROOT="+filepath.Clean(workspace.RootPath))

@@ -631,7 +631,7 @@ test(
 				await writeFile(`${root}/tracked.txt`, "updated\n");
 				const changes = await observe(
 					vscode,
-					"ahp-changeset:/wingman/uncommitted",
+					browser.changesets.layer(),
 					changesetReducer,
 				);
 				try {
@@ -669,15 +669,15 @@ test(
 				assert.equal(content.data, "hello");
 				await assert.rejects(
 					vscode.resourceRead({ uri: "file:///etc/passwd" }),
-					/outside/,
+					/does not serve/,
 				);
 			},
 		);
 		await t.test(
 			"workspace Git status and AHP layer operations share authoritative changesets",
 			async () => {
-				const stagedURI = "ahp-changeset:/wingman/staged";
-				const unstagedURI = "ahp-changeset:/wingman/unstaged";
+				const stagedURI = browser.changesets.layer("staged");
+				const unstagedURI = browser.changesets.layer("unstaged");
 				const staged = await observe(vscode, stagedURI, changesetReducer);
 				const unstaged = await observe(vscode, unstagedURI, changesetReducer);
 				const tracked = (state: any) =>

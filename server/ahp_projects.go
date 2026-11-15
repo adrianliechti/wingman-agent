@@ -51,9 +51,6 @@ func projectInfo(dir string) *t.ProjectInfo {
 
 // Caller holds h.mu.
 func (h *ahpHost) projectsLocked() []*ahpProject {
-	if h.pinned != nil {
-		return []*ahpProject{h.pinned}
-	}
 	projects := slices.Collect(maps.Values(h.projects))
 	slices.SortFunc(projects, func(a, b *ahpProject) int { return strings.Compare(a.dir, b.dir) })
 	return projects
@@ -108,7 +105,7 @@ func (h *ahpHost) projectAt(dir string) (*ahpProject, error) {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
-		s.Close()
+		s.close()
 		return nil, errHostClosed
 	}
 	h.projects[dir] = s.ahp
@@ -120,9 +117,6 @@ func (h *ahpHost) projectAt(dir string) (*ahpProject, error) {
 
 // projectOf finds the open project a path lies in.
 func (h *ahpHost) projectOf(path string) *ahpProject {
-	if h.pinned != nil {
-		return h.pinned
-	}
 	path = canonicalPath(path)
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -138,12 +132,19 @@ func (h *ahpHost) projectOf(path string) *ahpProject {
 	return found
 }
 
+// webProject is the project of the host's web UI, whose clients need not name its directory.
+func (h *ahpHost) webProject() *ahpProject {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.web
+}
+
 // workingProject opens the project of a session's working directory: the default one if the client names none.
 func (h *ahpHost) workingProject(uri *string) (*ahpProject, error) {
-	if h.pinned != nil {
-		return h.pinned, nil
-	}
 	if uri == nil {
+		if p := h.webProject(); p != nil {
+			return p, nil
+		}
 		return h.projectAt(h.roots[0])
 	}
 	path, err := ahpFilePath(*uri)
@@ -155,10 +156,10 @@ func (h *ahpHost) workingProject(uri *string) (*ahpProject, error) {
 
 // loadedProject names the open project a directory belongs to.
 func (h *ahpHost) loadedProject(uri *string) (*ahpProject, error) {
-	if h.pinned != nil {
-		return h.pinned, nil
-	}
 	if uri == nil {
+		if p := h.webProject(); p != nil {
+			return p, nil
+		}
 		return nil, ahpInvalid("a directory is required")
 	}
 	path, err := ahpFilePath(*uri)
@@ -173,9 +174,6 @@ func (h *ahpHost) loadedProject(uri *string) (*ahpProject, error) {
 
 // sessionProject opens the project a session was saved in.
 func (h *ahpHost) sessionProject(resource string) (*ahpProject, error) {
-	if h.pinned != nil {
-		return h.pinned, nil
-	}
 	if !validAHPSessionURI(resource) {
 		return nil, ahpInvalid("unsupported channel")
 	}
@@ -189,7 +187,11 @@ func (h *ahpHost) sessionProject(resource string) (*ahpProject, error) {
 			return nil, err
 		}
 	}
+	// Canonical URIs from before hosts served several projects are the web UI's.
 	if dir == "" {
+		if p := h.webProject(); p != nil {
+			return p, nil
+		}
 		return nil, &ahpRPCError{Code: int(t.ErrorCodeSessionNotFound), Message: "unknown session"}
 	}
 	return h.projectAt(dir)
@@ -239,13 +241,13 @@ func (h *ahpHost) closeIdle(idle time.Duration) {
 		}
 		h.mu.Lock()
 		// Any request that could start work reaches the project first, which counts as use.
-		if h.closed || h.projects[p.dir] != p || time.Since(p.used) < idle || h.subscribedLocked(p) {
+		if h.closed || h.projects[p.dir] != p || p == h.web || time.Since(p.used) < idle || h.subscribedLocked(p) {
 			h.mu.Unlock()
 			continue
 		}
 		p.detachLocked()
 		h.mu.Unlock()
-		p.server.Close()
+		p.server.close()
 		closed = true
 	}
 	if !closed {
@@ -262,9 +264,6 @@ func (h *ahpHost) closeIdle(idle time.Duration) {
 
 // resource serves the files of a project.
 func (h *ahpHost) resource(req ahpRequest) (any, error) {
-	if h.pinned != nil {
-		return h.pinned.resource(req)
-	}
 	var p ahpResourceParams
 	if json.Unmarshal(req.Params, &p) != nil || p.Channel != t.RootResourceURI {
 		return nil, ahpInvalid("root channel required")

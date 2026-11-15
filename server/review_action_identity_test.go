@@ -63,7 +63,7 @@ func TestReviewAHPRepeatedQueueEditsReachBackend(t *testing.T) {
 	a.queue.Inputs = []code.TurnInput{{ID: "queued", Content: []harness.Content{{Text: "original"}}}}
 	c := b.session("saved")
 	c.load()
-	ch, err := s.ahp.attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	ch, err := s.ahp.attachSession(c, s.ahp.canonicalURI("one", "saved"), "Test", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestReviewAHPRepeatedUnattendedChangesTakeEffect(t *testing.T) {
 	b.agent = agent
 	c := b.session("saved")
 	c.load()
-	ch, err := s.ahp.attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	ch, err := s.ahp.attachSession(c, s.ahp.canonicalURI("one", "saved"), "Test", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestAHPActionRetriesDoNotReplayOlderEdits(t *testing.T) {
 			b.agent = agent
 			c := b.session("saved")
 			c.load()
-			ch, err := s.ahp.attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+			ch, err := s.ahp.attachSession(c, s.ahp.canonicalURI("one", "saved"), "Test", time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}

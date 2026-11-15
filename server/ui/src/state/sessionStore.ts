@@ -82,13 +82,14 @@ function fromBase64url(value: string): string {
 		Uint8Array.from(binary, (char) => char.charCodeAt(0)),
 	);
 }
-/** The host's canonical chat URI for a native session it has not aliased. */
+/** A native session's chat URI from before hosts named its project; the host redirects it. */
 export function canonicalChatURI(backendId: string, sessionId: string): string {
 	return `ahp-chat:/wingman/${base64url(backendId)}/${base64url(sessionId)}`;
 }
 /** The provider a canonical chat or session URI names, if any. */
 export function canonicalBackend(uri: string): string | undefined {
-	const match = /^ahp-(?:chat|session):\/wingman\/([^/]+)\/[^/]+$/.exec(uri);
+	const match =
+		/^ahp-(?:chat|session):\/wingman\/([^/]+)\/[^/]+(?:\/[^/]+)?$/.exec(uri);
 	if (!match) return;
 	try {
 		return fromBase64url(match[1]);

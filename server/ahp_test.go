@@ -215,6 +215,7 @@ func TestAHPResourcesConfinedToWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.workspace = workspace
+	s.ahp = webProject(s, root)
 	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -445,6 +446,7 @@ func TestAHPNotFoundErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.workspace = workspace
+	s.ahp = webProject(s, workspace.RootPath)
 	client := ahpTestClient(t, endpoint, "missing-resources")
 	for _, method := range []string{"resourceRead", "resourceResolve", "resourceList"} {
 		err := client.Request(t.Context(), method, map[string]any{"channel": types.RootResourceURI, "uri": s.ahp.directoryURI() + "/missing"}, nil)
@@ -557,11 +559,11 @@ func TestAHPReconnectUnknownClientCanInitialize(t *testing.T) {
 }
 
 func TestAHPUnknownSessionLeavesNoController(t *testing.T) {
-	_, b, _, endpoint := ahpTestServer(t)
+	s, b, _, endpoint := ahpTestServer(t)
 	client := ahpTestClient(t, endpoint, "probe")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if _, _, err := client.Subscribe(ctx, canonicalAHPURI("one", "missing")); err == nil {
+	if _, _, err := client.Subscribe(ctx, s.ahp.canonicalURI("one", "missing")); err == nil {
 		t.Fatal("subscribing to an unknown session succeeded")
 	}
 	b.mu.Lock()

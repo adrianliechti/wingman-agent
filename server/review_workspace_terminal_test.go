@@ -168,7 +168,7 @@ func TestReviewWorkspaceTerminalExitWhileBehindKeepsFinalOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uri := "ahp-terminal:/wingman/" + session.ID()
+	uri := "ahp-terminal:/" + s.ahp.namespace + "/" + session.ID()
 	reviewWorkspaceTerminalEventually(t, "terminal attached", func() bool {
 		_, ok := reviewWorkspaceTerminalLookup(s, uri)
 		return ok
@@ -409,7 +409,7 @@ func TestReviewWorkspaceTerminalConcurrentClaimsHaveOneWinner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uri := "ahp-terminal:/wingman/" + session.ID()
+	uri := "ahp-terminal:/" + s.ahp.namespace + "/" + session.ID()
 	reviewWorkspaceTerminalEventually(t, "terminal attached", func() bool {
 		view, ok := reviewWorkspaceTerminalLookup(s, uri)
 		return ok && view.owner == ahpHostClient
@@ -592,7 +592,7 @@ func TestReviewWorkspaceTerminalTrimKeepsValidUTF8(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uri := "ahp-terminal:/wingman/" + session.ID()
+	uri := "ahp-terminal:/" + s.ahp.namespace + "/" + session.ID()
 	reviewWorkspaceTerminalEventually(t, "terminal attached", func() bool {
 		_, ok := reviewWorkspaceTerminalLookup(s, uri)
 		return ok
@@ -656,7 +656,7 @@ func TestReviewWorkspaceTerminalCatalogueRecoversFromOverflow(t *testing.T) {
 	want := func() []string {
 		var ids []string
 		for _, session := range s.terminals.List() {
-			ids = append(ids, "ahp-terminal:/wingman/"+session.ID())
+			ids = append(ids, "ahp-terminal:/"+s.ahp.namespace+"/"+session.ID())
 		}
 		slices.Sort(ids)
 		return ids
@@ -673,7 +673,7 @@ func TestReviewWorkspaceTerminalCatalogueRecoversFromOverflow(t *testing.T) {
 	reviewWorkspaceTerminalEventually(t, "catalogue to match the manager", func() bool {
 		return slices.Equal(got(), want())
 	})
-	if !slices.Contains(got(), "ahp-terminal:/wingman/"+running.ID()) || len(got()) > 33 {
+	if !slices.Contains(got(), "ahp-terminal:/"+s.ahp.namespace+"/"+running.ID()) || len(got()) > 33 {
 		t.Fatalf("catalogue %d entries", len(got()))
 	}
 }
@@ -690,7 +690,7 @@ func TestReviewWorkspaceTerminalDebugTerminalsReplaceExitedOnes(t *testing.T) {
 		return process
 	}
 	first := launch("printf 'debuggee-out\\n'; exit 4")
-	firstURI := "ahp-terminal:/wingman/" + first.ID()
+	firstURI := "ahp-terminal:/" + s.ahp.namespace + "/" + first.ID()
 	reviewWorkspaceTerminalEventually(t, "debuggee exit published", func() bool {
 		view, _ := reviewWorkspaceTerminalLookup(s, firstURI)
 		return view.exit != nil
@@ -704,7 +704,7 @@ func TestReviewWorkspaceTerminalDebugTerminalsReplaceExitedOnes(t *testing.T) {
 	second := launch("sleep 30")
 	reviewWorkspaceTerminalEventually(t, "exited debuggee removed", func() bool {
 		_, old := reviewWorkspaceTerminalLookup(s, firstURI)
-		_, current := reviewWorkspaceTerminalLookup(s, "ahp-terminal:/wingman/"+second.ID())
+		_, current := reviewWorkspaceTerminalLookup(s, "ahp-terminal:/"+s.ahp.namespace+"/"+second.ID())
 		return !old && current
 	})
 	if _, ok := reviewWorkspaceTerminalLookup(s, "ahp-terminal:/user-shell"); !ok {

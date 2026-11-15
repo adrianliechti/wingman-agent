@@ -35,7 +35,7 @@ func TestTasksAPI(t *testing.T) {
 		t.Fatal("no session id")
 	}
 
-	res, err := http.Get(web.URL + chatAPIPath("wingman", created.ID) + "/tasks")
+	res, err := http.Get(web.URL + chatAPIPath(app, "wingman", created.ID) + "/tasks")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestTasksAPI(t *testing.T) {
 	if len(tasks) != 0 {
 		t.Fatalf("tasks = %+v, want empty", tasks)
 	}
-	reviews, err := http.Get(web.URL + chatAPIPath("wingman", created.ID) + "/reviews")
+	reviews, err := http.Get(web.URL + chatAPIPath(app, "wingman", created.ID) + "/reviews")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestTasksAPI(t *testing.T) {
 		t.Fatalf("reviews status = %d", reviews.StatusCode)
 	}
 
-	res, err = http.Get(web.URL + chatAPIPath("wingman", created.ID) + "/tasks/nope")
+	res, err = http.Get(web.URL + chatAPIPath(app, "wingman", created.ID) + "/tasks/nope")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestTasksAPI(t *testing.T) {
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		res, err = http.Get(web.URL + chatAPIPath("wingman", created.ID) + "/tasks/" + launched.ID)
+		res, err = http.Get(web.URL + chatAPIPath(app, "wingman", created.ID) + "/tasks/" + launched.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -110,6 +110,6 @@ func TestTasksAPI(t *testing.T) {
 }
 
 // chatAPIPath encodes the chat URI as the web UI's encodeURIComponent does.
-func chatAPIPath(backend, id string) string {
-	return "/api/v2/chats/" + strings.ReplaceAll(url.PathEscape(ahpChatURI(canonicalAHPURI(backend, id))), ":", "%3A")
+func chatAPIPath(s *Server, backend, id string) string {
+	return "/api/v2/chats/" + strings.ReplaceAll(url.PathEscape(ahpChatURI(s.ahp.canonicalURI(backend, id))), ":", "%3A")
 }

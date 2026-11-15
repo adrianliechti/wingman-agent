@@ -265,8 +265,9 @@ func (s *Server) chatRoute(next http.Handler) http.Handler {
 			http.Error(w, "invalid chat URI", http.StatusBadRequest)
 			return
 		}
-		_, ch, err := s.ahp.ensureSession(chat)
-		if err != nil || ch == nil {
+		a, ch, err := s.ahp.ensureSession(chat)
+		// The host may serve other projects' chats too.
+		if err != nil || ch == nil || a.project != s.ahp {
 			http.Error(w, "chat not found", http.StatusNotFound)
 			return
 		}

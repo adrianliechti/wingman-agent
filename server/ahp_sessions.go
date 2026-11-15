@@ -100,12 +100,18 @@ func (p *ahpProject) loadSession(resource string, chat bool) (*ahpSession, error
 	}
 	if !ok {
 		p.mu.Unlock()
-		backend, id, _, err := parseCanonicalURI(resource)
+		backend, id, dir, err := parseCanonicalURI(resource)
 		if err != nil {
 			return nil, err
 		}
-		if resource != p.canonicalURI(backend, id) {
-			return nil, &ahpRPCError{Code: int(t.ErrorCodeSessionNotFound), Message: "unknown session"}
+		if canonical := p.canonicalURI(backend, id); resource != canonical {
+			if dir != "" {
+				return nil, &ahpRPCError{Code: int(t.ErrorCodeSessionNotFound), Message: "unknown session"}
+			}
+			if chat {
+				return nil, ahpMoved(ahpChatURI(canonical))
+			}
+			return nil, ahpMoved(canonical)
 		}
 		alias = ahpAlias{Resource: resource, Project: p.dir, Backend: backend, Session: id}
 		p.mu.Lock()
@@ -568,18 +574,10 @@ func (a *ahpChat) command(command Command) error {
 	return nil
 }
 
-// canonicalAHPURI names a native session that no client named.
-func canonicalAHPURI(backend, id string) string {
-	return "ahp-session:/wingman/" + base64.RawURLEncoding.EncodeToString([]byte(backend)) + "/" + base64.RawURLEncoding.EncodeToString([]byte(id))
-}
-
-// A host for several projects finds an unnamed session by the project in its URI.
+// canonicalURI names a native session that no client named; the host finds it by its project.
 func (p *ahpProject) canonicalURI(backend, id string) string {
-	uri := canonicalAHPURI(backend, id)
-	if p.pinned == nil {
-		uri += "/" + base64.RawURLEncoding.EncodeToString([]byte(p.dir))
-	}
-	return uri
+	encode := base64.RawURLEncoding.EncodeToString
+	return "ahp-session:/wingman/" + encode([]byte(backend)) + "/" + encode([]byte(id)) + "/" + encode([]byte(p.dir))
 }
 
 func parseCanonicalURI(resource string) (backend, id, dir string, err error) {

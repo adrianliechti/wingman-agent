@@ -76,6 +76,7 @@ type Server struct {
 	scope      WorkspaceScope
 	sendMu     sync.Mutex
 	ahp        *ahpProject
+	host       *Host // started with the web UI, which may serve other projects too
 
 	dapReferenceSeq  atomic.Uint64
 	searches         atomic.Int32
@@ -105,15 +106,22 @@ type Server struct {
 	managedTools   managedToolsStatus
 }
 
-// New starts a server for one project: its own agent host, with the web UI.
+// New starts an agent host for the projects in a directory, with the web UI for that directory's.
 func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, error) {
 	if opts == nil {
 		opts = new(ServerOptions)
 	}
-	s, err := newServer(ctx, workDir, opts, nil)
+	h, err := NewHost(ctx, &HostOptions{Roots: []string{workDir}, disableManagedTools: opts.disableManagedTools})
 	if err != nil {
 		return nil, err
 	}
+	s, err := newServer(h.ctx, workDir, opts, h.ahp)
+	if err != nil {
+		h.Close()
+		return nil, err
+	}
+	h.ahp.show(s.ahp)
+	s.host = h
 	if err := s.startWeb(opts); err != nil {
 		s.Close()
 		return nil, err
@@ -144,7 +152,7 @@ func (s *Server) startWeb(opts *ServerOptions) (err error) {
 	return nil
 }
 
-// newServer starts a project. Given a host, its sessions are served there.
+// newServer starts a project whose sessions the host serves.
 func newServer(ctx context.Context, workDir string, opts *ServerOptions, host *ahpHost) (_ *Server, err error) {
 	if opts == nil {
 		opts = new(ServerOptions)
@@ -167,7 +175,7 @@ func newServer(ctx context.Context, workDir string, opts *ServerOptions, host *a
 	}
 	defer func() {
 		if err != nil {
-			s.Close()
+			s.close()
 		}
 	}()
 	ws, err := code.NewWorkspace(workDir)
@@ -176,10 +184,6 @@ func newServer(ctx context.Context, workDir string, opts *ServerOptions, host *a
 	}
 	s.workspace = ws
 	s.scope = workspaceScope(ws.RootPath)
-	// A workspace server is the one project of its own host.
-	if host == nil {
-		host = newAHPHost()
-	}
 	s.ahp = host.attach(s)
 
 	s.terminals = terminal.NewManager(ws.RootPath)
@@ -269,7 +273,15 @@ func newServer(ctx context.Context, workDir string, opts *ServerOptions, host *a
 	return s, nil
 }
 
+// Close ends the server, and the host it started with.
 func (s *Server) Close() {
+	if s.host != nil {
+		s.host.Close()
+	}
+	s.close()
+}
+
+func (s *Server) close() {
 	s.closeOnce.Do(func() {
 		if s.cancel != nil {
 			s.cancel()
@@ -484,6 +496,7 @@ func (s *Server) send(f Frame) {
 
 type workspaceResponse struct {
 	WorkspaceScope
+	Namespace              string                          `json:"namespace"` // of the project's channels
 	Protocol               int                             `json:"protocol"`
 	Name                   string                          `json:"name"`
 	Path                   string                          `json:"path"`
@@ -524,6 +537,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	ws := s.workspace
 	info := workspaceResponse{
 		WorkspaceScope:         s.scope,
+		Namespace:              s.ahp.namespace,
 		Protocol:               2,
 		Name:                   filepath.Base(ws.RootPath),
 		Path:                   ws.RootPath,

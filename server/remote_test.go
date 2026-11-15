@@ -125,7 +125,7 @@ func remoteInitialize(t *testing.T, conn *websocket.Conn) string {
 	return initialized.Snapshots[0].State.Meta.Workspace.InstanceID
 }
 
-func remoteCommand(t *testing.T, client *http.Client, relayURL, instance string, command Command) (int, string) {
+func remoteCommand(t *testing.T, client *http.Client, relayURL, instance string, c *sessionController, command Command) (int, string) {
 	t.Helper()
 	conn := remoteAHP(t, client, relayURL)
 	defer conn.CloseNow()
@@ -133,7 +133,7 @@ func remoteCommand(t *testing.T, client *http.Client, relayURL, instance string,
 	if remoteInitialize(t, conn) != instance {
 		return 409, "workspace replaced"
 	}
-	snapshot := remoteRPC(t, conn, "subscribe", map[string]string{"channel": canonicalAHPURI("one", "saved")})
+	snapshot := remoteRPC(t, conn, "subscribe", map[string]string{"channel": c.backend.ahp.canonicalURI(c.ref.BackendID, c.ref.SessionID)})
 	var session struct {
 		Snapshot struct {
 			State struct {
@@ -177,7 +177,7 @@ func remoteSnapshot(t *testing.T, client *http.Client, relayURL string, c *sessi
 	conn := remoteAHP(t, client, relayURL)
 	defer conn.CloseNow()
 	remoteInitialize(t, conn)
-	return remoteRPC(t, conn, "subscribe", map[string]string{"channel": ahpChatURI(canonicalAHPURI(c.ref.BackendID, c.ref.SessionID))})
+	return remoteRPC(t, conn, "subscribe", map[string]string{"channel": ahpChatURI(c.backend.ahp.canonicalURI(c.ref.BackendID, c.ref.SessionID))})
 }
 
 func TestRemoteUsesExistingReceiptsAndRecoversLiveSessionAfterTunnelRestart(t *testing.T) {
@@ -194,14 +194,14 @@ func TestRemoteUsesExistingReceiptsAndRecoversLiveSessionAfterTunnelRestart(t *t
 	client := &http.Client{Jar: jar, Timeout: 5 * time.Second}
 	pairTestRemote(t, client, web.URL, credentials)
 	command := Command{ID: "remote-input", Type: "send", Text: "hello"}
-	if status, _ := remoteCommand(t, client, web.URL, "old-instance", command); status != 409 {
+	if status, _ := remoteCommand(t, client, web.URL, "old-instance", c, command); status != 409 {
 		t.Fatalf("old instance accepted: %d", status)
 	}
-	status, first := remoteCommand(t, client, web.URL, s.scope.InstanceID, command)
+	status, first := remoteCommand(t, client, web.URL, s.scope.InstanceID, c, command)
 	if status != 200 {
 		t.Fatalf("send: %d %s", status, first)
 	}
-	status, duplicate := remoteCommand(t, client, web.URL, s.scope.InstanceID, command)
+	status, duplicate := remoteCommand(t, client, web.URL, s.scope.InstanceID, c, command)
 	if status != 200 || first != duplicate {
 		t.Fatalf("receipt changed on retry: %d %s", status, duplicate)
 	}
@@ -248,7 +248,7 @@ func TestRemotePairingSwitchCannotRedirectAnOldWorkspaceCommand(t *testing.T) {
 	client := &http.Client{Jar: jar, Timeout: 5 * time.Second}
 	pairTestRemote(t, client, web.URL, firstCredentials)
 	pairTestRemote(t, client, web.URL, secondCredentials)
-	status, _ := remoteCommand(t, client, web.URL, first.scope.InstanceID, Command{ID: "old-page", Type: "send", Text: "must not run here"})
+	status, _ := remoteCommand(t, client, web.URL, first.scope.InstanceID, c, Command{ID: "old-page", Type: "send", Text: "must not run here"})
 	if status != 409 || a.sent.Load() != 0 {
 		t.Fatalf("old browser mutated newly paired workspace: status=%d sends=%d", status, a.sent.Load())
 	}

@@ -130,7 +130,10 @@ async function host(t: TestContext, states: Record<string, unknown>) {
 	t.after(() => ahp.stop());
 	ahp.start();
 	await ahp.ready();
-	const client = new WorkspaceClient({ ...scope, protocol: 2 }, ahp);
+	const client = new WorkspaceClient(
+		{ ...scope, protocol: 2, namespace: "wingman/workspace" },
+		ahp,
+	);
 	t.after(() => client.stop());
 	const sent = (method: string) => requests.filter((m) => m.method === method);
 	return { client, ahp, sent };
