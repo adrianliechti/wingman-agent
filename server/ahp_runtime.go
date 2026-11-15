@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -57,9 +58,14 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 		next[input.ID] = t.PendingMessage{Id: input.ID, Kind: ahpPtr(kind), Message: message}
 		kinds[input.ID] = kind
 	}
+	// The message that a starting turn consumes leaves the queue with that turn.
+	starting := ""
+	if a.chat.ActiveTurn == nil || a.chat.ActiveTurn.Id != c.nextInput {
+		starting = c.nextInput
+	}
 	previous := append([]t.PendingMessage{}, a.chat.QueuedMessages...)
 	for _, old := range previous {
-		if _, exists := next[old.Id]; !exists {
+		if _, exists := next[old.Id]; !exists && old.Id != starting {
 			kind := t.PendingMessageKindQueued
 			if old.Kind != nil {
 				kind = *old.Kind
@@ -82,6 +88,20 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 		if !unchanged {
 			a.chatAction(t.StateAction{Value: &t.ChatPendingMessageSetAction{Type: t.ActionTypeChatPendingMessageSet, Kind: kinds[item.Id], Id: item.Id, Message: item.Message}})
 		}
+	}
+	order, shown := []string{}, []string{}
+	for _, input := range c.state.PendingInputs {
+		if _, exists := next[input.ID]; exists {
+			order = append(order, input.ID)
+		}
+	}
+	for _, message := range a.chat.QueuedMessages {
+		if message.Id != starting {
+			shown = append(shown, message.Id)
+		}
+	}
+	if !slices.Equal(shown, order) {
+		a.chatAction(t.StateAction{Value: &t.ChatQueuedMessagesReorderedAction{Type: t.ActionTypeChatQueuedMessagesReordered, Order: order}})
 	}
 }
 

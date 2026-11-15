@@ -122,7 +122,7 @@ func (a *Agent) buildSession(id string) (*sessionState, error) {
 func (s *sessionState) configureHarness() {
 	a, sessionCfg := s.parent, s.harness.Config
 	s.harness.CacheKey = s.id
-	sessionCfg.Tools = s.catalogTools
+	sessionCfg.Tools = s.sessionTools
 	sessionCfg.PinTools = true
 	sessionCfg.FilterTools = s.filterTools
 	s.harness.PrepareTurn = s.prepareTurn
@@ -214,6 +214,7 @@ func (s *sessionState) configureTools() error {
 		tools = append(tools, websearch.Tools(elicit)...)
 	}
 	subagentCfg := sessionCfg.Clone()
+	subagentCfg.Tools = s.catalogTools
 	subagentCfg.FilterTools = s.subagentFilterTools
 	s.tools = append(tools, subagent.ToolsWithOptions(subagentCfg, subagent.Options{
 		SharedContext:  s.subagentContext,

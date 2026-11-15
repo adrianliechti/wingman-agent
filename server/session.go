@@ -115,6 +115,7 @@ type sessionController struct {
 	reasoningID string
 	attempt     map[string]bool
 	activeInput string
+	nextInput   string // the input the turn manager runs, known before its turn shows
 	lastOutcome string
 	hostTurns   []hostTurn
 	ahp         *ahpChat

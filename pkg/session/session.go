@@ -221,6 +221,51 @@ func ForkThrough(sessionsDir, id, newID, title, inputID string) error {
 	return fork(sessionsDir, id, newID, title, inputID)
 }
 
+// Truncate drops what a session recorded after the turn of an input, or
+// everything when inputID is empty. Nothing may record to the session meanwhile.
+func Truncate(sessionsDir, id, inputID string) error {
+	if sessionsDir == "" {
+		return fmt.Errorf("no sessions directory available")
+	}
+	if err := validateSessionID(id); err != nil {
+		return err
+	}
+	if err := ensureCurrentFormat(sessionsDir, id); err != nil {
+		return err
+	}
+	path := sessionPath(sessionsDir, id)
+	coord := journalCoord(path)
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	if coord.deleted {
+		return fmt.Errorf("session journal %s was deleted", id)
+	}
+	loaded, err := loadCurrent(path, id, false)
+	if inputID == "" && errors.Is(err, os.ErrNotExist) {
+		return nil // nothing was recorded yet
+	}
+	if err != nil {
+		return err
+	}
+	meta := record{Type: "meta", Version: journalVersion, ID: id, CreatedAt: &loaded.session.CreatedAt}
+	var events []harness.RuntimeEvent
+	if inputID != "" {
+		var ok bool
+		if events, ok = cutThrough(loaded.session.State.Events, inputID); !ok {
+			return fmt.Errorf("session %s has no input %s", id, inputID)
+		}
+		meta.Title = loaded.session.Title
+	}
+	if err := writeJournal(path, meta, events); err != nil {
+		return fmt.Errorf("write truncated session journal: %w", err)
+	}
+	coord.initialized, coord.createdAt, coord.lastSequence = true, loaded.session.CreatedAt, 0
+	if n := len(events); n > 0 {
+		coord.lastSequence = events[n-1].Sequence
+	}
+	return nil
+}
+
 func cutThrough(events []harness.RuntimeEvent, inputID string) ([]harness.RuntimeEvent, bool) {
 	input := func(e harness.RuntimeEvent) string {
 		if e.Type == harness.EventMessage && e.Message != nil && e.Message.Role == harness.RoleUser {

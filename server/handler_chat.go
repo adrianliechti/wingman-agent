@@ -256,7 +256,11 @@ func (s *backendRuntime) sendTurnSnapshot(sessionID string) {
 	}
 	snapshot := s.turns.Snapshot(sessionID)
 	queue := make([]TurnQueueEntry, 0, len(snapshot.Inputs))
+	c.nextInput = ""
 	for _, input := range snapshot.Inputs {
+		if input.State == code.TurnInputActive {
+			c.nextInput = input.ID
+		}
 		// Accepted active/steered inputs already belong to the transcript. Only
 		// waiting user inputs are editable in the queue panel.
 		if input.State != code.TurnInputQueued || input.Input.Origin == "task" {

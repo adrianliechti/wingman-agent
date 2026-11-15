@@ -5,6 +5,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/microsoft/agent-host-protocol/clients/go/ahp"
 	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
@@ -46,6 +47,9 @@ func (a *ahpSession) addChat(c *sessionController, resource, title string, origi
 	ch := newAHPChat(a, c, resource, title, stamp)
 	ch.chat.Origin = origin
 	c.ahp = ch
+	if agent, ok := c.backend.agent.(code.HostToolAgent); ok {
+		_ = agent.SetHostTools(c.ref.SessionID, ch.offerTools)
+	}
 	a.chats = append(a.chats, ch)
 	a.project.chats[resource] = ch
 	if len(a.chats) == 1 {
@@ -125,6 +129,9 @@ func (a *ahpSession) removeClient(id string) {
 	for _, client := range a.state.ActiveClients {
 		if client.ClientId == id {
 			a.sessionAction(t.StateAction{Value: &t.SessionActiveClientRemovedAction{Type: t.ActionTypeSessionActiveClientRemoved, ClientId: id}})
+			for _, ch := range a.chats {
+				ch.clientLeft(id)
+			}
 			return
 		}
 	}
@@ -187,6 +194,8 @@ func (a *ahpSession) syncInputNeeded() {
 			id = r.Id
 		case *t.SessionToolConfirmationRequest:
 			id = r.Id
+		case *t.SessionToolClientExecutionRequest:
+			id = r.Id
 		}
 		if _, ok := wanted[id]; !ok {
 			a.sessionAction(t.StateAction{Value: &t.SessionInputNeededRemovedAction{Type: t.ActionTypeSessionInputNeededRemoved, Id: id}})
@@ -219,6 +228,12 @@ func (a *ahpChat) inputRequests(wanted map[string]t.SessionInputRequest) {
 		case *t.ToolCallResponsePart:
 			if call, ok := p.ToolCall.Value.(*t.ToolCallPendingConfirmationState); ok {
 				wanted[call.ToolCallId] = t.SessionInputRequest{Value: &t.SessionToolConfirmationRequest{Id: call.ToolCallId, Chat: a.chat.Resource, Kind: t.SessionInputRequestKindToolConfirmation, TurnId: active.Id, ToolCall: t.ToolCallConfirmationState{Value: call}}}
+			}
+			// A client finds the calls to its tools here, without following the chat.
+			if call, ok := p.ToolCall.Value.(*t.ToolCallRunningState); ok && call.Contributor != nil {
+				if client, ok := call.Contributor.Value.(*t.ToolCallClientContributor); ok {
+					wanted[call.ToolCallId] = t.SessionInputRequest{Value: &t.SessionToolClientExecutionRequest{Id: call.ToolCallId, Chat: a.chat.Resource, Kind: t.SessionInputRequestKindToolClientExecution, TurnId: active.Id, ClientId: client.ClientId, ToolCall: *call}}
+				}
 			}
 		}
 	}

@@ -25,7 +25,9 @@ type ahpChat struct {
 	prompts          map[string]*ahpPrompt
 	promptSeq        int
 	reasoning        map[string]*ahpReasoningTiming
-	usageStart       UsageView // the controller's totals when the active turn started
+	usageStart       UsageView         // the controller's totals when the active turn started
+	offered          map[string]string // the client behind each tool the agent was last given
+	clientCalls      map[string]*ahpClientCall
 	removed          bool
 	projected        bool // turns created after the first projection are live, not history
 	projectedInput   string
@@ -84,7 +86,7 @@ type ahpPendingAction struct {
 
 func newAHPChat(a *ahpSession, c *sessionController, resource, title, stamp string) *ahpChat {
 	config := ahpConfig(c.state.Settings)
-	return &ahpChat{project: a.project, session: a, controller: c, title: title, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{},
+	return &ahpChat{project: a.project, session: a, controller: c, title: title, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{}, clientCalls: map[string]*ahpClientCall{},
 		chat: t.ChatState{Resource: resource, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}, Config: &t.ChatConfigState{Values: config.Values}},
 	}
 }
@@ -124,6 +126,10 @@ func ahpActionKey(action t.StateAction) string {
 		return "pending-set:" + v.Id
 	case *t.ChatPendingMessageRemovedAction:
 		return "pending-remove:" + v.Id
+	case *t.ChatQueuedMessagesReorderedAction:
+		return "reorder" // answered with the order the queue then has
+	case *t.ChatTruncatedAction:
+		return "truncate"
 	case *t.ChatTurnStartedAction:
 		return "start:" + v.TurnId
 	case *t.ChatTurnCancelledAction:
@@ -179,7 +185,7 @@ func (a *ahpChat) syncLocked(c *sessionController, changes []SessionChange) {
 	}
 	// Updates of a running tool change only its own part.
 	if len(changes) == 1 && changes[0].Type == "entry.upsert" && changes[0].Entry != nil && changes[0].Entry.Type == "tool" && a.chat.ActiveTurn != nil {
-		part, _ := a.project.entryPart(*changes[0].Entry)
+		part, _ := a.entryPart(*changes[0].Entry)
 		next := part.Value.(*t.ToolCallResponsePart).ToolCall
 		for _, p := range a.chat.ActiveTurn.ResponseParts {
 			if tool, ok := p.Value.(*t.ToolCallResponsePart); ok && ahpToolCallID(tool.ToolCall) == ahpToolCallID(next) {
@@ -252,6 +258,10 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 			// The finished turn now carries its duration.
 			turns, active = a.transcript(c)
 		}
+		// A client's cut leaves the turns the agent kept.
+		if p := a.session.pending["truncate"]; p != nil && p.envelope == nil && p.params.Channel == a.chat.Resource && active == nil && !reflect.DeepEqual(a.chat.Turns, turns) {
+			a.chatAction(p.params.Action)
+		}
 		if !reflect.DeepEqual(a.chat.Turns, turns) {
 			a.chatAction(t.StateAction{Value: &t.ChatTruncatedAction{Type: t.ActionTypeChatTruncated}})
 			if active == nil && len(turns) > 0 && turns[len(turns)-1].State == t.TurnStateError {
@@ -275,7 +285,7 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 		if active != nil {
 			if a.chat.ActiveTurn == nil || a.chat.ActiveTurn.Id != active.Id {
 				a.usageStart = c.state.Usage
-				a.chatAction(t.StateAction{Value: &t.ChatTurnStartedAction{Type: t.ActionTypeChatTurnStarted, TurnId: active.Id, StartedAt: active.StartedAt, Message: active.Message}})
+				a.startTurn(active)
 			}
 			if !a.syncParts(active.ResponseParts) {
 				var keep *string
@@ -295,6 +305,25 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 	a.syncTitle(c)
 	a.session.syncChats(previousSummary)
 	a.projected = true
+}
+
+// startTurn announces a new turn. A turn that consumes a pending message
+// shows the message leaving the queue first.
+func (a *ahpChat) startTurn(active *t.ActiveTurn) {
+	started := &t.ChatTurnStartedAction{Type: t.ActionTypeChatTurnStarted, TurnId: active.Id, StartedAt: active.StartedAt, Message: active.Message}
+	// An idle chat consumes a message before its queue ever held it.
+	if p := a.session.pending["pending-set:"+active.Id]; p != nil && p.envelope == nil && p.params.Channel == a.chat.Resource {
+		a.chatAction(p.params.Action)
+	}
+	if i := slices.IndexFunc(a.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == active.Id }); i >= 0 {
+		kind := t.PendingMessageKindQueued
+		if k := a.chat.QueuedMessages[i].Kind; k != nil {
+			kind = *k
+		}
+		a.chatAction(t.StateAction{Value: &t.ChatPendingMessageRemovedAction{Type: t.ActionTypeChatPendingMessageRemoved, Kind: kind, Id: active.Id}})
+		started.QueuedMessageId = &active.Id
+	}
+	a.chatAction(t.StateAction{Value: started})
 }
 
 func (a *ahpChat) finishTurn(id string, state t.TurnState, message *string) {
@@ -381,7 +410,7 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 		if len(turns) == 0 {
 			continue
 		}
-		if part, ok := a.project.entryPart(e); ok {
+		if part, ok := a.entryPart(e); ok {
 			if p, ok := part.Value.(*t.ReasoningResponsePart); ok {
 				seen[p.Id] = true
 				if timing := a.reasoning[p.Id]; timing != nil {
@@ -612,24 +641,25 @@ func (a *ahpChat) appendTool(turn string, call t.ToolCallState) {
 	var id, name, display string
 	var intention *string
 	var meta map[string]json.RawMessage
+	var contributor *t.ToolCallContributor
 	switch c := call.Value.(type) {
 	case *t.ToolCallStreamingState:
 		id, name, display, intention = c.ToolCallId, c.ToolName, c.DisplayName, c.Intention
-		meta = c.Meta
+		meta, contributor = c.Meta, c.Contributor
 	case *t.ToolCallRunningState:
 		id, name, display, intention = c.ToolCallId, c.ToolName, c.DisplayName, c.Intention
-		meta = c.Meta
+		meta, contributor = c.Meta, c.Contributor
 	case *t.ToolCallPendingConfirmationState:
 		id, name, display, intention = c.ToolCallId, c.ToolName, c.DisplayName, c.Intention
-		meta = c.Meta
+		meta, contributor = c.Meta, c.Contributor
 	case *t.ToolCallCompletedState:
 		id, name, display, intention = c.ToolCallId, c.ToolName, c.DisplayName, c.Intention
-		meta = c.Meta
+		meta, contributor = c.Meta, c.Contributor
 	default:
 		a.chatAction(t.StateAction{Value: &t.ChatResponsePartAction{Type: t.ActionTypeChatResponsePart, TurnId: turn, Part: t.ResponsePart{Value: &t.ToolCallResponsePart{Kind: t.ResponsePartKindToolCall, ToolCall: call}}}})
 		return
 	}
-	a.chatAction(t.StateAction{Value: &t.ChatToolCallStartAction{Type: t.ActionTypeChatToolCallStart, TurnId: turn, ToolCallId: id, ToolName: name, DisplayName: display, Intention: intention, Meta: meta}})
+	a.chatAction(t.StateAction{Value: &t.ChatToolCallStartAction{Type: t.ActionTypeChatToolCallStart, TurnId: turn, ToolCallId: id, ToolName: name, DisplayName: display, Intention: intention, Meta: meta, Contributor: contributor}})
 	switch c := call.Value.(type) {
 	case *t.ToolCallPendingConfirmationState:
 		a.chatAction(t.StateAction{Value: &t.ChatToolCallReadyAction{Type: t.ActionTypeChatToolCallReady, TurnId: turn, ToolCallId: id, InvocationMessage: c.InvocationMessage, ToolInput: c.ToolInput, Options: c.Options}})
@@ -672,7 +702,7 @@ func (a *ahpChat) syncTool(turn string, previous, next t.ToolCallState) bool {
 		} else if p, ok := previous.Value.(*t.ToolCallRunningState); !ok || p.ToolCallId != n.ToolCallId {
 			return false
 		}
-		a.chatAction(t.StateAction{Value: &t.ChatToolCallCompleteAction{Type: t.ActionTypeChatToolCallComplete, TurnId: turn, ToolCallId: n.ToolCallId, Result: t.ToolCallResult{Success: n.Success, PastTenseMessage: n.PastTenseMessage, Content: n.Content}}})
+		a.chatAction(t.StateAction{Value: &t.ChatToolCallCompleteAction{Type: t.ActionTypeChatToolCallComplete, TurnId: turn, ToolCallId: n.ToolCallId, Result: t.ToolCallResult{Success: n.Success, PastTenseMessage: n.PastTenseMessage, Content: n.Content, StructuredContent: n.StructuredContent, ResultMetadata: n.ResultMetadata, Error: n.Error}}})
 	case *t.ToolCallCancelledState:
 		p, ok := previous.Value.(*t.ToolCallPendingConfirmationState)
 		if !ok || p.ToolCallId != n.ToolCallId {

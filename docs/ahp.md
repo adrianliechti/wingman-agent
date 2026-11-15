@@ -213,8 +213,9 @@ its channel has expired.
 
 Supported features include provider/model discovery; session creation, listing
 and reopening; forked chats; history and streaming text/reasoning; tool
-activity; approvals and typed questions; cancellation; per-chat model, effort,
-mode and unattended settings; and editable queued/steering messages. The
+activity; client-provided tools; approvals and typed questions; cancellation;
+history truncation; per-chat model, effort, mode and unattended settings; and
+editable, reorderable queued/steering messages. The
 controller remains the single authority when browser and IDE clients act
 concurrently. Retry receipts are bounded and scoped to a running host; they do
 not survive a server restart. Session and chat URI mappings are saved under
@@ -237,6 +238,18 @@ chat has its own queue, turns and settings: `chat/configChanged` changes one
 chat, while `session/configChanged` and the session's config values address the
 default chat.
 
+`chat/queuedMessagesReordered` moves the named pending messages to the head of
+the queue in the given order; the others keep theirs, and the host answers with
+the order the queue then has. A turn that consumes a pending message carries
+its id as `queuedMessageId`, after a `chat/pendingMessageRemoved` for it; this
+also holds for a message that an idle chat runs at once.
+
+`chat/truncated` rewinds a chat of the builtin agent: it keeps the history
+through `turnId`, or none without one, in the agent's journal as well, so the
+model no longer sees the dropped turns. A running turn is stopped and the queue
+is cleared first, as when a turn is stopped. Files changed by the dropped turns
+stay as they are. External agents reject the action.
+
 Stopping a turn (`chat/turnCancelled`) also removes the messages queued behind
 it. A message `/compact [focus]` runs as a compaction turn when the backend can
 compact: the chat's `activity` reads `Compacting context…`, and the turn ends
@@ -254,6 +267,22 @@ progress and compaction are reported as the chat's `activity`. A steering
 message consumed by a running turn appears as a system notification with the
 user's text. `chat/usage` reports the latest request's prompt tokens as
 `inputTokens`, and the turn's output and cache-read tokens.
+
+The tools of a session's active clients (`session/activeClientSet`) join the
+builtin agent's tools in every chat of the session, from the chat's next turn.
+A client's tool replaces the agent's tool of the same name; subagents keep the
+agent's own tools, and names that model APIs reject are skipped. A call to such
+a tool carries the client as its `contributor`. It stays `streaming` until the
+agent runs it, so a client never starts a call that the agent then refuses:
+plan mode runs only tools with `readOnlyHint`. The call then waits in `running`
+for its owner, which also finds it as a `toolClientExecution` request in the
+session's `inputNeeded`. `toolInput` is the model's unmodified input. Only the
+owner may dispatch `chat/toolCallContentChanged` and `chat/toolCallComplete`.
+The call fails when its owner leaves the session, the turn is stopped, or the
+agent's tool timeout passes. Wingman asks for no approval of a client's tool;
+its client does. The contributor and the structured result last for the host
+process: reloaded and forked history keeps the result as text. External agents
+receive no client tools.
 
 Terminal channels share the workspace terminal manager, including debugger
 terminals. Following the [terminal URI specification](https://microsoft.github.io/agent-host-protocol/specification/terminal-channel.html#uri),
@@ -303,9 +332,8 @@ reasoning part starts, or before the turn's terminal action; timing lasts for
 the host process and history from earlier processes is untimed. The initialize
 response supplies standard `environment.pathStyle` metadata for native host
 paths. The web UI negotiates 1.1; 1.0 clients receive the legacy queue/steering projection.
-Side chats, chats from other providers, client-provided tools, TCP channels,
-experimental channel windows, and protocol-native automations are not
-advertised. Draft/archive/title overrides currently last for the host process.
+Side chats, chats from other providers, TCP channels, experimental channel
+windows, and protocol-native automations are not advertised. Draft/archive/title overrides currently last for the host process.
 The remaining Wingman extensions are the `x-wingman/workspaceChanged` root
 notification (`files_changed`, `workspace_changed`, `skills_changed` and
 `tasks_changed`), the root's `_meta["wingman.workspace"]` identity used to

@@ -292,6 +292,7 @@ type Command struct {
 	Images     []string             `json:"images,omitempty"`
 	Intent     code.TurnInputIntent `json:"intent,omitempty"`
 	ClearQueue bool                 `json:"clearQueue,omitempty"`
+	Order      []string             `json:"order,omitempty"`
 	PromptID   string               `json:"promptId,omitempty"`
 	Action     string               `json:"action,omitempty"`
 	Content    map[string]any       `json:"content,omitempty"`
@@ -510,6 +511,10 @@ func (c *sessionController) execute(command Command) error {
 		if err := b.turns.RemoveQueued(sid, command.InputID); err != nil {
 			return err
 		}
+	case "queue_reorder":
+		if err := b.turns.ReorderQueued(sid, command.Order); err != nil {
+			return err
+		}
 	case "cancel":
 		if command.InputID != "" {
 			if err := b.turns.CancelTurn(sid, command.InputID, command.ClearQueue); err != nil {
@@ -552,6 +557,24 @@ func (c *sessionController) execute(command Command) error {
 				return err
 			}
 		}
+	case "truncate":
+		truncator, ok := b.agent.(code.SessionTruncator)
+		if !ok {
+			return errors.ErrUnsupported
+		}
+		// What runs or waits belongs to the history that goes.
+		if err := b.turns.StopSession(b.ctx, sid); err != nil {
+			return err
+		}
+		if err := truncator.TruncateSession(b.ctx, sid, command.InputID); err != nil {
+			return err
+		}
+		kept := len(transcriptEntries(b.agent.Messages(sid)))
+		c.mu.Lock()
+		c.hostTurns = slices.DeleteFunc(c.hostTurns, func(turn hostTurn) bool { return turn.at >= kept })
+		c.lastOutcome, c.state.Error = "", nil
+		c.mu.Unlock()
+		c.replaceHistory()
 	case "delete":
 		if !supportsDelete(b.agent) {
 			return errors.ErrUnsupported

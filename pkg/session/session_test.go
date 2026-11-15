@@ -492,3 +492,62 @@ func TestForkThroughEndsWithTheInputsTurn(t *testing.T) {
 		t.Fatal("fork through an unknown input succeeded")
 	}
 }
+
+func TestTruncateKeepsTheJournalThroughAnInputsTurn(t *testing.T) {
+	dir := t.TempDir()
+	var events []harness.RuntimeEvent
+	add := func(e harness.RuntimeEvent) {
+		e.Sequence = uint64(len(events) + 1)
+		e.ID = "event-" + strconv.FormatUint(e.Sequence, 10)
+		e.At = time.Now().UTC()
+		events = append(events, e)
+	}
+	turn := func(input string) {
+		add(harness.RuntimeEvent{Type: harness.EventTurnStarted, TurnID: "turn-" + input})
+		add(harness.RuntimeEvent{Type: harness.EventMessage, Message: &harness.Message{Role: harness.RoleUser, InputID: input, Content: []harness.Content{{Text: "ask " + input}}}})
+		add(harness.RuntimeEvent{Type: harness.EventMessage, Message: &harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "answer " + input}}}})
+		add(harness.RuntimeEvent{Type: harness.EventTurnTerminal, TurnID: "turn-" + input, Terminal: &harness.RuntimeTerminal{Status: harness.RuntimeCompleted}})
+	}
+	for _, input := range []string{"a", "b", "c"} {
+		turn(input)
+	}
+	if err := Save(dir, "s1", harness.State{Events: events}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := Load(dir, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Truncate(dir, "s1", "missing"); err == nil {
+		t.Fatal("truncating after an unknown input succeeded")
+	}
+	if err := Truncate(dir, "s1", "b"); err != nil {
+		t.Fatal(err)
+	}
+	cut, err := Load(dir, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cut.State.Messages) != 4 || cut.State.Messages[3].Content[0].Text != "answer b" || !cut.CreatedAt.Equal(before.CreatedAt) || cut.Title != before.Title {
+		t.Fatalf("truncated session = %+v", cut)
+	}
+	// The journal continues after the last event it kept.
+	events = events[:8]
+	turn("d")
+	if err := Save(dir, "s1", harness.State{Events: events}); err != nil {
+		t.Fatal(err)
+	}
+	if continued, err := Load(dir, "s1"); err != nil || len(continued.State.Messages) != 6 || continued.State.Messages[5].Content[0].Text != "answer d" {
+		t.Fatalf("continued session = %+v, %v", continued.State.Messages, err)
+	}
+	if err := Truncate(dir, "s1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if empty, err := Load(dir, "s1"); err != nil || len(empty.State.Events) != 0 || !empty.CreatedAt.Equal(before.CreatedAt) {
+		t.Fatalf("cleared session = %+v, %v", empty, err)
+	}
+	// A session that never recorded anything has nothing to clear.
+	if err := Truncate(dir, "fresh", ""); err != nil {
+		t.Fatal(err)
+	}
+}

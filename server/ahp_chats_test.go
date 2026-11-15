@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -198,5 +199,104 @@ func TestAHPStopClearsQueueAndApprovalOptionsChooseScope(t *testing.T) {
 	ahpUntil(t, state, sub, func(types.ActionEnvelope) bool { return state.ActiveTurn == nil && len(state.QueuedMessages) == 0 })
 	if len(b.turns.Snapshot("session-1").Inputs) != 0 {
 		t.Fatal("stop left queued input behind")
+	}
+}
+
+func ahpQueue(id string) types.StateAction {
+	return types.StateAction{Value: &types.ChatPendingMessageSetAction{Type: types.ActionTypeChatPendingMessageSet, Kind: types.PendingMessageKindQueued, Id: id, Message: types.Message{Text: id, Origin: types.MessageOrigin{Kind: types.MessageKindUser}}}}
+}
+
+func TestAHPReorderedQueueRunsInItsNewOrder(t *testing.T) {
+	_, b, agent, endpoint := ahpTestServer(t)
+	gate := make(chan struct{})
+	agent.gate = gate
+	defer close(gate)
+	client := ahpTestClient(t, endpoint, "reorder")
+	chat := ahpCreate(t, client, "ahp-session:/reorder")
+	state, sub := ahpSubscribeChat(t, client, chat)
+	ahpSend(t, client, chat, "turn-1", 1)
+	ahpUntil(t, state, sub, func(types.ActionEnvelope) bool { return state.ActiveTurn != nil })
+	seq := int64(1)
+	dispatch := func(action types.StateAction) {
+		t.Helper()
+		seq++
+		if err := client.Notify(t.Context(), "dispatchAction", types.DispatchActionParams{Channel: chat, ClientSeq: seq, Action: action}); err != nil {
+			t.Fatal(err)
+		}
+		echo := ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { return e.Origin != nil && e.Origin.ClientSeq == seq })
+		if echo.RejectionReason != nil {
+			t.Fatal(*echo.RejectionReason)
+		}
+	}
+	for _, id := range []string{"a", "b", "c"} {
+		dispatch(ahpQueue(id))
+	}
+	// Named messages move to the head; unknown and repeated names are ignored.
+	dispatch(types.StateAction{Value: &types.ChatQueuedMessagesReorderedAction{Type: types.ActionTypeChatQueuedMessagesReordered, Order: []string{"c", "missing", "c"}}})
+	order := []string{"c", "a", "b"}
+	queued := func(messages []types.PendingMessage) (ids []string) {
+		for _, message := range messages {
+			ids = append(ids, message.Id)
+		}
+		return ids
+	}
+	fresh, _ := ahpSubscribeChat(t, ahpTestClient(t, endpoint, "reader"), chat)
+	var backend []string
+	for _, input := range b.turns.Snapshot("session-1").Inputs {
+		if input.State == code.TurnInputQueued {
+			backend = append(backend, input.ID)
+		}
+	}
+	if !slices.Equal(queued(state.QueuedMessages), order) || !slices.Equal(queued(fresh.QueuedMessages), order) || !slices.Equal(backend, order) {
+		t.Fatalf("queue: mirror %v, snapshot %v, backend %v", queued(state.QueuedMessages), queued(fresh.QueuedMessages), backend)
+	}
+	// A message leaves the queue before the turn that consumes it starts.
+	for _, id := range order {
+		gate <- struct{}{}
+		var removed int64
+		start := ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool {
+			if r, ok := e.Action.Value.(*types.ChatPendingMessageRemovedAction); ok && r.Id == id {
+				removed = e.ServerSeq
+			}
+			started, ok := e.Action.Value.(*types.ChatTurnStartedAction)
+			return ok && started.TurnId == id
+		})
+		started := start.Action.Value.(*types.ChatTurnStartedAction)
+		if started.QueuedMessageId == nil || *started.QueuedMessageId != id || started.Message.Text != id || removed == 0 || removed > start.ServerSeq {
+			t.Fatalf("turn %q started as %+v, its message removed at %d of %d", id, started, removed, start.ServerSeq)
+		}
+	}
+}
+
+func TestAHPIdleChatConsumesAQueuedMessageAsItsTurn(t *testing.T) {
+	_, _, _, endpoint := ahpTestServer(t)
+	client := ahpTestClient(t, endpoint, "idle")
+	chat := ahpCreate(t, client, "ahp-session:/idle")
+	state, sub := ahpSubscribeChat(t, client, chat)
+	if err := client.Notify(t.Context(), "dispatchAction", types.DispatchActionParams{Channel: chat, ClientSeq: 1, Action: ahpQueue("only")}); err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool {
+		switch action := e.Action.Value.(type) {
+		case *types.ChatPendingMessageSetAction:
+			if e.Origin != nil && e.RejectionReason == nil {
+				seen = append(seen, "set")
+			}
+		case *types.ChatPendingMessageRemovedAction:
+			if action.Kind == types.PendingMessageKindQueued {
+				seen = append(seen, "removed")
+			}
+		case *types.ChatTurnStartedAction:
+			if action.QueuedMessageId != nil && *action.QueuedMessageId == "only" {
+				seen = append(seen, "started")
+			}
+		case *types.ChatTurnCompleteAction:
+			return true
+		}
+		return false
+	})
+	if !slices.Equal(seen, []string{"set", "removed", "started"}) || len(state.QueuedMessages) != 0 || len(state.Turns) != 1 || state.Turns[0].Id != "only" {
+		t.Fatalf("actions %v left %+v", seen, state)
 	}
 }

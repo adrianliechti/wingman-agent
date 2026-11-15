@@ -113,6 +113,13 @@ type Compactor interface {
 	Compact(ctx context.Context, sessionID, focus string) (harness.CompactResult, error)
 }
 
+// HostToolAgent runs tools for a session that its host executes, such as those
+// of a connected client. The agent asks for them when a turn starts; they
+// replace its own tools of the same name.
+type HostToolAgent interface {
+	SetHostTools(sessionID string, tools func() []tool.Tool) error
+}
+
 // UnattendedAgent exposes an interaction policy independent of Agent/Plan mode.
 // Adapters that only expose provider-defined modes may omit this interface.
 type UnattendedAgent interface {
@@ -133,6 +140,12 @@ type SessionForker interface {
 // SessionTurnForker forks a session through the turn of one of its inputs.
 type SessionTurnForker interface {
 	ForkSessionThrough(ctx context.Context, id, inputID, title string) (string, error)
+}
+
+// SessionTruncator drops the history of an idle session after the turn of one
+// of its inputs, or all of it when inputID is empty.
+type SessionTruncator interface {
+	TruncateSession(ctx context.Context, id, inputID string) error
 }
 
 type SessionLoadStreamer interface {

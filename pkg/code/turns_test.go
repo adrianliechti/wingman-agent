@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -721,6 +722,36 @@ func TestTurnManagerRemoveAndReplaceQueued(t *testing.T) {
 	a.releases <- struct{}{}
 	if got := waitValue(t, a.starts); got != "new" {
 		t.Fatalf("replacement start = %q", got)
+	}
+	a.releases <- struct{}{}
+}
+
+func TestTurnManagerReorderQueued(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+	for _, text := range []string{"one", "two", "three", "four"} {
+		_, _ = m.Submit(context.Background(), "s", turnInput(text, text, TurnInputFollowUp))
+	}
+	_ = waitValue(t, a.starts)
+	// Unknown and repeated names are ignored; unnamed inputs keep their order.
+	if err := m.ReorderQueued("s", []string{"four", "missing", "four", "two"}); err != nil {
+		t.Fatal(err)
+	}
+	var queued []string
+	for _, input := range m.Snapshot("s").Inputs {
+		if input.State == TurnInputQueued {
+			queued = append(queued, input.ID)
+		}
+	}
+	if !slices.Equal(queued, []string{"four", "two", "three"}) {
+		t.Fatalf("queue = %v", queued)
+	}
+	for _, want := range queued {
+		a.releases <- struct{}{}
+		if got := waitValue(t, a.starts); got != want {
+			t.Fatalf("started %q, wanted %q", got, want)
+		}
 	}
 	a.releases <- struct{}{}
 }

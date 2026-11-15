@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 
@@ -556,6 +557,40 @@ func (m *TurnManager) RemoveQueued(sessionID, inputID string) error {
 	}
 	s.mu.Unlock()
 	m.emit(TurnEvent{SessionID: sessionID, Input: CloneTurnInput(removed.input), InputID: inputID, State: TurnInputCancelled, Intent: removed.input.Intent})
+	m.emitQueuePositions(sessionID, s)
+	return nil
+}
+
+// ReorderQueued moves the named inputs to the head of the queue in the given
+// order. Inputs it does not name follow in the order they had.
+func (m *TurnManager) ReorderQueued(sessionID string, order []string) error {
+	s := m.session(sessionID)
+	s.mu.Lock()
+	if !s.queueLoaded {
+		err := s.queueErr
+		s.mu.Unlock()
+		return err
+	}
+	previous := s.queued
+	reordered := make([]*managedTurnInput, 0, len(previous))
+	for _, id := range order {
+		i := slices.IndexFunc(previous, func(item *managedTurnInput) bool { return item.input.ID == id })
+		if i >= 0 && !slices.Contains(reordered, previous[i]) {
+			reordered = append(reordered, previous[i])
+		}
+	}
+	for _, item := range previous {
+		if !slices.Contains(reordered, item) {
+			reordered = append(reordered, item)
+		}
+	}
+	s.queued = reordered
+	if err := m.persistLocked(sessionID, s); err != nil {
+		s.queued = previous
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Unlock()
 	m.emitQueuePositions(sessionID, s)
 	return nil
 }

@@ -158,6 +158,14 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 		command.Type, command.InputID, command.ID = "queue_remove", action.Id, ahpCommandID("queue-remove", action.Id)
 		h.mu.Unlock()
 		return ch.command(command)
+	case *t.ChatQueuedMessagesReorderedAction:
+		if !chat {
+			h.mu.Unlock()
+			return ahpInvalid("chat channel required")
+		}
+		command.Type, command.Order, command.ID = "queue_reorder", action.Order, ahpCommandID("queue-reorder", p.Channel, c.id, p.ClientSeq)
+		h.mu.Unlock()
+		return ch.command(command)
 	case *t.ChatTurnStartedAction:
 		if !chat || action.TurnId == "" || ch.chat.ActiveTurn != nil {
 			h.mu.Unlock()
@@ -192,6 +200,17 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 		// Stopping a turn also drops what was queued behind it; a stop that
 		// arrives after its turn ended must not reach the next one.
 		command.Type, command.ID, command.InputID, command.ClearQueue = "cancel", ahpCommandID("cancel", action.TurnId), action.TurnId, true
+		h.mu.Unlock()
+		return ch.command(command)
+	case *t.ChatTruncatedAction:
+		if !chat || action.TurnId != nil && !slices.ContainsFunc(ch.chat.Turns, func(turn t.Turn) bool { return turn.Id == *action.TurnId }) {
+			h.mu.Unlock()
+			return ahpInvalid("a completed turn of this chat is required")
+		}
+		command.Type, command.ID = "truncate", ahpCommandID("truncate", p.Channel, c.id, p.ClientSeq)
+		if action.TurnId != nil {
+			command.InputID = *action.TurnId
+		}
 		h.mu.Unlock()
 		return ch.command(command)
 	case *t.ChatToolCallConfirmedAction:
@@ -272,8 +291,29 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			h.mu.Unlock()
 			return ahpInvalid("active client identity mismatch")
 		}
-		// Tools from attached clients are deliberately not advertised to agents.
 		a.sessionAction(p.Action)
+	case *t.ChatToolCallContentChangedAction:
+		call, err := ch.ownedCall(chat, c.id, action.TurnId, action.ToolCallId)
+		if err != nil {
+			h.mu.Unlock()
+			return err
+		}
+		call.content = append([]t.ToolResultContent(nil), action.Content...) // as the reducer keeps it
+		if action.Meta != nil {
+			call.meta = action.Meta
+		}
+		ch.chatAction(p.Action)
+	case *t.ChatToolCallCompleteAction:
+		call, err := ch.ownedCall(chat, c.id, action.TurnId, action.ToolCallId)
+		if err == nil && action.RequiresResultConfirmation != nil && *action.RequiresResultConfirmation {
+			err = ahpInvalid("confirming a tool's result is not supported")
+		}
+		if err != nil {
+			h.mu.Unlock()
+			return err
+		}
+		call.complete(action.Result, action.Meta)
+		ch.chatAction(p.Action)
 	case *t.SessionTitleChangedAction:
 		if !session || strings.TrimSpace(action.Title) == "" {
 			h.mu.Unlock()
