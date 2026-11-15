@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/google/uuid"
 )
@@ -56,7 +57,7 @@ func (b *backendRuntime) prompt(ctx context.Context, kind, message string, field
 	}
 	c := b.session(sid)
 	id := uuid.NewString()
-	p := pendingPrompt{view: PromptView{ID: id, Kind: kind, Message: message, Fields: fields}, reply: make(chan Command, 1)}
+	p := pendingPrompt{view: PromptView{ID: id, Kind: kind, Message: message, Fields: fields, InputID: harness.InputIDFromContext(ctx)}, reply: make(chan Command, 1)}
 	c.mu.Lock()
 	if c.state.Status == "deleted" {
 		c.mu.Unlock()

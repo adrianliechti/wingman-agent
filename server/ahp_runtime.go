@@ -109,6 +109,42 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 	}
 }
 
+// wantedLocked is the config a chat should run where it runs another: its
+// session's values with those a client set on it. Caller holds host.mu.
+func (a *ahpChat) wantedLocked() map[string]json.RawMessage {
+	wanted := map[string]json.RawMessage{}
+	for key, value := range a.session.state.Config.Values {
+		if own, ok := a.own[key]; ok {
+			value = own
+		}
+		if !bytes.Equal(a.config.Values[key], value) {
+			wanted[key] = value
+		}
+	}
+	for key, value := range a.own {
+		if _, listed := a.session.state.Config.Values[key]; !listed && !bytes.Equal(a.config.Values[key], value) {
+			wanted[key] = value
+		}
+	}
+	return wanted
+}
+
+// wantedSettings fills a settings command with what its AHP chat wants as it runs.
+func (c *sessionController) wantedSettings(command *Command) error {
+	c.mu.Lock()
+	ch := c.ahp
+	c.mu.Unlock()
+	if ch == nil {
+		return nil
+	}
+	ch.project.mu.Lock()
+	wanted := ch.wantedLocked()
+	ch.project.mu.Unlock()
+	settings, err := ahpSettings(wanted)
+	command.Model, command.Effort, command.Mode, command.Unattended = settings.Model, settings.Effort, settings.Mode, settings.Unattended
+	return err
+}
+
 func (a *ahpChat) syncConfig(c *sessionController) {
 	a.config = ahpConfig(c.state.Settings)
 	a.syncOverlay()
@@ -119,7 +155,8 @@ func (a *ahpChat) syncConfig(c *sessionController) {
 func (a *ahpChat) syncOverlay() {
 	overlay := map[string]json.RawMessage{}
 	for key, value := range a.config.Values {
-		if session := a.session.state.Config; a.own[key] || session == nil || !bytes.Equal(session.Values[key], value) {
+		_, own := a.own[key]
+		if session := a.session.state.Config; own || session == nil || !bytes.Equal(session.Values[key], value) {
 			overlay[key] = value
 		}
 	}
@@ -199,7 +236,6 @@ func (a *ahpChat) syncTitle(c *sessionController) {
 				title = title[:80]
 			}
 			a.session.sessionAction(t.StateAction{Value: &t.SessionTitleChangedAction{Type: t.ActionTypeSessionTitleChanged, Title: string(title)}})
-			a.session.rememberTitle()
 			return
 		}
 	}

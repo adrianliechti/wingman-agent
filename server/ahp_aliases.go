@@ -11,22 +11,24 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
+	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
 // ahpAlias maps an AHP URI to the native session behind it. A session's
 // alias names its default chat; a forked chat's alias also names the chat.
 type ahpAlias struct {
-	Resource           string    `json:"resource"`
-	Project            string    `json:"project,omitempty"` // directory
-	Chat               string    `json:"chat,omitempty"`
-	Title              string    `json:"title,omitempty"`
-	Backend            string    `json:"backend"`
-	Session            string    `json:"session"`
-	Fork               string    `json:"fork,omitempty"` // source chat
-	Turn               string    `json:"turn,omitempty"` // source turn
-	Created            time.Time `json:"created,omitzero"`
-	RequestFingerprint string    `json:"requestFingerprint,omitempty"`
-	CreationError      string    `json:"creationError,omitempty"`
+	Resource      string          `json:"resource"`
+	Project       string          `json:"project,omitempty"` // directory
+	Chat          string          `json:"chat,omitempty"`
+	Title         string          `json:"title,omitempty"`
+	Backend       string          `json:"backend"`
+	Session       string          `json:"session"`
+	Fork          string          `json:"fork,omitempty"` // source chat
+	Turn          string          `json:"turn,omitempty"` // source turn
+	Created       time.Time       `json:"created,omitzero"`
+	Modified      time.Time       `json:"modified,omitzero"` // the session's last change
+	Status        t.SessionStatus `json:"status,omitempty"`  // the session's own read and archived flags
+	CreationError string          `json:"creationError,omitempty"`
 }
 
 func readAliases(dir string) []ahpAlias {
@@ -151,6 +153,19 @@ func (h *ahpHost) savedLocked(key nativeKey) (ahpAlias, bool) {
 		}
 	}
 	return ahpAlias{}, false
+}
+
+// discard undoes a session or chat whose creation failed: it leaves the host,
+// and its native session is deleted.
+func (p *ahpProject) discard(c *sessionController, alias ahpAlias) {
+	p.mu.Lock()
+	if alias.Chat != "" {
+		p.forgetChatAlias(alias.Chat)
+	} else {
+		p.forgetAlias(alias.Resource)
+	}
+	p.mu.Unlock()
+	_ = c.command(c.backend.ctx, Command{ID: "ahp-discard:" + c.ref.SessionID, Epoch: c.epoch, Type: "delete"})
 }
 
 // storeAlias saves a session's or chat's alias and makes it known to the host.

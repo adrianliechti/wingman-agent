@@ -159,7 +159,7 @@ func TestAHPForkChatsLiveInTheirSession(t *testing.T) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(h.chats) != 0 || !h.sessions[session].deleted {
+	if len(h.chats) != 0 || h.sessions[session] != nil {
 		t.Fatalf("session chats survived disposal: %v", h.chats)
 	}
 }

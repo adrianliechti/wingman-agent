@@ -85,8 +85,6 @@ type backendRuntime struct {
 	turns          *code.TurnManager
 	mu             sync.Mutex
 	sessions       map[string]*sessionController
-	createMu       sync.Mutex
-	creations      map[string]creationReceipt
 	taskPumpMu     sync.Mutex
 	taskPumps      map[*task.Registry]bool
 	operationMu    sync.Mutex
@@ -122,7 +120,7 @@ func (s *Server) backendOperation(fn func(*backendRuntime, http.ResponseWriter, 
 }
 
 func (s *Server) bindBackend(id string, a code.Agent) *backendRuntime {
-	b := &backendRuntime{Server: s, id: id, agent: a, sessions: map[string]*sessionController{}, creations: map[string]creationReceipt{}}
+	b := &backendRuntime{Server: s, id: id, agent: a, sessions: map[string]*sessionController{}}
 	if ui, ok := a.(interface{ SetUI(code.UI) }); ok {
 		ui.SetUI(b)
 	}
@@ -280,8 +278,10 @@ func (s *Server) chatRoute(next http.Handler) http.Handler {
 
 type Command struct {
 	requireIdle bool
-	wait        bool                  // steering that waits for a turn instead of starting one
-	option      *t.ConfirmationOption // the approval option an AHP client chose
+	wait        bool                         // steering that waits for a turn instead of starting one
+	sync        bool                         // settings that its AHP chat wants when they run
+	option      *t.ConfirmationOption        // the approval option an AHP client chose
+	answers     map[string]t.ChatInputAnswer // an AHP client's answers with its drafts, as its reducer keeps them
 
 	ID         string               `json:"id"`
 	Epoch      string               `json:"epoch,omitempty"`
@@ -321,17 +321,13 @@ type commandReceipt struct {
 	done        chan struct{}
 }
 
-type creationReceipt struct {
-	fingerprint [32]byte
-	receipt     Receipt
-}
-
 func commandFingerprint(command Command) [32]byte {
 	data, _ := json.Marshal(command)
 	return sha256.Sum256(data)
 }
 
-// createSession owns native creation and its retry receipt independently of transport.
+// createSession creates a native session, or forks one. Callers own retries:
+// AHP creation is serialised per URI and recorded in the session's alias.
 func (b *backendRuntime) createSession(command Command) commandReceipt {
 	failure := func(status int, message string) commandReceipt {
 		return commandReceipt{status: status, message: message}
@@ -340,21 +336,12 @@ func (b *backendRuntime) createSession(command Command) commandReceipt {
 		return failure(409, "workspace closed")
 	}
 	defer b.operations.Done()
-	if command.ID == "" || command.Type != "create" && command.Type != "fork" {
-		return failure(400, "create or fork command and request id required")
+	if command.Type != "create" && command.Type != "fork" {
+		return failure(400, "create or fork command required")
 	}
 	forker, canFork := b.agent.(code.SessionForker)
 	if command.Type == "fork" && (!canFork || command.Source == "") {
 		return failure(400, "fork requires a source session on an agent that supports forking")
-	}
-	b.createMu.Lock()
-	defer b.createMu.Unlock()
-	fingerprint := commandFingerprint(command)
-	if previous, ok := b.creations[command.ID]; ok {
-		if previous.fingerprint != fingerprint {
-			return failure(409, "request id reused with different content")
-		}
-		return commandReceipt{receipt: previous.receipt}
 	}
 	var id string
 	var err error
@@ -379,7 +366,6 @@ func (b *backendRuntime) createSession(command Command) commandReceipt {
 	c := b.session(id)
 	c.opMu.Lock()
 	receipt := Receipt{ID: command.ID, Ref: c.ref, Epoch: c.epoch, Outcome: "created"}
-	b.creations[command.ID] = creationReceipt{fingerprint, receipt}
 	c.loaded = true
 	c.replaceHistory()
 	c.mu.Lock()
@@ -479,12 +465,6 @@ func (c *sessionController) execute(command Command) error {
 	}
 	switch command.Type {
 	case "send", "queue_update":
-		if command.requireIdle {
-			snapshot := b.turns.Snapshot(sid)
-			if snapshotHasActive(snapshot) || snapshot.Compacting {
-				return code.ErrTurnInProgress
-			}
-		}
 		if command.Type == "send" && command.InputID != "" && command.InputID != command.ID {
 			return errors.New("input id must equal the send request id")
 		}
@@ -503,23 +483,20 @@ func (c *sessionController) execute(command Command) error {
 		}
 		// A queue recovered after a restart waits for the user; sending continues
 		// it, after the input when that input must start now.
-		if command.Type == "send" && !command.wait && b.turns.Snapshot(sid).Paused {
-			if command.requireIdle {
-				if err := b.turns.Unpause(sid); err != nil {
-					return err
-				}
-			} else {
-				b.turns.Resume(sid)
-			}
+		if command.Type == "send" && !command.wait && !command.requireIdle && b.turns.Snapshot(sid).Paused {
+			b.turns.Resume(sid)
 		}
-		if command.Type == "queue_update" {
-			if err := b.turns.ReplaceQueued(sid, id, input); err != nil {
-				return err
-			}
-		} else {
-			if _, err := b.turns.Submit(b.ctx, sid, input); err != nil {
-				return err
-			}
+		var err error
+		switch {
+		case command.Type == "queue_update":
+			err = b.turns.ReplaceQueued(sid, id, input)
+		case command.requireIdle:
+			_, err = b.turns.Start(b.ctx, sid, input)
+		default:
+			_, err = b.turns.Submit(b.ctx, sid, input)
+		}
+		if err != nil {
+			return err
 		}
 		b.ensureTaskPump(sid)
 	case "queue_remove":
@@ -545,6 +522,11 @@ func (c *sessionController) execute(command Command) error {
 			}
 		}
 	case "settings":
+		if command.sync {
+			if err := c.wantedSettings(&command); err != nil {
+				return err
+			}
+		}
 		ctx := code.WithSessionID(b.ctx, sid)
 		// Always refresh, including partial failures or provider-normalized values.
 		defer c.refreshSettings()

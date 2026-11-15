@@ -1068,3 +1068,40 @@ func TestTurnManagerEditsWaitingSteeringWhileItsTurnStreams(t *testing.T) {
 	}
 	waitValue(t, a.done)
 }
+
+// emptySteerAgent refuses steering without content, as the builtin harness does.
+type emptySteerAgent struct{ *turnManagerTestAgent }
+
+func (a *emptySteerAgent) Steer(ctx context.Context, id string, input TurnInput) error {
+	if len(input.Content) == 0 {
+		return ErrNoActiveTurn
+	}
+	return a.turnManagerTestAgent.Steer(ctx, id, input)
+}
+
+func TestTurnManagerWaitingSteeringEditedIntoACompactionRunsAsOne(t *testing.T) {
+	a := &emptySteerAgent{newTurnManagerTestAgent()}
+	a.steer = true
+	events := make(chan TurnEvent, 32)
+	m := NewTurnManager(context.Background(), a, func(ev TurnEvent) { events <- ev })
+	defer m.Close()
+
+	_, _ = m.Submit(context.Background(), "s", waitingSteer("w", "guide w"))
+	_, _ = m.Submit(context.Background(), "s", waitingSteer("later", "guide later"))
+	if err := m.ReplaceQueued("s", "w", TurnInput{Intent: TurnInputSteer, Wait: true, Compact: true}); err != nil {
+		t.Fatal(err)
+	}
+	if ev := waitForState(t, events, "w", TurnInputActive); !ev.Input.Compact || ev.Intent != TurnInputFollowUp {
+		t.Fatalf("the edited steering runs as %+v", ev.Input)
+	}
+	waitForState(t, events, "w", TurnInputFailed) // the test agent cannot compact
+	_, _ = m.Submit(context.Background(), "s", turnInput("1", "one", TurnInputFollowUp))
+	_ = waitValue(t, a.starts)
+	a.mu.Lock()
+	steers := slices.Clone(a.steers)
+	a.mu.Unlock()
+	if !slices.Equal(steers, []string{"guide later"}) {
+		t.Fatalf("steers = %v", steers)
+	}
+	a.releases <- struct{}{}
+}

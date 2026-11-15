@@ -1,13 +1,13 @@
 package server
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -118,6 +118,11 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			command.Intent, command.wait = code.TurnInputSteer, true
 		}
 		queued := slices.ContainsFunc(ch.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == action.Id }) || ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id
+		// Its input would take the place of the turn's.
+		if !queued && (ch.chat.ActiveTurn != nil && ch.chat.ActiveTurn.Id == action.Id || slices.ContainsFunc(ch.chat.Turns, func(turn t.Turn) bool { return turn.Id == action.Id })) {
+			h.mu.Unlock()
+			return ahpInvalid("a turn already has this id")
+		}
 		if queued {
 			command.Type, command.InputID, command.ID = "queue_update", action.Id, ahpCommandID("queue-update", p.Channel, c.id, p.ClientSeq)
 		}
@@ -239,11 +244,12 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			return ahpInvalid("input request already resolved or expired")
 		}
 		command.Type, command.PromptID, command.Action, command.ID = "prompt_response", action.RequestId, string(action.Response), id
-		answers := maps.Clone(prompt.answers)
-		if answers == nil {
-			answers = map[string]t.ChatInputAnswer{}
-		}
+		answers := map[string]t.ChatInputAnswer{}
+		maps.Copy(answers, prompt.answers)
 		maps.Copy(answers, action.Answers)
+		if len(answers) > 0 {
+			command.answers = answers
+		}
 		var err error
 		command.Content, err = ahpAnswers(prompt.view, answers)
 		h.mu.Unlock()
@@ -256,69 +262,48 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			h.mu.Unlock()
 			return ahpInvalid("session channel required")
 		}
-		values, err := ahpConfigValues(action.Config)
-		if err != nil {
+		if _, err := ahpConfigValues(action.Config); err != nil {
 			h.mu.Unlock()
 			return err
 		}
-		// The session's values change, and with them every chat that does not set its own.
-		type change struct {
-			chat   *ahpChat
-			values map[string]json.RawMessage
-		}
-		changes := []change{}
-		for _, ch := range a.chats {
-			inherited := map[string]json.RawMessage{}
-			for key, value := range values {
-				if !ch.own[key] && bytes.Equal(ch.config.Values[key], a.state.Config.Values[key]) {
-					inherited[key] = value
-				}
-			}
-			if len(inherited) > 0 {
-				changes = append(changes, change{ch, inherited})
-			}
-		}
 		h.mu.Unlock()
-		for _, change := range changes {
-			if err := change.chat.setConfig(ahpCommandID("config", p.Channel, c.id, p.ClientSeq, change.chat.chat.Resource), change.values); err != nil {
-				return err
-			}
-		}
+		err := a.configure(ahpCommandID("config", p.Channel, c.id, p.ClientSeq), action.Config)
 		h.mu.Lock()
-		merged := maps.Clone(a.state.Config.Values)
-		maps.Copy(merged, values)
-		answer := t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: merged, Replace: new(true)}}
-		ahp.ApplyActionToSession(&a.state, answer)
-		a.acknowledge(p.Channel, p.Action, answer)
+		answer := t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: maps.Clone(a.state.Config.Values), Replace: new(true)}}
+		if err != nil {
+			a.sessionAction(answer) // what changed before the failure, which the client's action does not acknowledge
+		} else {
+			ahp.ApplyActionToSession(&a.state, answer)
+			a.acknowledge(p.Channel, p.Action, answer)
+		}
 		for _, ch := range a.chats {
 			ch.syncOverlay()
 		}
 		h.mu.Unlock()
-		return nil
+		return err
 	case *t.ChatConfigChangedAction:
 		if !chat {
 			h.mu.Unlock()
 			return ahpInvalid("chat channel required")
 		}
-		values, own := action.Config, maps.Clone(ch.own)
-		if action.Replace != nil && *action.Replace {
-			// A replaced overlay returns what it omits to the session's values.
-			values, own = maps.Clone(action.Config), map[string]bool{}
-			for key := range ch.chat.Config.Values {
-				if _, kept := values[key]; !kept {
-					values[key] = a.state.Config.Values[key]
-				}
-			}
+		values, err := ahpConfigValues(action.Config)
+		if err != nil {
+			h.mu.Unlock()
+			return err
 		}
-		for key := range action.Config {
-			own[key] = true
+		// A replaced overlay returns what it omits to the session's values.
+		previous, own := ch.own, map[string]json.RawMessage{}
+		if action.Replace == nil || !*action.Replace {
+			maps.Copy(own, previous)
 		}
-		previous := ch.own
+		maps.Copy(own, values)
 		ch.own = own
 		h.mu.Unlock()
-		if err := ch.setConfig(ahpCommandID("config", p.Channel, c.id, p.ClientSeq), values); err != nil {
+		if err := ch.syncSettings(ahpCommandID("config", p.Channel, c.id, p.ClientSeq)); err != nil {
 			h.mu.Lock()
-			ch.own = previous
+			if reflect.DeepEqual(ch.own, own) { // a later change stays
+				ch.own = previous
+			}
 			ch.syncOverlay()
 			h.mu.Unlock()
 			return err
@@ -363,7 +348,6 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			return ahpInvalid("nonempty session title required")
 		}
 		a.sessionAction(p.Action)
-		a.rememberTitle()
 	case *t.SessionIsReadChangedAction, *t.SessionIsArchivedChangedAction:
 		if !session {
 			h.mu.Unlock()
@@ -399,13 +383,13 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 	unsaved := a.unsaved
 	h.mu.Unlock()
 	if unsaved {
-		a.saveTitle()
+		a.save()
 	}
 	return nil
 }
 
 func ahpAnswerValues(view PromptView, content map[string]any) map[string]t.ChatInputAnswer {
-	answers := map[string]t.ChatInputAnswer{}
+	var answers map[string]t.ChatInputAnswer
 	for _, field := range view.Fields {
 		value, ok := content[field.Name]
 		if !ok || field.CustomAnswerFor != "" {
@@ -436,18 +420,17 @@ func ahpAnswerValues(view PromptView, content map[string]any) map[string]t.ChatI
 		default:
 			continue
 		}
+		if answers == nil {
+			answers = map[string]t.ChatInputAnswer{}
+		}
 		answers[field.Name] = t.ChatInputAnswer{Value: &t.ChatInputAnswered{State: t.ChatInputAnswerStateSubmitted, Value: answer}}
 	}
 	return answers
 }
 
-func (a *ahpChat) setConfig(id string, values map[string]json.RawMessage) error {
-	command, err := ahpSettings(values)
-	if err != nil {
-		return err
-	}
-	command.ID, command.Epoch = id, a.controller.epoch
-	return a.command(command)
+// syncSettings has the chat run its session's values with those a client set on it.
+func (a *ahpChat) syncSettings(id string) error {
+	return a.command(Command{ID: id, Epoch: a.controller.epoch, Type: "settings", sync: true})
 }
 
 // ahpSettings is the settings command that applies config values.

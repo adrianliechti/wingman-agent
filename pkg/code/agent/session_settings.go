@@ -39,6 +39,16 @@ func (a *Agent) loadSessionSettings(id string) (sessionSettings, error) {
 	return settings, nil
 }
 
+// created reports whether a session that has no journal yet was created here.
+func (a *Agent) created(id string) bool {
+	dir, err := session.ArtifactDir(a.sessionsDir, id)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, sessionSettingsFile))
+	return err == nil
+}
+
 // saveSessionSettingsLocked persists the session's selection. Callers hold
 // modelMu so concurrent changes are written in the order they were applied.
 func (a *Agent) saveSessionSettingsLocked(s *sessionState) error {

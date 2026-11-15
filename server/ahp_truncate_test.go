@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/microsoft/agent-host-protocol/clients/go/ahp"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
@@ -347,8 +348,23 @@ func TestAHPWaitingSteeringBelongsToTheQueue(t *testing.T) {
 			t.Fatalf("%s: %s", name, truncateJSON(t, state.QueuedMessages))
 		}
 	}
-	if !c.app.busy() {
-		t.Fatal("waiting steering let its project close")
+	// The saved queue keeps the steering for a project that closes meanwhile.
+	saved := func() []string {
+		c.app.ahp.mu.Lock()
+		controller := c.app.ahp.chats[c.state.Resource].controller
+		c.app.ahp.mu.Unlock()
+		queue, err := controller.backend.agent.(code.TurnQueueStore).LoadTurnQueue(controller.ref.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := []string{}
+		for _, input := range queue.Inputs {
+			ids = append(ids, input.ID)
+		}
+		return ids
+	}
+	if ids := saved(); !slices.Equal(ids, []string{"second", "first"}) {
+		t.Fatalf("saved queue: %v", ids)
 	}
 	// Clearing the conversation drops what waited with the history.
 	if echo, _ := c.dispatch(types.StateAction{Value: &types.ChatTruncatedAction{Type: types.ActionTypeChatTruncated}}); echo.RejectionReason != nil {
@@ -359,8 +375,8 @@ func TestAHPWaitingSteeringBelongsToTheQueue(t *testing.T) {
 			t.Fatalf("%s after the cut: %s", name, truncateJSON(t, state))
 		}
 	}
-	if c.app.busy() {
-		t.Fatal("a cleared chat stayed busy")
+	if ids := saved(); len(ids) != 0 {
+		t.Fatalf("saved queue after the cut: %v", ids)
 	}
 	c.complete("two", "second question")
 	if request := model.asked("second question"); strings.Contains(request, "mind the tests") || strings.Contains(request, "keep it short") {

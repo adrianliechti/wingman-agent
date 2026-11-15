@@ -197,24 +197,19 @@ func TestSessionRestoresEditableQueueAndRejectsMissingHistory(t *testing.T) {
 	}
 }
 
-func TestSessionReceiptsDeduplicateAfterCompletionAndCreation(t *testing.T) {
+func TestSessionReceiptsDeduplicateAfterCompletion(t *testing.T) {
 	s, b, a := newProtocolServer(t)
 	var created Receipt
-	for range 2 {
-		rec := protocolRequest(t, s, "/api/v2/backends/one/sessions", Command{ID: "draft-request", Type: "create"})
-		if rec.Code != 200 {
-			t.Fatalf("create: %s", rec.Body)
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
-			t.Fatal(err)
-		}
+	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions", Command{ID: "draft-request", Type: "create"})
+	if rec.Code != 200 {
+		t.Fatalf("create: %s", rec.Body)
 	}
-	if a.created.Load() != 1 {
-		t.Fatalf("created %d sessions", a.created.Load())
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
 	}
 	path := "/api/v2/backends/one/sessions/" + created.Ref.SessionID + "/commands"
 	command := Command{ID: "send-request", Epoch: created.Epoch, Type: "send", Text: "hello"}
-	rec := protocolRequest(t, s, path, command)
+	rec = protocolRequest(t, s, path, command)
 	if rec.Code != 200 {
 		t.Fatalf("send: %d %s", rec.Code, rec.Body)
 	}

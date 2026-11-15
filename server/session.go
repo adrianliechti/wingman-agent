@@ -43,6 +43,7 @@ type PromptView struct {
 	Kind    string             `json:"kind"`
 	Message string             `json:"message"`
 	Fields  []tool.ElicitField `json:"fields,omitempty"`
+	InputID string             `json:"inputId,omitempty"` // the input whose turn asks, when known
 }
 
 type SessionSettings struct {
@@ -121,6 +122,7 @@ type sessionController struct {
 	lastOutcome string
 	lastInput   string // the input lastOutcome belongs to
 	hostTurns   []hostTurn
+	steered     map[string]string // each steering input, and the turn input it joined
 	ahp         *ahpChat
 }
 
@@ -240,6 +242,12 @@ func (c *sessionController) replaceHistory() {
 		entries = slices.Insert(entries, at, turn.entries...)
 		inserted += len(turn.entries)
 	}
+	// Steering the running turn took stays until its agent records it.
+	for _, e := range c.entries {
+		if e.Type == "user" && c.activeInput != "" && c.steered[e.InputID] == c.activeInput && !slices.ContainsFunc(entries, func(n TranscriptEntry) bool { return n.InputID == e.InputID }) {
+			entries = append(entries, e)
+		}
+	}
 	c.entries = entries
 	c.textID = ""
 	c.reasoningID = ""
@@ -328,6 +336,13 @@ func (c *sessionController) apply(f Frame) {
 			switch code.TurnInputState(f.Input.State) {
 			case code.TurnInputActive:
 				c.activeInput, c.lastOutcome = f.Input.ID, ""
+			case code.TurnInputSteered:
+				if c.activeInput != "" {
+					if c.steered == nil {
+						c.steered = map[string]string{}
+					}
+					c.steered[f.Input.ID] = c.activeInput
+				}
 			case code.TurnInputCompleted, code.TurnInputIncomplete, code.TurnInputFailed, code.TurnInputCancelled:
 				if c.activeInput == f.Input.ID {
 					c.activeInput, c.lastOutcome, c.lastInput = "", f.Input.State, f.Input.ID

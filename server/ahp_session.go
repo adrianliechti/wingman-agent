@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"reflect"
 	"slices"
@@ -18,21 +19,22 @@ type ahpSession struct {
 	project  *ahpProject
 	resource string
 	created  string
+	modified string // the session's last change before it was loaded
 	state    t.SessionState
 	chats    []*ahpChat
 	deleted  bool
-	unsaved  bool // the alias has a title that is not saved yet
+	unsaved  bool // the alias holds changes that are not saved yet
 	pending  map[string]*ahpPendingAction
 	acks     map[t.ActionOrigin]ahpAck
 	ackOrder []t.ActionOrigin
 }
 
-func newAHPSession(h *ahpProject, resource, provider, title string, updated time.Time) *ahpSession {
+func newAHPSession(h *ahpProject, resource, provider, title string, created, modified time.Time, own t.SessionStatus) *ahpSession {
 	if title == "" {
 		title = "New session"
 	}
-	return &ahpSession{project: h, resource: resource, created: updated.UTC().Format(time.RFC3339Nano), pending: map[string]*ahpPendingAction{}, acks: map[t.ActionOrigin]ahpAck{},
-		state: t.SessionState{Changesets: h.changesetCatalogue(), Provider: provider, Title: title, Status: t.SessionStatusIdle, Lifecycle: t.SessionLifecycleReady, ActiveClients: []t.SessionActiveClient{}, Chats: []t.ChatSummary{}, Project: h.info(), WorkingDirectories: []string{h.directoryURI()}},
+	return &ahpSession{project: h, resource: resource, created: created.UTC().Format(time.RFC3339Nano), modified: modified.UTC().Format(time.RFC3339Nano), pending: map[string]*ahpPendingAction{}, acks: map[t.ActionOrigin]ahpAck{},
+		state: t.SessionState{Changesets: h.changesetCatalogue(), Provider: provider, Title: title, Status: t.SessionStatusIdle | own&^ahpActivityBits, Lifecycle: t.SessionLifecycleReady, ActiveClients: []t.SessionActiveClient{}, Chats: []t.ChatSummary{}, Project: h.info(), WorkingDirectories: []string{h.directoryURI()}},
 	}
 }
 
@@ -43,7 +45,7 @@ func (a *ahpSession) addChat(c *sessionController, resource, title string, origi
 	if title == "" && len(a.chats) > 0 {
 		title = a.state.Title
 	}
-	stamp := a.created
+	stamp := a.modified
 	if !created.IsZero() {
 		stamp = created.UTC().Format(time.RFC3339Nano)
 	}
@@ -81,6 +83,9 @@ func (a *ahpChat) inherit(source *ahpChat, through string) {
 	a.chat.Turns = slices.Clone(source.chat.Turns[:i+1])
 	maps.Copy(a.reasoning, source.reasoning)
 	for _, turn := range a.chat.Turns {
+		if ending, ok := source.endings[turn.Id]; ok {
+			a.endings[turn.Id] = ending
+		}
 		for _, part := range turn.ResponseParts {
 			if tool, ok := part.Value.(*t.ToolCallResponsePart); ok && source.clientCalls[ahpToolCallID(tool.ToolCall)] != nil {
 				a.clientCalls[ahpToolCallID(tool.ToolCall)] = source.clientCalls[ahpToolCallID(tool.ToolCall)]
@@ -110,7 +115,7 @@ func (a *ahpChat) summary() t.ChatSummary {
 }
 
 func (a *ahpSession) summary() t.SessionSummary {
-	summary := t.SessionSummary{Resource: a.resource, Provider: a.state.Provider, Title: a.state.Title, Status: a.state.Status, CreatedAt: a.created, ModifiedAt: a.created, Project: a.state.Project, WorkingDirectories: a.state.WorkingDirectories, DefaultChat: a.state.DefaultChat, Chats: []t.SessionChatSummary{}}
+	summary := t.SessionSummary{Resource: a.resource, Provider: a.state.Provider, Title: a.state.Title, Status: a.state.Status, CreatedAt: a.created, ModifiedAt: a.modified, Project: a.state.Project, WorkingDirectories: a.state.WorkingDirectories, DefaultChat: a.state.DefaultChat, Chats: []t.SessionChatSummary{}}
 	for _, ch := range a.chats {
 		status := ch.chat.Status
 		summary.Chats = append(summary.Chats, t.SessionChatSummary{Resource: ch.chat.Resource, Title: ch.title, Status: &status})
@@ -119,24 +124,60 @@ func (a *ahpSession) summary() t.SessionSummary {
 	return summary
 }
 
+// configure changes the session's values and every chat that does not set its
+// own, and keeps the values as its default chat runs them, which its backend
+// may have normalized. Caller does not hold host.mu.
+func (a *ahpSession) configure(id string, config map[string]json.RawMessage) error {
+	values, err := ahpConfigValues(config)
+	if err != nil {
+		return err
+	}
+	h := a.project
+	h.mu.Lock()
+	merged := maps.Clone(a.state.Config.Values)
+	maps.Copy(merged, values)
+	a.state.Config.Values = merged
+	chats := slices.Clone(a.chats)
+	h.mu.Unlock()
+	var errs []error
+	for _, ch := range chats {
+		errs = append(errs, ch.syncSettings(ahpCommandID(id, ch.chat.Resource)))
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	main := a.chats[0]
+	normalized := maps.Clone(a.state.Config.Values)
+	for key := range values {
+		if _, own := main.own[key]; !own && main.config.Values[key] != nil {
+			normalized[key] = main.config.Values[key]
+		}
+	}
+	a.state.Config.Values = normalized
+	return errors.Join(errs...)
+}
+
 func (a *ahpSession) sessionAction(action t.StateAction) {
 	ahp.ApplyActionToSession(&a.state, action)
 	a.emit(a.resource, action)
 }
 
-// A host lists the saved title before it loads the session's project. Caller holds host.mu.
-func (a *ahpSession) rememberTitle() {
+// keep holds in the session's alias what a host lists before it opens the
+// session's project: its title, read and archived flags and last change.
+// Caller holds host.mu.
+func (a *ahpSession) keep(summary t.SessionSummary) {
 	alias, ok := a.project.aliases[a.resource]
-	if !ok || alias.Title == a.state.Title {
+	modified, _ := time.Parse(time.RFC3339Nano, summary.ModifiedAt)
+	own := a.state.Status &^ ahpActivityBits
+	if !ok || alias.Title == a.state.Title && alias.Status == own && alias.Modified.Equal(modified) {
 		return
 	}
-	alias.Title = a.state.Title
+	alias.Title, alias.Status, alias.Modified = a.state.Title, own, modified
 	a.project.rememberAliasLocked(alias)
 	a.unsaved = true
 }
 
-// saveTitle writes a remembered title outside the host's lock, which the actions of every project wait for.
-func (a *ahpSession) saveTitle() {
+// save writes the kept alias outside the host's lock, which the actions of every project wait for.
+func (a *ahpSession) save() {
 	p := a.project
 	p.aliasMu.Lock()
 	defer p.aliasMu.Unlock()
@@ -217,9 +258,11 @@ func (a *ahpSession) syncChats(previous t.SessionSummary) {
 	}
 	a.state.Status = a.activity() | a.state.Status&^ahpActivityBits
 	a.syncInputNeeded()
-	if next := a.summary(); !reflect.DeepEqual(previous, next) {
+	next := a.summary()
+	if !reflect.DeepEqual(previous, next) {
 		a.project.notifyRoot("root/sessionSummaryChanged", t.SessionSummaryChangedParams{Channel: t.RootResourceURI, Session: a.resource, Changes: t.PartialSessionSummary{Title: &next.Title, Status: &next.Status, ModifiedAt: &next.ModifiedAt, Chats: next.Chats}})
 	}
+	a.keep(next)
 }
 
 func (a *ahpSession) syncInputNeeded() {
@@ -308,6 +351,11 @@ func (a *ahpSession) chatDeleted(ch *ahpChat) {
 	for client := range a.project.clients {
 		delete(client.subscriptions, a.resource)
 	}
+	// A chat created while the session was disposed goes with it.
+	for _, fork := range a.project.forksLocked(a.resource) {
+		a.project.forgetChatAlias(fork.Chat)
+	}
 	a.project.forgetAlias(a.resource)
+	delete(a.project.sessions, a.resource)
 	a.project.notifyRoot("root/sessionRemoved", t.SessionRemovedParams{Channel: t.RootResourceURI, Session: a.resource})
 }

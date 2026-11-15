@@ -4,13 +4,14 @@ import (
 	"maps"
 	"slices"
 
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
 )
 
-// busy reports whether closing the project would cut off work: a turn or
-// queued input, an open question, a task, a schedule or a terminal.
+// busy reports whether closing the project would cut off work: a turn, queued
+// input its agent does not save, an open question, a task, a schedule or a terminal.
 func (s *Server) busy() bool {
 	if s.terminals != nil && slices.ContainsFunc(s.terminals.List(), func(session *terminal.Session) bool { return !session.Exited() }) {
 		return true
@@ -34,9 +35,10 @@ func (b *backendRuntime) busy() bool {
 	sessions := maps.Clone(b.sessions)
 	b.mu.Unlock()
 	local, _ := b.agent.(*agent.Agent)
+	_, saved := b.agent.(code.TurnQueueStore) // a saved queue waits for its session to reopen
 	for id, c := range sessions {
 		c.mu.Lock()
-		working := c.state.Phase != "" && c.state.Phase != "idle" || len(c.state.PendingInputs) > 0 || len(c.state.Prompts) > 0
+		working := c.state.Phase != "" && c.state.Phase != "idle" || len(c.state.PendingInputs) > 0 && !saved || len(c.state.Prompts) > 0
 		c.mu.Unlock()
 		if working {
 			return true

@@ -209,6 +209,13 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 		return "", err
 	}
 	s.startSource = "startup"
+	// A session is saved from its creation; its journal starts with its first event.
+	a.modelMu.Lock()
+	err = a.saveSessionSettingsLocked(s)
+	a.modelMu.Unlock()
+	if err != nil {
+		return "", errors.Join(err, s.close())
+	}
 	if err := a.registerSession(ctx, s); err != nil {
 		return "", err
 	}
@@ -237,6 +244,9 @@ func (a *Agent) loadSession(ctx context.Context, id string) error {
 	a.mu.Unlock()
 
 	saved, err := session.Load(a.sessionsDir, id)
+	if errors.Is(err, os.ErrNotExist) && a.created(id) {
+		saved, err = session.Session{ID: id}, nil // created, but never used
+	}
 	if err != nil {
 		return err
 	}

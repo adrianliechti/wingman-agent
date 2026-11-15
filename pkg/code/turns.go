@@ -176,6 +176,30 @@ func (m *TurnManager) Features(sessionID string) TurnFeatures {
 // Submit rejects duplicate live input IDs. Transport receipts own retry
 // deduplication. A steer that loses a turn-boundary race becomes a FIFO follow-up.
 func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnInput) (TurnInputSnapshot, error) {
+	return m.submit(ctx, sessionID, input, false)
+}
+
+// Start runs input as the session's next turn once a finishing turn has
+// settled, or fails with ErrTurnInProgress while another turn or a compaction
+// runs. A paused queue continues after it.
+func (m *TurnManager) Start(ctx context.Context, sessionID string, input TurnInput) (TurnInputSnapshot, error) {
+	for {
+		s := m.session(sessionID)
+		s.mu.Lock()
+		finishing, done := s.running && s.active == nil && !s.compacting, s.done
+		s.mu.Unlock()
+		if !finishing {
+			return m.submit(ctx, sessionID, input, true)
+		}
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return TurnInputSnapshot{}, ctx.Err()
+		}
+	}
+}
+
+func (m *TurnManager) submit(ctx context.Context, sessionID string, input TurnInput, now bool) (TurnInputSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return TurnInputSnapshot{}, err
 	}
@@ -227,6 +251,21 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 	if _, exists := s.ids[input.ID]; exists {
 		s.mu.Unlock()
 		return TurnInputSnapshot{}, ErrDuplicateInput
+	}
+	if now {
+		if s.active != nil || s.running {
+			s.mu.Unlock()
+			return TurnInputSnapshot{}, ErrTurnInProgress
+		}
+		input.Intent, input.Wait = TurnInputFollowUp, false
+		if s.paused {
+			s.paused = false
+			if err := m.persistLocked(sessionID, s); err != nil {
+				s.paused = true
+				s.mu.Unlock()
+				return TurnInputSnapshot{}, err
+			}
+		}
 	}
 	s.ids[input.ID] = struct{}{}
 	s.mu.Unlock()
@@ -695,9 +734,9 @@ func (m *TurnManager) ReplaceQueued(sessionID, inputID string, replacement TurnI
 	}
 	position := 0
 	var previous TurnInput
-	// Only steering that asks to wait keeps waiting for a turn; any other replacement is a follow-up.
+	// Only steering that asks to wait keeps waiting for a turn; any other replacement, and a compaction, is a follow-up.
 	replacement.ID = inputID
-	if replacement.Intent != TurnInputSteer || !replacement.Wait {
+	if replacement.Intent != TurnInputSteer || !replacement.Wait || replacement.Compact {
 		replacement.Intent, replacement.Wait = TurnInputFollowUp, false
 	}
 	replacement = CloneTurnInput(replacement)
@@ -848,26 +887,6 @@ func (m *TurnManager) StopSession(ctx context.Context, sessionID string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-}
-
-// Unpause lets a recovered queue continue after the next turn without
-// starting it now.
-func (m *TurnManager) Unpause(sessionID string) error {
-	s := m.session(sessionID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.queueLoaded {
-		return s.queueErr
-	}
-	if !s.paused {
-		return nil
-	}
-	s.paused = false
-	if err := m.persistLocked(sessionID, s); err != nil {
-		s.paused = true
-		return err
-	}
-	return nil
 }
 
 func (m *TurnManager) Resume(sessionID string) bool {

@@ -188,6 +188,14 @@ func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
 	if ev.State == "" {
 		return
 	}
+	// A failure of the queue itself, such as one it could not save, ends no input.
+	if ev.InputID == "" {
+		if ev.Err != nil {
+			s.sendSession(ev.SessionID, Frame{Type: EvtError, Message: ev.Err.Error()})
+		}
+		s.sendTurnSnapshot(ev.SessionID)
+		return
+	}
 	// The turn's final usage and its failure belong to the turn, so they precede its end.
 	if ev.Executed {
 		s.sendUsageIfChanged(ev.SessionID)

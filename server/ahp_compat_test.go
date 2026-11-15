@@ -46,11 +46,11 @@ func TestAHPCreationRetriesPreserveParametersAndErrors(test *testing.T) {
 	params.Channel = "ahp-session:/invalid-config"
 	params.Config = map[string]json.RawMessage{"model": json.RawMessage(`false`)}
 	checkCode(create(params), -32602)
-	// An incomplete creation must keep reporting its configuration error;
-	// AlreadyExists would tell reconnecting clients it had succeeded.
+	// A failed creation keeps reporting its error; AlreadyExists would tell
+	// reconnecting clients it had succeeded.
 	checkCode(create(params), -32602)
-	if agent.created.Load() != 2 {
-		test.Fatal("configuration retry created a duplicate conversation")
+	if agent.created.Load() != 1 {
+		test.Fatal("an invalid configuration created a conversation")
 	}
 }
 

@@ -20,14 +20,15 @@ type ahpChat struct {
 	session          *ahpSession
 	controller       *sessionController
 	chat             t.ChatState
-	title            string                // the session's name for the chat, which no action can give the chat itself
-	config           *t.SessionConfigState // the controller's, read without its lock
-	own              map[string]bool       // the config a client set on this chat, which it keeps over the session's
+	title            string                     // the session's name for the chat, which no action can give the chat itself
+	config           *t.SessionConfigState      // the controller's, read without its lock
+	own              map[string]json.RawMessage // the config a client set on this chat, which it keeps over the session's
 	prompts          map[string]*ahpPrompt
 	promptSeq        int
 	reasoning        map[string]*ahpReasoningTiming
-	usageStart       UsageView         // the controller's totals when the active turn started
-	offered          map[string]string // the client behind each tool the agent was last given
+	endings          map[string]t.StateAction // the action that ended each turn the host ended
+	usageStart       UsageView                // the controller's totals when the active turn started
+	offered          map[string]string        // the client behind each tool the agent was last given
 	clientCalls      map[string]*ahpClientCall
 	removed          bool
 	projected        bool // turns created after the first projection are live, not history
@@ -87,7 +88,7 @@ type ahpPendingAction struct {
 
 func newAHPChat(a *ahpSession, c *sessionController, resource, title, stamp string) *ahpChat {
 	config := ahpConfig(c.state.Settings)
-	return &ahpChat{project: a.project, session: a, controller: c, title: title, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{}, clientCalls: map[string]*ahpClientCall{}, own: map[string]bool{},
+	return &ahpChat{project: a.project, session: a, controller: c, title: title, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{}, clientCalls: map[string]*ahpClientCall{}, endings: map[string]t.StateAction{}, own: map[string]json.RawMessage{},
 		chat: t.ChatState{Resource: resource, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}, Config: &t.ChatConfigState{Values: map[string]json.RawMessage{}}},
 	}
 }
@@ -155,7 +156,7 @@ func (a *ahpChat) syncLocked(c *sessionController, changes []SessionChange) {
 		unsaved := a.session.unsaved
 		a.project.mu.Unlock()
 		if unsaved {
-			a.session.saveTitle()
+			a.session.save()
 		}
 	}()
 	if !a.project.availableLocked() || a.session.deleted || a.removed {
@@ -228,9 +229,13 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 		a.projectedPrompts = slices.Clone(c.state.Prompts)
 		for _, p := range c.state.Prompts {
 			if a.prompts[p.ID] == nil {
+				// A prompt joins the running turn, unless another input asks, such as a background task's.
 				turn := c.activeInput
 				if a.chat.ActiveTurn != nil {
 					turn = a.chat.ActiveTurn.Id
+				}
+				if p.InputID != "" && p.InputID != c.activeInput && c.steered[p.InputID] != c.activeInput {
+					turn = ""
 				}
 				after := ""
 				if n := len(c.entries); n > 0 {
@@ -253,6 +258,12 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 			state := t.TurnStateComplete
 			if len(turns) > 0 {
 				state = turns[len(turns)-1].State
+			}
+			// A prompt a completed turn left open was not its own; it stays answerable as the session's.
+			for _, p := range a.prompts {
+				if state == t.TurnStateComplete && p.turn == old.Id && p.response == nil {
+					p.turn = ""
+				}
 			}
 			a.finishTurn(old.Id, state, c.state.Error)
 			// The finished turn now carries its duration.
@@ -338,18 +349,21 @@ func (a *ahpChat) finishTurn(id string, state t.TurnState, message *string) {
 			duration = max(0, time.Since(started).Milliseconds())
 		}
 	}
+	ending := t.StateAction{Value: &t.ChatTurnCompleteAction{Type: t.ActionTypeChatTurnComplete, TurnId: id, Duration: duration}}
 	switch state {
 	case t.TurnStateCancelled:
-		a.chatAction(t.StateAction{Value: &t.ChatTurnCancelledAction{Type: t.ActionTypeChatTurnCancelled, TurnId: id, Duration: duration}})
-		return
+		ending = t.StateAction{Value: &t.ChatTurnCancelledAction{Type: t.ActionTypeChatTurnCancelled, TurnId: id, Duration: duration}}
 	case t.TurnStateError:
 		text := "Turn failed"
 		if message != nil {
 			text = *message
 		}
-		a.chatAction(t.StateAction{Value: &t.ChatErrorAction{Type: t.ActionTypeChatError, TurnId: id, Duration: duration, Part: t.ErrorResponsePart{Kind: t.ResponsePartKindError, Error: t.ErrorInfo{ErrorType: "agent", Message: text}}}})
-	default:
-		a.chatAction(t.StateAction{Value: &t.ChatTurnCompleteAction{Type: t.ActionTypeChatTurnComplete, TurnId: id, Duration: duration}})
+		ending = t.StateAction{Value: &t.ChatErrorAction{Type: t.ActionTypeChatError, TurnId: id, Duration: duration, Part: t.ErrorResponsePart{Kind: t.ResponsePartKindError, Error: t.ErrorInfo{ErrorType: "agent", Message: text}}}}
+	}
+	a.endings[id] = ending
+	a.chatAction(ending)
+	if state == t.TurnStateCancelled {
+		return
 	}
 	// A cancel that lost the race is answered once its client can see the turn ended.
 	key := ahpActionKey(a.chat.Resource, t.StateAction{Value: &t.ChatTurnCancelledAction{TurnId: id}})
@@ -372,7 +386,12 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 	seen := map[string]bool{}
 	for _, e := range c.entries {
 		if e.Type == "user" {
-			if c.activeInput != "" && len(turns) > 0 && turns[len(turns)-1].Id == c.activeInput && e.InputID != c.activeInput {
+			// Steering stays in the turn it joined; while a turn runs, any other input joins it.
+			joined := c.steered[e.InputID]
+			if joined == "" && e.InputID != c.activeInput {
+				joined = c.activeInput
+			}
+			if joined != "" && len(turns) > 0 && turns[len(turns)-1].Id == joined {
 				last := &turns[len(turns)-1]
 				last.ResponseParts = append(last.ResponseParts, t.ResponsePart{Value: &t.SystemNotificationResponsePart{Kind: t.ResponsePartKindSystemNotification, Content: t.NewStringOrMarkdownPlain(e.Content)}})
 				anchors[len(anchors)-1] = append(anchors[len(anchors)-1], e.ID)
@@ -462,7 +481,7 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 		if last.StartedAt != nil {
 			started = *last.StartedAt
 		}
-		return turns[:len(turns)-1], &t.ActiveTurn{Id: last.Id, StartedAt: started, Message: last.Message, ResponseParts: last.ResponseParts}
+		return a.ended(turns[:len(turns)-1]), &t.ActiveTurn{Id: last.Id, StartedAt: started, Message: last.Message, ResponseParts: last.ResponseParts}
 	}
 	switch code.TurnInputState(c.lastOutcome) {
 	case code.TurnInputCancelled:
@@ -470,17 +489,42 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 	case code.TurnInputFailed:
 		last.State = t.TurnStateError
 	}
-	for i := range turns {
-		turn := &turns[i]
-		if turn.State == t.TurnStateError && i == len(turns)-1 {
-			message := "Turn failed"
-			if c.state.Error != nil {
-				message = *c.state.Error
-			}
-			turn.ResponseParts = append(turn.ResponseParts, t.ResponsePart{Value: &t.ErrorResponsePart{Kind: t.ResponsePartKindError, Error: t.ErrorInfo{ErrorType: "agent", Message: message}}})
+	// A failed turn restored from history ends with the session's error.
+	if _, ended := a.endings[last.Id]; !ended && last.State == t.TurnStateError {
+		message := "Turn failed"
+		if c.state.Error != nil {
+			message = *c.state.Error
+		}
+		last.ResponseParts = append(last.ResponseParts, t.ResponsePart{Value: &t.ErrorResponsePart{Kind: t.ResponsePartKindError, Error: t.ErrorInfo{ErrorType: "agent", Message: message}}})
+	}
+	return a.ended(turns), nil
+}
+
+// ended finishes the turns the host ended the way the reducer finished them for its clients.
+func (a *ahpChat) ended(turns []t.Turn) []t.Turn {
+	ids := map[string]bool{}
+	for i, turn := range turns {
+		ids[turn.Id] = true
+		ending, ok := a.endings[turn.Id]
+		if !ok {
+			continue
+		}
+		active := &t.ActiveTurn{Id: turn.Id, Message: turn.Message, ResponseParts: turn.ResponseParts, Usage: turn.Usage}
+		if turn.StartedAt != nil {
+			active.StartedAt = *turn.StartedAt
+		}
+		scratch := t.ChatState{ActiveTurn: active, Turns: []t.Turn{}}
+		ahp.ApplyActionToChat(&scratch, ending)
+		if len(scratch.Turns) == 1 {
+			turns[i] = scratch.Turns[0]
 		}
 	}
-	return turns, nil
+	for id := range a.endings {
+		if !ids[id] {
+			delete(a.endings, id)
+		}
+	}
+	return turns
 }
 
 func (p *ahpProject) entryPart(e TranscriptEntry) (t.ResponsePart, bool) {
@@ -728,8 +772,14 @@ func (a *ahpChat) resolvePromptLocked(command Command) {
 	defer a.project.mu.Unlock()
 	if p := a.prompts[command.PromptID]; p != nil {
 		p.response = &command
-		if len(command.Content) > 0 {
+		switch {
+		case command.answers != nil:
+			p.answers = command.answers
+		case len(command.Content) > 0: // answered by a client of another protocol
 			p.answers = ahpAnswerValues(p.view, command.Content)
+		}
+		if len(p.answers) == 0 {
+			p.answers = nil
 		}
 	}
 }

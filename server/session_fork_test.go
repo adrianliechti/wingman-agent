@@ -40,20 +40,18 @@ func newForkProtocolServer(t *testing.T, a code.Agent) *Server {
 	return s
 }
 
-func TestForkSessionCreatesAndDeduplicates(t *testing.T) {
+func TestForkSessionCreates(t *testing.T) {
 	a := &forkingProtocolAgent{protocolAgent: &protocolAgent{}}
 	s := newForkProtocolServer(t, a)
 
 	command := Command{ID: "fork-request", Type: "fork", Source: "saved", Title: "Second try"}
 	var receipt Receipt
-	for range 2 {
-		rec := protocolRequest(t, s, "/api/v2/backends/one/sessions", command)
-		if rec.Code != 200 {
-			t.Fatalf("fork: %d %s", rec.Code, rec.Body)
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &receipt); err != nil {
-			t.Fatal(err)
-		}
+	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions", command)
+	if rec.Code != 200 {
+		t.Fatalf("fork: %d %s", rec.Code, rec.Body)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
 	}
 	if a.forks.Load() != 1 || a.source != "saved" || a.title != "Second try" {
 		t.Fatalf("forks=%d source=%q title=%q", a.forks.Load(), a.source, a.title)

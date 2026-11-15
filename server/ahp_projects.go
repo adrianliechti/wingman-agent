@@ -232,6 +232,7 @@ func (h *ahpHost) subscribedLocked(p *ahpProject) bool {
 func (h *ahpHost) closeIdle(idle time.Duration) {
 	h.projectMu.Lock()
 	defer h.projectMu.Unlock()
+	closed := false
 	for _, p := range h.loaded() {
 		if p.server.busy() {
 			continue
@@ -245,7 +246,18 @@ func (h *ahpHost) closeIdle(idle time.Duration) {
 		p.detachLocked()
 		h.mu.Unlock()
 		p.server.Close()
+		closed = true
 	}
+	if !closed {
+		return
+	}
+	// The root lists the models and terminals of open projects only.
+	h.publishAgents()
+	h.mu.Lock()
+	if !h.closed {
+		h.publishTerminalsLocked()
+	}
+	h.mu.Unlock()
 }
 
 // resource serves the files of a project.
