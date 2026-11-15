@@ -116,14 +116,7 @@ func (p *Project) runResourceWatches() {
 		p.host.mu.Lock()
 		active := map[string]*resourceWatch{}
 		for uri, w := range p.watches {
-			subscribed := false
-			for c := range p.host.clients {
-				if c.subscriptions[uri] {
-					subscribed = true
-					break
-				}
-			}
-			if subscribed {
+			if p.followedLocked(uri) {
 				w.touched = time.Now()
 				active[uri] = w
 			} else if time.Since(w.touched) > time.Minute {

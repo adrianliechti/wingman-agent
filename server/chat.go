@@ -21,7 +21,6 @@ type Chat struct {
 	session          *Session
 	controller       *sessionController
 	chat             types.ChatState
-	title            string                     // the session's name for the chat, which no action can give the chat itself
 	config           *types.SessionConfigState  // the controller's, read without its lock
 	own              map[string]json.RawMessage // the config a client set on this chat, which it keeps over the session's
 	prompts          map[string]*prompt
@@ -31,7 +30,8 @@ type Chat struct {
 	usageStart       UsageView                    // the controller's totals when the active turn started
 	offered          map[string]string            // the client behind each tool the agent was last given
 	clientCalls      map[string]*clientCall
-	projected        bool // turns created after the first projection are live, not history
+	decoded          map[string]decodedMessage // the queued messages by input
+	projected        bool                      // turns created after the first projection are live, not history
 	projectedInput   string
 	projectedOutcome string
 	projectedPrompts []PromptView
@@ -88,14 +88,14 @@ type pendingAction struct {
 
 func newChat(a *Session, c *sessionController, resource, title, stamp string) *Chat {
 	config := configFromSettings(c.state.Settings)
-	return &Chat{project: a.project, session: a, controller: c, title: title, config: config, prompts: map[string]*prompt{}, reasoning: map[string]*reasoningTiming{}, clientCalls: map[string]*clientCall{}, endings: map[string]types.StateAction{}, own: map[string]json.RawMessage{},
+	return &Chat{project: a.project, session: a, controller: c, config: config, prompts: map[string]*prompt{}, reasoning: map[string]*reasoningTiming{}, clientCalls: map[string]*clientCall{}, endings: map[string]types.StateAction{}, own: map[string]json.RawMessage{},
 		chat: types.ChatState{Resource: resource, Title: title, Status: types.SessionStatusIdle, ModifiedAt: stamp, Turns: []types.Turn{}, Config: &types.ChatConfigState{Values: map[string]json.RawMessage{}}},
 	}
 }
 
 // emit publishes an action, acknowledging the client action it completes.
 func (a *Session) emit(channel string, action types.StateAction) {
-	if !a.answer(actionKey(channel, action), action, nil) {
+	if len(a.pending) == 0 || !a.answer(actionKey(channel, action), action, nil) {
 		a.project.host.publish(channel, action, nil, nil)
 	}
 }
@@ -265,16 +265,18 @@ func (a *Chat) syncProjection(c *sessionController, changes []SessionChange) {
 			// The finished turn now carries its duration.
 			turns, active = a.transcript(c)
 		}
+		changed := !reflect.DeepEqual(a.chat.Turns, turns)
 		// A client's cut leaves the turns the agent kept.
-		if active == nil && !reflect.DeepEqual(a.chat.Turns, turns) {
+		if active == nil && changed {
 			for _, p := range a.session.pending {
 				if _, cut := p.params.Action.Value.(*types.ChatTruncatedAction); cut && p.params.Channel == a.chat.Resource {
 					a.chatAction(p.params.Action)
+					changed = !reflect.DeepEqual(a.chat.Turns, turns)
 					break
 				}
 			}
 		}
-		if !reflect.DeepEqual(a.chat.Turns, turns) {
+		if changed {
 			a.chatAction(types.StateAction{Value: &types.ChatTruncatedAction{Type: types.ActionTypeChatTruncated}})
 			if active == nil && len(turns) > 0 && turns[len(turns)-1].State == types.TurnStateError {
 				last := turns[len(turns)-1]
@@ -328,11 +330,7 @@ func (a *Chat) startTurn(active *types.ActiveTurn) {
 		a.chatAction(p.params.Action)
 	}
 	if i := slices.IndexFunc(a.chat.QueuedMessages, func(m types.PendingMessage) bool { return m.Id == active.Id }); i >= 0 {
-		kind := types.PendingMessageKindQueued
-		if k := a.chat.QueuedMessages[i].Kind; k != nil {
-			kind = *k
-		}
-		a.chatAction(types.StateAction{Value: &types.ChatPendingMessageRemovedAction{Type: types.ActionTypeChatPendingMessageRemoved, Kind: kind, Id: active.Id}})
+		a.chatAction(types.StateAction{Value: &types.ChatPendingMessageRemovedAction{Type: types.ActionTypeChatPendingMessageRemoved, Kind: pendingKind(a.chat.QueuedMessages[i]), Id: active.Id}})
 		started.QueuedMessageId = &active.Id
 	}
 	a.chatAction(types.StateAction{Value: started})
@@ -393,10 +391,7 @@ func (a *Chat) transcript(c *sessionController) ([]types.Turn, *types.ActiveTurn
 			}
 			var startedAt, duration = (*string)(nil), (*int64)(nil)
 			var usage *types.UsageInfo
-			message := a.project.message(e.Source, e.Content, e.Files, e.Images)
-			if e.Source == nil && e.Content == "" && len(e.Files)+len(e.Images) == 0 {
-				message.Origin.Kind = types.MessageKindSystemNotification // such as a background task's result
-			}
+			var message *types.Message
 			if len(turns) < len(old) {
 				prior := old[len(turns)]
 				// External backends may omit InputID in their committed history.
@@ -406,13 +401,20 @@ func (a *Chat) transcript(c *sessionController) ([]types.Turn, *types.ActiveTurn
 				}
 				if prior.Id == id {
 					startedAt, duration, usage = prior.StartedAt, prior.Duration, prior.Usage
-					message = prior.Message
+					message = &prior.Message
 					message.Text = e.Content
 				}
 			} else if a.projected {
 				startedAt = new(time.Now().UTC().Format(time.RFC3339Nano))
 			}
-			turns = append(turns, types.Turn{Id: id, StartedAt: startedAt, Duration: duration, Usage: usage, Message: message, ResponseParts: []types.ResponsePart{}, State: types.TurnStateComplete})
+			// Only a turn the chat does not show yet has its message built.
+			if message == nil {
+				message = new(a.project.message(e.Source, e.Content, e.Files, e.Images))
+				if e.Source == nil && e.Content == "" && len(e.Files)+len(e.Images) == 0 {
+					message.Origin.Kind = types.MessageKindSystemNotification // such as a background task's result
+				}
+			}
+			turns = append(turns, types.Turn{Id: id, StartedAt: startedAt, Duration: duration, Usage: usage, Message: *message, ResponseParts: []types.ResponsePart{}, State: types.TurnStateComplete})
 			anchors = append(anchors, []string{e.ID})
 			continue
 		}
@@ -560,9 +562,8 @@ func (p *Project) entryPart(e TranscriptEntry) (types.ResponsePart, bool) {
 			content = append(content, types.ToolResultContent{Value: &types.ToolResultResourceContent{Type: types.ToolResultContentTypeResource, Uri: uri}})
 		}
 		for _, image := range e.Images {
-			prefix, data, ok := strings.Cut(image, ",")
-			if ok && strings.HasPrefix(prefix, "data:image/") && strings.HasSuffix(prefix, ";base64") {
-				content = append(content, types.ToolResultContent{Value: &types.ToolResultEmbeddedResourceContent{Type: types.ToolResultContentTypeEmbeddedResource, ContentType: strings.TrimSuffix(strings.TrimPrefix(prefix, "data:"), ";base64"), Data: data}})
+			if contentType, data, ok := imageDataURL(image); ok {
+				content = append(content, types.ToolResultContent{Value: &types.ToolResultEmbeddedResourceContent{Type: types.ToolResultContentTypeEmbeddedResource, ContentType: contentType, Data: data}})
 			}
 		}
 		invocation := types.NewStringOrMarkdownPlain(e.ToolName)

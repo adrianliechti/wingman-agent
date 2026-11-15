@@ -212,6 +212,7 @@ func (p *Project) attachTerminal(session *terminal.Session, resource string, cla
 				// append across a gap in the VT stream.
 				p.host.mu.Unlock()
 				cancel()
+				var snapshot []byte // the goroutine must not keep the first snapshot alive
 				snapshot, offset, output, cancel = session.SubscribeAt()
 				p.host.mu.Lock()
 				if p.terminalChannels[resource] != a {
@@ -383,11 +384,7 @@ func (c *connection) disposeTerminal(resource string) (any, error) {
 	return nil, nil
 }
 
-func (c *connection) executeTerminalAction(p types.DispatchActionParams) error {
-	a := c.host.terminal(p.Channel)
-	if a == nil {
-		return &ahp.Error{Code: int(types.ErrorCodeNotFound), Message: "terminal not found"}
-	}
+func (c *connection) executeTerminalAction(a *terminalChannel, p types.DispatchActionParams) error {
 	input, err := c.applyTerminalAction(a, p)
 	if err != nil || input == nil {
 		return err

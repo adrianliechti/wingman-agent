@@ -745,7 +745,7 @@ func TestTurnManagerGivesAnInputItsContext(t *testing.T) {
 	if got := waitValue(t, a.contexts); !slices.Equal(got, input.Context) {
 		t.Fatalf("context = %q", got)
 	}
-	if content := input.content(); len(content) != 2 || !content[0].Hidden || content[1].Hidden || content[1].Text != "question" {
+	if content := harness.ContextContent(input.Context, input.Content); len(content) != 2 || !content[0].Hidden || content[1].Hidden || content[1].Text != "question" {
 		t.Fatalf("content for steering = %+v", content)
 	}
 }

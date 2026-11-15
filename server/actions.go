@@ -32,8 +32,8 @@ func (c *connection) dispatch(raw json.RawMessage) {
 	var a *Session
 	var ch *Chat
 	var err error
-	if h.terminal(p.Channel) != nil {
-		err = c.executeTerminalAction(p)
+	if t := h.terminal(p.Channel); t != nil {
+		err = c.executeTerminalAction(t, p)
 	} else if a, ch, err = h.ensureSession(p.Channel); err == nil {
 		h.mu.Lock()
 		if ack, ok := a.acks[pending.origin]; ok && ack.key == key {
@@ -131,8 +131,8 @@ func (c *connection) applyAction(a *Session, ch *Chat, p types.DispatchActionPar
 			// Steering waits in the queue for a turn to take it and never starts one.
 			command.Intent, command.wait = code.TurnInputSteer, true
 		}
-		queued := slices.ContainsFunc(ch.chat.QueuedMessages, func(m types.PendingMessage) bool { return m.Id == action.Id }) || ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id
-		if queued {
+		pending := func(m types.PendingMessage) bool { return m.Id == action.Id }
+		if slices.ContainsFunc(ch.chat.QueuedMessages, pending) {
 			command.Type, command.InputID, command.ID = "queue_update", action.Id, commandID("queue-update", p.Channel, c.id, p.ClientSeq)
 		}
 		return func() error {
@@ -150,25 +150,14 @@ func (c *connection) applyAction(a *Session, ch *Chat, p types.DispatchActionPar
 			if a.pending[actionKey(p.Channel, p.Action)] == nil {
 				return nil
 			}
-			var queued *types.PendingMessage
-			for i := range ch.chat.QueuedMessages {
-				if ch.chat.QueuedMessages[i].Id == action.Id {
-					queued = &ch.chat.QueuedMessages[i]
-				}
-			}
-			if queued == nil && ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id {
-				queued = ch.chat.SteeringMessage
-			}
-			if queued == nil {
+			i := slices.IndexFunc(ch.chat.QueuedMessages, pending)
+			if i < 0 {
 				ch.chatAction(p.Action)
 				ch.chatAction(types.StateAction{Value: &types.ChatPendingMessageRemovedAction{Type: types.ActionTypeChatPendingMessageRemoved, Kind: action.Kind, Id: action.Id}})
 				return nil
 			}
-			kind := types.PendingMessageKindQueued
-			if queued.Kind != nil {
-				kind = *queued.Kind
-			}
-			a.acknowledge(p.Channel, p.Action, types.StateAction{Value: &types.ChatPendingMessageSetAction{Type: types.ActionTypeChatPendingMessageSet, Kind: kind, Id: queued.Id, Message: queued.Message}})
+			queued := ch.chat.QueuedMessages[i]
+			a.acknowledge(p.Channel, p.Action, types.StateAction{Value: &types.ChatPendingMessageSetAction{Type: types.ActionTypeChatPendingMessageSet, Kind: pendingKind(queued), Id: queued.Id, Message: queued.Message}})
 			return nil
 		}, nil
 	case *types.ChatPendingMessageRemovedAction:

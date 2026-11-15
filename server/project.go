@@ -13,7 +13,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
-	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/filewatch"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
@@ -327,13 +326,7 @@ func (p *Project) info() *types.ProjectInfo {
 	return projectInfo(p.workspace.RootPath)
 }
 
-func (p *Project) directoryURI() string {
-	root := "/"
-	if p.workspace != nil {
-		root = p.workspace.RootPath
-	}
-	return fileuri.FromPath(root)
-}
+func (p *Project) directoryURI() string { return p.fileURI(".") }
 
 func (p *Project) startedBackend(provider string) *backendRuntime {
 	p.backendsMu.Lock()

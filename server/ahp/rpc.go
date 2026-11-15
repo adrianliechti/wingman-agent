@@ -23,20 +23,22 @@ type Error struct {
 	Data    any    `json:"data,omitempty"`
 }
 
-func (e *Error) Error() string           { return e.Message }
-func InvalidParams(message string) error { return &Error{Code: -32602, Message: message} }
+func (e *Error) Error() string { return e.Message }
+func InvalidParams(message string) error {
+	return &Error{Code: int(types.ErrorCodeInvalidParams), Message: message}
+}
 
 // Decode distinguishes invalid JSON from an invalid JSON-RPC request.
 func Decode(data []byte) (Request, error) {
 	var req Request
 	if json.Unmarshal(data, &req) != nil {
 		if json.Valid(data) {
-			return Request{}, &Error{Code: -32600, Message: "invalid JSON-RPC request"}
+			return Request{}, &Error{Code: int(types.ErrorCodeInvalidRequest), Message: "invalid JSON-RPC request"}
 		}
-		return Request{}, &Error{Code: -32700, Message: "invalid JSON"}
+		return Request{}, &Error{Code: int(types.ErrorCodeParseError), Message: "invalid JSON"}
 	}
 	if req.JSONRPC != "2.0" || req.Method == "" {
-		return req, &Error{Code: -32600, Message: "invalid JSON-RPC request"}
+		return req, &Error{Code: int(types.ErrorCodeInvalidRequest), Message: "invalid JSON-RPC request"}
 	}
 	return req, nil
 }
@@ -48,7 +50,7 @@ func Reply(id json.RawMessage, result any, err error) any {
 	if err != nil {
 		var rpc *Error
 		if !errors.As(err, &rpc) {
-			rpc = &Error{Code: -32603, Message: err.Error()}
+			rpc = &Error{Code: int(types.ErrorCodeInternalError), Message: err.Error()}
 			if os.IsNotExist(err) {
 				rpc.Code = int(types.ErrorCodeNotFound)
 			} else if os.IsPermission(err) {

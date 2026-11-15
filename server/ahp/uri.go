@@ -21,6 +21,10 @@ func ChatURI(resource string) string {
 	return strings.Replace(resource, "ahp-session:", "ahp-chat:", 1)
 }
 
+func SessionURI(chat string) string {
+	return strings.Replace(chat, "ahp-chat:", "ahp-session:", 1)
+}
+
 // Terminal URI schemes are server-defined. Accept client-chosen schemes
 // (including VS Code's agenthost-terminal), but reserve other ahp-* namespaces
 // for their protocol channels. Never rewrite the terminal's subscription identity.

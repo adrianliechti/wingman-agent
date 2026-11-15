@@ -260,7 +260,7 @@ func (s *backendRuntime) sendTurnSnapshot(sessionID string) {
 		}
 		// Accepted active/steered inputs already belong to the transcript. Only
 		// waiting user inputs are editable in the queue panel.
-		if input.State != code.TurnInputQueued || input.Input.Origin == "task" {
+		if input.State != code.TurnInputQueued || input.Input.Origin == taskOrigin {
 			continue
 		}
 		queue = append(queue, turnQueueEntry(input.Input, input.State, input.Position))

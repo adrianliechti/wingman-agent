@@ -129,7 +129,7 @@ func (h *Host) serve(w http.ResponseWriter, r *http.Request) {
 			if err := c.subscribeRequest(req); err != nil {
 				c.reply(req.ID, nil, err)
 				var rpc *ahp.Error
-				if errors.As(err, &rpc) && rpc.Code == -32005 {
+				if errors.As(err, &rpc) && rpc.Code == int(types.ErrorCodeUnsupportedProtocolVersion) {
 					// Version negotiation failures terminate the connection after
 					// the client has received the supported version list.
 					c.writer.close()
@@ -148,7 +148,7 @@ func (h *Host) serve(w http.ResponseWriter, r *http.Request) {
 		select {
 		case c.requests <- struct{}{}:
 		default:
-			c.reply(req.ID, nil, &ahp.Error{Code: -32603, Message: "too many concurrent requests"})
+			c.reply(req.ID, nil, &ahp.Error{Code: int(types.ErrorCodeInternalError), Message: "too many concurrent requests"})
 			continue
 		}
 		go func() {
@@ -286,7 +286,7 @@ func (c *connection) chatSnapshot(chat *types.ChatState) *types.ChatState {
 	state := *chat
 	state.QueuedMessages = nil
 	for _, message := range chat.QueuedMessages {
-		if message.Kind == nil || *message.Kind == types.PendingMessageKindQueued {
+		if pendingKind(message) == types.PendingMessageKindQueued {
 			state.QueuedMessages = append(state.QueuedMessages, message)
 		}
 	}
@@ -312,7 +312,7 @@ func (c *connection) subscribeRequest(req ahp.Request) error {
 			return ahp.InvalidParams(err.Error())
 		}
 		if version == "" {
-			return &ahp.Error{Code: -32005, Message: "unsupported protocol version", Data: map[string]any{"supportedVersions": types.SupportedProtocolVersions()}}
+			return &ahp.Error{Code: int(types.ErrorCodeUnsupportedProtocolVersion), Message: "unsupported protocol version", Data: map[string]any{"supportedVersions": types.SupportedProtocolVersions()}}
 		}
 		clientID, channels = p.ClientId, p.InitialSubscriptions
 	case "reconnect":
@@ -621,20 +621,15 @@ func (c *connection) request(req ahp.Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		started := project.startedBackend(provider) != nil
 		b, err := project.backend(provider)
 		if err != nil {
 			return nil, err
 		}
 		if !b.Project.beginOperation() {
-			return nil, errors.New("workspace closed")
+			return nil, errWorkspaceClosed
 		}
 		defer b.Project.operations.Done()
 		cfg := configFromSettings(b.settings(""))
-		// An agent that just started may know its models.
-		if !started {
-			h.publishAgents()
-		}
 		for key, value := range p.Config {
 			if _, ok := cfg.Schema.Properties[key]; ok {
 				cfg.Values[key] = value
@@ -675,7 +670,7 @@ func (c *connection) request(req ahp.Request) (any, error) {
 		result, err := h.resource(req)
 		return result, resourceError(err)
 	default:
-		return nil, &ahp.Error{Code: -32601, Message: "method not supported: " + req.Method}
+		return nil, &ahp.Error{Code: int(types.ErrorCodeMethodNotFound), Message: "method not supported: " + req.Method}
 	}
 }
 

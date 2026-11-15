@@ -52,8 +52,7 @@ func workspaceScope(root string) WorkspaceScope {
 
 func (s *Project) InstanceID() string { return s.scope.InstanceID }
 
-// Each backend owns its agent, turn manager, and session controllers for the
-// workspace lifetime. Browser navigation never replaces execution ownership.
+// Each backend owns its agent, turn manager, and session controllers for its project's lifetime.
 type backendRuntime struct {
 	Project        *Project
 	id             string
@@ -156,6 +155,10 @@ func (s *Project) resolveBackend(id string, create func(context.Context) (code.A
 	if err != nil && a != nil {
 		_ = a.Close()
 	}
+	// The root lists the models and capabilities of started agents.
+	if err == nil && s.host != nil {
+		s.host.publishAgents()
+	}
 	return entry.runtime, entry.err
 }
 
@@ -239,7 +242,7 @@ func (b *backendRuntime) createSession(command Command) commandReceipt {
 		return commandReceipt{err: errors.New(message)}
 	}
 	if !b.Project.beginOperation() {
-		return failure("workspace closed")
+		return commandReceipt{err: errWorkspaceClosed}
 	}
 	defer b.Project.operations.Done()
 	if command.Type != "create" && command.Type != "fork" {
@@ -296,7 +299,7 @@ func (c *sessionController) command(ctx context.Context, command Command) comman
 		case <-ctx.Done():
 			return commandReceipt{err: ctx.Err()}
 		case <-c.backend.Project.ctx.Done():
-			return commandReceipt{err: errors.New("workspace closed")}
+			return commandReceipt{err: errWorkspaceClosed}
 		}
 	}
 	record := &commandReceipt{fingerprint: fingerprint, done: make(chan struct{}), receipt: Receipt{Ref: c.ref}}
@@ -337,17 +340,22 @@ func (c *sessionController) pruneReceiptsLocked() {
 	}
 }
 
-// cuttable reports whether the agent's history holds an input, after whose turn
-// it can be cut. A compaction is no input of the history.
+// cuttable reports whether the agent's history holds an input, after whose turn it can be cut.
 func (c *sessionController) cuttable(inputID string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return !c.compactionsLocked()[inputID] && slices.ContainsFunc(c.entries, func(e TranscriptEntry) bool { return e.Type == "user" && e.InputID == inputID })
+}
+
+// compactionsLocked are the inputs of compaction turns, which the agent's history has no input for. Caller holds c.mu.
+func (c *sessionController) compactionsLocked() map[string]bool {
+	compactions := map[string]bool{}
 	for _, turn := range c.hostTurns {
-		if turn.compact && turn.entries[0].InputID == inputID {
-			return false
+		if turn.compact {
+			compactions[turn.entries[0].InputID] = true
 		}
 	}
-	return slices.ContainsFunc(c.entries, func(e TranscriptEntry) bool { return e.Type == "user" && e.InputID == inputID })
+	return compactions
 }
 
 func (c *sessionController) execute(command Command) error {

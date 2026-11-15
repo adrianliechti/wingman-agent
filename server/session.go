@@ -27,12 +27,12 @@ type Session struct {
 	ackOrder []types.ActionOrigin
 }
 
-func newSession(h *Project, resource, provider, title string, created, modified time.Time, own types.SessionStatus) *Session {
+func newSession(p *Project, resource, provider, title string, created, modified time.Time, own types.SessionStatus) *Session {
 	if title == "" {
 		title = "New session"
 	}
-	return &Session{project: h, resource: resource, created: created.UTC().Format(time.RFC3339Nano), modified: modified.UTC().Format(time.RFC3339Nano), pending: map[string]*pendingAction{}, acks: map[types.ActionOrigin]ack{},
-		state: types.SessionState{Changesets: h.changesetCatalogue(), Provider: provider, Title: title, Status: types.SessionStatusIdle | own&^activityBits, Lifecycle: types.SessionLifecycleReady, ActiveClients: []types.SessionActiveClient{}, Chats: []types.ChatSummary{}, Project: h.info(), WorkingDirectories: []string{h.directoryURI()}},
+	return &Session{project: p, resource: resource, created: created.UTC().Format(time.RFC3339Nano), modified: modified.UTC().Format(time.RFC3339Nano), pending: map[string]*pendingAction{}, acks: map[types.ActionOrigin]ack{},
+		state: types.SessionState{Changesets: p.changesetCatalogue(), Provider: provider, Title: title, Status: types.SessionStatusIdle | own&^activityBits, Lifecycle: types.SessionLifecycleReady, ActiveClients: []types.SessionActiveClient{}, Chats: []types.ChatSummary{}, Project: p.info(), WorkingDirectories: []string{p.directoryURI()}},
 	}
 }
 
@@ -109,14 +109,14 @@ func (a *Session) chat(resource string) *Chat {
 }
 
 func (a *Chat) summary() types.ChatSummary {
-	return types.ChatSummary{Resource: a.chat.Resource, Title: a.title, Status: a.chat.Status, ModifiedAt: a.chat.ModifiedAt, Origin: a.chat.Origin}
+	return types.ChatSummary{Resource: a.chat.Resource, Title: a.chat.Title, Status: a.chat.Status, ModifiedAt: a.chat.ModifiedAt, Origin: a.chat.Origin}
 }
 
 func (a *Session) summary() types.SessionSummary {
 	summary := types.SessionSummary{Resource: a.resource, Provider: a.state.Provider, Title: a.state.Title, Status: a.state.Status, CreatedAt: a.created, ModifiedAt: a.modified, Project: a.state.Project, WorkingDirectories: a.state.WorkingDirectories, DefaultChat: a.state.DefaultChat, Chats: []types.SessionChatSummary{}}
 	for _, ch := range a.chats {
 		status := ch.chat.Status
-		summary.Chats = append(summary.Chats, types.SessionChatSummary{Resource: ch.chat.Resource, Title: ch.title, Status: &status})
+		summary.Chats = append(summary.Chats, types.SessionChatSummary{Resource: ch.chat.Resource, Title: ch.chat.Title, Status: &status})
 		summary.ModifiedAt = max(summary.ModifiedAt, ch.chat.ModifiedAt)
 	}
 	return summary
@@ -130,19 +130,19 @@ func (a *Session) configure(id string, config map[string]json.RawMessage) error 
 	if err != nil {
 		return err
 	}
-	h := a.project
-	h.host.mu.Lock()
+	h := a.project.host
+	h.mu.Lock()
 	merged := maps.Clone(a.state.Config.Values)
 	maps.Copy(merged, values)
 	a.state.Config.Values = merged
 	chats := slices.Clone(a.chats)
-	h.host.mu.Unlock()
+	h.mu.Unlock()
 	var errs []error
 	for _, ch := range chats {
 		errs = append(errs, ch.syncSettings(commandID(id, ch.chat.Resource)))
 	}
-	h.host.mu.Lock()
-	defer h.host.mu.Unlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	main := a.chats[0]
 	normalized := maps.Clone(a.state.Config.Values)
 	for key := range values {

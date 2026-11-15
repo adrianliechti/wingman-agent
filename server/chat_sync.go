@@ -38,35 +38,58 @@ func (p *Project) message(source json.RawMessage, text string, files, images []s
 		message.Attachments = append(message.Attachments, types.MessageAttachment{Value: &types.MessageResourceAttachment{Type: "resource", Uri: p.fileURI(file), Label: file}})
 	}
 	for _, image := range images {
-		prefix, data, ok := strings.Cut(image, ",")
-		if !ok || !strings.HasPrefix(prefix, "data:image/") || !strings.HasSuffix(prefix, ";base64") {
+		contentType, data, ok := imageDataURL(image)
+		if !ok {
 			continue
 		}
 		if _, err := base64.StdEncoding.DecodeString(data); err != nil {
 			continue
 		}
-		message.Attachments = append(message.Attachments, types.MessageAttachment{Value: &types.MessageEmbeddedResourceAttachment{Type: "embeddedResource", ContentType: strings.TrimSuffix(strings.TrimPrefix(prefix, "data:"), ";base64"), Label: "Image", Data: data}})
+		message.Attachments = append(message.Attachments, types.MessageAttachment{Value: &types.MessageEmbeddedResourceAttachment{Type: "embeddedResource", ContentType: contentType, Label: "Image", Data: data}})
 	}
 	return message
 }
 
+// imageDataURL splits a base64 image data URL into its content type and data.
+func imageDataURL(url string) (contentType, data string, ok bool) {
+	prefix, data, ok := strings.Cut(url, ",")
+	contentType, encoded := strings.CutSuffix(strings.TrimPrefix(prefix, "data:"), ";base64")
+	return contentType, data, ok && encoded && strings.HasPrefix(prefix, "data:image/")
+}
+
+// decodedMessage is a queued message with the client source it was decoded from.
+type decodedMessage struct {
+	source  json.RawMessage
+	message types.Message
+}
+
+// pendingKind is a pending message's kind; one without a kind is queued.
+func pendingKind(m types.PendingMessage) types.PendingMessageKind {
+	if m.Kind != nil {
+		return *m.Kind
+	}
+	return types.PendingMessageKindQueued
+}
+
 func (a *Chat) syncQueue(c *sessionController) {
 	next := map[string]types.PendingMessage{}
-	kinds := map[string]types.PendingMessageKind{}
 	order := []string{}
+	decoded := map[string]decodedMessage{}
 	for _, input := range c.state.PendingInputs {
-		if input.Origin == "task" || input.State != "queued" {
-			continue
-		}
 		kind := types.PendingMessageKindQueued
 		if input.Intent == string(code.TurnInputSteer) {
 			kind = types.PendingMessageKindSteering
 		}
-		message := a.project.message(input.Source, input.Text, input.Files, input.Images)
-		next[input.ID] = types.PendingMessage{Id: input.ID, Kind: new(kind), Message: message}
-		kinds[input.ID] = kind
+		// A client's source can carry large images, so it is decoded once.
+		d, ok := a.decoded[input.ID]
+		if !ok || len(input.Source) == 0 || !bytes.Equal(d.source, input.Source) {
+			d = decodedMessage{input.Source, a.project.message(input.Source, input.Text, input.Files, input.Images)}
+		}
+		decoded[input.ID] = d
+		next[input.ID] = types.PendingMessage{Id: input.ID, Kind: new(kind), Message: d.message}
 		order = append(order, input.ID)
 	}
+	a.decoded = decoded
 	// The message that a starting turn consumes leaves the queue with that turn.
 	starting := ""
 	if a.chat.ActiveTurn == nil || a.chat.ActiveTurn.Id != c.nextInput {
@@ -75,27 +98,13 @@ func (a *Chat) syncQueue(c *sessionController) {
 	previous := append([]types.PendingMessage{}, a.chat.QueuedMessages...)
 	for _, old := range previous {
 		if _, exists := next[old.Id]; !exists && old.Id != starting {
-			kind := types.PendingMessageKindQueued
-			if old.Kind != nil {
-				kind = *old.Kind
-			}
-			a.chatAction(types.StateAction{Value: &types.ChatPendingMessageRemovedAction{Type: types.ActionTypeChatPendingMessageRemoved, Kind: kind, Id: old.Id}})
+			a.chatAction(types.StateAction{Value: &types.ChatPendingMessageRemovedAction{Type: types.ActionTypeChatPendingMessageRemoved, Kind: pendingKind(old), Id: old.Id}})
 		}
 	}
-	for _, input := range c.state.PendingInputs {
-		item, exists := next[input.ID]
-		if !exists {
-			continue
-		}
-		unchanged := false
-		for _, old := range previous {
-			if reflect.DeepEqual(old, item) {
-				unchanged = true
-				break
-			}
-		}
-		if !unchanged {
-			a.chatAction(types.StateAction{Value: &types.ChatPendingMessageSetAction{Type: types.ActionTypeChatPendingMessageSet, Kind: kinds[item.Id], Id: item.Id, Message: item.Message}})
+	for _, id := range order {
+		item := next[id]
+		if !slices.ContainsFunc(previous, func(old types.PendingMessage) bool { return reflect.DeepEqual(old, item) }) {
+			a.chatAction(types.StateAction{Value: &types.ChatPendingMessageSetAction{Type: types.ActionTypeChatPendingMessageSet, Kind: *item.Kind, Id: item.Id, Message: item.Message}})
 		}
 	}
 	shown := []string{}

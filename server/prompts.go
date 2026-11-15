@@ -61,7 +61,7 @@ func (b *backendRuntime) prompt(ctx context.Context, kind, message string, field
 	c.mu.Lock()
 	if c.state.Status == sessionDeleted {
 		c.mu.Unlock()
-		return Command{}, errors.New("session deleted")
+		return Command{}, errSessionDeleted
 	}
 	c.prompts[id] = p
 	c.publishPromptsLocked()

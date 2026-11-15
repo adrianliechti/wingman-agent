@@ -14,6 +14,9 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 )
 
+// taskOrigin marks the input that delivers background task results.
+const taskOrigin = "task"
+
 func (s *backendRuntime) sessionTasks(sessionID string) *task.Registry {
 	ca, ok := s.agent.(*agent.Agent)
 	if !ok {
@@ -122,7 +125,7 @@ func (s *backendRuntime) deliverTaskResults(sessionID string, batch []task.Event
 	_, err := turns.Submit(s.Project.ctx, sessionID, code.TurnInput{
 		ID:     fmt.Sprintf("task-%s-%d", first.ID, first.Seq),
 		Intent: code.TurnInputSteer,
-		Origin: "task",
+		Origin: taskOrigin,
 		Content: []harness.Content{{
 			Text:   strings.Join(blocks, "\n\n"),
 			Hidden: true,

@@ -16,6 +16,17 @@ import (
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
+// load loads a native session the way a command does before it runs.
+func (c *sessionController) load() {
+	if !c.backend.Project.beginOperation() {
+		return
+	}
+	defer c.backend.Project.operations.Done()
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+	_ = c.loadLocked()
+}
+
 func TestAHPCreationRetriesPreserveParametersAndErrors(test *testing.T) {
 	test.Setenv("WINGMAN_HOME", test.TempDir())
 	s, _, agent := newProtocolServer(test)

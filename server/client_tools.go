@@ -76,31 +76,31 @@ func (a *Chat) clientTool(def types.ToolDefinition) tool.Tool {
 
 // runClientTool waits until the client that provides a tool completes the call.
 func (a *Chat) runClientTool(ctx context.Context, name string) (tool.Result, error) {
-	h := a.project
+	h := a.project.host
 	request, _ := hook.ToolCallFromContext(ctx)
-	h.host.mu.Lock()
+	h.mu.Lock()
 	call := a.clientCall(request.ID, name)
 	call.started, call.input = true, request.Args
-	h.host.mu.Unlock()
+	h.mu.Unlock()
 	c := a.controller
 	c.mu.Lock()
 	a.syncLocked(c, nil) // the call shows as running
 	c.mu.Unlock()
-	h.host.mu.Lock()
+	h.mu.Lock()
 	if !slices.ContainsFunc(a.session.state.ActiveClients, func(c types.SessionActiveClient) bool { return c.ClientId == call.client }) {
 		a.failClientCall(request.ID, call, "The client that provides "+name+" has disconnected.")
 	}
-	h.host.mu.Unlock()
+	h.mu.Unlock()
 	select {
 	case <-call.done:
 	case <-ctx.Done():
-		h.host.mu.Lock()
+		h.mu.Lock()
 		a.failClientCall(request.ID, call, "The call was stopped before the client completed it.")
-		h.host.mu.Unlock()
+		h.mu.Unlock()
 		return tool.Result{}, ctx.Err()
 	}
-	h.host.mu.Lock()
-	defer h.host.mu.Unlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	return clientToolResult(*call.result), nil
 }
 

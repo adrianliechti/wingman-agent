@@ -29,12 +29,12 @@ func (h *Host) sessionURI(channel string) string {
 	if alias, ok := h.chatAliases[channel]; ok {
 		return alias.Resource
 	}
-	return strings.Replace(channel, "ahp-chat:", "ahp-session:", 1)
+	return ahp.SessionURI(channel)
 }
 
 // moved tells a client that a canonical URI's session lives under an alias.
 func moved(resource string) error {
-	return &ahp.Error{Code: -32602, Message: "session is available at " + resource, Data: map[string]string{"resource": resource}}
+	return &ahp.Error{Code: int(types.ErrorCodeInvalidParams), Message: "session is available at " + resource, Data: map[string]string{"resource": resource}}
 }
 
 // ensureSession loads the session behind a session or chat channel. The chat
@@ -83,7 +83,7 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 	alias, ok := p.host.aliases[resource]
 	if ok && alias.CreationError != "" {
 		p.host.mu.Unlock()
-		return nil, &ahp.Error{Code: int(types.ErrorCodeSessionNotFound), Message: "unknown session"}
+		return nil, errUnknownSession
 	}
 	if !ok {
 		p.host.mu.Unlock()
@@ -93,7 +93,7 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 		}
 		if canonical := p.canonicalURI(backend, id); resource != canonical {
 			if dir != "" {
-				return nil, &ahp.Error{Code: int(types.ErrorCodeSessionNotFound), Message: "unknown session"}
+				return nil, errUnknownSession
 			}
 			if chat {
 				return nil, moved(ahp.ChatURI(canonical))
@@ -102,7 +102,7 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 		}
 		alias = sessionAlias{Resource: resource, Project: p.dir, Backend: backend, Session: id}
 		p.host.mu.Lock()
-		if other, ok := p.host.savedLocked(alias.native()); ok {
+		if other, ok := p.host.savedIndexLocked(p.dir)[alias.native()]; ok {
 			p.host.mu.Unlock()
 			if other.Chat != "" && chat {
 				return nil, moved(other.Chat)
@@ -112,10 +112,11 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 	}
 	forks := p.host.forksLocked(resource)
 	p.host.mu.Unlock()
-	c, title, updated, err := p.loadController(alias.Backend, alias.Session)
+	c, err := p.loadController(alias.Backend, alias.Session)
 	if err != nil {
 		return nil, err
 	}
+	title, updated := c.backend.listing(alias.Session)
 	// The saved title holds a client's rename and the title the host gave the session.
 	main, err := p.attachSession(c, resource, cmp.Or(alias.Title, title), updated)
 	if err != nil {
@@ -123,7 +124,7 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 	}
 	a := main.session
 	for _, fork := range forks {
-		c, _, _, err := p.loadController(fork.Backend, fork.Session)
+		c, err := p.loadController(fork.Backend, fork.Session)
 		var rpc *ahp.Error
 		if errors.As(err, &rpc) && rpc.Code == int(types.ErrorCodeSessionNotFound) {
 			p.host.mu.Lock()
@@ -140,14 +141,14 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 	return a, nil
 }
 
-// loadController loads a native session with its catalog title and time.
-func (p *Project) loadController(backend, id string) (*sessionController, string, time.Time, error) {
+// loadController loads a native session.
+func (p *Project) loadController(backend, id string) (*sessionController, error) {
 	b, err := p.backend(backend)
 	if err != nil {
-		return nil, "", time.Time{}, err
+		return nil, err
 	}
 	if !b.Project.beginOperation() {
-		return nil, "", time.Time{}, errors.New("workspace closed")
+		return nil, errWorkspaceClosed
 	}
 	defer b.Project.operations.Done()
 	c := b.session(id)
@@ -156,19 +157,28 @@ func (p *Project) loadController(backend, id string) (*sessionController, string
 	c.opMu.Unlock()
 	if err != nil {
 		b.discard(id, c)
-		if errors.Is(err, os.ErrNotExist) || err.Error() == "session not found" || err.Error() == "session deleted" {
-			return nil, "", time.Time{}, &ahp.Error{Code: int(types.ErrorCodeSessionNotFound), Message: "unknown session"}
+		if errors.Is(err, os.ErrNotExist) || err.Error() == "session not found" || errors.Is(err, errSessionDeleted) {
+			return nil, errUnknownSession
 		}
-		return nil, "", time.Time{}, err
+		return nil, err
 	}
+	return c, nil
+}
+
+// listing is a native session's title and last change as its agent lists them.
+func (b *backendRuntime) listing(id string) (string, time.Time) {
 	// Attaching must not make an old session look recently modified.
 	title, updated := "", time.Now()
+	if !b.Project.beginOperation() {
+		return title, updated
+	}
+	defer b.Project.operations.Done()
 	if sessions, err := b.agent.ListSessions(b.Project.ctx); err == nil {
 		if i := slices.IndexFunc(sessions, func(info code.SessionInfo) bool { return info.ID == id }); i >= 0 {
 			title, updated = sessions[i].Title, sessions[i].UpdatedAt
 		}
 	}
-	return c, title, updated, nil
+	return title, updated
 }
 
 // attachSession projects a native session as an AHP session and returns its default chat.
@@ -251,7 +261,7 @@ func (p *Project) createSession(raw json.RawMessage, clientID string) (any, erro
 		return nil, &ahp.Error{Code: int(types.ErrorCodeSessionAlreadyExists), Message: "a chat already uses this session's chat URI"}
 	}
 	if exists && alias.CreationError == "" {
-		return nil, &ahp.Error{Code: -32003, Message: "session already exists"}
+		return nil, &ahp.Error{Code: int(types.ErrorCodeSessionAlreadyExists), Message: "session already exists"}
 	}
 	// A creation that a restart cut off starts over.
 	if exists {
@@ -264,7 +274,7 @@ func (p *Project) createSession(raw json.RawMessage, clientID string) (any, erro
 		return nil, err
 	}
 	if !b.Project.beginOperation() {
-		return nil, errors.New("workspace closed")
+		return nil, errWorkspaceClosed
 	}
 	defer b.Project.operations.Done()
 	record := b.createSession(Command{ID: "ahp-create:" + params.Channel, Type: "create"})
@@ -328,19 +338,15 @@ func (h *Host) createChat(raw json.RawMessage) (any, error) {
 		}
 	}
 	// A chat may not take the URI of a session's default chat.
-	defer h.creation(strings.Replace(p.Chat, "ahp-chat:", "ahp-session:", 1))()
-	compactions := map[string]bool{}
+	defer h.creation(ahp.SessionURI(p.Chat))()
+	var compactions map[string]bool
 	if fork != nil {
 		h.mu.Lock()
 		source := a.chat(fork.Chat)
 		h.mu.Unlock()
 		if source != nil {
 			source.controller.mu.Lock()
-			for _, turn := range source.controller.hostTurns {
-				if turn.compact {
-					compactions[turn.entries[0].InputID] = true
-				}
-			}
+			compactions = source.controller.compactionsLocked()
 			source.controller.mu.Unlock()
 		}
 	}
@@ -404,7 +410,7 @@ func (h *Host) createChat(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	if !b.Project.beginOperation() {
-		return nil, errors.New("workspace closed")
+		return nil, errWorkspaceClosed
 	}
 	defer b.Project.operations.Done()
 	record := b.createSession(command)
@@ -415,12 +421,14 @@ func (h *Host) createChat(raw json.RawMessage) (any, error) {
 	if fork != nil {
 		alias.Fork, alias.Turn = fork.Chat, fork.TurnId
 	}
-	c, title, _, err := project.loadController(provider, alias.Session)
+	c, err := project.loadController(provider, alias.Session)
 	if err != nil {
 		project.discard(b.session(alias.Session), alias)
 		return nil, err
 	}
-	alias.Title = cmp.Or(command.Title, title)
+	if alias.Title = command.Title; alias.Title == "" {
+		alias.Title, _ = b.listing(alias.Session)
+	}
 	if err := project.storeAlias(alias); err != nil {
 		project.discard(c, alias)
 		return nil, err
@@ -453,11 +461,7 @@ func (h *Host) listSessions(raw json.RawMessage) (any, error) {
 	items := []types.SessionSummary{}
 	seen := map[string]bool{}
 	for _, project := range h.loaded() {
-		listed, err := project.nativeSessions(root.Agents, seen)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, listed...)
+		items = append(items, project.nativeSessions(root.Agents, seen)...)
 	}
 	h.mu.Lock()
 	for _, a := range h.sessions {
@@ -466,9 +470,9 @@ func (h *Host) listSessions(raw json.RawMessage) (any, error) {
 			seen[a.resource] = true
 		}
 	}
-	// Projects that are not open yet are listed from the sessions saved for them.
+	// Saved sessions no agent listed, such as those of projects that are not open, are listed as saved.
 	for resource, alias := range h.aliases {
-		if !seen[resource] && alias.Project != "" && alias.CreationError == "" && h.projects[alias.Project] == nil {
+		if !seen[resource] && alias.Project != "" && alias.CreationError == "" {
 			items = append(items, h.savedSummaryLocked(alias))
 		}
 	}
@@ -497,8 +501,12 @@ func (h *Host) chatSummariesLocked(resource, chat string) []types.SessionChatSum
 }
 
 // nativeSessions lists the sessions of this project's started agents.
-func (p *Project) nativeSessions(agents []types.AgentInfo, seen map[string]bool) ([]types.SessionSummary, error) {
-	items := []types.SessionSummary{}
+func (p *Project) nativeSessions(agents []types.AgentInfo, seen map[string]bool) []types.SessionSummary {
+	type listing struct {
+		backend  string
+		sessions []code.SessionInfo
+	}
+	var listings []listing
 	for _, info := range agents {
 		// Listing must not launch every installed external CLI. An external
 		// backend becomes available here after first use/config discovery.
@@ -509,62 +517,54 @@ func (p *Project) nativeSessions(agents []types.AgentInfo, seen map[string]bool)
 		sessions, err := b.agent.ListSessions(b.Project.ctx)
 		b.Project.operations.Done()
 		// An agent that cannot list its sessions has its saved ones listed.
-		if err != nil {
-			continue
+		if err == nil {
+			listings = append(listings, listing{b.id, sessions})
 		}
-		for _, session := range sessions {
-			resource := p.canonicalURI(b.id, session.ID)
-			p.host.mu.Lock()
-			alias, saved := p.host.savedLocked(nativeKey{p.dir, b.id, session.ID})
-			if saved {
+	}
+	h := p.host
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	saved := h.savedIndexLocked(p.dir)
+	items := []types.SessionSummary{}
+	for _, l := range listings {
+		for _, session := range l.sessions {
+			resource := p.canonicalURI(l.backend, session.ID)
+			alias, ok := saved[nativeKey{p.dir, l.backend, session.ID}]
+			if ok {
 				// Forked chats are listed with their session.
 				if alias.Chat != "" {
-					p.host.mu.Unlock()
 					continue
 				}
 				resource = alias.Resource
 			}
-			if a := p.host.sessions[resource]; a != nil {
+			if a := h.sessions[resource]; a != nil {
 				items = append(items, a.summary())
 				seen[a.resource] = true
-				p.host.mu.Unlock()
 				continue
 			}
-			if saved {
+			if ok {
 				if alias.CreationError == "" {
 					if session.UpdatedAt.After(alias.Modified) {
 						alias.Modified = session.UpdatedAt
 					}
-					items = append(items, p.host.savedSummaryLocked(alias))
+					items = append(items, h.savedSummaryLocked(alias))
 					seen[resource] = true
 				}
-				p.host.mu.Unlock()
 				continue
 			}
 			stamp := session.UpdatedAt.UTC().Format(time.RFC3339Nano)
 			chat := ahp.ChatURI(resource)
-			chats := p.host.chatSummariesLocked(resource, chat)
-			p.host.mu.Unlock()
-			items = append(items, types.SessionSummary{Resource: resource, Provider: b.id, Title: session.Title, Status: types.SessionStatusIdle, CreatedAt: stamp, ModifiedAt: stamp, Project: p.info(), WorkingDirectories: []string{p.directoryURI()}, DefaultChat: &chat, Chats: chats})
+			items = append(items, types.SessionSummary{Resource: resource, Provider: l.backend, Title: session.Title, Status: types.SessionStatusIdle, CreatedAt: stamp, ModifiedAt: stamp, Project: p.info(), WorkingDirectories: []string{p.directoryURI()}, DefaultChat: &chat, Chats: h.chatSummariesLocked(resource, chat)})
 			seen[resource] = true
 		}
 	}
-	// Saved sessions its agents do not list, such as unused ones or those of an agent that has not started, stay listed.
-	p.host.mu.Lock()
-	defer p.host.mu.Unlock()
-	for resource, alias := range p.host.aliases {
-		if alias.Project == p.dir && !seen[resource] && alias.CreationError == "" && p.host.sessions[resource] == nil {
-			items = append(items, p.host.savedSummaryLocked(alias))
-			seen[resource] = true
-		}
-	}
-	return items, nil
+	return items
 }
 
 func (a *Chat) command(command Command) error {
 	b := a.controller.backend
 	if !b.Project.beginOperation() {
-		return errors.New("workspace closed")
+		return errWorkspaceClosed
 	}
 	defer b.Project.operations.Done()
 	return a.controller.command(b.Project.ctx, command).err
@@ -579,7 +579,7 @@ func (p *Project) canonicalURI(backend, id string) string {
 func parseCanonicalURI(resource string) (backend, id, dir string, err error) {
 	parts := strings.Split(strings.TrimPrefix(resource, "ahp-session:/wingman/"), "/")
 	if !strings.HasPrefix(resource, "ahp-session:/wingman/") || len(parts) != 2 && len(parts) != 3 {
-		return "", "", "", &ahp.Error{Code: int(types.ErrorCodeSessionNotFound), Message: "unknown session"}
+		return "", "", "", errUnknownSession
 	}
 	values := make([]string, 3)
 	for i, part := range parts {

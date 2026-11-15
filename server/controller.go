@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -139,16 +138,6 @@ func newSessionController(b *backendRuntime, id string) *sessionController {
 	return &sessionController{backend: b, ref: SessionRef{b.Project.scope.WorkspaceID, b.id, id}, receipts: map[string]*commandReceipt{}, deliveredTasks: map[string]bool{}, entries: []TranscriptEntry{}, prompts: map[string]pendingPrompt{}, attempt: map[string]bool{}, state: SessionState{Status: sessionLoading, Phase: "idle", Prompts: []PromptView{}, PendingInputs: []TurnQueueEntry{}, ToolProgress: map[string]string{}, Settings: SessionSettings{Models: []modelOption{}, Efforts: []string{}, Modes: []modeOption{}}}}
 }
 
-func (c *sessionController) load() {
-	if !c.backend.Project.beginOperation() {
-		return
-	}
-	defer c.backend.Project.operations.Done()
-	c.opMu.Lock()
-	defer c.opMu.Unlock()
-	_ = c.loadLocked()
-}
-
 func (c *sessionController) loadLocked() error {
 	if err := c.backend.Project.ctx.Err(); err != nil {
 		return err
@@ -157,7 +146,7 @@ func (c *sessionController) loadLocked() error {
 	status := c.state.Status
 	c.mu.Unlock()
 	if status == sessionDeleted {
-		return errors.New("session deleted")
+		return errSessionDeleted
 	}
 	if status == sessionReady {
 		return nil
@@ -353,7 +342,7 @@ func (c *sessionController) apply(f Frame) {
 		}
 		if f.Input != nil && (f.Input.State == string(code.TurnInputActive) || f.Input.State == string(code.TurnInputSteered)) {
 			c.state.Error = nil
-			visible := f.Input.Origin != "task" && (f.Input.Text != "" || len(f.Input.Files)+len(f.Input.Images) > 0)
+			visible := f.Input.Origin != taskOrigin && (f.Input.Text != "" || len(f.Input.Files)+len(f.Input.Images) > 0)
 			// An active input without visible content still opens its own turn.
 			if visible || f.Input.State == string(code.TurnInputActive) {
 				entry := TranscriptEntry{ID: "input:" + f.Input.ID, InputID: f.Input.ID, Type: "user"}

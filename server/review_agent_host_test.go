@@ -89,10 +89,7 @@ func TestReviewHostScopesNativeSessionIDs(t *testing.T) {
 	}
 	a, b := makeProject(canonicalPath(t.TempDir())), makeProject(canonicalPath(t.TempDir()))
 	h.aliases["ahp-session:/a"] = sessionAlias{Resource: "ahp-session:/a", Project: a.dir, Backend: "one", Session: "saved"}
-	items, err := b.nativeSessions([]types.AgentInfo{{Provider: "one"}}, map[string]bool{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	items := b.nativeSessions([]types.AgentInfo{{Provider: "one"}}, map[string]bool{})
 	if len(items) != 1 || items[0].Resource != b.canonicalURI("one", "saved") {
 		t.Fatalf("project B adopted project A's alias: %+v", items)
 	}

@@ -230,19 +230,17 @@ func (h *Host) forksLocked(resource string) []sessionAlias {
 	return forks
 }
 
-// savedLocked finds the alias of a native session: its forked chat's, or its session's.
-func (h *Host) savedLocked(key nativeKey) (sessionAlias, bool) {
-	for _, alias := range h.chatAliases {
-		if alias.native() == key {
-			return alias, true
+// savedIndexLocked finds a project's saved sessions and chats by native session; a forked chat's alias wins. Caller holds h.mu.
+func (h *Host) savedIndexLocked(dir string) map[nativeKey]sessionAlias {
+	index := map[nativeKey]sessionAlias{}
+	for _, aliases := range []map[string]sessionAlias{h.aliases, h.chatAliases} {
+		for _, alias := range aliases {
+			if alias.Project == dir {
+				index[alias.native()] = alias
+			}
 		}
 	}
-	for _, alias := range h.aliases {
-		if alias.native() == key {
-			return alias, true
-		}
-	}
-	return sessionAlias{}, false
+	return index
 }
 
 // discard undoes a session or chat whose creation failed: it leaves the host,
@@ -270,7 +268,7 @@ func (h *Host) discardSaved(alias sessionAlias) error {
 		return err
 	}
 	if !p.beginOperation() {
-		return errors.New("workspace closed")
+		return errWorkspaceClosed
 	}
 	defer p.operations.Done()
 	p.discard(b.session(alias.Session), alias)

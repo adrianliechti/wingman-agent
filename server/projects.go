@@ -17,7 +17,12 @@ import (
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
-var errHostClosed = errors.New("host closed")
+var (
+	errHostClosed      = errors.New("host closed")
+	errWorkspaceClosed = errors.New("workspace closed")
+	errSessionDeleted  = errors.New("session deleted")
+	errUnknownSession  = &ahp.Error{Code: int(types.ErrorCodeSessionNotFound), Message: "unknown session"}
+)
 
 // canonicalPath follows the links in the part of a path that exists.
 func canonicalPath(path string) string {
@@ -86,21 +91,21 @@ func (h *Host) projectAt(dir string) (*Project, error) {
 	if !h.serves(dir) {
 		return nil, &ahp.Error{Code: int(types.ErrorCodePermissionDenied), Message: "this host does not serve " + dir}
 	}
-	s, err := h.open(dir)
+	p, err := h.open(dir)
 	if err != nil {
 		return nil, err
 	}
 	h.mu.Lock()
 	if h.ctx.Err() != nil {
 		h.mu.Unlock()
-		s.close()
+		p.close()
 		return nil, errHostClosed
 	}
-	h.projects[dir] = s
+	h.projects[dir] = p
 	h.mu.Unlock()
 	// Its agents may know their models by now.
 	h.publishAgents()
-	return s, nil
+	return p, nil
 }
 
 // projectOf finds the open project a path lies in.
@@ -180,15 +185,20 @@ func (h *Host) sessionProject(resource string) (*Project, error) {
 		if p := h.webProject(); p != nil {
 			return p, nil
 		}
-		return nil, &ahp.Error{Code: int(types.ErrorCodeSessionNotFound), Message: "unknown session"}
+		return nil, errUnknownSession
 	}
 	return h.projectAt(dir)
 }
 
+// ownsLocked reports whether a terminal, watch or changeset channel is the project's. Caller holds host.mu.
+func (p *Project) ownsLocked(channel string) bool {
+	return p.terminalChannels[channel] != nil || p.watches[channel] != nil || strings.HasPrefix(channel, p.changesetPrefix())
+}
+
 // ownerLocked finds the project a terminal, watch or changeset belongs to.
 func (h *Host) ownerLocked(channel string) *Project {
-	for _, p := range h.projectsLocked() {
-		if p.terminalChannels[channel] != nil || p.watches[channel] != nil || strings.HasPrefix(channel, p.changesetPrefix()) {
+	for _, p := range h.projects {
+		if p.ownsLocked(channel) {
 			p.used = time.Now()
 			return p
 		}
@@ -206,10 +216,7 @@ func (h *Host) owner(channel string) *Project {
 func (h *Host) subscribedLocked(p *Project) bool {
 	for c := range h.clients {
 		for channel := range c.subscriptions {
-			if a, _ := h.channel(channel); a != nil && a.project == p {
-				return true
-			}
-			if p.terminalChannels[channel] != nil || p.watches[channel] != nil || p.changesets[channel] != nil {
+			if a, _ := h.channel(channel); a != nil && a.project == p || p.ownsLocked(channel) {
 				return true
 			}
 		}

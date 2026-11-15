@@ -39,7 +39,7 @@ type managedTurnSession struct {
 
 // TurnManager provides the session-level execution semantics shared by the
 // web UI and other multi-turn clients. It guarantees one Agent.Send call per
-// session at a time, supplies a FIFO follow-up queue for every backend, and
+// session at a time, supplies a follow-up queue for every backend, and
 // uses native steering only when the backend explicitly supports it.
 type TurnManager struct {
 	ctx    context.Context
@@ -199,7 +199,7 @@ func (m *TurnManager) Features(sessionID string) TurnFeatures {
 }
 
 // Submit rejects duplicate live input IDs. Transport receipts own retry
-// deduplication. A steer that loses a turn-boundary race becomes a FIFO follow-up.
+// deduplication. A steer that loses a turn-boundary race becomes a follow-up, unless it waits.
 func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnInput) (TurnInputSnapshot, error) {
 	return m.submit(ctx, sessionID, input, false)
 }
@@ -287,7 +287,6 @@ func (m *TurnManager) submit(ctx context.Context, sessionID string, input TurnIn
 	}
 	s.ids[input.ID] = struct{}{}
 	s.mu.Unlock()
-	steerer, _ := m.agent.(TurnSteerer)
 	steerable := m.Features(sessionID).Steer
 	item := &managedTurnInput{input: input}
 	if input.Intent == TurnInputSteer && steerable {
@@ -297,7 +296,7 @@ func (m *TurnManager) submit(ctx context.Context, sessionID string, input TurnIn
 		hasActive := target != nil && !s.cancelRequested && !(input.Wait && slices.ContainsFunc(s.queued, waits))
 		s.mu.Unlock()
 		if hasActive {
-			state, err := m.steer(ctx, sessionID, s, steerer, target, item, input)
+			state, err := m.steer(ctx, sessionID, s, target, item, input)
 			switch {
 			case err == nil:
 				return TurnInputSnapshot{ID: input.ID, State: state, Intent: input.Intent}, nil
@@ -355,10 +354,10 @@ func (m *TurnManager) submit(ctx context.Context, sessionID string, input TurnIn
 // steer delivers a copy of item's input, taken with item reserved, to target's
 // running turn. Steering the agent took leaves the queue and joins that turn, or
 // shares its outcome if it ended meanwhile, whatever happened to ctx since.
-func (m *TurnManager) steer(ctx context.Context, sessionID string, s *managedTurnSession, steerer TurnSteerer, target, item *managedTurnInput, input TurnInput) (TurnInputState, error) {
+func (m *TurnManager) steer(ctx context.Context, sessionID string, s *managedTurnSession, target, item *managedTurnInput, input TurnInput) (TurnInputState, error) {
 	delivered := input
-	delivered.Content = input.content() // the running turn reads the context with the input
-	err := callSteer(ctx, steerer, sessionID, delivered)
+	delivered.Content = harness.ContextContent(input.Context, input.Content) // the running turn reads the context with the input
+	err := callSteer(ctx, m.agent.(TurnSteerer), sessionID, delivered)
 	s.mu.Lock()
 	// A stop cleared it from the queue meanwhile: it ends unless the agent took it.
 	cleared := item.delivering && !slices.Contains(s.queued, item)
@@ -401,8 +400,7 @@ func (m *TurnManager) steer(ctx context.Context, sessionID string, s *managedTur
 // steerWaiting hands the running turn the steering that waits in the queue.
 // Steering its agent cannot take yet waits for the turn's next message.
 func (m *TurnManager) steerWaiting(ctx context.Context, sessionID string, s *managedTurnSession) {
-	steerer, _ := m.agent.(TurnSteerer)
-	steerable := steerer != nil && m.Features(sessionID).Steer
+	steerable := m.Features(sessionID).Steer
 	for {
 		s.mu.Lock()
 		i := slices.IndexFunc(s.queued, waits)
@@ -416,7 +414,7 @@ func (m *TurnManager) steerWaiting(ctx context.Context, sessionID string, s *man
 		s.mu.Unlock()
 		err := ErrTurnNotSteerable
 		if steerable {
-			if _, err = m.steer(ctx, sessionID, s, steerer, target, item, input); err == nil {
+			if _, err = m.steer(ctx, sessionID, s, target, item, input); err == nil {
 				continue
 			}
 		}
@@ -651,7 +649,7 @@ func (m *TurnManager) StartCompact(sessionID, focus string, done func(harness.Co
 	return nil
 }
 
-// promoteLocked activates the next queued input unless paused and persists the queue.
+// promoteLocked activates the first queued input that may run, unless paused, and persists the queue.
 func (m *TurnManager) promoteLocked(sessionID string, s *managedTurnSession) (*managedTurnInput, error) {
 	var next *managedTurnInput
 	i := runnable(s.queued)

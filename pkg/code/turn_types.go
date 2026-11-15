@@ -62,15 +62,6 @@ var (
 	ErrInvalidIntent = errors.New("invalid turn input intent")
 )
 
-// content is the input with its context as hidden parts ahead of it.
-func (input TurnInput) content() []harness.Content {
-	content := make([]harness.Content, 0, len(input.Context)+len(input.Content))
-	for _, text := range input.Context {
-		content = append(content, harness.Content{Text: text, Hidden: true})
-	}
-	return append(content, input.Content...)
-}
-
 type TurnInput struct {
 	ID      string            `json:"id"`
 	Content []harness.Content `json:"content"`

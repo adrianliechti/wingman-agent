@@ -103,7 +103,7 @@ func editorRequestError(ctx context.Context, err error) error {
 }
 
 func (p *editorSocket) notify(method string, params any) {
-	p.send(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+	p.send(ahp.Notify(method, params))
 }
 
 func (p *editorSocket) reply(id json.RawMessage, result any, err error) {
@@ -111,7 +111,7 @@ func (p *editorSocket) reply(id json.RawMessage, result any, err error) {
 		return
 	}
 	if err == nil {
-		p.send(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+		p.send(ahp.Reply(id, result, nil))
 		return
 	}
 	rpc := &ahp.Error{Code: -32603, Message: err.Error()}
@@ -131,5 +131,5 @@ func (p *editorSocket) reply(id json.RawMessage, result any, err error) {
 			rpc.Data = json.RawMessage(native.Data)
 		}
 	}
-	p.send(map[string]any{"jsonrpc": "2.0", "id": id, "error": rpc})
+	p.send(ahp.Reply(id, nil, rpc))
 }

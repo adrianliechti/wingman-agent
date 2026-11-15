@@ -101,7 +101,8 @@ func (p *Project) ensureChangeset(channel string) error {
 	return nil
 }
 
-func (p *Project) subscribedChangesetLocked(channel string) bool {
+// followedLocked reports whether a client subscribes to a channel. Caller holds host.mu.
+func (p *Project) followedLocked(channel string) bool {
 	for client := range p.host.clients {
 		if client.subscriptions[channel] {
 			return true
@@ -116,7 +117,7 @@ func (p *Project) refreshChangesets() {
 	for _, layer := range changesetLayers {
 		channel := p.changesChannel(layer)
 		p.host.mu.Lock()
-		active := p.subscribedChangesetLocked(channel)
+		active := p.followedLocked(channel)
 		p.host.mu.Unlock()
 		if active {
 			p.refreshChangesetLocked(channel, false)
@@ -317,7 +318,7 @@ func (p *Project) comparisonChangeset(diffs []changes.FileDiff) (string, error) 
 func (p *Project) evictComparisonLocked(keep string) bool {
 	oldest := ""
 	for uri, c := range p.changesets {
-		if uri != keep && c.comparison && !p.subscribedChangesetLocked(uri) && time.Since(c.touched) > time.Minute &&
+		if uri != keep && c.comparison && !p.followedLocked(uri) && time.Since(c.touched) > time.Minute &&
 			(oldest == "" || c.touched.Before(p.changesets[oldest].touched)) {
 			oldest = uri
 		}
