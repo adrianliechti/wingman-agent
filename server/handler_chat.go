@@ -24,9 +24,6 @@ func (s *backendRuntime) buildInput(sessionID string, msg Command) []harness.Con
 			}
 		}
 	}
-	for _, text := range msg.Context {
-		input = append(input, harness.Content{Text: text, Hidden: true})
-	}
 	var rootPath string
 	if s.workspace != nil {
 		rootPath = s.workspace.RootPath
@@ -191,16 +188,19 @@ func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
 	if ev.State == "" {
 		return
 	}
+	// The turn's final usage and its failure belong to the turn, so they precede its end.
+	if ev.Executed {
+		s.sendUsageIfChanged(ev.SessionID)
+	}
+	if ev.State == code.TurnInputFailed && ev.Err != nil && !errors.Is(ev.Err, context.Canceled) {
+		s.sendSession(ev.SessionID, Frame{Type: EvtError, Message: ev.Err.Error()})
+	}
 	entry := turnQueueEntry(ev.Input, ev.State, ev.Position)
 	s.sendSession(ev.SessionID, Frame{Type: EvtTurnInput, Input: &entry})
 
 	switch ev.State {
 	case code.TurnInputActive:
 		s.setSessionPhase(ev.SessionID, "thinking")
-	case code.TurnInputFailed:
-		if ev.Err != nil && !errors.Is(ev.Err, context.Canceled) {
-			s.sendSession(ev.SessionID, Frame{Type: EvtError, Message: ev.Err.Error()})
-		}
 	case code.TurnInputCancelled:
 		if ev.Executed {
 			s.sendSession(ev.SessionID, Frame{Type: EvtError, Message: "Cancelled"})
@@ -214,25 +214,14 @@ func (s *backendRuntime) handleTurnEvent(ev code.TurnEvent) {
 }
 
 func (s *backendRuntime) finalizeTurn(sid string) {
-	a := s.agent
-	if a == nil {
+	if s.agent == nil {
 		return
 	}
 	s.session(sid).replaceHistory()
-	s.sendUsageIfChanged(sid)
-
-	ws := s.workspace
 	s.flushFiles()
-
-	if ws != nil && ws.HasLSP() {
+	if ws := s.workspace; ws != nil && ws.HasLSP() {
 		s.refreshDiagnostics()
 	}
-
-	// Persistence belongs to the backend's journal, including partial and
-	// interrupted turns. Web finalization only refreshes resource projections.
-	if len(a.Messages(sid)) > 0 {
-	}
-
 }
 
 func snapshotHasActive(snapshot code.TurnSnapshot) bool {
@@ -297,7 +286,7 @@ func compactFocus(text string) string {
 
 func turnQueueEntry(input code.TurnInput, state code.TurnInputState, position int) TurnQueueEntry {
 	display := visibleInput(code.CloneTurnInput(input))
-	return TurnQueueEntry{ID: input.ID, State: string(state), Intent: string(input.Intent), Position: position, Text: display.Text, Files: display.Files, Images: display.Images, Origin: input.Origin, Compact: input.Compact}
+	return TurnQueueEntry{ID: input.ID, State: string(state), Intent: string(input.Intent), Position: position, Text: display.Text, Files: display.Files, Images: display.Images, Origin: input.Origin, Compact: input.Compact, Source: display.Source}
 }
 
 func (s *backendRuntime) sendUsageIfChanged(sessionID string) {

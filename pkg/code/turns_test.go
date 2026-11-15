@@ -19,6 +19,7 @@ type turnManagerTestAgent struct {
 	starts     chan string
 	sessionIDs chan string
 	releases   chan struct{}
+	contexts   chan []string
 	cancels    int
 	steers     []string
 	steerErr   error
@@ -48,7 +49,7 @@ func (a *blockingSteerAgent) Steer(ctx context.Context, sessionID string, input 
 
 func newTurnManagerTestAgent() *turnManagerTestAgent {
 	return &turnManagerTestAgent{
-		starts: make(chan string, 16), sessionIDs: make(chan string, 16), releases: make(chan struct{}, 16),
+		starts: make(chan string, 16), sessionIDs: make(chan string, 16), releases: make(chan struct{}, 16), contexts: make(chan []string, 16),
 	}
 }
 
@@ -104,6 +105,9 @@ func (a *turnManagerTestAgent) Send(ctx context.Context, _ string, input []harne
 	return func(yield func(harness.Message, error) bool) {
 		a.starts <- text
 		a.sessionIDs <- SessionIDFromContext(ctx)
+		if attached := harness.InputContextFromContext(ctx); attached != nil {
+			a.contexts <- attached
+		}
 		if text == "reset" {
 			harness.EmitStreamEvent(ctx, harness.StreamEventReset)
 		}
@@ -724,6 +728,26 @@ func TestTurnManagerRemoveAndReplaceQueued(t *testing.T) {
 		t.Fatalf("replacement start = %q", got)
 	}
 	a.releases <- struct{}{}
+}
+
+// An agent receives an input's context with it, apart from its content.
+func TestTurnManagerGivesAnInputItsContext(t *testing.T) {
+	a := newTurnManagerTestAgent()
+	m := NewTurnManager(context.Background(), a, nil)
+	defer m.Close()
+	input := turnInput("1", "question", TurnInputFollowUp)
+	input.Context = []string{"an attached chat"}
+	_, _ = m.Submit(context.Background(), "s", input)
+	if got := waitValue(t, a.starts); got != "question" {
+		t.Fatalf("the turn started with %q", got)
+	}
+	a.releases <- struct{}{}
+	if got := waitValue(t, a.contexts); !slices.Equal(got, input.Context) {
+		t.Fatalf("context = %q", got)
+	}
+	if content := input.content(); len(content) != 2 || !content[0].Hidden || content[1].Hidden || content[1].Text != "question" {
+		t.Fatalf("content for steering = %+v", content)
+	}
 }
 
 func TestTurnManagerReorderQueued(t *testing.T) {

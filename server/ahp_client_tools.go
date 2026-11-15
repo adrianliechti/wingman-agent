@@ -76,11 +76,7 @@ func (a *ahpChat) runClientTool(ctx context.Context, name string) (tool.Result, 
 	h := a.project
 	request, _ := hook.ToolCallFromContext(ctx)
 	h.mu.Lock()
-	call := a.clientCalls[request.ID]
-	if call == nil {
-		call = &ahpClientCall{client: a.offered[name], done: make(chan struct{})}
-		a.clientCalls[request.ID] = call
-	}
+	call := a.clientCall(request.ID, name)
 	call.started, call.input = true, request.Args
 	h.mu.Unlock()
 	c := a.controller
@@ -103,6 +99,16 @@ func (a *ahpChat) runClientTool(ctx context.Context, name string) (tool.Result, 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return clientToolResult(*call.result), nil
+}
+
+// clientCall is the record of a call to a client's tool. Caller holds host.mu.
+func (a *ahpChat) clientCall(id, name string) *ahpClientCall {
+	call := a.clientCalls[id]
+	if call == nil {
+		call = &ahpClientCall{client: a.offered[name], done: make(chan struct{})}
+		a.clientCalls[id] = call
+	}
+	return call
 }
 
 // clientToolResult is what the model reads of a client's result.
@@ -212,8 +218,7 @@ func (a *ahpChat) entryPart(e TranscriptEntry) (t.ResponsePart, bool) {
 	id := cmp.Or(e.ToolID, e.ID)
 	call := a.clientCalls[id]
 	if call == nil && e.ToolResult == nil && a.offered[e.ToolName] != "" {
-		call = &ahpClientCall{client: a.offered[e.ToolName], done: make(chan struct{})}
-		a.clientCalls[id] = call
+		call = a.clientCall(id, e.ToolName)
 	}
 	if call == nil {
 		return a.project.entryPart(e)

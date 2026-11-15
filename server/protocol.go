@@ -1,6 +1,8 @@
 package server
 
 import (
+	"encoding/json"
+
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
@@ -60,6 +62,8 @@ type TurnQueueEntry struct {
 	Files    []string `json:"files,omitempty"`
 	Images   []string `json:"images,omitempty"`
 	Compact  bool     `json:"compact,omitempty"`
+
+	Source json.RawMessage `json:"source,omitempty"`
 }
 
 type ConversationMessage struct {

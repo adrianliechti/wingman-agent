@@ -849,6 +849,14 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 		return nil, code.ErrEmptyInput
 	}
 	input = harness.CloneContent(input)
+	// The external agent reads attached context with the input.
+	if attached := harness.InputContextFromContext(ctx); len(attached) > 0 {
+		parts := make([]harness.Content, 0, len(attached)+len(input))
+		for _, text := range attached {
+			parts = append(parts, harness.Content{Text: text, Hidden: true})
+		}
+		input = append(parts, input...)
+	}
 	a.mu.Lock()
 	sess, ok := a.sessions[id]
 	a.mu.Unlock()

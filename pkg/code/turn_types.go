@@ -2,7 +2,9 @@ package code
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"slices"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
@@ -58,6 +60,15 @@ var (
 	ErrInvalidIntent = errors.New("invalid turn input intent")
 )
 
+// content is the input with its context as hidden parts ahead of it.
+func (input TurnInput) content() []harness.Content {
+	content := make([]harness.Content, 0, len(input.Context)+len(input.Content))
+	for _, text := range input.Context {
+		content = append(content, harness.Content{Text: text, Hidden: true})
+	}
+	return append(content, input.Content...)
+}
+
 type TurnInput struct {
 	ID      string            `json:"id"`
 	Content []harness.Content `json:"content"`
@@ -68,20 +79,27 @@ type TurnInput struct {
 	Origin  string            `json:"origin,omitempty"`
 	// Compact runs compaction instead of a model turn; Content is its focus.
 	Compact bool `json:"compact,omitempty"`
+	// Context is what the model reads before the input and the transcript does
+	// not show. Agents receive it through harness.WithInputContext.
+	Context []string `json:"context,omitempty"`
 }
 
 type TurnInputDisplay struct {
 	Text   string   `json:"text"`
 	Files  []string `json:"files,omitempty"`
 	Images []string `json:"images,omitempty"`
+	// Source is the input in its client's own form, which a host shows as is.
+	Source json.RawMessage `json:"source,omitempty"`
 }
 
 func CloneTurnInput(input TurnInput) TurnInput {
 	input.Content = harness.CloneContent(input.Content)
+	input.Context = append([]string(nil), input.Context...)
 	if input.Display != nil {
 		display := *input.Display
 		display.Files = append([]string(nil), display.Files...)
 		display.Images = append([]string(nil), display.Images...)
+		display.Source = slices.Clone(display.Source)
 		input.Display = &display
 	}
 	return input

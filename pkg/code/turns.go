@@ -228,7 +228,9 @@ func (m *TurnManager) Submit(ctx context.Context, sessionID string, input TurnIn
 		s.mu.Unlock()
 		if hasActive {
 			if steerer, ok := m.agent.(TurnSteerer); ok {
-				err := callSteer(ctx, steerer, sessionID, input)
+				steered := input
+				steered.Content = input.content() // the running turn reads the context with the input
+				err := callSteer(ctx, steerer, sessionID, steered)
 				if err == nil {
 					item := &managedTurnInput{input: input}
 					s.mu.Lock()
@@ -422,6 +424,7 @@ func (m *TurnManager) executeInput(ctx context.Context, sessionID string, item *
 			m.emit(TurnEvent{SessionID: sessionID, InputID: item.input.ID, StreamEvent: harness.StreamEventCommit})
 		},
 	})
+	ctx = harness.WithInputContext(ctx, item.input.Context)
 	stream, err := m.agent.Send(ctx, sessionID, item.input.Content)
 	if err != nil {
 		return err

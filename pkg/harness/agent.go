@@ -182,6 +182,9 @@ func (a *Agent) RunExclusiveStream(ctx context.Context, prepare func(context.Con
 }
 
 func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, error], error) {
+	// The context belongs to this input, not to the turns that its tools start.
+	attached := InputContextFromContext(ctx)
+	ctx = WithInputContext(ctx, nil)
 	if a.PrepareTurn != nil {
 		var err error
 		input, err = a.PrepareTurn(ctx, input)
@@ -273,7 +276,7 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 
 	message := userMessage(input)
 	message.InputID = InputIDFromContext(ctx)
-	if err := a.appendInputs(ctx, message); err != nil {
+	if err := a.appendInputs(ctx, attached, message); err != nil {
 		return failSetup(err)
 	}
 
@@ -342,7 +345,7 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 					completion = completionState{}
 					nativeContinuation = false
 				}
-				if err := a.appendInputs(ctx, pending...); err != nil {
+				if err := a.appendInputs(ctx, nil, pending...); err != nil {
 					stop(err)
 					return
 				}
@@ -819,7 +822,7 @@ func (a *Agent) finishTurn(ctx context.Context, turnID string, status RuntimeSta
 	a.pendingInput = nil
 	a.queueMu.Unlock()
 
-	appendErr := a.appendInputs(ctx, queuedMessages...)
+	appendErr := a.appendInputs(ctx, nil, queuedMessages...)
 	if appendErr != nil && outcomeErr == nil {
 		status = RuntimeFailed
 		outcomeErr = appendErr

@@ -90,6 +90,10 @@ func (a *protocolAgent) Close() error  { return nil }
 func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
 	a.sent.Add(1)
 	a.mu.Lock()
+	// Attached context precedes its input, as the harness records it.
+	for _, text := range harness.InputContextFromContext(ctx) {
+		a.messages = append(a.messages, harness.Message{Role: harness.RoleUser, InputID: harness.InputIDFromContext(ctx), Hidden: true, Content: []harness.Content{{Text: text, Hidden: true}}})
+	}
 	a.messages = append(a.messages, harness.Message{Role: harness.RoleUser, InputID: harness.InputIDFromContext(ctx), Content: harness.CloneContent(input)})
 	a.mu.Unlock()
 	return func(yield func(harness.Message, error) bool) {

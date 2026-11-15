@@ -13,3 +13,17 @@ func InputIDFromContext(ctx context.Context) string {
 	id, _ := ctx.Value(inputIDKey{}).(string)
 	return id
 }
+
+type inputContextKey struct{}
+
+// WithInputContext gives an input text that the model reads before it and no
+// transcript shows, such as an attached chat. The harness records it with the
+// input, so it never outlives an input that was refused.
+func WithInputContext(ctx context.Context, texts []string) context.Context {
+	return context.WithValue(ctx, inputContextKey{}, texts)
+}
+
+func InputContextFromContext(ctx context.Context) []string {
+	texts, _ := ctx.Value(inputContextKey{}).([]string)
+	return texts
+}

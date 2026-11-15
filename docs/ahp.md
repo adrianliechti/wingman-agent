@@ -213,9 +213,9 @@ its channel has expired.
 
 Supported features include provider/model discovery; session creation, listing
 and reopening; forked chats; history and streaming text/reasoning; tool
-activity; client-provided tools; approvals and typed questions; cancellation;
-history truncation; per-chat model, effort, mode and unattended settings; and
-editable, reorderable queued/steering messages. The
+activity; client-provided tools; chat attachments; approvals and typed
+questions; cancellation; history truncation; per-chat model, effort, mode and
+unattended settings; and editable, reorderable queued/steering messages. The
 controller remains the single authority when browser and IDE clients act
 concurrently. Retry receipts are bounded and scoped to a running host; they do
 not survive a server restart. Session and chat URI mappings are saved under
@@ -232,7 +232,8 @@ Each chat projects one native session. `createChat` with
 `source: { kind: "fork", chat, turnId }` forks a completed turn of a chat in the
 same session into a new native session, which becomes a chat of that session.
 Forks from an earlier turn copy the journal up to the next input, so the source
-may keep running; only the builtin agent supports this. `disposeChat` deletes a
+may keep running; only the builtin agent supports this. The fork's turns keep
+what only the host knows of them: their timing, usage and messages as sent. `disposeChat` deletes a
 forked chat, and `disposeSession` deletes the session with all its chats. Each
 chat has its own queue, turns and settings: `chat/configChanged` changes one
 chat, while `session/configChanged` and the session's config values address the
@@ -265,8 +266,26 @@ follows VS Code's convention (`terminal` for shell commands). Pending approvals
 offer the confirmation options `once` and `deny`; each approval is answered once. Retries, tool
 progress and compaction are reported as the chat's `activity`. A steering
 message consumed by a running turn appears as a system notification with the
-user's text. `chat/usage` reports the latest request's prompt tokens as
-`inputTokens`, and the turn's output and cache-read tokens.
+user's text. A steering message sent while no turn runs waits in the queue
+(`kind: "steering"`), where it can be edited and removed; several can wait. The
+next turn takes them once it shows its first output, and they last for the host
+process. A turn's final usage and its failure arrive before its end. `chat/usage` reports the latest request's prompt tokens as
+`inputTokens`, and the turn's output and cache-read tokens; for a provider that
+counts no tokens it names only the model.
+
+A message may attach a chat of any session (`type: "chat"`). The host resolves
+the chat's turns through `endTurn`, or all it has, when it accepts the message,
+and rejects an unknown chat and a turn that is unknown, running or cut away. The
+transcript holds the user texts and markdown answers; attachments inside it stay
+references.
+
+What an attachment gives the model and not the transcript (a chat's transcript,
+a `simple` attachment's `modelRepresentation`, a selection, an embedded text
+resource) precedes the message. The builtin agent keeps it as a message of its
+own that leaves the history with the message's turn; other agents and a steering
+message read it inline. Queued messages and the turns that consume them keep the
+message as the client sent it, a queued one also across a restart; turns loaded
+from an agent's history show only its text, files and images.
 
 The tools of a session's active clients (`session/activeClientSet`) join the
 builtin agent's tools in every chat of the session, from the chat's next turn.
@@ -281,8 +300,8 @@ owner may dispatch `chat/toolCallContentChanged` and `chat/toolCallComplete`.
 The call fails when its owner leaves the session, the turn is stopped, or the
 agent's tool timeout passes. Wingman asks for no approval of a client's tool;
 its client does. The contributor and the structured result last for the host
-process: reloaded and forked history keeps the result as text. External agents
-receive no client tools.
+process: reloaded history keeps the result as text. External agents receive no
+client tools.
 
 Terminal channels share the workspace terminal manager, including debugger
 terminals. Following the [terminal URI specification](https://microsoft.github.io/agent-host-protocol/specification/terminal-channel.html#uri),

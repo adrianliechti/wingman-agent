@@ -33,7 +33,7 @@ import (
 // ahpHost is the endpoint: its connections, the order of their actions and the channel namespace.
 type ahpHost struct {
 	mu          sync.Mutex
-	createMu    sync.Mutex
+	creating    map[string]chan struct{} // sessions being created, closed when done
 	seq         int64
 	clients     map[*ahpConnection]struct{}
 	sessions    map[string]*ahpSession
@@ -127,7 +127,7 @@ func (e *ahpRPCError) Error() string  { return e.Message }
 func ahpInvalid(message string) error { return &ahpRPCError{Code: -32602, Message: message} }
 
 func newAHPHost() *ahpHost {
-	return &ahpHost{clients: map[*ahpConnection]struct{}{}, sessions: map[string]*ahpSession{}, chats: map[string]*ahpChat{}, aliases: map[string]ahpAlias{}, chatAliases: map[string]ahpAlias{}, versions: map[string]ahpClientVersion{}, projects: map[string]*ahpProject{}}
+	return &ahpHost{creating: map[string]chan struct{}{}, clients: map[*ahpConnection]struct{}{}, sessions: map[string]*ahpSession{}, chats: map[string]*ahpChat{}, aliases: map[string]ahpAlias{}, chatAliases: map[string]ahpAlias{}, versions: map[string]ahpClientVersion{}, projects: map[string]*ahpProject{}}
 }
 
 // attach makes a project and its saved sessions reachable through the host.
@@ -284,6 +284,26 @@ func (p *ahpProject) storeAlias(alias ahpAlias) error {
 	defer p.mu.Unlock()
 	p.rememberAliasLocked(alias)
 	return nil
+}
+
+// creation lets one request at a time create a session or its default chat;
+// requests for other URIs, and so every other project, proceed meanwhile.
+func (h *ahpHost) creation(session string) (done func()) {
+	h.mu.Lock()
+	for wait := h.creating[session]; wait != nil; wait = h.creating[session] {
+		h.mu.Unlock()
+		<-wait
+		h.mu.Lock()
+	}
+	created := make(chan struct{})
+	h.creating[session] = created
+	h.mu.Unlock()
+	return func() {
+		h.mu.Lock()
+		delete(h.creating, session)
+		h.mu.Unlock()
+		close(created)
+	}
 }
 
 func (h *ahpHost) connected() bool {
@@ -1195,6 +1215,7 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		started := project.startedBackend(provider) != nil
 		b, err := project.backend(provider)
 		if err != nil {
 			return nil, err
@@ -1204,7 +1225,10 @@ func (c *ahpConnection) request(req ahpRequest) (any, error) {
 		}
 		defer b.operations.Done()
 		cfg := ahpConfig(b.settings(""))
-		h.publishAgents()
+		// An agent that just started may know its models.
+		if !started {
+			h.publishAgents()
+		}
 		for key, value := range p.Config {
 			if _, ok := cfg.Schema.Properties[key]; ok {
 				cfg.Values[key] = value
@@ -1269,8 +1293,7 @@ func (p *ahpProject) createSession(raw json.RawMessage, clientID string) (any, e
 	if params.Provider != nil {
 		provider = *params.Provider
 	}
-	p.createMu.Lock()
-	defer p.createMu.Unlock()
+	defer p.creation(params.Channel)()
 	p.mu.Lock()
 	alias, exists := p.aliases[params.Channel]
 	existing := p.sessions[params.Channel]
@@ -1354,8 +1377,8 @@ func (h *ahpHost) createChat(raw json.RawMessage) (any, error) {
 			return nil, ahpInvalid("only forks are supported as chat sources")
 		}
 	}
-	h.createMu.Lock()
-	defer h.createMu.Unlock()
+	// A chat may not take the URI of a session's default chat.
+	defer h.creation(strings.Replace(p.Chat, "ahp-chat:", "ahp-session:", 1))()
 	compactions := map[string]bool{}
 	if fork != nil {
 		h.mu.Lock()
@@ -1446,13 +1469,7 @@ func (h *ahpHost) createChat(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	if p.InitialMessage != nil {
-		command := Command{ID: ahpCommandID("initial", p.Chat), Epoch: c.epoch, Type: "send", Text: p.InitialMessage.Text, requireIdle: true}
-		if err := project.attachments(*p.InitialMessage, &command); err != nil {
-			return nil, err
-		}
-		if err := ch.command(command); err != nil {
-			return nil, err
-		}
+		return nil, ch.start(ahpCommandID("initial", p.Chat), *p.InitialMessage)
 	}
 	return nil, nil
 }

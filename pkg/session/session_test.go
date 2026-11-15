@@ -518,10 +518,10 @@ func TestTruncateKeepsTheJournalThroughAnInputsTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Truncate(dir, "s1", "missing"); err == nil {
+	if _, err := Truncate(dir, "s1", "missing"); err == nil {
 		t.Fatal("truncating after an unknown input succeeded")
 	}
-	if err := Truncate(dir, "s1", "b"); err != nil {
+	if _, err := Truncate(dir, "s1", "b"); err != nil {
 		t.Fatal(err)
 	}
 	cut, err := Load(dir, "s1")
@@ -540,14 +540,42 @@ func TestTruncateKeepsTheJournalThroughAnInputsTurn(t *testing.T) {
 	if continued, err := Load(dir, "s1"); err != nil || len(continued.State.Messages) != 6 || continued.State.Messages[5].Content[0].Text != "answer d" {
 		t.Fatalf("continued session = %+v, %v", continued.State.Messages, err)
 	}
-	if err := Truncate(dir, "s1", ""); err != nil {
+	if _, err := Truncate(dir, "s1", ""); err != nil {
 		t.Fatal(err)
 	}
 	if empty, err := Load(dir, "s1"); err != nil || len(empty.State.Events) != 0 || !empty.CreatedAt.Equal(before.CreatedAt) {
 		t.Fatalf("cleared session = %+v, %v", empty, err)
 	}
 	// A session that never recorded anything has nothing to clear.
-	if err := Truncate(dir, "fresh", ""); err != nil {
+	if _, err := Truncate(dir, "fresh", ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// An input is found by its last message: context recorded with it comes first,
+// and a task result's input is hidden itself.
+func TestTruncateFindsHiddenInputsAndTheirContext(t *testing.T) {
+	var events []harness.RuntimeEvent
+	add := func(e harness.RuntimeEvent) {
+		e.Sequence = uint64(len(events) + 1)
+		events = append(events, e)
+	}
+	user := func(input, text string, hidden bool) {
+		add(harness.RuntimeEvent{Type: harness.EventMessage, Message: &harness.Message{Role: harness.RoleUser, InputID: input, Hidden: hidden, Content: []harness.Content{{Text: text, Hidden: hidden}}}})
+	}
+	turn := func(input string, body func()) {
+		add(harness.RuntimeEvent{Type: harness.EventTurnStarted, TurnID: "turn-" + input})
+		body()
+		add(harness.RuntimeEvent{Type: harness.EventMessage, Message: &harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "answer " + input}}}})
+		add(harness.RuntimeEvent{Type: harness.EventTurnTerminal, TurnID: "turn-" + input, Terminal: &harness.RuntimeTerminal{Status: harness.RuntimeCompleted}})
+	}
+	turn("a", func() { user("a", "an attached chat", true); user("a", "ask a", false) })
+	turn("task", func() { user("task", "a task finished", true) })
+	turn("b", func() { user("b", "ask b", false) })
+	for input, kept := range map[string]int{"a": 5, "task": 9} {
+		cut, ok := cutThrough(events, input)
+		if !ok || len(cut) != kept {
+			t.Fatalf("cut through %s kept %d of %d events", input, len(cut), len(events))
+		}
 	}
 }

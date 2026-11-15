@@ -20,7 +20,8 @@ func (e hookStopError) Error() string { return string(e) }
 // appendInputs applies the same prompt hooks to initial and queued user input.
 // Hidden harness notices do not represent a new user prompt. Process the whole
 // batch so rejecting one prompt does not discard other accepted inputs.
-func (a *Agent) appendInputs(ctx context.Context, inputs ...Message) error {
+// Attached context precedes the accepted inputs and goes with them.
+func (a *Agent) appendInputs(ctx context.Context, attached []string, inputs ...Message) error {
 	if len(inputs) == 0 {
 		return nil
 	}
@@ -58,6 +59,11 @@ func (a *Agent) appendInputs(ctx context.Context, inputs ...Message) error {
 		}
 	}
 	if len(messages) > 0 {
+		recorded := make([]Message, 0, len(attached)+len(messages))
+		for _, text := range attached {
+			recorded = append(recorded, Message{Role: RoleUser, InputID: messages[0].InputID, Hidden: true, Content: []Content{{Text: text, Hidden: true}}})
+		}
+		messages = append(recorded, messages...)
 		// Commit current host guidance before the accepted input, together in
 		// one batch. Later tool-driven changes still sync at request boundaries.
 		if update, changed := a.contextInstructionsUpdate(a.requestMessages()); changed {

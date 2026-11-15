@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -25,7 +26,12 @@ func (p *ahpProject) fileURI(path string) string {
 	return fileuri.FromPath(path)
 }
 
-func (p *ahpProject) message(text string, files, images []string) t.Message {
+// message is an input as its client sent it, or as the host knows it.
+func (p *ahpProject) message(source json.RawMessage, text string, files, images []string) t.Message {
+	var sent t.Message
+	if len(source) > 0 && json.Unmarshal(source, &sent) == nil {
+		return sent
+	}
 	message := t.Message{Text: text, Origin: t.MessageOrigin{Kind: t.MessageKindUser}}
 	for _, file := range files {
 		message.Attachments = append(message.Attachments, t.MessageAttachment{Value: &t.MessageResourceAttachment{Type: "resource", Uri: p.fileURI(file), Label: file}})
@@ -46,6 +52,7 @@ func (p *ahpProject) message(text string, files, images []string) t.Message {
 func (a *ahpChat) syncQueue(c *sessionController) {
 	next := map[string]t.PendingMessage{}
 	kinds := map[string]t.PendingMessageKind{}
+	order := []string{}
 	for _, input := range c.state.PendingInputs {
 		if input.Origin == "task" || input.State != "queued" {
 			continue
@@ -54,9 +61,10 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 		if input.Intent == string(code.TurnInputSteer) {
 			kind = t.PendingMessageKindSteering
 		}
-		message := a.project.message(input.Text, input.Files, input.Images)
+		message := a.project.message(input.Source, input.Text, input.Files, input.Images)
 		next[input.ID] = t.PendingMessage{Id: input.ID, Kind: ahpPtr(kind), Message: message}
 		kinds[input.ID] = kind
+		order = append(order, input.ID)
 	}
 	// The message that a starting turn consumes leaves the queue with that turn.
 	starting := ""
@@ -65,7 +73,7 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 	}
 	previous := append([]t.PendingMessage{}, a.chat.QueuedMessages...)
 	for _, old := range previous {
-		if _, exists := next[old.Id]; !exists && old.Id != starting {
+		if _, exists := next[old.Id]; !exists && old.Id != starting && !a.waiting[old.Id] {
 			kind := t.PendingMessageKindQueued
 			if old.Kind != nil {
 				kind = *old.Kind
@@ -89,14 +97,9 @@ func (a *ahpChat) syncQueue(c *sessionController) {
 			a.chatAction(t.StateAction{Value: &t.ChatPendingMessageSetAction{Type: t.ActionTypeChatPendingMessageSet, Kind: kinds[item.Id], Id: item.Id, Message: item.Message}})
 		}
 	}
-	order, shown := []string{}, []string{}
-	for _, input := range c.state.PendingInputs {
-		if _, exists := next[input.ID]; exists {
-			order = append(order, input.ID)
-		}
-	}
+	shown := []string{}
 	for _, message := range a.chat.QueuedMessages {
-		if message.Id != starting {
+		if message.Id != starting && !a.waiting[message.Id] {
 			shown = append(shown, message.Id)
 		}
 	}
@@ -124,8 +127,11 @@ func (a *ahpChat) syncUsage(c *sessionController) {
 	if model := c.state.Settings.Model; model != "" {
 		usage.Model = &model
 	}
+	// A provider that counts no tokens still names the model that answers.
 	if total.LastInputTokens == 0 && *usage.OutputTokens == 0 {
-		return
+		if usage = (t.UsageInfo{Model: usage.Model}); usage.Model == nil {
+			return
+		}
 	}
 	if active.Usage == nil || !reflect.DeepEqual(*active.Usage, usage) {
 		a.chatAction(t.StateAction{Value: &t.ChatUsageAction{Type: t.ActionTypeChatUsage, TurnId: active.Id, Usage: usage}})

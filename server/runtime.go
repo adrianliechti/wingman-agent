@@ -287,7 +287,8 @@ type Command struct {
 	Type       string               `json:"type"`
 	InputID    string               `json:"inputId,omitempty"`
 	Text       string               `json:"text,omitempty"`
-	Context    []string             `json:"context,omitempty"` // model-only attachment text
+	Context    []string             `json:"context,omitempty"` // model-only attachment text, read before the input
+	Message    json.RawMessage      `json:"message,omitempty"` // the input in its client's own form
 	Files      []string             `json:"files,omitempty"`
 	Images     []string             `json:"images,omitempty"`
 	Intent     code.TurnInputIntent `json:"intent,omitempty"`
@@ -454,6 +455,19 @@ func (c *sessionController) pruneReceiptsLocked() {
 	}
 }
 
+// cuttable reports whether the agent's history holds an input, after whose turn
+// it can be cut. A compaction is no input of the history.
+func (c *sessionController) cuttable(inputID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, turn := range c.hostTurns {
+		if turn.compact && turn.entries[0].InputID == inputID {
+			return false
+		}
+	}
+	return slices.ContainsFunc(c.entries, func(e TranscriptEntry) bool { return e.Type == "user" && e.InputID == inputID })
+}
+
 func (c *sessionController) execute(command Command) error {
 	b, sid := c.backend, c.ref.SessionID
 	if err := b.ctx.Err(); err != nil {
@@ -477,7 +491,7 @@ func (c *sessionController) execute(command Command) error {
 		if id == "" {
 			id = command.ID
 		}
-		input := code.TurnInput{ID: id, Intent: command.Intent, Origin: "user", Display: &code.TurnInputDisplay{Text: command.Text, Files: command.Files, Images: command.Images}}
+		input := code.TurnInput{ID: id, Intent: command.Intent, Origin: "user", Context: command.Context, Display: &code.TurnInputDisplay{Text: command.Text, Files: command.Files, Images: command.Images, Source: command.Message}}
 		if _, canCompact := b.agent.(code.Compactor); canCompact && isCompactCommand(command.Text) {
 			input.Compact = true
 			if focus := compactFocus(command.Text); focus != "" {
@@ -562,6 +576,9 @@ func (c *sessionController) execute(command Command) error {
 		if !ok {
 			return errors.ErrUnsupported
 		}
+		if command.InputID != "" && !c.cuttable(command.InputID) {
+			return errors.New("history can only be cut after a turn of the conversation")
+		}
 		// What runs or waits belongs to the history that goes.
 		if err := b.turns.StopSession(b.ctx, sid); err != nil {
 			return err
@@ -572,8 +589,12 @@ func (c *sessionController) execute(command Command) error {
 		kept := len(transcriptEntries(b.agent.Messages(sid)))
 		c.mu.Lock()
 		c.hostTurns = slices.DeleteFunc(c.hostTurns, func(turn hostTurn) bool { return turn.at >= kept })
-		c.lastOutcome, c.state.Error = "", nil
+		// The outcome of the last turn stays with it.
+		if c.lastInput != command.InputID {
+			c.lastOutcome, c.lastInput, c.state.Error = "", "", nil
+		}
 		c.mu.Unlock()
+		c.refreshSettings() // the usage of the dropped turns goes with them
 		c.replaceHistory()
 	case "delete":
 		if !supportsDelete(b.agent) {

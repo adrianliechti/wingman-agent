@@ -306,13 +306,8 @@ func (a *Agent) TruncateSession(ctx context.Context, id, inputID string) error {
 		return fmt.Errorf("session %s not found", id)
 	}
 	return s.harness.RunExclusive(ctx, func(context.Context) error {
-		if err := session.Truncate(a.sessionsDir, id, inputID); err != nil {
-			return err
-		}
-		var state harness.State
-		if saved, err := session.Load(a.sessionsDir, id); err == nil {
-			state = saved.State
-		} else if !errors.Is(err, os.ErrNotExist) {
+		state, err := session.Truncate(a.sessionsDir, id, inputID)
+		if err != nil {
 			return err
 		}
 		_, revision := s.harness.StateVersion()

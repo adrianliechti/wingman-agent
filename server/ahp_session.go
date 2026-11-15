@@ -1,6 +1,7 @@
 package server
 
 import (
+	"maps"
 	"reflect"
 	"slices"
 	"time"
@@ -46,6 +47,11 @@ func (a *ahpSession) addChat(c *sessionController, resource, title string, origi
 	}
 	ch := newAHPChat(a, c, resource, title, stamp)
 	ch.chat.Origin = origin
+	if origin != nil {
+		if fork, ok := origin.Value.(*t.ChatForkOrigin); ok {
+			ch.inherit(a.chat(fork.Chat), fork.TurnId)
+		}
+	}
 	c.ahp = ch
 	if agent, ok := c.backend.agent.(code.HostToolAgent); ok {
 		_ = agent.SetHostTools(c.ref.SessionID, ch.offerTools)
@@ -61,6 +67,30 @@ func (a *ahpSession) addChat(c *sessionController, resource, title string, origi
 	}
 	ch.syncProjection(c, nil)
 	return ch
+}
+
+// inherit gives a fork what only the host knows of the turns it copies, such
+// as their timing, usage and messages as they were sent.
+func (a *ahpChat) inherit(source *ahpChat, through string) {
+	if source == nil {
+		return
+	}
+	i := slices.IndexFunc(source.chat.Turns, func(turn t.Turn) bool { return turn.Id == through })
+	a.chat.Turns = slices.Clone(source.chat.Turns[:i+1])
+	maps.Copy(a.reasoning, source.reasoning)
+	for _, turn := range a.chat.Turns {
+		for _, part := range turn.ResponseParts {
+			if tool, ok := part.Value.(*t.ToolCallResponsePart); ok && source.clientCalls[ahpToolCallID(tool.ToolCall)] != nil {
+				a.clientCalls[ahpToolCallID(tool.ToolCall)] = source.clientCalls[ahpToolCallID(tool.ToolCall)]
+			}
+		}
+		for id, prompt := range source.prompts {
+			if prompt.turn == turn.Id {
+				a.prompts[id] = prompt
+			}
+		}
+	}
+	a.promptSeq = source.promptSeq
 }
 
 func (a *ahpSession) chat(resource string) *ahpChat {

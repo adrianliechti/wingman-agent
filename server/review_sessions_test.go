@@ -662,8 +662,10 @@ func TestReviewSessionsAttachmentContentStaysOutOfTheMessageText(t *testing.T) {
 	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
 	agent.mu.Lock()
 	sent := ""
-	for _, content := range agent.messages[0].Content {
-		sent += content.Text // the attachment may arrive as its own content part
+	for _, message := range agent.messages {
+		for _, content := range message.Content {
+			sent += content.Text // the attachment arrives as context of its own
+		}
 	}
 	agent.mu.Unlock()
 	if !strings.Contains(sent, "PRIVATE FILE BODY") {

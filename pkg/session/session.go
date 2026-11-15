@@ -222,48 +222,53 @@ func ForkThrough(sessionsDir, id, newID, title, inputID string) error {
 }
 
 // Truncate drops what a session recorded after the turn of an input, or
-// everything when inputID is empty. Nothing may record to the session meanwhile.
-func Truncate(sessionsDir, id, inputID string) error {
+// everything when inputID is empty, and returns the state that remains.
+// Nothing may record to the session meanwhile.
+func Truncate(sessionsDir, id, inputID string) (harness.State, error) {
 	if sessionsDir == "" {
-		return fmt.Errorf("no sessions directory available")
+		return harness.State{}, fmt.Errorf("no sessions directory available")
 	}
 	if err := validateSessionID(id); err != nil {
-		return err
+		return harness.State{}, err
 	}
 	if err := ensureCurrentFormat(sessionsDir, id); err != nil {
-		return err
+		return harness.State{}, err
 	}
 	path := sessionPath(sessionsDir, id)
 	coord := journalCoord(path)
 	coord.mu.Lock()
 	defer coord.mu.Unlock()
 	if coord.deleted {
-		return fmt.Errorf("session journal %s was deleted", id)
+		return harness.State{}, fmt.Errorf("session journal %s was deleted", id)
 	}
 	loaded, err := loadCurrent(path, id, false)
 	if inputID == "" && errors.Is(err, os.ErrNotExist) {
-		return nil // nothing was recorded yet
+		return harness.State{}, nil // nothing was recorded yet
 	}
 	if err != nil {
-		return err
+		return harness.State{}, err
 	}
 	meta := record{Type: "meta", Version: journalVersion, ID: id, CreatedAt: &loaded.session.CreatedAt}
 	var events []harness.RuntimeEvent
 	if inputID != "" {
 		var ok bool
 		if events, ok = cutThrough(loaded.session.State.Events, inputID); !ok {
-			return fmt.Errorf("session %s has no input %s", id, inputID)
+			return harness.State{}, fmt.Errorf("session %s has no input %s", id, inputID)
 		}
 		meta.Title = loaded.session.Title
 	}
+	state, err := normalizeState(harness.State{Events: events})
+	if err != nil {
+		return harness.State{}, err
+	}
 	if err := writeJournal(path, meta, events); err != nil {
-		return fmt.Errorf("write truncated session journal: %w", err)
+		return harness.State{}, fmt.Errorf("write truncated session journal: %w", err)
 	}
 	coord.initialized, coord.createdAt, coord.lastSequence = true, loaded.session.CreatedAt, 0
 	if n := len(events); n > 0 {
 		coord.lastSequence = events[n-1].Sequence
 	}
-	return nil
+	return state, nil
 }
 
 func cutThrough(events []harness.RuntimeEvent, inputID string) ([]harness.RuntimeEvent, bool) {
@@ -273,7 +278,13 @@ func cutThrough(events []harness.RuntimeEvent, inputID string) ([]harness.Runtim
 		}
 		return ""
 	}
-	start := slices.IndexFunc(events, func(e harness.RuntimeEvent) bool { return input(e) == inputID })
+	// The input is the last message with its ID: context recorded with it comes first.
+	start := -1
+	for i, e := range events {
+		if input(e) == inputID {
+			start = i
+		}
+	}
 	if start < 0 {
 		return nil, false
 	}

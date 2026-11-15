@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -24,7 +25,7 @@ func (c *ahpConnection) dispatch(raw json.RawMessage) {
 		return
 	}
 	pending := &ahpPendingAction{params: p, origin: t.ActionOrigin{ClientId: c.id, ClientSeq: p.ClientSeq}}
-	key := ahpActionKey(p.Action)
+	key := ahpActionKey(p.Channel, p.Action)
 	var a *ahpSession
 	var ch *ahpChat
 	var err error
@@ -108,11 +109,21 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			h.mu.Unlock()
 			return ahpInvalid("valid user pending message required")
 		}
+		// Steering waits for a turn to steer, and the host keeps it until then.
+		if action.Kind == t.PendingMessageKindSteering && (ch.chat.ActiveTurn == nil || ch.waiting[action.Id]) {
+			ch.waiting[action.Id] = true
+			ch.chatAction(p.Action)
+			h.mu.Unlock()
+			return nil
+		}
+		waited := ch.waiting[action.Id]
+		delete(ch.waiting, action.Id) // a steering message the client now queues
 		command.Type, command.ID, command.Text, command.Intent = "send", action.Id, action.Message.Text, code.TurnInputFollowUp
+		command.Message, _ = json.Marshal(action.Message)
 		if action.Kind == t.PendingMessageKindSteering {
 			command.Intent = code.TurnInputSteer
 		}
-		queued := slices.ContainsFunc(ch.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == action.Id }) || ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id
+		queued := !waited && (slices.ContainsFunc(ch.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == action.Id }) || ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id)
 		if queued {
 			command.Type, command.InputID, command.ID = "queue_update", action.Id, ahpCommandID("queue-update", p.Channel, c.id, p.ClientSeq)
 		}
@@ -127,7 +138,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 		// A receipt may outlive its wire acknowledgement. Reply with the
 		// current queue state so a retry cannot restore an older edit. An idle
 		// queue may also have consumed the message before it was projected.
-		if pending := a.pending[ahpActionKey(p.Action)]; pending != nil && pending.envelope == nil {
+		if pending := a.pending[ahpActionKey(p.Channel, p.Action)]; pending != nil && pending.envelope == nil {
 			var queued *t.PendingMessage
 			for i := range ch.chat.QueuedMessages {
 				if ch.chat.QueuedMessages[i].Id == action.Id {
@@ -142,7 +153,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 				if queued.Kind != nil {
 					kind = *queued.Kind
 				}
-				a.acknowledge(p.Action, t.StateAction{Value: &t.ChatPendingMessageSetAction{Type: t.ActionTypeChatPendingMessageSet, Kind: kind, Id: queued.Id, Message: queued.Message}})
+				a.acknowledge(p.Channel, p.Action, t.StateAction{Value: &t.ChatPendingMessageSetAction{Type: t.ActionTypeChatPendingMessageSet, Kind: kind, Id: queued.Id, Message: queued.Message}})
 			} else {
 				ch.chatAction(p.Action)
 				ch.chatAction(t.StateAction{Value: &t.ChatPendingMessageRemovedAction{Type: t.ActionTypeChatPendingMessageRemoved, Kind: action.Kind, Id: action.Id}})
@@ -154,6 +165,12 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 		if !chat || action.Id == "" {
 			h.mu.Unlock()
 			return ahpInvalid("chat and pending message required")
+		}
+		if ch.waiting[action.Id] && action.Kind == t.PendingMessageKindSteering {
+			delete(ch.waiting, action.Id)
+			ch.chatAction(p.Action)
+			h.mu.Unlock()
+			return nil
 		}
 		command.Type, command.InputID, command.ID = "queue_remove", action.Id, ahpCommandID("queue-remove", action.Id)
 		h.mu.Unlock()
@@ -178,20 +195,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			}
 		}
 		h.mu.Unlock()
-		command.ID, command.Type, command.Text, command.requireIdle = action.TurnId, "send", action.Message.Text, true
-		if err := a.project.attachments(action.Message, &command); err != nil {
-			return err
-		}
-		if action.Message.Agent != nil {
-			return ahpInvalid("custom agent selection is not supported")
-		}
-		if action.Message.Model != nil {
-			model := action.Message.Model.Id
-			if err := ch.command(Command{ID: command.ID + ":model", Epoch: command.Epoch, Type: "settings", Model: &model}); err != nil {
-				return err
-			}
-		}
-		return ch.command(command)
+		return ch.start(action.TurnId, action.Message)
 	case *t.ChatTurnCancelledAction:
 		if !chat || ch.chat.ActiveTurn == nil || ch.chat.ActiveTurn.Id != action.TurnId {
 			h.mu.Unlock()
@@ -270,7 +274,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 		}
 		// The backend may have normalized the values; acknowledge what it holds.
 		h.mu.Lock()
-		a.acknowledge(p.Action, t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: a.state.Config.Values, Replace: ahpPtr(true)}})
+		a.acknowledge(p.Channel, p.Action, t.StateAction{Value: &t.SessionConfigChangedAction{Type: t.ActionTypeSessionConfigChanged, Config: a.state.Config.Values, Replace: ahpPtr(true)}})
 		h.mu.Unlock()
 		return nil
 	case *t.ChatConfigChangedAction:
@@ -283,7 +287,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			return err
 		}
 		h.mu.Lock()
-		a.acknowledge(p.Action, t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: ch.chat.Config.Values, Replace: ahpPtr(true)}})
+		a.acknowledge(p.Channel, p.Action, t.StateAction{Value: &t.ChatConfigChangedAction{Type: t.ActionTypeChatConfigChanged, Config: ch.chat.Config.Values, Replace: ahpPtr(true)}})
 		h.mu.Unlock()
 		return nil
 	case *t.SessionActiveClientSetAction:
@@ -427,6 +431,25 @@ func (a *ahpChat) setConfig(id string, values map[string]json.RawMessage) error 
 	return a.command(command)
 }
 
+// start runs a client's message as a turn of the idle chat.
+func (a *ahpChat) start(id string, message t.Message) error {
+	if message.Agent != nil {
+		return ahpInvalid("custom agent selection is not supported")
+	}
+	command := Command{ID: id, Epoch: a.controller.epoch, Type: "send", Text: message.Text, requireIdle: true}
+	command.Message, _ = json.Marshal(message)
+	if err := a.project.attachments(message, &command); err != nil {
+		return err
+	}
+	if message.Model != nil {
+		model := message.Model.Id
+		if err := a.command(Command{ID: id + ":model", Epoch: command.Epoch, Type: "settings", Model: &model}); err != nil {
+			return err
+		}
+	}
+	return a.command(command)
+}
+
 func (p *ahpProject) attachments(message t.Message, command *Command) error {
 	for _, attachment := range message.Attachments {
 		switch a := attachment.Value.(type) {
@@ -456,11 +479,50 @@ func (p *ahpProject) attachments(message t.Message, command *Command) error {
 			} else {
 				return ahpInvalid("unsupported attachment content type")
 			}
+		case *t.MessageChatAttachment:
+			transcript, err := p.chatTranscript(a)
+			if err != nil {
+				return err
+			}
+			command.Context = append(command.Context, transcript)
 		default:
 			return ahpInvalid("unsupported attachment")
 		}
 	}
 	return nil
+}
+
+// chatTranscript is a chat as the model of another chat reads it: the turns it
+// has now, through the one the attachment names.
+func (h *ahpHost) chatTranscript(attachment *t.MessageChatAttachment) (string, error) {
+	_, ch, err := h.ensureSession(attachment.Resource)
+	if err != nil || ch == nil {
+		return "", ahpInvalid("attached chat not found")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	turns := ch.chat.Turns
+	if end := attachment.EndTurn; end != nil {
+		i := slices.IndexFunc(turns, func(turn t.Turn) bool { return turn.Id == *end })
+		if i < 0 {
+			return "", ahpInvalid("attached chat has no completed turn " + *end)
+		}
+		turns = turns[:i+1]
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "<attached_chat label=%q resource=%q>\n", attachment.Label, attachment.Resource)
+	for _, turn := range turns {
+		// Attachments of its messages stay references.
+		b.WriteString("User:\n" + turn.Message.Text + "\n\nAssistant:\n")
+		for _, part := range turn.ResponseParts {
+			if markdown, ok := part.Value.(*t.MarkdownResponsePart); ok {
+				b.WriteString(markdown.Content + "\n")
+			}
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("</attached_chat>")
+	return b.String(), nil
 }
 
 func ahpAnswers(view PromptView, answers map[string]t.ChatInputAnswer) (map[string]any, error) {

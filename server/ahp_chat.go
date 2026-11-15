@@ -28,6 +28,8 @@ type ahpChat struct {
 	usageStart       UsageView         // the controller's totals when the active turn started
 	offered          map[string]string // the client behind each tool the agent was last given
 	clientCalls      map[string]*ahpClientCall
+	waiting          map[string]bool // steering messages that wait in the queue for a turn
+	steering         bool            // the waiting ones are being handed to the running turn
 	removed          bool
 	projected        bool // turns created after the first projection are live, not history
 	projectedInput   string
@@ -86,61 +88,60 @@ type ahpPendingAction struct {
 
 func newAHPChat(a *ahpSession, c *sessionController, resource, title, stamp string) *ahpChat {
 	config := ahpConfig(c.state.Settings)
-	return &ahpChat{project: a.project, session: a, controller: c, title: title, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{}, clientCalls: map[string]*ahpClientCall{},
+	return &ahpChat{project: a.project, session: a, controller: c, title: title, config: config, prompts: map[string]*ahpPrompt{}, reasoning: map[string]*ahpReasoningTiming{}, clientCalls: map[string]*ahpClientCall{}, waiting: map[string]bool{},
 		chat: t.ChatState{Resource: resource, Title: title, Status: t.SessionStatusIdle, ModifiedAt: stamp, Turns: []t.Turn{}, Config: &t.ChatConfigState{Values: config.Values}},
 	}
 }
 
 // emit publishes an action, acknowledging the client action it completes.
 func (a *ahpSession) emit(channel string, action t.StateAction) {
+	key := ahpActionKey(channel, action)
 	var origin *t.ActionOrigin
-	p := a.pending[ahpActionKey(action)]
-	if p != nil && p.envelope == nil && channel == p.params.Channel {
+	p := a.pending[key]
+	if p != nil && p.envelope == nil {
 		origin = &p.origin
 	}
 	envelope := a.project.publish(channel, action, origin, nil)
 	if origin != nil {
 		p.envelope = &envelope
-		a.remember(*origin, ahpActionKey(action), envelope)
-		delete(a.pending, ahpActionKey(action))
+		a.remember(*origin, key, envelope)
+		delete(a.pending, key)
 	}
 }
 
 // acknowledge answers a client's action with the host's own, such as the
 // values a backend normalized.
-func (a *ahpSession) acknowledge(client, action t.StateAction) {
-	key := ahpActionKey(client)
+func (a *ahpSession) acknowledge(channel string, client, action t.StateAction) {
+	key := ahpActionKey(channel, client)
 	p := a.pending[key]
 	if p == nil || p.envelope != nil {
 		return
 	}
-	envelope := a.project.publish(p.params.Channel, action, &p.origin, nil)
+	envelope := a.project.publish(channel, action, &p.origin, nil)
 	p.envelope = &envelope
 	a.remember(p.origin, key, envelope)
 	delete(a.pending, key)
 }
 
-func ahpActionKey(action t.StateAction) string {
+// ahpActionKey identifies an action on a channel: the host's action that
+// completes a client's has the client's key.
+func ahpActionKey(channel string, action t.StateAction) string {
 	switch v := action.Value.(type) {
 	case *t.ChatPendingMessageSetAction:
-		return "pending-set:" + v.Id
+		return channel + " pending-set:" + v.Id
 	case *t.ChatPendingMessageRemovedAction:
-		return "pending-remove:" + v.Id
-	case *t.ChatQueuedMessagesReorderedAction:
-		return "reorder" // answered with the order the queue then has
-	case *t.ChatTruncatedAction:
-		return "truncate"
+		return channel + " pending-remove:" + v.Id
 	case *t.ChatTurnStartedAction:
-		return "start:" + v.TurnId
+		return channel + " start:" + v.TurnId
 	case *t.ChatTurnCancelledAction:
-		return "cancel:" + v.TurnId
+		return channel + " cancel:" + v.TurnId
 	case *t.ChatToolCallConfirmedAction:
-		return "confirm:" + v.ToolCallId
+		return channel + " confirm:" + v.ToolCallId
 	case *t.ChatInputCompletedAction:
-		return "input:" + v.RequestId
+		return channel + " input:" + v.RequestId
 	default:
 		data, _ := json.Marshal(action)
-		return string(data)
+		return channel + " " + string(data)
 	}
 }
 
@@ -259,8 +260,13 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 			turns, active = a.transcript(c)
 		}
 		// A client's cut leaves the turns the agent kept.
-		if p := a.session.pending["truncate"]; p != nil && p.envelope == nil && p.params.Channel == a.chat.Resource && active == nil && !reflect.DeepEqual(a.chat.Turns, turns) {
-			a.chatAction(p.params.Action)
+		if active == nil && !reflect.DeepEqual(a.chat.Turns, turns) {
+			for _, p := range a.session.pending {
+				if _, cut := p.params.Action.Value.(*t.ChatTruncatedAction); cut && p.envelope == nil && p.params.Channel == a.chat.Resource {
+					a.chatAction(p.params.Action)
+					break
+				}
+			}
 		}
 		if !reflect.DeepEqual(a.chat.Turns, turns) {
 			a.chatAction(t.StateAction{Value: &t.ChatTruncatedAction{Type: t.ActionTypeChatTruncated}})
@@ -296,6 +302,11 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 				a.chatAction(t.StateAction{Value: &t.ChatTurnStartedAction{Type: t.ActionTypeChatTurnStarted, TurnId: active.Id, StartedAt: active.StartedAt, Message: active.Message}})
 				a.syncParts(active.ResponseParts)
 			}
+			// A turn that answers takes steering; before then its agent may still refuse it.
+			if len(a.waiting) > 0 && !a.steering && len(a.chat.ActiveTurn.ResponseParts) > 0 {
+				a.steering = true
+				go a.steer()
+			}
 		}
 	}
 	a.syncConfig(c)
@@ -312,7 +323,7 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 func (a *ahpChat) startTurn(active *t.ActiveTurn) {
 	started := &t.ChatTurnStartedAction{Type: t.ActionTypeChatTurnStarted, TurnId: active.Id, StartedAt: active.StartedAt, Message: active.Message}
 	// An idle chat consumes a message before its queue ever held it.
-	if p := a.session.pending["pending-set:"+active.Id]; p != nil && p.envelope == nil && p.params.Channel == a.chat.Resource {
+	if p := a.session.pending[ahpActionKey(a.chat.Resource, t.StateAction{Value: &t.ChatPendingMessageSetAction{Id: active.Id}})]; p != nil && p.envelope == nil {
 		a.chatAction(p.params.Action)
 	}
 	if i := slices.IndexFunc(a.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == active.Id }); i >= 0 {
@@ -326,6 +337,36 @@ func (a *ahpChat) startTurn(active *t.ActiveTurn) {
 	a.chatAction(t.StateAction{Value: started})
 }
 
+// steer hands the steering messages that waited for a turn to the running one.
+func (a *ahpChat) steer() {
+	h := a.project
+	for {
+		h.mu.Lock()
+		i := slices.IndexFunc(a.chat.QueuedMessages, func(m t.PendingMessage) bool { return a.waiting[m.Id] })
+		if i < 0 || a.removed {
+			a.steering = false
+			h.mu.Unlock()
+			return
+		}
+		next := a.chat.QueuedMessages[i]
+		delete(a.waiting, next.Id)
+		h.mu.Unlock()
+		command := Command{ID: next.Id, Epoch: a.controller.epoch, Type: "send", Text: next.Message.Text, Intent: code.TurnInputSteer}
+		command.Message, _ = json.Marshal(next.Message)
+		err := a.project.attachments(next.Message, &command)
+		if err == nil {
+			err = a.command(command)
+		}
+		// A message the turn took left the queue with its projection; one it
+		// could not take leaves it now.
+		h.mu.Lock()
+		if err != nil && slices.ContainsFunc(a.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == next.Id }) && !a.waiting[next.Id] {
+			a.chatAction(t.StateAction{Value: &t.ChatPendingMessageRemovedAction{Type: t.ActionTypeChatPendingMessageRemoved, Kind: t.PendingMessageKindSteering, Id: next.Id}})
+		}
+		h.mu.Unlock()
+	}
+}
+
 func (a *ahpChat) finishTurn(id string, state t.TurnState, message *string) {
 	var duration int64
 	if active := a.chat.ActiveTurn; active != nil && active.Id == id {
@@ -333,19 +374,10 @@ func (a *ahpChat) finishTurn(id string, state t.TurnState, message *string) {
 			duration = max(0, time.Since(started).Milliseconds())
 		}
 	}
-	if state != t.TurnStateCancelled {
-		// A cancel that lost the race to the turn's end must still be answered.
-		if p := a.session.pending[ahpActionKey(t.StateAction{Value: &t.ChatTurnCancelledAction{TurnId: id}})]; p != nil && p.envelope == nil {
-			reason := "the turn finished before it could be cancelled"
-			envelope := a.project.publish(p.params.Channel, p.params.Action, &p.origin, &reason)
-			p.envelope = &envelope
-			a.session.remember(p.origin, ahpActionKey(p.params.Action), envelope)
-			delete(a.session.pending, ahpActionKey(p.params.Action))
-		}
-	}
 	switch state {
 	case t.TurnStateCancelled:
 		a.chatAction(t.StateAction{Value: &t.ChatTurnCancelledAction{Type: t.ActionTypeChatTurnCancelled, TurnId: id, Duration: duration}})
+		return
 	case t.TurnStateError:
 		text := "Turn failed"
 		if message != nil {
@@ -354,6 +386,15 @@ func (a *ahpChat) finishTurn(id string, state t.TurnState, message *string) {
 		a.chatAction(t.StateAction{Value: &t.ChatErrorAction{Type: t.ActionTypeChatError, TurnId: id, Duration: duration, Part: t.ErrorResponsePart{Kind: t.ResponsePartKindError, Error: t.ErrorInfo{ErrorType: "agent", Message: text}}}})
 	default:
 		a.chatAction(t.StateAction{Value: &t.ChatTurnCompleteAction{Type: t.ActionTypeChatTurnComplete, TurnId: id, Duration: duration}})
+	}
+	// A cancel that lost the race is answered once its client can see the turn ended.
+	key := ahpActionKey(a.chat.Resource, t.StateAction{Value: &t.ChatTurnCancelledAction{TurnId: id}})
+	if p := a.session.pending[key]; p != nil && p.envelope == nil {
+		reason := "the turn finished before it could be cancelled"
+		envelope := a.project.publish(p.params.Channel, p.params.Action, &p.origin, &reason)
+		p.envelope = &envelope
+		a.session.remember(p.origin, key, envelope)
+		delete(a.session.pending, key)
 	}
 }
 
@@ -379,14 +420,9 @@ func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {
 			}
 			var startedAt, duration = (*string)(nil), (*int64)(nil)
 			var usage *t.UsageInfo
-			message := a.project.message(e.Content, e.Files, e.Images)
-			if e.Content == "" && len(e.Files)+len(e.Images) == 0 {
+			message := a.project.message(e.Source, e.Content, e.Files, e.Images)
+			if e.Source == nil && e.Content == "" && len(e.Files)+len(e.Images) == 0 {
 				message.Origin.Kind = t.MessageKindSystemNotification // such as a background task's result
-			}
-			if pending := a.session.pending["start:"+id]; pending != nil {
-				if started, ok := pending.params.Action.Value.(*t.ChatTurnStartedAction); ok {
-					message = started.Message
-				}
 			}
 			if len(turns) < len(old) {
 				prior := old[len(turns)]

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -34,6 +35,7 @@ type TranscriptEntry struct {
 	ToolResult    *string                `json:"toolResult,omitempty"`
 	ToolPartial   bool                   `json:"toolPartial,omitempty"`
 	ReasoningID   string                 `json:"reasoningId,omitempty"`
+	Source        json.RawMessage        `json:"source,omitempty"` // a user input as its client sent it
 }
 
 type PromptView struct {
@@ -117,6 +119,7 @@ type sessionController struct {
 	activeInput string
 	nextInput   string // the input the turn manager runs, known before its turn shows
 	lastOutcome string
+	lastInput   string // the input lastOutcome belongs to
 	hostTurns   []hostTurn
 	ahp         *ahpChat
 }
@@ -327,7 +330,7 @@ func (c *sessionController) apply(f Frame) {
 				c.activeInput, c.lastOutcome = f.Input.ID, ""
 			case code.TurnInputCompleted, code.TurnInputIncomplete, code.TurnInputFailed, code.TurnInputCancelled:
 				if c.activeInput == f.Input.ID {
-					c.activeInput, c.lastOutcome = "", f.Input.State
+					c.activeInput, c.lastOutcome, c.lastInput = "", f.Input.State, f.Input.ID
 				}
 			}
 		}
@@ -338,7 +341,7 @@ func (c *sessionController) apply(f Frame) {
 			if visible || f.Input.State == string(code.TurnInputActive) {
 				entry := TranscriptEntry{ID: "input:" + f.Input.ID, InputID: f.Input.ID, Type: "user"}
 				if visible {
-					entry.Content, entry.Files, entry.Images = f.Input.Text, f.Input.Files, f.Input.Images
+					entry.Content, entry.Files, entry.Images, entry.Source = f.Input.Text, f.Input.Files, f.Input.Images, f.Input.Source
 				}
 				c.upsertLocked(entry)
 				if (f.Input.Compact || !visible) && c.index(entry.ID) >= 0 && !slices.ContainsFunc(c.hostTurns, func(turn hostTurn) bool { return turn.entries[0].ID == entry.ID }) {

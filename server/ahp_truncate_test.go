@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +23,7 @@ type truncateModel struct {
 	mu       sync.Mutex
 	requests []string
 	hold     chan struct{} // while set, the replies to "slow" questions wait for it
+	fail     string        // questions it refuses
 }
 
 func (m *truncateModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -33,8 +35,12 @@ func (m *truncateModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	m.mu.Lock()
 	m.requests = append(m.requests, string(body))
-	hold := m.hold
+	hold, fail := m.hold, m.fail
 	m.mu.Unlock()
+	if fail != "" && strings.Contains(string(body), fail) {
+		http.Error(w, `{"error":{"message":"the model refused","type":"invalid_request_error"}}`, http.StatusBadRequest)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	fmt.Fprint(w, `data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"answer","output_index":0,"content_index":0,"delta":"an answer"}`+"\n\n")
 	w.(http.Flusher).Flush()
@@ -61,12 +67,24 @@ func (m *truncateModel) asked(question string) string {
 }
 
 type truncateChat struct {
-	t      *testing.T
-	client *ahp.Client
-	other  *ahp.Client
-	seq    int64
-	state  *types.ChatState
-	events *ahp.Subscription
+	t         *testing.T
+	client    *ahp.Client
+	other     *ahp.Client
+	directory string
+	seq       *int64 // the client's, shared by its chats
+	state     *types.ChatState
+	events    *ahp.Subscription
+}
+
+// open creates another session for the same clients and follows its chat.
+func (c *truncateChat) open(session string) *truncateChat {
+	c.t.Helper()
+	if err := c.client.Request(c.t.Context(), "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("wingman"), WorkingDirectories: []string{c.directory}}, nil); err != nil {
+		c.t.Fatal(err)
+	}
+	next := *c
+	next.state, next.events = ahpSubscribeChat(c.t, c.client, ahpChatURI(session))
+	return &next
 }
 
 func truncateTest(t *testing.T) (*truncateModel, *truncateChat) {
@@ -87,24 +105,19 @@ func truncateTest(t *testing.T) (*truncateModel, *truncateChat) {
 	endpoint := "ws" + strings.TrimPrefix(server.URL, "http") + "/ahp"
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	t.Cleanup(cancel)
-	c := &truncateChat{t: t, client: ahpTestClient(t, endpoint, ""), other: ahpTestClient(t, endpoint, "")}
+	c := &truncateChat{t: t, client: ahpTestClient(t, endpoint, ""), other: ahpTestClient(t, endpoint, ""), directory: app.ahp.directoryURI(), seq: new(int64)}
 	for id, client := range map[string]*ahp.Client{"editor": c.client, "reader": c.other} {
 		if _, err := client.Initialize(ctx, id, []string{"1.1.0"}, []string{types.RootResourceURI}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	session := "ahp-session:/truncate"
-	if err := c.client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("wingman"), WorkingDirectories: []string{app.ahp.directoryURI()}}, nil); err != nil {
-		t.Fatal(err)
-	}
-	c.state, c.events = ahpSubscribeChat(t, c.client, ahpChatURI(session))
-	return model, c
+	return model, c.open("ahp-session:/truncate")
 }
 
 func (c *truncateChat) dispatch(action types.StateAction) (echo types.ActionEnvelope, seen []types.ActionEnvelope) {
 	c.t.Helper()
-	c.seq++
-	seq := c.seq
+	*c.seq++
+	seq := *c.seq
 	if err := c.client.Notify(c.t.Context(), "dispatchAction", types.DispatchActionParams{Channel: c.state.Resource, ClientSeq: seq, Action: action}); err != nil {
 		c.t.Fatal(err)
 	}
@@ -115,14 +128,17 @@ func (c *truncateChat) dispatch(action types.StateAction) (echo types.ActionEnve
 	return echo, seen
 }
 
-func (c *truncateChat) start(turn, text string) {
+func (c *truncateChat) start(turn, text string, attachments ...types.MessageAttachment) types.ActionEnvelope {
 	c.t.Helper()
-	c.dispatch(types.StateAction{Value: &types.ChatTurnStartedAction{Type: types.ActionTypeChatTurnStarted, TurnId: turn, StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Message: types.Message{Text: text, Origin: types.MessageOrigin{Kind: types.MessageKindUser}}}})
+	echo, _ := c.dispatch(types.StateAction{Value: &types.ChatTurnStartedAction{Type: types.ActionTypeChatTurnStarted, TurnId: turn, StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Message: types.Message{Text: text, Origin: types.MessageOrigin{Kind: types.MessageKindUser}, Attachments: attachments}}})
+	return echo
 }
 
-func (c *truncateChat) complete(turn, text string) {
+func (c *truncateChat) complete(turn, text string, attachments ...types.MessageAttachment) {
 	c.t.Helper()
-	c.start(turn, text)
+	if echo := c.start(turn, text, attachments...); echo.RejectionReason != nil {
+		c.t.Fatal(*echo.RejectionReason)
+	}
 	if !truncateTurns(c.state, turn) {
 		ahpUntil(c.t, c.state, c.events, func(types.ActionEnvelope) bool { return truncateTurns(c.state, turn) })
 	}
@@ -183,6 +199,12 @@ func TestAHPTruncateKeepsHistoryThroughATurn(t *testing.T) {
 	if !truncateTurns(c.state, "one", "three") || len(c.state.Turns) != 2 {
 		t.Fatalf("turns after continuing: %s", truncateJSON(t, c.state.Turns))
 	}
+	// Each turn has the model's final counts, also the first after the cut.
+	for _, turn := range c.state.Turns {
+		if turn.Usage == nil || turn.Usage.OutputTokens == nil || *turn.Usage.OutputTokens != 2 {
+			t.Fatalf("usage of %s: %s", turn.Id, truncateJSON(t, turn.Usage))
+		}
+	}
 }
 
 func TestAHPTruncateDropsTheActiveTurn(t *testing.T) {
@@ -226,5 +248,77 @@ func TestAHPTruncateDropsTheActiveTurn(t *testing.T) {
 	c.complete("three", "third question")
 	if request := model.asked("third question"); strings.Contains(request, "first question") || strings.Contains(request, "slow question") {
 		t.Fatalf("the model was asked: %s", request)
+	}
+}
+
+func TestAHPTruncateKeepsAFailedTurnAsItWas(t *testing.T) {
+	model, c := truncateTest(t)
+	c.complete("one", "first question")
+	model.mu.Lock()
+	model.fail = "broken question"
+	model.mu.Unlock()
+	c.complete("two", "broken question")
+	// The turn ends with its failure, not one it learns of later.
+	if failed := truncateJSON(t, c.state.Turns[1]); c.state.Turns[1].State != types.TurnStateError || !strings.Contains(failed, "the model refused") {
+		t.Fatalf("the turn did not fail as the model did: %s", failed)
+	}
+	kept := truncateJSON(t, c.state.Turns)
+	echo, seen := c.dispatch(types.StateAction{Value: &types.ChatTruncatedAction{Type: types.ActionTypeChatTruncated, TurnId: ahpPtr("two")}})
+	if echo.RejectionReason != nil {
+		t.Fatal(*echo.RejectionReason)
+	}
+	if len(seen) != 1 || truncateJSON(t, c.state.Turns) != kept || truncateJSON(t, c.snapshot().Turns) != kept {
+		t.Fatalf("%d actions; mirror %s; snapshot %s", len(seen), truncateJSON(t, c.state.Turns), truncateJSON(t, c.snapshot().Turns))
+	}
+}
+
+func truncateSteer(id, text string) types.StateAction {
+	return types.StateAction{Value: &types.ChatPendingMessageSetAction{Type: types.ActionTypeChatPendingMessageSet, Kind: types.PendingMessageKindSteering, Id: id, Message: types.Message{Text: text, Origin: types.MessageOrigin{Kind: types.MessageKindUser}}}}
+}
+
+// Steering sent to an idle chat waits for a turn to steer instead of starting one.
+func TestAHPIdleSteeringWaitsForATurn(t *testing.T) {
+	model, c := truncateTest(t)
+	for _, action := range []types.StateAction{
+		truncateSteer("first", "mind the tests"),
+		truncateSteer("second", "keep it short"),
+		truncateSteer("second", "keep it very short"),
+		truncateSteer("third", "drop this"),
+		{Value: &types.ChatPendingMessageRemovedAction{Type: types.ActionTypeChatPendingMessageRemoved, Kind: types.PendingMessageKindSteering, Id: "third"}},
+	} {
+		if echo, _ := c.dispatch(action); echo.RejectionReason != nil {
+			t.Fatal(*echo.RejectionReason)
+		}
+	}
+	waiting := func(state *types.ChatState) (ids []string) {
+		for _, m := range state.QueuedMessages {
+			ids = append(ids, m.Id+"="+m.Message.Text)
+		}
+		return ids
+	}
+	want := []string{"first=mind the tests", "second=keep it very short"}
+	for name, state := range map[string]*types.ChatState{"mirror": c.state, "snapshot": c.snapshot()} {
+		if !slices.Equal(waiting(state), want) || state.ActiveTurn != nil || len(state.Turns) != 0 {
+			t.Fatalf("%s: %s", name, truncateJSON(t, state))
+		}
+	}
+	if model.asked("mind the tests") != "" {
+		t.Fatal("waiting steering reached the model")
+	}
+	// The next turn takes them.
+	model.mu.Lock()
+	model.hold = make(chan struct{})
+	model.mu.Unlock()
+	c.start("turn", "slow question")
+	ahpUntil(t, c.state, c.events, func(types.ActionEnvelope) bool {
+		return len(c.state.QueuedMessages) == 0 && c.state.SteeringMessage == nil
+	})
+	close(model.hold)
+	ahpUntil(t, c.state, c.events, func(types.ActionEnvelope) bool { return truncateTurns(c.state, "turn") })
+	if request := model.asked("keep it very short"); !strings.Contains(request, "mind the tests") || strings.Contains(request, "drop this") {
+		t.Fatalf("the model was asked: %s", request)
+	}
+	if len(c.state.Turns) != 1 || !strings.Contains(truncateJSON(t, c.state.Turns[0].ResponseParts), "keep it very short") {
+		t.Fatalf("the turn does not show the steering: %s", truncateJSON(t, c.state.Turns))
 	}
 }
