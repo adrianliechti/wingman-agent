@@ -118,6 +118,7 @@ func newProtocolServer(t *testing.T) (*Server, *backendRuntime, *protocolAgent) 
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, backends: map[string]*backendEntry{}}
+	s.ahp = newAHPHost().attach(s)
 	a := &protocolAgent{}
 	b := s.bindBackend("one", a)
 	s.backends[b.id] = &backendEntry{runtime: b}

@@ -512,7 +512,7 @@ func TestReviewWorkspaceChatRoutesResolveOnlyKnownChats(t *testing.T) {
 
 func reviewWorkspaceDeleteChat(t *testing.T, app *Server, id string) {
 	t.Helper()
-	_, ch, err := app.ahpProject().ensureSession(ahpChatURI(canonicalAHPURI("wingman", id)))
+	_, ch, err := app.ahp.ensureSession(ahpChatURI(canonicalAHPURI("wingman", id)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +550,7 @@ func TestReviewWorkspaceAHPDropsSlowConsumerWithoutBlockingHost(t *testing.T) {
 	if _, err := healthy.Initialize(ctx, "healthy", []string{"1.0.0"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	h := s.ahpProject()
+	h := s.ahp
 	h.mu.Lock()
 	connected := len(h.clients)
 	h.mu.Unlock()

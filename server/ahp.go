@@ -133,7 +133,7 @@ func ahpOriginAllowed(r *http.Request) bool {
 }
 
 func (s *Server) handleAHP(w http.ResponseWriter, r *http.Request) {
-	s.ahpProject().serve(s.ctx, w, r)
+	s.ahp.serve(s.ctx, w, r)
 }
 
 // serve runs one client connection until it closes or parent ends.

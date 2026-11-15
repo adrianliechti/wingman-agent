@@ -41,11 +41,12 @@ func (c *ahpConnection) dispatch(raw json.RawMessage) {
 			return
 		}
 		if running := a.pending[key]; running != nil {
-			h.mu.Unlock()
-			if running.origin == pending.origin {
-				return // a retry of an action whose acknowledgement is still due
+			// A retry of an action whose acknowledgement is still due waits for it.
+			if running.origin != pending.origin {
+				a.remember(pending.origin, key, h.publish(p.Channel, p.Action, &pending.origin, new("action is already in progress")))
 			}
-			err = ahpInvalid("action is already in progress")
+			h.mu.Unlock()
+			return
 		} else {
 			a.pending[key] = pending
 			h.mu.Unlock()
@@ -57,30 +58,28 @@ func (c *ahpConnection) dispatch(raw json.RawMessage) {
 	if a == nil && errors.As(err, &rpc) && rpc.Code == int(t.ErrorCodeSessionNotFound) {
 		return
 	}
+	var reason *string
+	if err != nil {
+		reason = new(err.Error())
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if pending.envelope == nil {
-		if err == nil {
-			switch p.Action.Value.(type) {
-			case *t.ChatTurnStartedAction, *t.ChatTurnCancelledAction:
-				// Execution acknowledges these at its actual lifecycle boundary.
-				// In particular, cancellation may return before the stream stops.
-				return
-			}
-		}
-		var reason *string
-		if err != nil {
-			reason = new(err.Error())
-		}
-		envelope := h.publish(p.Channel, p.Action, &pending.origin, reason)
-		pending.envelope = &envelope
-		if a != nil {
-			a.remember(pending.origin, key, envelope)
+	if a == nil { // a terminal's action
+		h.publish(p.Channel, p.Action, &pending.origin, reason)
+		return
+	}
+	if a.pending[key] != pending {
+		return // the host answered it already
+	}
+	if err == nil {
+		switch p.Action.Value.(type) {
+		case *t.ChatTurnStartedAction, *t.ChatTurnCancelledAction:
+			// Execution acknowledges these at its actual lifecycle boundary.
+			// In particular, cancellation may return before the stream stops.
+			return
 		}
 	}
-	if a != nil && a.pending[key] == pending {
-		delete(a.pending, key)
-	}
+	a.answer(key, t.StateAction{}, reason)
 }
 
 // ahpCommandID derives a stable controller command ID. Repeated edits use
@@ -118,11 +117,6 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 			command.Intent, command.wait = code.TurnInputSteer, true
 		}
 		queued := slices.ContainsFunc(ch.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == action.Id }) || ch.chat.SteeringMessage != nil && ch.chat.SteeringMessage.Id == action.Id
-		// Its input would take the place of the turn's.
-		if !queued && (ch.chat.ActiveTurn != nil && ch.chat.ActiveTurn.Id == action.Id || slices.ContainsFunc(ch.chat.Turns, func(turn t.Turn) bool { return turn.Id == action.Id })) {
-			h.mu.Unlock()
-			return ahpInvalid("a turn already has this id")
-		}
 		if queued {
 			command.Type, command.InputID, command.ID = "queue_update", action.Id, ahpCommandID("queue-update", p.Channel, c.id, p.ClientSeq)
 		}
@@ -137,7 +131,7 @@ func (c *ahpConnection) executeAction(a *ahpSession, ch *ahpChat, p t.DispatchAc
 		// A receipt may outlive its wire acknowledgement. Reply with the
 		// current queue state so a retry cannot restore an older edit. An idle
 		// queue may also have consumed the message before it was projected.
-		if pending := a.pending[ahpActionKey(p.Channel, p.Action)]; pending != nil && pending.envelope == nil {
+		if pending := a.pending[ahpActionKey(p.Channel, p.Action)]; pending != nil {
 			var queued *t.PendingMessage
 			for i := range ch.chat.QueuedMessages {
 				if ch.chat.QueuedMessages[i].Id == action.Id {

@@ -108,7 +108,7 @@ func (p *ahpProject) runResourceWatches() {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-p.done:
+		case <-p.server.ctx.Done():
 			return
 		case <-ticker.C:
 		}

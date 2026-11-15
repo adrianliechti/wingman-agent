@@ -80,10 +80,10 @@ func (a *ahpSession) remember(origin t.ActionOrigin, key string, envelope t.Acti
 	a.acks[origin] = ahpAck{key: key, envelope: envelope}
 }
 
+// ahpPendingAction is a client's action that the host has not answered yet.
 type ahpPendingAction struct {
-	params   t.DispatchActionParams
-	origin   t.ActionOrigin
-	envelope *t.ActionEnvelope
+	params t.DispatchActionParams
+	origin t.ActionOrigin
 }
 
 func newAHPChat(a *ahpSession, c *sessionController, resource, title, stamp string) *ahpChat {
@@ -95,32 +95,31 @@ func newAHPChat(a *ahpSession, c *sessionController, resource, title, stamp stri
 
 // emit publishes an action, acknowledging the client action it completes.
 func (a *ahpSession) emit(channel string, action t.StateAction) {
-	key := ahpActionKey(channel, action)
-	var origin *t.ActionOrigin
-	p := a.pending[key]
-	if p != nil && p.envelope == nil {
-		origin = &p.origin
-	}
-	envelope := a.project.publish(channel, action, origin, nil)
-	if origin != nil {
-		p.envelope = &envelope
-		a.remember(*origin, key, envelope)
-		delete(a.pending, key)
+	if !a.answer(ahpActionKey(channel, action), action, nil) {
+		a.project.publish(channel, action, nil, nil)
 	}
 }
 
 // acknowledge answers a client's action with the host's own, such as the
 // values a backend normalized.
 func (a *ahpSession) acknowledge(channel string, client, action t.StateAction) {
-	key := ahpActionKey(channel, client)
+	a.answer(ahpActionKey(channel, client), action, nil)
+}
+
+// answer publishes the host's answer to a pending client action: the action
+// that completes it, or, without one, the client's own, rejected when a
+// reason is given. It reports whether the action was pending. Caller holds host.mu.
+func (a *ahpSession) answer(key string, action t.StateAction, rejection *string) bool {
 	p := a.pending[key]
-	if p == nil || p.envelope != nil {
-		return
+	if p == nil {
+		return false
 	}
-	envelope := a.project.publish(channel, action, &p.origin, nil)
-	p.envelope = &envelope
-	a.remember(p.origin, key, envelope)
 	delete(a.pending, key)
+	if action.Value == nil {
+		action = p.params.Action
+	}
+	a.remember(p.origin, key, a.project.publish(p.params.Channel, action, &p.origin, rejection))
+	return true
 }
 
 // ahpActionKey identifies an action on a channel: the host's action that
@@ -272,7 +271,7 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 		// A client's cut leaves the turns the agent kept.
 		if active == nil && !reflect.DeepEqual(a.chat.Turns, turns) {
 			for _, p := range a.session.pending {
-				if _, cut := p.params.Action.Value.(*t.ChatTruncatedAction); cut && p.envelope == nil && p.params.Channel == a.chat.Resource {
+				if _, cut := p.params.Action.Value.(*t.ChatTruncatedAction); cut && p.params.Channel == a.chat.Resource {
 					a.chatAction(p.params.Action)
 					break
 				}
@@ -328,7 +327,7 @@ func (a *ahpChat) syncProjection(c *sessionController, changes []SessionChange) 
 func (a *ahpChat) startTurn(active *t.ActiveTurn) {
 	started := &t.ChatTurnStartedAction{Type: t.ActionTypeChatTurnStarted, TurnId: active.Id, StartedAt: active.StartedAt, Message: active.Message}
 	// An idle chat consumes a message before its queue ever held it.
-	if p := a.session.pending[ahpActionKey(a.chat.Resource, t.StateAction{Value: &t.ChatPendingMessageSetAction{Id: active.Id}})]; p != nil && p.envelope == nil {
+	if p := a.session.pending[ahpActionKey(a.chat.Resource, t.StateAction{Value: &t.ChatPendingMessageSetAction{Id: active.Id}})]; p != nil {
 		a.chatAction(p.params.Action)
 	}
 	if i := slices.IndexFunc(a.chat.QueuedMessages, func(m t.PendingMessage) bool { return m.Id == active.Id }); i >= 0 {
@@ -367,13 +366,7 @@ func (a *ahpChat) finishTurn(id string, state t.TurnState, message *string) {
 	}
 	// A cancel that lost the race is answered once its client can see the turn ended.
 	key := ahpActionKey(a.chat.Resource, t.StateAction{Value: &t.ChatTurnCancelledAction{TurnId: id}})
-	if p := a.session.pending[key]; p != nil && p.envelope == nil {
-		reason := "the turn finished before it could be cancelled"
-		envelope := a.project.publish(p.params.Channel, p.params.Action, &p.origin, &reason)
-		p.envelope = &envelope
-		a.session.remember(p.origin, key, envelope)
-		delete(a.session.pending, key)
-	}
+	a.session.answer(key, t.StateAction{}, new("the turn finished before it could be cancelled"))
 }
 
 func (a *ahpChat) transcript(c *sessionController) ([]t.Turn, *t.ActiveTurn) {

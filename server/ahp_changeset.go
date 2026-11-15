@@ -89,7 +89,7 @@ func (p *ahpProject) ensureChangeset(channel string) error {
 			defer ticker.Stop()
 			for {
 				select {
-				case <-p.done:
+				case <-p.server.ctx.Done():
 					return
 				case <-ticker.C:
 					p.refreshChangesets()

@@ -311,7 +311,7 @@ func (s *Server) handleGitAction(action string) http.HandlerFunc {
 		defer cancel()
 		result, err := s.runGit(ctx, p)
 		if err == nil {
-			s.ahpProject().refreshChangesets()
+			s.ahp.refreshChangesets()
 		}
 		writeGitResult(w, result, err)
 	}
@@ -335,7 +335,7 @@ func (s *Server) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 		writeGitResult(w, nil, err)
 		return
 	}
-	channel, err := s.ahpProject().comparisonChangeset(comparison.Diffs)
+	channel, err := s.ahp.comparisonChangeset(comparison.Diffs)
 	if err != nil {
 		writeGitResult(w, nil, err)
 		return

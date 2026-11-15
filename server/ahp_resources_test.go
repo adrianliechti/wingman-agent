@@ -78,7 +78,7 @@ func TestAHPFileURIsRoundTripThroughResourcePath(test *testing.T) {
 func TestAHPResourcesPreserveFileSemantics(test *testing.T) {
 	root := test.TempDir()
 	app := newDebugTestServer(test, root)
-	h := app.ahpProject()
+	h := app.ahp
 	call := func(method string, params map[string]any) (any, error) {
 		params["channel"] = t.RootResourceURI
 		raw, _ := json.Marshal(params)

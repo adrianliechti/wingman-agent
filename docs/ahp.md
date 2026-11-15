@@ -82,10 +82,15 @@ the folder picker starts in the host's root.
   directory. A session created without a working directory uses the host's
   root.
 - A project closes after 15 minutes without a subscribed client, a request
-  that reaches it, or work: a running or queued turn, an open question, a
-  background task, a schedule or a live terminal keep it open.
+  that reaches it, or work: a running turn, queued input its agent does not
+  save, an open question, a background task, a schedule or a live terminal
+  keep it open. The builtin agent saves its queue, which waits for the session
+  to open again.
 - Sessions the host created are listed after a restart without opening their
-  projects; subscribing to one opens its project.
+  projects, with their title, read and archived flags and last change;
+  subscribing to one opens its project. A session or chat opens again even if
+  it never ran a turn. A creation that fails leaves no session behind, and a
+  disposed session's or chat's URI can be used again.
 
 A host owns the connections, the order of their actions and the channel
 namespace. A project owns its agents, sessions, terminals, file watches and
@@ -263,7 +268,10 @@ chat.
 the queue in the given order; the others keep theirs, and the host answers with
 the order the queue then has. A turn that consumes a pending message carries
 its id as `queuedMessageId`, after a `chat/pendingMessageRemoved` for it; this
-also holds for a message that an idle chat runs at once.
+also holds for a message that an idle chat runs at once. A `chat/turnStarted`
+that arrives while the last turn settles starts once it has; one that arrives
+while another turn or a compaction runs is rejected. Steering that a turn took
+stays part of that turn.
 
 `chat/truncated` rewinds a chat of the builtin agent: it keeps the history
 through `turnId`, or none without one, in the agent's journal as well, so the
@@ -288,8 +296,12 @@ progress and compaction are reported as the chat's `activity`. A steering
 message consumed by a running turn appears as a system notification with the
 user's text. A steering message sent while no turn runs waits in the queue
 (`kind: "steering"`), where it can be edited and removed; several can wait. The
-next turn takes them once it shows its first output, and they last for the host
-process. A turn's final usage and its failure arrive before its end. `chat/usage` reports the latest request's prompt tokens as
+next turn takes them as soon as its agent accepts steering; while one is handed
+over it can no longer be edited. The builtin agent saves them with its queue. An
+agent that cannot steer answers them after the turn. A question or approval
+that a turn did not raise itself, such as one from a background task, is the
+session's: it is listed in `inputNeeded` and answered with `chat/inputCompleted`.
+A turn's final usage and its failure arrive before its end. `chat/usage` reports the latest request's prompt tokens as
 `inputTokens`, and the turn's output and cache-read tokens; for a provider that
 counts no tokens it names only the model.
 
@@ -372,7 +384,7 @@ the host process and history from earlier processes is untimed. The initialize
 response supplies standard `environment.pathStyle` metadata for native host
 paths. The web UI negotiates 1.1; 1.0 clients receive the legacy queue/steering projection.
 Side chats, chats from other providers, TCP channels, experimental channel
-windows, and protocol-native automations are not advertised. Draft/archive/title overrides currently last for the host process.
+windows, and protocol-native automations are not advertised. Chat drafts and a chat's own read and archived flags last while its project is open.
 The remaining Wingman extensions are the `x-wingman/workspaceChanged` root
 notification (`files_changed`, `workspace_changed`, `skills_changed` and
 `tasks_changed`), the root's `_meta["wingman.workspace"]` identity used to

@@ -112,12 +112,12 @@ func (p *ahpProject) startTerminals() {
 			defer func() { cancel() }()
 			for {
 				select {
-				case <-p.done:
+				case <-p.server.ctx.Done():
 					return
 				case event, ok := <-events:
 					if !ok {
 						select {
-						case <-p.done:
+						case <-p.server.ctx.Done():
 							return
 						default:
 						}
@@ -140,7 +140,7 @@ func (p *ahpProject) startTerminals() {
 						p.mu.Unlock()
 						p.terminalMu.Unlock()
 						select {
-						case <-p.done:
+						case <-p.server.ctx.Done():
 							return
 						default:
 						}
@@ -197,7 +197,7 @@ func (p *ahpProject) attachTerminal(session *terminal.Session, resource string, 
 		defer func() { cancel() }()
 		for {
 			select {
-			case <-p.done:
+			case <-p.server.ctx.Done():
 				return
 			case chunk, ok := <-output:
 				p.mu.Lock()
@@ -549,7 +549,7 @@ func (s *Server) handleTerminalStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid terminal URI", http.StatusBadRequest)
 		return
 	}
-	h := s.ahpProject()
+	h := s.ahp
 	h.startTerminals()
 	h.mu.Lock()
 	terminal := h.terminals[uri]

@@ -31,6 +31,7 @@ func newForkProtocolServer(t *testing.T, a code.Agent) *Server {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, backends: map[string]*backendEntry{}}
+	s.ahp = newAHPHost().attach(s)
 	b := s.bindBackend("one", a)
 	s.backends[b.id] = &backendEntry{runtime: b}
 	s.mux = chi.NewRouter()

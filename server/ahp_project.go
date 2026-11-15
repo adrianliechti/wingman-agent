@@ -19,8 +19,6 @@ type ahpProject struct {
 	namespace    string     // prefix of the channels this project names itself
 	aliasMu      sync.Mutex // orders the saved aliases' writes, which happen outside the host's lock
 	used         time.Time  // when a client last reached the project; protected by host.mu
-	done         chan struct{}
-	stopOnce     sync.Once
 	terminalOnce sync.Once
 	terminals    map[string]*ahpTerminal
 	watches      map[string]*ahpResourceWatch
@@ -32,7 +30,7 @@ type ahpProject struct {
 
 // attach makes a project and its saved sessions reachable through the host.
 func (h *ahpHost) attach(s *Server) *ahpProject {
-	p := &ahpProject{ahpHost: h, server: s, terminals: map[string]*ahpTerminal{}, namespace: "wingman", used: time.Now(), done: make(chan struct{})}
+	p := &ahpProject{ahpHost: h, server: s, terminals: map[string]*ahpTerminal{}, namespace: "wingman", used: time.Now()}
 	if s.workspace != nil {
 		p.dir = canonicalPath(s.workspace.RootPath)
 	}
@@ -55,12 +53,6 @@ func (h *ahpHost) attach(s *Server) *ahpProject {
 	return p
 }
 
-// ahpProject is the server's project on its host; a workspace server has its own host.
-func (s *Server) ahpProject() *ahpProject {
-	s.ahpOnce.Do(func() { s.ahp = newAHPHost().attach(s) })
-	return s.ahp
-}
-
 // Only the clients of a workspace server follow one project's files.
 func (p *ahpProject) workspaceChanged(f Frame) {
 	if p.pinned == nil {
@@ -71,23 +63,17 @@ func (p *ahpProject) workspaceChanged(f Frame) {
 	p.notifyRoot("x-wingman/workspaceChanged", map[string]any{"channel": t.RootResourceURI, "event": f})
 }
 
-// stop ends the project's own goroutines.
+// stop ends the project's own goroutines, which follow its server's context.
 func (p *ahpProject) stop() {
-	p.stopOnce.Do(func() { close(p.done) })
+	if p.server.cancel != nil {
+		p.server.cancel()
+	}
 }
 
 // availableLocked rejects late attachments from work that was already in flight.
 // Caller holds host.mu.
 func (p *ahpProject) availableLocked() bool {
-	if p.closed {
-		return false
-	}
-	select {
-	case <-p.done:
-		return false
-	default:
-		return true
-	}
+	return !p.closed && p.server.ctx.Err() == nil
 }
 
 // detachLocked removes live channels while retaining aliases for reopening.

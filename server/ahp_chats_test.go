@@ -129,7 +129,7 @@ func TestAHPForkChatsLiveInTheirSession(t *testing.T) {
 	// A restarted host finds forks through their chat URI, in creation order.
 	other, _, _ := newProtocolServer(t)
 	other.backends["fork"] = &backendEntry{runtime: other.bindBackend("fork", agent)}
-	a, ch, err := other.ahpProject().ensureSession("ahp-chat:/late")
+	a, ch, err := other.ahp.ensureSession("ahp-chat:/late")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestAHPForkChatsLiveInTheirSession(t *testing.T) {
 		removed, ok := e.Action.Value.(*types.SessionChatRemovedAction)
 		return ok && removed.Chat == "ahp-chat:/early"
 	})
-	h := s.ahpProject()
+	h := s.ahp
 	h.mu.Lock()
 	_, aliased := h.chatAliases["ahp-chat:/early"]
 	h.mu.Unlock()

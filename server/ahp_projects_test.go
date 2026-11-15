@@ -20,7 +20,7 @@ func projectLifecycleHost(t *testing.T, root string) *Host {
 	h.ahp.open = func(dir string) (*Server, error) {
 		ctx, cancel := context.WithCancel(ctx)
 		s := &Server{ctx: ctx, cancel: cancel, workspace: &code.Workspace{RootPath: dir}, scope: workspaceScope(dir), backends: map[string]*backendEntry{}}
-		s.ahpOnce.Do(func() { s.ahp = h.ahp.attach(s) })
+		s.ahp = h.ahp.attach(s)
 		return s, nil
 	}
 	return h
@@ -94,7 +94,7 @@ func TestHostIdleProjectWaitsForTeardownBeforeReopening(t *testing.T) {
 	p.server.background.Go(func() { <-release })
 	idleClosed := make(chan struct{})
 	go func() { h.ahp.closeIdle(0); close(idleClosed) }()
-	<-p.done
+	<-p.server.ctx.Done()
 	reopened := make(chan *ahpProject, 1)
 	go func() {
 		next, err := h.ahp.projectAt(root)

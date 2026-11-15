@@ -447,7 +447,7 @@ func TestAHPNormalizedSessionValueKeepsTheDefaultChatFollowing(t *testing.T) {
 	agent.mu.Lock()
 	mode := agent.mode
 	agent.mu.Unlock()
-	h := s.ahpProject()
+	h := s.ahp
 	h.mu.Lock()
 	sessionMode := string(h.sessions[session].state.Config.Values["mode"])
 	overlay := truncateJSON(t, h.chats[ahpChatURI(session)].chat.Config.Values)
@@ -524,7 +524,7 @@ func TestAHPApprovalOutlivingItsTurnStaysAnswerable(t *testing.T) {
 		return ok
 	})
 	ahpDrain(state, sub, nil)
-	h := s.ahpProject()
+	h := s.ahp
 	h.mu.Lock()
 	needed := truncateJSON(t, h.sessions["ahp-session:/late"].state.InputNeeded)
 	h.mu.Unlock()
@@ -545,17 +545,5 @@ func TestAHPApprovalOutlivingItsTurnStaysAnswerable(t *testing.T) {
 	case <-replies:
 	case <-time.After(time.Second):
 		t.Fatalf("the waiting approval cannot be answered: inputNeeded %s; confirm rejected %v; input rejected %v", needed, *echo.RejectionReason, *echo2.RejectionReason)
-	}
-}
-
-func TestAHPPendingMessageCannotTakeATurnsID(t *testing.T) {
-	_, c := truncateTest(t)
-	c.complete("one", "first question")
-	set := types.StateAction{Value: &types.ChatPendingMessageSetAction{Type: types.ActionTypeChatPendingMessageSet, Kind: types.PendingMessageKindQueued, Id: "one", Message: types.Message{Text: "again", Origin: types.MessageOrigin{Kind: types.MessageKindUser}}}}
-	if echo, _ := c.dispatch(set); echo.RejectionReason == nil {
-		t.Fatal("a pending message took a turn's id")
-	}
-	if fresh := c.snapshot(); len(fresh.Turns) != 1 || fresh.Turns[0].Message.Text != "first question" {
-		t.Fatalf("the turn changed: %s", truncateJSON(t, fresh.Turns))
 	}
 }

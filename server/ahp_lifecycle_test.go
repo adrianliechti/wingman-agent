@@ -101,7 +101,7 @@ func TestAHPChatCreatedDuringDisposeGoesWithItsSession(t *testing.T) {
 	if err := <-created; err == nil {
 		t.Fatal("a chat joined a disposed session")
 	}
-	h := s.ahpProject()
+	h := s.ahp
 	h.mu.Lock()
 	alias, leaked := h.chatAliases[side]
 	h.mu.Unlock()
@@ -178,7 +178,7 @@ func TestAHPDisposedURIsCanBeUsedAgain(t *testing.T) {
 	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("one")}, nil); err != nil {
 		t.Fatalf("creating a disposed session again: %v", err)
 	}
-	if dir, err := s.ahpProject().aliasDirectory(); err == nil {
+	if dir, err := s.ahp.aliasDirectory(); err == nil {
 		if _, err := os.Stat(dir); err != nil {
 			t.Fatal(err)
 		}
@@ -303,7 +303,7 @@ func TestServerListsSavedSessionsOfAgentsItHasNotStarted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.ahpProject().storeAlias(ahpAlias{Resource: "ahp-session:/external", Backend: "external", Session: "native", Created: time.Now(), Title: "External session"}); err != nil {
+	if err := first.ahp.storeAlias(ahpAlias{Resource: "ahp-session:/external", Backend: "external", Session: "native", Created: time.Now(), Title: "External session"}); err != nil {
 		t.Fatal(err)
 	}
 	first.Close()
@@ -312,7 +312,7 @@ func TestServerListsSavedSessionsOfAgentsItHasNotStarted(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	if listed := reviewHostCatalog(t, restarted.ahpProject().ahpHost); len(listed) != 1 {
+	if listed := reviewHostCatalog(t, restarted.ahp.ahpHost); len(listed) != 1 {
 		t.Fatalf("the dormant agent's session is not listed: %+v", listed)
 	}
 }

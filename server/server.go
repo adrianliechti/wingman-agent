@@ -75,7 +75,6 @@ type Server struct {
 	backends   map[string]*backendEntry
 	scope      WorkspaceScope
 	sendMu     sync.Mutex
-	ahpOnce    sync.Once
 	ahp        *ahpProject
 
 	dapReferenceSeq  atomic.Uint64
@@ -177,10 +176,11 @@ func newServer(ctx context.Context, workDir string, opts *ServerOptions, host *a
 	}
 	s.workspace = ws
 	s.scope = workspaceScope(ws.RootPath)
-	if host != nil {
-		s.ahpOnce.Do(func() { s.ahp = host.attach(s) })
+	// A workspace server is the one project of its own host.
+	if host == nil {
+		host = newAHPHost()
 	}
-	s.ahpProject()
+	s.ahp = host.attach(s)
 
 	s.terminals = terminal.NewManager(ws.RootPath)
 
@@ -361,7 +361,6 @@ func serveLocal(handler http.Handler, listeners []net.Listener, done ...context.
 }
 
 func (s *Server) registerRoutes(r chi.Router) {
-	s.ahpProject()
 	r.Get("/ahp", s.handleAHP)
 	r.Get("/lsp", s.handleLSP)
 	r.Get("/dap", s.handleDAP)
