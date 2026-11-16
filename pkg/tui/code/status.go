@@ -160,6 +160,10 @@ func (a *App) footerLine(width int) string {
 		return cellIndent + ansi.Truncate(left, width-len(cellIndent), "…")
 	}
 
+	if status := a.voiceStatus(); status != "" {
+		return withRight(status)
+	}
+
 	if a.footerHint != "" {
 		return withRight(colored(t.Yellow, a.footerHint))
 	}

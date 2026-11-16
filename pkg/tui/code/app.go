@@ -133,6 +133,8 @@ type App struct {
 	clipboardRead  func() ([]clipboard.Content, error)
 	clipboardWrite func(string) error
 
+	voice voiceState
+
 	turns           *code.TurnManager
 	queuePaused     bool
 	queueCount      int
@@ -811,6 +813,7 @@ func (a *App) Run() error {
 func (a *App) shutdown() {
 	a.stop()
 	a.term.Stop()
+	a.endVoice()
 	if a.operationCancel != nil {
 		a.operationCancel()
 	}
@@ -1159,6 +1162,7 @@ func (a *App) bellIfUnfocused() {
 }
 
 func (a *App) handlePaste(text string) {
+	a.resolveVoicePending()
 	text = normalizePastedText(text)
 	if text == "" {
 		return
@@ -1201,6 +1205,9 @@ func (a *App) handlePaste(text string) {
 
 func (a *App) handleKey(ev inline.KeyEvent) {
 	defer a.markDraftChanged()
+	if a.handleVoiceKey(ev) {
+		return
+	}
 	if ev.Key != inline.KeyCtrl || ev.Rune != 'c' {
 		a.disarmQuitGate()
 	}
