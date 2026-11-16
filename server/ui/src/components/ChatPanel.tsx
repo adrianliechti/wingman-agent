@@ -1,6 +1,6 @@
 import type { MessageAttachment } from "@microsoft/agent-host-protocol";
 import { VirtualTurns } from "./chat/VirtualTurns";
-import { ArrowUp, ListEnd, Loader2, Plus, Square, X } from "lucide-react";
+import { ArrowUp, ListEnd, Loader2, Mic, Plus, Square, X } from "lucide-react";
 import {
 	useEffect,
 	useEffectEvent,
@@ -19,6 +19,8 @@ import { useToast } from "./ui/Feedback.tsx";
 import { atTextareaEdge } from "../utils/textareaNavigation";
 import { useColorScheme } from "../hooks/useColorScheme";
 import { useCanCompact, useChatCommands } from "../hooks/useChatCommands";
+import { useVoiceAvailable, useVoiceInput } from "../hooks/useVoiceInput";
+import { VoiceMeter } from "./chat/VoiceMeter";
 import {
 	type ChatCommand,
 	sentAttachments,
@@ -136,6 +138,9 @@ function wordEndAt(text: string, caret: number): number {
 	}
 	return end;
 }
+
+// A Space held this long dictates; a shorter press types a space.
+const SPACE_HOLD_MS = 300;
 
 const composerIconButton =
 	"flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40";
@@ -364,6 +369,99 @@ export function ChatPanel({
 		!!skillToken && skillToken.start > 0,
 	);
 	const canCompact = useCanCompact(sessionId);
+
+	const voiceBackend = workspaceClient().backendOf(sessionId ?? "");
+	const voiceAvailable = useVoiceAvailable(
+		voiceBackend,
+		settings.models.map((m) => m.id).join(),
+	);
+	const setTextAndCaret = (text: string, pos: number) => {
+		draft.update({ text });
+		setCaret(pos);
+		requestAnimationFrame(() => {
+			const ta = textareaRef.current;
+			ta?.focus();
+			ta?.setSelectionRange(pos, pos);
+		});
+	};
+	const insertTranscript = (text: string) => {
+		const value = draft.getSnapshot().text;
+		const at = textareaRef.current?.selectionStart ?? value.length;
+		const before = at > 0 && !/\s/.test(value[at - 1]) ? " " : "";
+		const after = at < value.length && !/\s/.test(value[at]) ? " " : "";
+		const insert = before + text + after;
+		setTextAndCaret(
+			value.slice(0, at) + insert + value.slice(at),
+			at + insert.length,
+		);
+	};
+	const voice = useVoiceInput({
+		backend: voiceBackend,
+		onText: insertTranscript,
+		onError: (error) =>
+			toast({
+				title: "Voice input failed",
+				description: error.message,
+				tone: "error",
+			}),
+	});
+	const spaceHold = useRef<{
+		at: number;
+		started: boolean;
+		timer?: ReturnType<typeof setTimeout>;
+	} | null>(null);
+	const endSpaceHold = (transcribe: boolean) => {
+		const hold = spaceHold.current;
+		if (!hold) return;
+		spaceHold.current = null;
+		clearTimeout(hold.timer);
+		if (!hold.started) return;
+		if (transcribe && Date.now() - hold.at >= SPACE_HOLD_MS) void voice.stop();
+		else voice.cancel();
+	};
+	const handleVoiceKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+		if (voice.phase === "recording") {
+			e.preventDefault();
+			// Another key ends a dictation, like releasing Space.
+			if (!(e.key === " " && e.repeat)) {
+				spaceHold.current = null;
+				void voice.stop();
+			}
+			return true;
+		}
+		const plainSpace =
+			e.key === " " && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey;
+		if (!plainSpace || !voiceAvailable || showSkills || voice.phase !== "idle")
+			return false;
+		if (e.repeat) {
+			if (spaceHold.current) e.preventDefault();
+			return true;
+		}
+		const ta = e.currentTarget;
+		const atStart = ta.selectionStart === 0 && ta.selectionEnd === 0;
+		const hold: NonNullable<typeof spaceHold.current> = {
+			at: Date.now(),
+			started: atStart,
+		};
+		spaceHold.current = hold;
+		// Leading spaces do nothing, so at the start Space only dictates.
+		if (atStart) {
+			e.preventDefault();
+			voice.start();
+			return true;
+		}
+		hold.timer = setTimeout(() => {
+			if (spaceHold.current !== hold) return;
+			hold.started = true;
+			const value = draft.getSnapshot().text;
+			const c = ta.selectionStart;
+			// The typed space separates the transcript unless it doubles one.
+			if (c >= 2 && value[c - 1] === " " && value[c - 2] === " ")
+				setTextAndCaret(value.slice(0, c - 1) + value.slice(c), c - 1);
+			voice.start();
+		}, SPACE_HOLD_MS);
+		return false;
+	};
 
 	const skillQuery = skillToken ? skillToken.query.toLowerCase() : null;
 	const skillMatches = useMemo(() => {
@@ -653,8 +751,9 @@ export function ChatPanel({
 		});
 	};
 
-	const handleKeyDown = (e: React.KeyboardEvent) => {
+	const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
 		if (e.nativeEvent.isComposing) return;
+		if (handleVoiceKey(e)) return;
 		if (showSkills) {
 			switch (e.key) {
 				case "ArrowDown":
@@ -1110,6 +1209,10 @@ export function ChatPanel({
 										setCaret((e.target as HTMLTextAreaElement).selectionStart)
 									}
 									onKeyDown={handleKeyDown}
+									onKeyUp={(e) => {
+										if (e.key === " ") endSpaceHold(true);
+									}}
+									onBlur={() => endSpaceHold(true)}
 									onPaste={handlePaste}
 									placeholder={placeholder}
 									rows={1}
@@ -1219,6 +1322,41 @@ export function ChatPanel({
 											onClick={() => onCancel()}
 										>
 											<Square size={11} fill="currentColor" />
+										</button>
+									)}
+									{voiceAvailable && (
+										<button
+											type="button"
+											className={composerIconButton}
+											// Keep focus in the composer so Space and Esc still reach it.
+											onMouseDown={(e) => e.preventDefault()}
+											onClick={() => {
+												if (voice.phase === "idle") voice.start();
+												else if (voice.phase === "recording") void voice.stop();
+												else voice.cancel();
+											}}
+											title={
+												voice.phase === "recording"
+													? "Stop and transcribe · Esc cancels"
+													: voice.phase === "transcribing"
+														? "Cancel transcription (Esc)"
+														: "Dictate · or hold Space"
+											}
+											aria-label={
+												voice.phase === "recording"
+													? "Stop dictation"
+													: voice.phase === "transcribing"
+														? "Cancel transcription"
+														: "Dictate"
+											}
+										>
+											{voice.phase === "recording" ? (
+												<VoiceMeter levels={voice.levels} />
+											) : voice.phase === "transcribing" ? (
+												<Loader2 size={14} className="animate-spin" />
+											) : (
+												<Mic size={14} />
+											)}
 										</button>
 									)}
 									<button

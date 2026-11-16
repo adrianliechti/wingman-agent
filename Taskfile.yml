@@ -94,7 +94,7 @@ tasks:
     deps: [build:ui]
     dir: app
     cmds:
-      - go tool appbundle -name "Wingman Agent" -id com.adrianliechti.wingman-agent -description "Wingman Agent" -company "Adrian Liechti" -copyright "© Adrian Liechti" -package .
+      - go tool appbundle -name "Wingman Agent" -id com.adrianliechti.wingman-agent -description "Wingman Agent" -company "Adrian Liechti" -copyright "© Adrian Liechti" -microphone "Wingman uses the microphone for voice input." -package .
 
   run:app:
     desc: Build and launch the desktop app with web inspection enabled

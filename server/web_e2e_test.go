@@ -166,7 +166,16 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/v1/models":
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"object":"list","data":[{"id":"gpt-5.4","object":"model"}]}`)
+		fmt.Fprint(w, `{"object":"list","data":[{"id":"gpt-5.4","object":"model"},{"id":"gpt-transcribe","object":"model"}]}`)
+	case "/v1/audio/transcriptions":
+		file, header, err := r.FormFile("file")
+		if err != nil || r.FormValue("model") != "gpt-transcribe" || header.Size <= 44 {
+			http.Error(w, "unexpected transcription request", http.StatusBadRequest)
+			return
+		}
+		file.Close()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"text":"dictated by voice"}`)
 	case "/v1/responses":
 		m.requests.Add(1)
 		body, _ := io.ReadAll(r.Body)

@@ -282,6 +282,8 @@ func (a *App) WithTerminal(t *inline.Terminal) {
 // the previous turn. The epoch prevents already-queued UI callbacks from an
 // older activation of the same session from rendering later.
 func (a *App) activateSession(id string) {
+	a.resolveVoicePending()
+	a.endVoice()
 	if a.dismissPrompt != nil {
 		a.dismissPrompt()
 	}
