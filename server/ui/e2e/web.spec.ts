@@ -33,6 +33,13 @@ import { join } from "node:path";
 
 test.use({
 	extraHTTPHeaders: { "X-Wingman-Instance": process.env.E2E_INSTANCE ?? "" },
+	// Chromium's synthetic microphone plays a tone, so voice input records real samples.
+	launchOptions: {
+		args: [
+			"--use-fake-ui-for-media-stream",
+			"--use-fake-device-for-media-stream",
+		],
+	},
 });
 
 async function mockSavedSessions(
@@ -6584,4 +6591,117 @@ test("recovery: streaming output is followed until the user scrolls away", async
 	await expect(jump).toBeHidden();
 	for (let step = 0; step < 3; step++) stream();
 	await expect.poll(distance).toBeLessThan(40);
+});
+
+test("holding Space dictates into the composer", async ({ page }) => {
+	const input = await composer(page);
+	const mic = page.getByRole("button", { name: "Dictate" });
+	await expect(mic).toBeVisible();
+	await input.fill("run");
+	await input.press("End");
+
+	await input.press("Space");
+	await expect(input).toHaveValue("run ");
+
+	await page.keyboard.down("Space");
+	await expect(
+		page.getByRole("button", { name: "Stop dictation" }),
+	).toBeVisible();
+	await page.waitForTimeout(900);
+	await page.keyboard.up("Space");
+	await expect(input).toHaveValue("run dictated by voice");
+});
+
+test("leaving a composer cancels pending Space dictation", async ({ page }) => {
+	await page.addInitScript(() => {
+		(window as any).microphoneRequests = 0;
+		navigator.mediaDevices.getUserMedia = async () => {
+			(window as any).microphoneRequests++;
+			throw new DOMException(
+				"Unexpected microphone request",
+				"NotAllowedError",
+			);
+		};
+	});
+	const input = await composer(page);
+	await expect(page.getByRole("button", { name: "Dictate" })).toBeVisible();
+	await input.fill("keep this draft");
+	const menu = await openNewMenu(page);
+	await page.clock.install();
+	await page.clock.pauseAt(new Date());
+	// Navigation can remove the textarea without a blur or Space keyup event.
+	await input.evaluate((element) => {
+		element.dispatchEvent(
+			new KeyboardEvent("keydown", { key: " ", bubbles: true }),
+		);
+	});
+	await menu
+		.getByRole("menuitem", { name: "Chat", exact: true })
+		.evaluate((element: HTMLElement) => element.click());
+	await expect(
+		page.getByPlaceholder("Message Wingman…").filter({ visible: true }),
+	).toHaveValue("");
+	await page.clock.runFor(500);
+	expect(await page.evaluate(() => (window as any).microphoneRequests)).toBe(0);
+});
+
+test("switching harness cancels dictation", async ({ page }) => {
+	await mockACPBackend(page);
+	const requests: string[] = [];
+	await page.route("**/api/v2/backends/*/transcription", (route) => {
+		if (route.request().method() === "GET")
+			return route.fulfill({ json: { available: true } });
+		requests.push(route.request().url());
+		return route.fulfill({ json: { text: "stale transcript" } });
+	});
+	const input = await composer(page);
+	await input.fill("keep this draft");
+	await page.getByRole("button", { name: "Dictate", exact: true }).click();
+	await expect(
+		page.getByRole("button", { name: "Stop dictation" }),
+	).toBeVisible();
+	await page.waitForTimeout(900);
+
+	await page
+		.getByRole("button", { name: "Harness: Wingman", exact: true })
+		.click();
+	await page
+		.getByRole("menu", { name: "Harness", exact: true })
+		.getByRole("menuitemradio", { name: "Codex", exact: true })
+		.click();
+	await expect(
+		page.getByRole("button", { name: "Dictate", exact: true }),
+	).toBeVisible();
+	await expect(page.getByPlaceholder("Message Codex…")).toHaveValue(
+		"keep this draft",
+	);
+	expect(requests).toEqual([]);
+});
+
+test("mic button dictates and Escape cancels without stopping the turn", async ({
+	page,
+}) => {
+	const input = await composer(page);
+	await input.click();
+	await page.keyboard.down("Space");
+	await expect(
+		page.getByRole("button", { name: "Stop dictation" }),
+	).toBeVisible();
+	await page.keyboard.up("Space");
+	await expect(page.getByRole("button", { name: "Dictate" })).toBeVisible();
+	await expect(input).toHaveValue("");
+
+	await page.getByRole("button", { name: "Dictate" }).click();
+	await expect(
+		page.getByRole("button", { name: "Stop dictation" }),
+	).toBeVisible();
+	await page.keyboard.press("Escape");
+	await expect(page.getByRole("button", { name: "Dictate" })).toBeVisible();
+	await expect(input).toHaveValue("");
+
+	await page.getByRole("button", { name: "Dictate" }).click();
+	await page.waitForTimeout(900);
+	await page.getByRole("button", { name: "Stop dictation" }).click();
+	await expect(input).toHaveValue("dictated by voice");
+	await expect(input).toBeFocused();
 });

@@ -11,6 +11,8 @@ import (
 func (s *Server) registerSessionRoutes(r chi.Router) {
 	r.Route("/v2", func(r chi.Router) {
 		r.Post("/backends/{backend}/models/refresh", s.backendOperation(handleRefreshModels))
+		r.Get("/backends/{backend}/transcription", s.backendOperation(handleTranscriptionStatus))
+		r.Post("/backends/{backend}/transcription", s.backendOperation(handleTranscribe))
 		r.Route("/chats/{chat}", func(r chi.Router) {
 			r.Get("/reviews", s.chatHandler(handleTurnReviews))
 			r.Get("/reviews/{turnID}", s.chatHandler(handleTurnReviews))

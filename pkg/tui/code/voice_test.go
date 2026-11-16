@@ -286,6 +286,28 @@ func TestVoiceOtherKeyEndsRecording(t *testing.T) {
 	}
 }
 
+func TestVoiceSessionSwitchCancelsInput(t *testing.T) {
+	for _, phase := range []string{"recording", "transcribing"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			app := &App{ctx: t.Context(), agent: newUITestAgent(nil), editor: NewEditor(), sessionID: "old"}
+			s := &voiceSession{cancel: cancel, transcribing: phase == "transcribing", release: time.NewTimer(time.Hour)}
+			app.voice.session = s
+
+			app.activateSession("new")
+			if ctx.Err() != context.Canceled || app.voice.session != nil {
+				t.Fatal("session switch did not cancel voice input")
+			}
+			app.editor.SetText("new draft")
+			app.finishVoice(s, "old transcript", nil)
+			if got := app.editor.Text(); got != "new draft" {
+				t.Fatalf("stale transcript changed new draft: %q", got)
+			}
+		})
+	}
+}
+
 func TestVoiceWithoutTranscriberTypesSpaces(t *testing.T) {
 	vt := newVoiceTest(t, "unused")
 	vt.app.agent = newUITestAgent(nil)

@@ -183,6 +183,8 @@ The built-in Wingman agent reads provider settings from environment variables:
 | `WINGMAN_TOKEN` | Gateway authentication token, if required |
 | `WINGMAN_MODEL` | Default model; also selectable with `/model` |
 | `WINGMAN_EFFORT` | Reasoning effort; also selectable with `/model` |
+| `WINGMAN_MODEL_TRANSCRIBE` | Optional model for microphone dictation |
+| `WINGMAN_DISABLE_VOICE` | Disable microphone dictation |
 
 Provider priority is `WINGMAN_URL`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, then
 Ollama. With none set, Wingman uses `http://localhost:4242/v1`. A gateway must run

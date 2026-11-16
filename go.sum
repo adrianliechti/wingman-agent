@@ -17,8 +17,8 @@ github.com/abemedia/go-cfb v0.2.0 h1:amLvu7/DX65XtcmMuc0an/t09W36gMOrnYwLxGGmwX8
 github.com/abemedia/go-cfb v0.2.0/go.mod h1:ytSRuNKf2VMDQDs8TSZ/VmkVfS4giAdc4xl5XOnpKKA=
 github.com/adrianliechti/go-extract v0.0.0-20261029154039-97b29af3f71f h1:YosMo9d86cM65yZN8pUVKMjpUMNV2jBDTUx5z04eaRA=
 github.com/adrianliechti/go-extract v0.0.0-20261029154039-97b29af3f71f/go.mod h1:LZKkKLbEJucjbYH003wJSifMPs9lVWI7LGpCpyXo4q0=
-github.com/adrianliechti/go-shell v0.1.10 h1:CLl1LxqA35hhlA/PFc9C9iPFeEcxMDmwoPJKO6q/nUE=
-github.com/adrianliechti/go-shell v0.1.10/go.mod h1:WwNDLx2RxEuyTc8kb90wyytIG21QfTL4yjnLyAtU9uo=
+github.com/adrianliechti/go-shell v0.1.11 h1:CySaonr39OkYCaA+3CjW5jvW7AY0hP1TneXcinDAthY=
+github.com/adrianliechti/go-shell v0.1.11/go.mod h1:WwNDLx2RxEuyTc8kb90wyytIG21QfTL4yjnLyAtU9uo=
 github.com/alecthomas/assert/v2 v2.11.0 h1:2Q9r3ki8+JYXvGsDyBXwH3LcJ+WK5D0gc5E8vS6K3D0=
 github.com/alecthomas/assert/v2 v2.11.0/go.mod h1:Bze95FyfUr7x34QZrjL+XP+0qgp/zg8yS+TtBj1WA3k=
 github.com/alecthomas/chroma/v2 v2.27.0 h1:FodwmyOBgJULFYmDqibcp9pvfDLWdtPRh9v/r5BXYZs=
