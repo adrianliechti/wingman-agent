@@ -288,11 +288,25 @@ func (r *ANSIRenderer) renderString(w util.BufWriter, source []byte, node ast.No
 	return ast.WalkContinue, nil
 }
 
+// codeSpanText is a code span's text, which its text children hold.
+func codeSpanText(node ast.Node, source []byte) string {
+	var text strings.Builder
+	for c := node.FirstChild(); c != nil; c = c.NextSibling() {
+		switch t := c.(type) {
+		case *ast.Text:
+			text.Write(t.Segment.Value(source))
+		case *ast.String:
+			text.Write(t.Value)
+		}
+	}
+	return text.String()
+}
+
 func (r *ANSIRenderer) renderCodeSpan(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		r.codeLink = ""
 		if r.link == "" {
-			r.codeLink = r.codeFileDestination(string(node.Text(source)))
+			r.codeLink = r.codeFileDestination(codeSpanText(node, source))
 		}
 		w.WriteString(ansi.Fg(r.theme.Cyan))
 		if r.codeLink != "" {

@@ -101,8 +101,8 @@ func TestDisplayToolUsesProducerPresentation(t *testing.T) {
 	}
 }
 
-func TestConvertMessagesUsesSameCompactPresentation(t *testing.T) {
-	messages := convertMessages([]harness.Message{{
+func TestTranscriptUsesSameCompactPresentation(t *testing.T) {
+	entries := transcriptEntries([]harness.Message{{
 		Role: harness.RoleAssistant,
 		Content: []harness.Content{
 			{ToolCall: &harness.ToolCall{
@@ -113,26 +113,25 @@ func TestConvertMessagesUsesSameCompactPresentation(t *testing.T) {
 			}},
 		},
 	}})
-	call := messages[0].Content[0].ToolCall
-	result := messages[0].Content[1].ToolResult
-	if call == nil || result == nil || call.Name != "Read file" || result.Name != "Read file" {
-		t.Fatalf("messages = %#v", messages)
+	if len(entries) != 1 {
+		t.Fatalf("entries = %#v", entries)
 	}
-	if call.Args != "" || result.Args != "" || len(call.Locations) != 1 || len(result.Locations) != 1 {
-		t.Fatalf("call = %#v, result = %#v", call, result)
+	call := entries[0]
+	if call.ToolName != "Read file" || call.ToolResult == nil || *call.ToolResult != "contents" || call.ToolArgs != "" || len(call.ToolLocations) != 1 {
+		t.Fatalf("tool = %#v", call)
 	}
 }
 
-func TestConvertMessagesPromotesPrimaryArgumentInHistory(t *testing.T) {
-	messages := convertMessages([]harness.Message{{
+func TestTranscriptPromotesPrimaryArgumentInHistory(t *testing.T) {
+	entries := transcriptEntries([]harness.Message{{
 		Role: harness.RoleAssistant,
 		Content: []harness.Content{{ToolCall: &harness.ToolCall{
 			ID: "glob-1", Name: "Find files", Kind: "search",
 			Args: `{"pattern":"README*","limit":20}`,
 		}}},
 	}})
-	call := messages[0].Content[0].ToolCall
-	if call == nil || call.Name != "Find files" || call.Hint != "README*" || call.Args != `{"limit":20}` {
+	call := entries[0]
+	if call.ToolName != "Find files" || call.ToolHint != "README*" || call.ToolArgs != `{"limit":20}` {
 		t.Fatalf("call = %#v", call)
 	}
 }

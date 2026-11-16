@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"net/http"
 	"net/http/httptest"
@@ -27,7 +28,9 @@ type lifecycleAgent struct {
 
 func (a *lifecycleAgent) Send(ctx context.Context, _ string, _ []harness.Content) (iter.Seq2[harness.Message, error], error) {
 	return func(yield func(harness.Message, error) bool) {
-		yield(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "working"}}}, nil)
+		if !yield(harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "working"}}}, nil) {
+			return
+		}
 		<-ctx.Done()
 		close(a.cancelled)
 		<-a.release
@@ -70,10 +73,37 @@ func (a *lifecycleAgent) SetModel(ctx context.Context, id, model string) error {
 }
 
 func installProtocolAgent(s *Server, a code.Agent) *backendRuntime {
-	s.backends["one"].runtime.turns.Close()
-	b := s.bindBackend("one", a)
-	s.backends["one"] = &backendEntry{runtime: b}
+	s.Project.backends["one"].runtime.turns.Close()
+	b := s.Project.bindBackend("one", a)
+	s.Project.backends["one"] = &backendEntry{runtime: b}
 	return b
+}
+
+func TestSessionRetriesFailedLoadAndKeepsReadyState(t *testing.T) {
+	s, _, base := newProtocolServer(t)
+	attempts := 0
+	b := installProtocolAgent(s, &lifecycleAgent{protocolAgent: base, load: func(context.Context, string) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("temporary failure")
+		}
+		return nil
+	}})
+	c := b.session("saved")
+	c.load()
+	c.mu.Lock()
+	status, message := c.state.Status, c.state.Error
+	c.mu.Unlock()
+	if status != "error" || message == nil {
+		t.Fatalf("failed load: status=%q error=%v", status, message)
+	}
+	c.load()
+	c.load()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if attempts != 2 || c.state.Status != "ready" || c.state.Error != nil {
+		t.Fatalf("retried load: attempts=%d status=%q error=%v", attempts, c.state.Status, c.state.Error)
+	}
 }
 
 func TestSessionDeleteWaitsForFinalQueueWrite(t *testing.T) {
@@ -83,12 +113,12 @@ func TestSessionDeleteWaitsForFinalQueueWrite(t *testing.T) {
 	c := b.session("saved")
 	c.load()
 	path := "/api/v2/backends/one/sessions/saved/commands"
-	if rec := protocolRequest(t, s, path, Command{ID: "send", Epoch: c.epoch, Type: "send", Text: "hello"}); rec.Code != 200 {
+	if rec := protocolRequest(t, s, path, Command{ID: "send", Type: "send", Text: "hello"}); rec.Code != 200 {
 		t.Fatal(rec.Body)
 	}
 	waitProtocol(t, func() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.state.Phase == "streaming" })
 	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- protocolRequest(t, s, path, Command{ID: "delete", Epoch: c.epoch, Type: "delete"}) }()
+	go func() { done <- protocolRequest(t, s, path, Command{ID: "delete", Type: "delete"}) }()
 	<-a.cancelled
 	var rec *httptest.ResponseRecorder
 	select {
@@ -168,13 +198,13 @@ func TestSessionRequestIDIsSharedByPromptsAndInFlightCommands(t *testing.T) {
 	model := "new-model"
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		done <- protocolRequest(t, s, path, Command{ID: "shared", Epoch: c.epoch, Type: "settings", Model: &model})
+		done <- protocolRequest(t, s, path, Command{ID: "shared", Type: "settings", Model: &model})
 	}()
 	waitProtocol(t, func() bool { c.mu.Lock(); defer c.mu.Unlock(); return len(c.prompts) == 1 })
 	c.mu.Lock()
 	prompt := c.state.Prompts[0].ID
 	c.mu.Unlock()
-	answer := Command{ID: "shared", Epoch: c.epoch, Type: "prompt_response", PromptID: prompt, Action: "accept"}
+	answer := Command{ID: "shared", Type: "prompt_response", PromptID: prompt, Action: "accept"}
 	if rec := protocolRequest(t, s, path, answer); rec.Code != 409 {
 		t.Errorf("request ID reused across command types: %d", rec.Code)
 	}
@@ -191,7 +221,7 @@ func TestSessionRequestIDIsSharedByPromptsAndInFlightCommands(t *testing.T) {
 		t.Fatal("prompt deadlocked with settings")
 	}
 	// A completed prompt receipt must also reserve its ID against ordinary commands.
-	if rec := protocolRequest(t, s, path, Command{ID: "answer", Epoch: c.epoch, Type: "queue_clear"}); rec.Code != 409 {
+	if rec := protocolRequest(t, s, path, Command{ID: "answer", Type: "queue_clear"}); rec.Code != 409 {
 		t.Errorf("completed prompt ID reused: %d", rec.Code)
 	}
 }
@@ -212,7 +242,7 @@ func TestBackendReadsCancelWithEitherRequestOrWorkspace(t *testing.T) {
 			ctx, cancelRequest := context.WithCancel(context.Background())
 			defer cancelRequest()
 			req := httptest.NewRequest("GET", "/api/v2/backends/one/sessions", nil).WithContext(ctx)
-			req.Header.Set(instanceHeader, s.scope.InstanceID)
+			req.Header.Set(instanceHeader, s.Project.scope.InstanceID)
 			done := make(chan struct{})
 			go func() {
 				handler := s.backendOperation(func(b *backendRuntime, _ http.ResponseWriter, r *http.Request) {

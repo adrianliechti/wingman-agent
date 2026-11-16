@@ -130,7 +130,7 @@ func TestCommandActionToolCall(t *testing.T) {
 		t.Errorf("search: got %q %v %v %v", title, kind, locs, ok)
 	}
 
-	title, kind, input, locs, ok = commandActionToolCall([]commandAction{{Type: "listFiles", Path: "/p"}})
+	title, kind, _, locs, ok = commandActionToolCall([]commandAction{{Type: "listFiles", Path: "/p"}})
 	if !ok || title != "List files" || kind != acp.ToolKindRead || len(locs) != 1 || locs[0].Path != "/p" {
 		t.Errorf("listFiles: got %q %v %v %v", title, kind, locs, ok)
 	}

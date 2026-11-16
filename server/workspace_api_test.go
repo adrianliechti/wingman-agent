@@ -14,7 +14,7 @@ import (
 func workspaceAPI(t *testing.T, app *Server, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, "http://localhost"+path, strings.NewReader(body))
-	req.Header.Set(instanceHeader, app.scope.InstanceID)
+	req.Header.Set(instanceHeader, app.Project.scope.InstanceID)
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)
 	return rec
@@ -64,11 +64,11 @@ func TestWorkspaceFilesRevealAndTerminalStatus(t *testing.T) {
 	if rec := status("ahp-terminal:/missing"); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown terminal: %d", rec.Code)
 	}
-	session, err := app.terminals.Create("", 80, 24)
+	session, err := app.Project.terminals.Create("", 80, 24)
 	if err != nil {
 		t.Skipf("no PTY: %v", err)
 	}
-	uri := "ahp-terminal:/wingman/" + session.ID()
+	uri := "ahp-terminal:/" + app.Project.namespace + "/" + session.ID()
 	deadline := time.Now().Add(2 * time.Second)
 	rec = status(uri)
 	for rec.Code == http.StatusNotFound && time.Now().Before(deadline) {

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/remote"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 )
@@ -96,7 +97,7 @@ func TestReviewWorkspaceEntryPointsRejectHostileHost(t *testing.T) {
 	} {
 		for _, host := range []string{"attacker.example:9000", "localhost.attacker.example", "0.0.0.0:9000", "127.0.0.1.nip.io:9000", "", "[::ffff:7f00:1]x:1"} {
 			method, target, _ := strings.Cut(route, " ")
-			rec := reviewWorkspaceRequest(app, method, target, host, app.scope.InstanceID, strings.NewReader(`{"query":"a"}`))
+			rec := reviewWorkspaceRequest(app, method, target, host, app.Project.scope.InstanceID, strings.NewReader(`{"query":"a"}`))
 			if rec.Code != http.StatusForbidden {
 				t.Fatalf("%s with Host %q: %d %s", route, host, rec.Code, rec.Body)
 			}
@@ -106,7 +107,7 @@ func TestReviewWorkspaceEntryPointsRejectHostileHost(t *testing.T) {
 
 func TestReviewWorkspaceProtectedRoutesCheckInstance(t *testing.T) {
 	app, _ := reviewWorkspaceApp(t, map[string]string{"a.txt": "a", "index.html": "<p>x</p>"})
-	chat := chatAPIPath("wingman", "missing")
+	chat := chatAPIPath(app, "wingman", "missing")
 	routes := []string{
 		"GET /lsp", "GET /dap", "GET /content?path=a.txt", "GET /preview?path=index.html",
 		"GET /api/workspace/git", "GET /api/workspace/files?query=a", "POST /api/workspace/search",
@@ -126,7 +127,7 @@ func TestReviewWorkspaceProtectedRoutesCheckInstance(t *testing.T) {
 		if strings.Contains(target, "?") {
 			sep = "&"
 		}
-		if rec := reviewWorkspaceRequest(app, method, target+sep+"instance="+app.scope.InstanceID, "localhost:9000", "previous-instance", strings.NewReader(`{}`)); rec.Code != http.StatusConflict {
+		if rec := reviewWorkspaceRequest(app, method, target+sep+"instance="+app.Project.scope.InstanceID, "localhost:9000", "previous-instance", strings.NewReader(`{}`)); rec.Code != http.StatusConflict {
 			t.Fatalf("%s with stale header and fresh query: %d", route, rec.Code)
 		}
 	}
@@ -136,11 +137,11 @@ func TestReviewWorkspaceProtectedRoutesCheckInstance(t *testing.T) {
 	if rec := reviewWorkspaceRequest(app, "GET", "/api/workspace", "localhost:9000", "previous-instance", nil); rec.Code != http.StatusConflict {
 		t.Fatalf("stale discovery: %d", rec.Code)
 	}
-	if rec := reviewWorkspaceRequest(app, "GET", "/api/workspace/files?query=a&instance="+app.scope.InstanceID, "localhost:9000", "", nil); rec.Code != http.StatusOK {
+	if rec := reviewWorkspaceRequest(app, "GET", "/api/workspace/files?query=a&instance="+app.Project.scope.InstanceID, "localhost:9000", "", nil); rec.Code != http.StatusOK {
 		t.Fatalf("query instance: %d %s", rec.Code, rec.Body)
 	}
 	app.Close()
-	if rec := reviewWorkspaceRequest(app, "GET", "/api/workspace/files?query=a", "localhost:9000", app.scope.InstanceID, nil); rec.Code != http.StatusConflict {
+	if rec := reviewWorkspaceRequest(app, "GET", "/api/workspace/files?query=a", "localhost:9000", app.Project.scope.InstanceID, nil); rec.Code != http.StatusConflict {
 		t.Fatalf("closed workspace served: %d", rec.Code)
 	}
 }
@@ -177,7 +178,7 @@ func TestReviewWorkspaceAHPNeedsNoInstanceAndRejectsForeignPages(t *testing.T) {
 		if err := dial("/ahp", origin); err == nil {
 			t.Fatalf("AHP accepted origin %s", origin)
 		}
-		if err := dial("/lsp?instance="+app.scope.InstanceID, origin); err == nil {
+		if err := dial("/lsp?instance="+app.Project.scope.InstanceID, origin); err == nil {
 			t.Fatalf("LSP accepted origin %s", origin)
 		}
 	}
@@ -216,14 +217,14 @@ func TestReviewWorkspaceSearchConcurrencyCap(t *testing.T) {
 	address := strings.TrimPrefix(web.URL, "http://")
 	var stalled []net.Conn
 	for range maxWorkspaceSearches {
-		stalled = append(stalled, reviewWorkspaceStalledSearch(t, address, app.scope.InstanceID))
+		stalled = append(stalled, reviewWorkspaceStalledSearch(t, address, app.Project.scope.InstanceID))
 	}
 	if !reviewWorkspaceWaitSearches(app, maxWorkspaceSearches, 10*time.Second) {
 		t.Fatalf("stalled searches = %d", app.searches.Load())
 	}
 	search := func() *http.Response {
 		req, _ := http.NewRequest("POST", web.URL+"/api/workspace/search", strings.NewReader(`{"query":"nothing-matches-this"}`))
-		req.Header.Set(instanceHeader, app.scope.InstanceID)
+		req.Header.Set(instanceHeader, app.Project.scope.InstanceID)
 		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -257,7 +258,7 @@ func TestReviewWorkspaceSearchDeadlineBoundsStalledClient(t *testing.T) {
 	app, _ := reviewWorkspaceApp(t, reviewWorkspaceLargeSearchFiles())
 	web := httptest.NewServer(app)
 	t.Cleanup(web.Close)
-	reviewWorkspaceStalledSearch(t, strings.TrimPrefix(web.URL, "http://"), app.scope.InstanceID)
+	reviewWorkspaceStalledSearch(t, strings.TrimPrefix(web.URL, "http://"), app.Project.scope.InstanceID)
 	if !reviewWorkspaceWaitSearches(app, 1, 10*time.Second) {
 		t.Fatalf("search did not start: %d", app.searches.Load())
 	}
@@ -451,10 +452,10 @@ func TestReviewWorkspaceChatRoutesResolveOnlyKnownChats(t *testing.T) {
 	app, _ := reviewWorkspaceApp(t, nil)
 	web := httptest.NewServer(scopedTestHandler(app))
 	t.Cleanup(web.Close)
-	b := app.backends["wingman"].runtime
+	b := app.Project.backends["wingman"].runtime
 	record := b.createSession(Command{ID: "review-create", Type: "create"})
-	if record.status != 0 {
-		t.Fatal(record.message)
+	if record.err != nil {
+		t.Fatal(record.err)
 	}
 	id := record.receipt.Ref.SessionID
 	get := func(path string) int {
@@ -467,13 +468,13 @@ func TestReviewWorkspaceChatRoutesResolveOnlyKnownChats(t *testing.T) {
 		res.Body.Close()
 		return res.StatusCode
 	}
-	if code := get(chatAPIPath("wingman", id) + "/tasks"); code != http.StatusOK {
+	if code := get(chatAPIPath(app, "wingman", id) + "/tasks"); code != http.StatusOK {
 		t.Fatalf("known chat: %d", code)
 	}
-	session := "/api/v2/chats/" + url.PathEscape(canonicalAHPURI("wingman", id))
+	session := "/api/v2/chats/" + url.PathEscape(app.Project.canonicalURI("wingman", id))
 	for path, want := range map[string]int{
-		chatAPIPath("wingman", "missing") + "/tasks":          http.StatusNotFound,
-		chatAPIPath("review-unknown-backend", "x") + "/tasks": http.StatusNotFound,
+		chatAPIPath(app, "wingman", "missing") + "/tasks":          http.StatusNotFound,
+		chatAPIPath(app, "review-unknown-backend", "x") + "/tasks": http.StatusNotFound,
 		session + "/tasks": http.StatusNotFound,
 		"/api/v2/chats/" + url.PathEscape("ahp-chat:/wingman/!!/!!") + "/tasks":                      http.StatusNotFound,
 		"/api/v2/chats/" + url.PathEscape("file:///etc/passwd") + "/tasks":                           http.StatusNotFound,
@@ -486,37 +487,37 @@ func TestReviewWorkspaceChatRoutesResolveOnlyKnownChats(t *testing.T) {
 	b.mu.Lock()
 	_, kept := b.sessions["missing"]
 	b.mu.Unlock()
-	app.backendsMu.Lock()
-	_, started := app.backends["review-unknown-backend"]
-	app.backendsMu.Unlock()
+	app.Project.backendsMu.Lock()
+	_, started := app.Project.backends["review-unknown-backend"]
+	app.Project.backendsMu.Unlock()
 	if kept || started {
 		t.Fatalf("lookups left state behind: controller=%v backend=%v", kept, started)
 	}
-	if code := get(chatAPIPath("wingman", id) + "/tasks"); code != http.StatusOK {
+	if code := get(chatAPIPath(app, "wingman", id) + "/tasks"); code != http.StatusOK {
 		t.Fatalf("known chat after probes: %d", code)
 	}
 	var wg sync.WaitGroup
 	for range 16 {
 		wg.Go(func() {
-			if code := get(chatAPIPath("wingman", id) + "/reviews"); code != http.StatusOK {
+			if code := get(chatAPIPath(app, "wingman", id) + "/reviews"); code != http.StatusOK {
 				t.Errorf("concurrent reviews: %d", code)
 			}
 		})
 	}
 	wg.Wait()
 	reviewWorkspaceDeleteChat(t, app, id)
-	if code := get(chatAPIPath("wingman", id) + "/tasks"); code != http.StatusNotFound {
+	if code := get(chatAPIPath(app, "wingman", id) + "/tasks"); code != http.StatusNotFound {
 		t.Fatalf("deleted chat: %d", code)
 	}
 }
 
 func reviewWorkspaceDeleteChat(t *testing.T, app *Server, id string) {
 	t.Helper()
-	_, ch, err := app.ahpHost().ensureSession(ahpChatURI(canonicalAHPURI("wingman", id)))
+	_, ch, err := app.Project.host.ensureSession(ahp.ChatURI(app.Project.canonicalURI("wingman", id)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ch.command(Command{ID: "review-delete", Epoch: ch.controller.epoch, Type: "delete"}); err != nil {
+	if err := ch.command(Command{ID: "review-delete", Type: "delete"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -542,37 +543,37 @@ func reviewWorkspaceRawAHP(t *testing.T, ctx context.Context, endpoint, clientID
 }
 
 func TestReviewWorkspaceAHPDropsSlowConsumerWithoutBlockingHost(t *testing.T) {
-	s, _, _, endpoint := ahpTestServer(t)
+	s, _, _, endpoint := protocolTestServer(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	reviewWorkspaceRawAHP(t, ctx, endpoint, "never-reads")
-	healthy := ahpTestClient(t, endpoint, "")
+	healthy := protocolTestClient(t, endpoint, "")
 	if _, err := healthy.Initialize(ctx, "healthy", []string{"1.0.0"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	h := s.ahpHost()
-	h.mu.Lock()
-	connected := len(h.clients)
-	h.mu.Unlock()
+	h := s.Project
+	h.host.mu.Lock()
+	connected := len(h.host.clients)
+	h.host.mu.Unlock()
 	if connected != 2 {
 		t.Fatalf("clients = %d", connected)
 	}
 	text := strings.Repeat("x", 16<<10)
 	start := time.Now()
 	for range 4000 {
-		s.send(Frame{Type: EvtWorkspaceChanged, Text: text})
+		s.Project.workspaceChanged(Frame{Type: EvtWorkspaceChanged, Text: text})
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("publishing waited for a slow consumer: %v", elapsed)
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		h.mu.Lock()
+		h.host.mu.Lock()
 		remaining := []string{}
-		for c := range h.clients {
+		for c := range h.host.clients {
 			remaining = append(remaining, c.id)
 		}
-		h.mu.Unlock()
+		h.host.mu.Unlock()
 		if len(remaining) == 1 && remaining[0] == "healthy" {
 			break
 		}
@@ -589,7 +590,7 @@ func TestReviewWorkspaceAHPDropsSlowConsumerWithoutBlockingHost(t *testing.T) {
 }
 
 func TestReviewWorkspaceAHPMalformedFramesKeepConnection(t *testing.T) {
-	_, _, _, endpoint := ahpTestServer(t)
+	_, _, _, endpoint := protocolTestServer(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	conn := reviewWorkspaceRawAHP(t, ctx, endpoint, "")
@@ -617,7 +618,7 @@ func TestReviewWorkspaceAHPMalformedFramesKeepConnection(t *testing.T) {
 		want  float64
 	}{
 		{`{`, -32700},
-		{`[{"jsonrpc":"2.0","id":1,"method":"ping"}]`, -32700},
+		{`[{"jsonrpc":"2.0","id":1,"method":"ping"}]`, -32600},
 		{`{"jsonrpc":"1.0","id":2,"method":"ping"}`, -32600},
 		{`{"jsonrpc":"2.0","id":3}`, -32600},
 		{`{"jsonrpc":"2.0","id":4,"method":"listSessions"}`, -32602},
@@ -666,7 +667,7 @@ func TestReviewWorkspaceRelayKeepsOriginAndInstanceChecks(t *testing.T) {
 		res.Body.Close()
 		return res.StatusCode
 	}
-	if code := get("/api/workspace/files?query=a", app.scope.InstanceID); code != http.StatusOK {
+	if code := get("/api/workspace/files?query=a", app.Project.scope.InstanceID); code != http.StatusOK {
 		t.Fatalf("paired request: %d", code)
 	}
 	if code := get("/api/workspace/files?query=a", ""); code != http.StatusConflict {
@@ -693,11 +694,11 @@ func TestReviewWorkspaceRelayKeepsOriginAndInstanceChecks(t *testing.T) {
 	if err := dial("/ahp", web.URL); err != nil {
 		t.Fatalf("same-origin relay AHP: %v", err)
 	}
-	if err := dial("/lsp?instance="+app.scope.InstanceID, web.URL); err != nil {
+	if err := dial("/lsp?instance="+app.Project.scope.InstanceID, web.URL); err != nil {
 		t.Fatalf("same-origin relay LSP: %v", err)
 	}
 	// A same-site page carries the pairing cookie but not the relay's origin.
-	for _, path := range []string{"/ahp", "/lsp?instance=" + app.scope.InstanceID, "/dap?instance=" + app.scope.InstanceID} {
+	for _, path := range []string{"/ahp", "/lsp?instance=" + app.Project.scope.InstanceID, "/dap?instance=" + app.Project.scope.InstanceID} {
 		if err := dial(path, sibling); err == nil {
 			t.Fatalf("relay %s accepted sibling origin", path)
 		}
@@ -718,7 +719,7 @@ func TestReviewWorkspaceRelayAbortedSearchReleasesSlot(t *testing.T) {
 	search := func(ctx context.Context, query string) *http.Response {
 		t.Helper()
 		req, _ := http.NewRequestWithContext(ctx, "POST", web.URL+"/api/workspace/search", strings.NewReader(`{"query":"`+query+`"}`))
-		req.Header.Set(instanceHeader, app.scope.InstanceID)
+		req.Header.Set(instanceHeader, app.Project.scope.InstanceID)
 		req.Header.Set("Origin", web.URL)
 		res, err := client.Do(req)
 		if err != nil {

@@ -519,7 +519,7 @@ export default function App() {
 		useState<FileTabHandle | null>(null);
 	const [composerSeed, setComposerSeed] = useState<{
 		text: string;
-		completions?: MessageAttachment[];
+		attachments?: MessageAttachment[];
 		files?: string[];
 		append?: boolean;
 		nonce: number;
@@ -1960,12 +1960,12 @@ export default function App() {
 		images?: string[],
 		intent: TurnInputIntent = "follow_up",
 		draftTabId?: string,
-		completions?: MessageAttachment[],
+		attachments?: MessageAttachment[],
 	): Promise<boolean> => {
 		let sid = key;
 		try {
 			if (isDraft(key)) sid = await createSessionForDraft(key, draftTabId);
-			return sendChat(sid, text, files, images, intent, completions);
+			return sendChat(sid, text, files, images, intent, attachments);
 		} catch {
 			return false;
 		}
@@ -1976,7 +1976,7 @@ export default function App() {
 		files?: string[],
 		images?: string[],
 		intent: TurnInputIntent = "follow_up",
-		completions?: MessageAttachment[],
+		attachments?: MessageAttachment[],
 	): Promise<boolean> =>
 		sendForSession(
 			sessionId,
@@ -1985,7 +1985,7 @@ export default function App() {
 			images,
 			intent,
 			undefined,
-			completions,
+			attachments,
 		);
 
 	const focusChat = () => {
@@ -2021,7 +2021,7 @@ export default function App() {
 		if (skill.input_hint) {
 			setComposerSeed({
 				text: `/${skill.name} `,
-				completions: skill.attachment ? [skill.attachment] : undefined,
+				attachments: skill.attachment ? [skill.attachment] : undefined,
 				nonce: Date.now(),
 			});
 			return;
@@ -2471,7 +2471,7 @@ export default function App() {
 						sessionId={key}
 						onSelectBackend={(id) => handleBackendSelect(id, tab)}
 						placeholder={`Message ${formatAgentName(backendId, backend?.name)}…`}
-						onSend={(text, files, images, intent, completions) =>
+						onSend={(text, files, images, intent, attachments) =>
 							sendForSession(
 								key,
 								text,
@@ -2479,7 +2479,7 @@ export default function App() {
 								images,
 								intent,
 								tab.id,
-								completions,
+								attachments,
 							)
 						}
 						onAct={act}

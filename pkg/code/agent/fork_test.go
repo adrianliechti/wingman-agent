@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -181,5 +182,54 @@ func TestForkSessionRefusesRunningTurn(t *testing.T) {
 		if filepath.Ext(entry.Name()) == ".jsonl" && entry.Name() != id+".jsonl" {
 			t.Fatalf("busy fork left %s behind", entry.Name())
 		}
+	}
+}
+
+func TestTruncateSessionRewindsALoadedSession(t *testing.T) {
+	a := New(newOptionsTestWorkspace(t), Config{Options: Options{IsolateSessions: true}}, nil)
+	defer a.Close()
+	const id = "truncate-source"
+	var events []harness.RuntimeEvent
+	add := func(e harness.RuntimeEvent) {
+		e.Sequence = uint64(len(events) + 1)
+		e.ID = "event-" + strconv.FormatUint(e.Sequence, 10)
+		e.At = time.Now().UTC()
+		events = append(events, e)
+	}
+	for _, input := range []string{"a", "b"} {
+		add(harness.RuntimeEvent{Type: harness.EventTurnStarted, TurnID: "turn-" + input})
+		add(harness.RuntimeEvent{Type: harness.EventMessage, Message: &harness.Message{Role: harness.RoleUser, InputID: input, Content: []harness.Content{{Text: "ask " + input}}}})
+		add(harness.RuntimeEvent{Type: harness.EventMessage, Message: &harness.Message{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "answer " + input}}}})
+		add(harness.RuntimeEvent{Type: harness.EventTurnTerminal, TurnID: "turn-" + input, Terminal: &harness.RuntimeTerminal{Status: harness.RuntimeCompleted}})
+	}
+	if err := session.Save(a.sessionsDir, id, harness.State{Events: events}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.LoadSession(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetMode(t.Context(), id, code.PlanModeID); err != nil {
+		t.Fatal(err)
+	}
+	version := a.HistoryVersion(id)
+	if err := a.TruncateSession(t.Context(), id, "missing"); err == nil || len(a.Messages(id)) != 4 {
+		t.Fatalf("cut after an unknown input: %v, %d messages", err, len(a.Messages(id)))
+	}
+	if err := a.TruncateSession(t.Context(), id, "a"); err != nil {
+		t.Fatal(err)
+	}
+	messages := a.Messages(id)
+	if len(messages) != 2 || messages[1].Content[0].Text != "answer a" {
+		t.Fatalf("messages after the cut = %+v", messages)
+	}
+	// The rewrite is visible as one, and the session keeps its settings.
+	if _, mode := a.Modes(id); a.HistoryVersion(id).Revision == version.Revision || mode != code.PlanModeID {
+		t.Fatalf("revision %d, mode %q", a.HistoryVersion(id).Revision, mode)
+	}
+	if saved, err := session.Load(a.sessionsDir, id); err != nil || len(saved.State.Messages) != 2 {
+		t.Fatalf("saved after the cut = %+v, %v", saved.State.Messages, err)
+	}
+	if err := a.TruncateSession(t.Context(), id, ""); err != nil || len(a.Messages(id)) != 0 {
+		t.Fatalf("clearing: %v, %d messages", err, len(a.Messages(id)))
 	}
 }

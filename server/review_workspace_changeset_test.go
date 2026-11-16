@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/changes"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
@@ -48,26 +49,26 @@ func reviewWorkspaceChangesetRepo(t *testing.T, files map[string]string) string 
 	return dir
 }
 
-func reviewWorkspaceChangesetHost(t *testing.T, root string) *ahpHost {
+func reviewWorkspaceChangesetHost(t *testing.T, root string) *Project {
 	t.Helper()
-	h := newDebugTestServer(t, root).ahpHost()
-	t.Cleanup(h.close)
+	h := newDebugTestServer(t, root).Project
+	t.Cleanup(h.host.Close)
 	return h
 }
 
-func reviewWorkspaceChangesetState(t *testing.T, h *ahpHost, channel string) types.ChangesetState {
+func reviewWorkspaceChangesetState(t *testing.T, h *Project, channel string) types.ChangesetState {
 	t.Helper()
 	if err := h.ensureChangeset(channel); err != nil {
 		t.Fatal(err)
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.host.mu.Lock()
+	defer h.host.mu.Unlock()
 	state := h.changesets[channel].state
 	state.Files = append([]types.ChangesetFile{}, state.Files...)
 	return state
 }
 
-func reviewWorkspaceChangesetFile(t *testing.T, h *ahpHost, channel, path string) types.ChangesetFile {
+func reviewWorkspaceChangesetFile(t *testing.T, h *Project, channel, path string) types.ChangesetFile {
 	t.Helper()
 	for _, file := range reviewWorkspaceChangesetState(t, h, channel).Files {
 		if strings.HasSuffix(file.Id, "/"+path) {
@@ -78,7 +79,7 @@ func reviewWorkspaceChangesetFile(t *testing.T, h *ahpHost, channel, path string
 	return types.ChangesetFile{}
 }
 
-func reviewWorkspaceChangesetInvoke(h *ahpHost, params map[string]any) error {
+func reviewWorkspaceChangesetInvoke(h *Project, params map[string]any) error {
 	raw, _ := json.Marshal(params)
 	_, err := h.invokeChangesetOperation(raw)
 	return err
@@ -90,8 +91,8 @@ func reviewWorkspaceChangesetTarget(file types.ChangesetFile, nonce string) map[
 
 func reviewWorkspaceChangesetCode(t *testing.T, err error, want int) {
 	t.Helper()
-	var rpc *ahpRPCError
-	if !errors.As(ahpResourceError(err), &rpc) || rpc.Code != want {
+	var rpc *ahp.Error
+	if !errors.As(resourceError(err), &rpc) || rpc.Code != want {
 		t.Fatalf("want error %d, got %v", want, err)
 	}
 }
@@ -110,8 +111,8 @@ func TestReviewWorkspaceChangesetDiscardStaysInsideWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := reviewWorkspaceChangesetHost(t, root)
-	file := reviewWorkspaceChangesetFile(t, h, ahpUnstagedChanges, "vendor/lib.txt")
-	_ = reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": ahpUnstagedChanges, "operationId": "discard-changes", "target": reviewWorkspaceChangesetTarget(file, *file.Nonce)})
+	file := reviewWorkspaceChangesetFile(t, h, h.changesChannel(changes.DiffUnstaged), "vendor/lib.txt")
+	_ = reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": h.changesChannel(changes.DiffUnstaged), "operationId": "discard-changes", "target": reviewWorkspaceChangesetTarget(file, *file.Nonce)})
 	if data, _ := os.ReadFile(filepath.Join(outside, "lib.txt")); string(data) != "outside\n" {
 		t.Fatalf("discard-changes overwrote a file outside the workspace: %q", data)
 	}
@@ -130,12 +131,12 @@ func TestReviewWorkspaceChangesetIdleComparisonsDoNotStarveWorkspaceLayers(t *te
 			t.Fatal(err)
 		}
 	}
-	h.mu.Lock()
+	h.host.mu.Lock()
 	for _, c := range h.changesets {
 		c.touched = time.Now().Add(-2 * time.Minute)
 	}
-	h.mu.Unlock()
-	state := reviewWorkspaceChangesetState(t, h, ahpWorkspaceChanges)
+	h.host.mu.Unlock()
+	state := reviewWorkspaceChangesetState(t, h, h.changesChannel(changes.DiffCombined))
 	if state.Status != types.ChangesetStatusReady {
 		t.Fatalf("workspace changes are unavailable while only idle comparisons hold content: %s", state.Error.Message)
 	}
@@ -152,11 +153,11 @@ func TestReviewWorkspaceChangesetOperationValidation(t *testing.T) {
 	write("a.txt", "first\n")
 	write("new.txt", "untracked\n")
 	h := reviewWorkspaceChangesetHost(t, root)
-	stale := reviewWorkspaceChangesetFile(t, h, ahpUnstagedChanges, "a.txt")
-	added := reviewWorkspaceChangesetFile(t, h, ahpUnstagedChanges, "new.txt")
+	stale := reviewWorkspaceChangesetFile(t, h, h.changesChannel(changes.DiffUnstaged), "a.txt")
+	added := reviewWorkspaceChangesetFile(t, h, h.changesChannel(changes.DiffUnstaged), "new.txt")
 	write("a.txt", "second\n")
 	discard := func(target map[string]any) error {
-		params := map[string]any{"channel": ahpUnstagedChanges, "operationId": "discard-changes"}
+		params := map[string]any{"channel": h.changesChannel(changes.DiffUnstaged), "operationId": "discard-changes"}
 		if target != nil {
 			params["target"] = target
 		}
@@ -172,28 +173,28 @@ func TestReviewWorkspaceChangesetOperationValidation(t *testing.T) {
 	reviewWorkspaceChangesetCode(t, discard(map[string]any{"kind": "resource", "resource": added.Id, "side": "before"}), -32602)
 	reviewWorkspaceChangesetCode(t, discard(map[string]any{"kind": "resource", "resource": added.Id, "side": "middle"}), -32602)
 	reviewWorkspaceChangesetCode(t, discard(map[string]any{"kind": "range", "resource": added.Id, "range": map[string]any{"start": map[string]any{"line": 0, "character": 0}, "end": map[string]any{"line": 0, "character": 1}}}), -32602)
-	for _, channel := range []string{ahpWorkspaceChanges, ahpStagedChanges, "ahp-changeset:/wingman/compare/unknown"} {
+	for _, channel := range []string{h.changesChannel(changes.DiffCombined), h.changesChannel(changes.DiffStaged), h.changesetPrefix() + "compare/unknown"} {
 		reviewWorkspaceChangesetCode(t, reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": channel, "operationId": "discard-changes", "target": map[string]any{"kind": "resource", "resource": added.Id}}), -32602)
 	}
-	reviewWorkspaceChangesetCode(t, reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": ahpUnstagedChanges, "operationId": "unstage"}), -32602)
+	reviewWorkspaceChangesetCode(t, reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": h.changesChannel(changes.DiffUnstaged), "operationId": "unstage"}), -32602)
 
-	fresh := reviewWorkspaceChangesetFile(t, h, ahpUnstagedChanges, "a.txt")
-	if err := reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": ahpUnstagedChanges, "operationId": "stage", "target": reviewWorkspaceChangesetTarget(fresh, *fresh.Nonce)}); err != nil {
+	fresh := reviewWorkspaceChangesetFile(t, h, h.changesChannel(changes.DiffUnstaged), "a.txt")
+	if err := reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": h.changesChannel(changes.DiffUnstaged), "operationId": "stage", "target": reviewWorkspaceChangesetTarget(fresh, *fresh.Nonce)}); err != nil {
 		t.Fatal(err)
 	}
-	staged := reviewWorkspaceChangesetFile(t, h, ahpStagedChanges, "a.txt")
+	staged := reviewWorkspaceChangesetFile(t, h, h.changesChannel(changes.DiffStaged), "a.txt")
 	if staged.Edit.After == nil {
 		t.Fatal("staged change lost its after side")
 	}
-	for _, file := range reviewWorkspaceChangesetState(t, h, ahpUnstagedChanges).Files {
+	for _, file := range reviewWorkspaceChangesetState(t, h, h.changesChannel(changes.DiffUnstaged)).Files {
 		if file.Id == fresh.Id {
 			t.Fatal("staged file is still unstaged")
 		}
 	}
-	if err := reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": ahpStagedChanges, "operationId": "unstage"}); err != nil {
+	if err := reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": h.changesChannel(changes.DiffStaged), "operationId": "unstage"}); err != nil {
 		t.Fatal(err)
 	}
-	if files := reviewWorkspaceChangesetState(t, h, ahpStagedChanges).Files; len(files) != 0 {
+	if files := reviewWorkspaceChangesetState(t, h, h.changesChannel(changes.DiffStaged)).Files; len(files) != 0 {
 		t.Fatalf("staged after unstaging all: %+v", files)
 	}
 	if err := discard(map[string]any{"kind": "resource", "resource": added.Id}); err != nil {
@@ -211,12 +212,12 @@ func TestReviewWorkspaceChangesetRejectsUnknownTargetFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := reviewWorkspaceChangesetHost(t, root)
-	stale := reviewWorkspaceChangesetFile(t, h, ahpUnstagedChanges, "a.txt")
+	stale := reviewWorkspaceChangesetFile(t, h, h.changesChannel(changes.DiffUnstaged), "a.txt")
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("second\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	reviewWorkspaceChangesetCode(t, reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": ahpUnstagedChanges, "operationId": "discard-changes", "nonce": *stale.Nonce}), -32602)
-	err := reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": ahpUnstagedChanges, "operationId": "discard-changes",
+	reviewWorkspaceChangesetCode(t, reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": h.changesChannel(changes.DiffUnstaged), "operationId": "discard-changes", "nonce": *stale.Nonce}), -32602)
+	err := reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": h.changesChannel(changes.DiffUnstaged), "operationId": "discard-changes",
 		"target": map[string]any{"kind": "resource", "resource": stale.Id, "fileNonce": *stale.Nonce}})
 	if data, _ := os.ReadFile(filepath.Join(root, "a.txt")); string(data) != "second\n" {
 		t.Fatalf("discard with a misspelled nonce destroyed newer edits (err %v): %q", err, data)
@@ -232,7 +233,7 @@ func TestReviewWorkspaceChangesetBinaryChangesKeepIdentity(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(root, "blob.bin"), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		file := reviewWorkspaceChangesetFile(t, h, ahpUnstagedChanges, "blob.bin")
+		file := reviewWorkspaceChangesetFile(t, h, h.changesChannel(changes.DiffUnstaged), "blob.bin")
 		for _, side := range []*types.FileEditSide{file.Edit.Before, file.Edit.After} {
 			if side == nil || side.Content.ContentType == nil || *side.Content.ContentType != "application/octet-stream" {
 				t.Fatalf("binary side = %+v", side)
@@ -243,8 +244,8 @@ func TestReviewWorkspaceChangesetBinaryChangesKeepIdentity(t *testing.T) {
 	if nonces[0] == nonces[1] {
 		t.Fatal("different binary contents share a nonce")
 	}
-	file := reviewWorkspaceChangesetFile(t, h, ahpUnstagedChanges, "blob.bin")
-	reviewWorkspaceChangesetCode(t, reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": ahpUnstagedChanges, "operationId": "discard-changes", "target": reviewWorkspaceChangesetTarget(file, nonces[0])}), -32011)
+	file := reviewWorkspaceChangesetFile(t, h, h.changesChannel(changes.DiffUnstaged), "blob.bin")
+	reviewWorkspaceChangesetCode(t, reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": h.changesChannel(changes.DiffUnstaged), "operationId": "discard-changes", "target": reviewWorkspaceChangesetTarget(file, nonces[0])}), -32011)
 	if data, _ := os.ReadFile(filepath.Join(root, "blob.bin")); string(data) != "\x00second" {
 		t.Fatalf("stale binary discard changed the file: %q", data)
 	}
@@ -253,11 +254,11 @@ func TestReviewWorkspaceChangesetBinaryChangesKeepIdentity(t *testing.T) {
 func TestReviewWorkspaceChangesetComparisonRetention(t *testing.T) {
 	root := t.TempDir()
 	app := newDebugTestServer(t, root)
-	h := app.ahpHost()
-	t.Cleanup(h.close)
+	h := app.Project
+	t.Cleanup(h.host.Close)
 	web := httptest.NewServer(app)
 	t.Cleanup(web.Close)
-	client := ahpTestClient(t, "ws"+strings.TrimPrefix(web.URL, "http")+"/ahp", "comparison-retention")
+	client := protocolTestClient(t, "ws"+strings.TrimPrefix(web.URL, "http")+"/ahp", "comparison-retention")
 	compare := func(i int) string {
 		t.Helper()
 		channel, err := h.comparisonChangeset([]changes.FileDiff{{Path: fmt.Sprintf("f%d.txt", i), Status: changes.StatusAdded, Modified: fmt.Sprintf("content %d\n", i)}})
@@ -285,17 +286,17 @@ func TestReviewWorkspaceChangesetComparisonRetention(t *testing.T) {
 	}
 	defer sub.Close()
 	retained := result.Snapshot.State.Changeset.Files[0].Edit.After.Content.Uri
-	h.mu.Lock()
+	h.host.mu.Lock()
 	for i, channel := range channels {
 		h.changesets[channel].touched = time.Now().Add(-time.Hour + time.Duration(i)*time.Second)
 	}
 	evicted := h.changesets[channels[1]].state.Files[0].Edit.After.Content.Uri
-	h.mu.Unlock()
+	h.host.mu.Unlock()
 	compare(100)
-	h.mu.Lock()
+	h.host.mu.Lock()
 	_, kept := h.changesets[channels[0]]
 	_, dropped := h.changesets[channels[1]]
-	h.mu.Unlock()
+	h.host.mu.Unlock()
 	if !kept || dropped {
 		t.Fatalf("eviction kept subscribed=%v, dropped oldest idle=%v", kept, !dropped)
 	}
@@ -317,7 +318,7 @@ func TestReviewWorkspaceChangesetConcurrentWritesAndRefreshes(t *testing.T) {
 	resource := func(method string, params map[string]any) (any, error) {
 		params["channel"] = types.RootResourceURI
 		raw, _ := json.Marshal(params)
-		return h.resource(ahpRequest{Method: method, Params: raw})
+		return h.resource(ahp.Request{Method: method, Params: raw})
 	}
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -327,7 +328,7 @@ func TestReviewWorkspaceChangesetConcurrentWritesAndRefreshes(t *testing.T) {
 			}
 		}
 	})
-	for _, channel := range []string{ahpWorkspaceChanges, ahpStagedChanges, ahpUnstagedChanges} {
+	for _, channel := range []string{h.changesChannel(changes.DiffCombined), h.changesChannel(changes.DiffStaged), h.changesChannel(changes.DiffUnstaged)} {
 		wg.Go(func() {
 			for range 15 {
 				if err := h.ensureChangeset(channel); err != nil {
@@ -339,16 +340,16 @@ func TestReviewWorkspaceChangesetConcurrentWritesAndRefreshes(t *testing.T) {
 	}
 	wg.Go(func() {
 		for range 40 {
-			h.mu.Lock()
+			h.host.mu.Lock()
 			uris := []string{}
-			if c := h.changesets[ahpWorkspaceChanges]; c != nil {
+			if c := h.changesets[h.changesChannel(changes.DiffCombined)]; c != nil {
 				for _, file := range c.state.Files {
 					if file.Edit.After != nil {
 						uris = append(uris, file.Edit.After.Content.Uri)
 					}
 				}
 			}
-			h.mu.Unlock()
+			h.host.mu.Unlock()
 			for _, uri := range uris {
 				if _, err := resource("resourceRead", map[string]any{"uri": uri}); err != nil && !strings.Contains(err.Error(), "no longer retained") {
 					t.Error(err)
@@ -358,9 +359,9 @@ func TestReviewWorkspaceChangesetConcurrentWritesAndRefreshes(t *testing.T) {
 	})
 	wg.Go(func() {
 		for range 6 {
-			for _, op := range []struct{ channel, id string }{{ahpUnstagedChanges, "stage"}, {ahpStagedChanges, "unstage"}} {
+			for _, op := range []struct{ channel, id string }{{h.changesChannel(changes.DiffUnstaged), "stage"}, {h.changesChannel(changes.DiffStaged), "unstage"}} {
 				err := reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": op.channel, "operationId": op.id})
-				var rpc *ahpRPCError
+				var rpc *ahp.Error
 				if err != nil && (!errors.As(err, &rpc) || rpc.Code != -32602) {
 					t.Error(err)
 				}
@@ -371,14 +372,14 @@ func TestReviewWorkspaceChangesetConcurrentWritesAndRefreshes(t *testing.T) {
 	if t.Failed() {
 		return
 	}
-	if err := reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": ahpStagedChanges, "operationId": "unstage"}); err != nil && !strings.Contains(err.Error(), "not available") {
+	if err := reviewWorkspaceChangesetInvoke(h, map[string]any{"channel": h.changesChannel(changes.DiffStaged), "operationId": "unstage"}); err != nil && !strings.Contains(err.Error(), "not available") {
 		t.Fatal(err)
 	}
 	disk, err := os.ReadFile(filepath.Join(root, "a.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	file := reviewWorkspaceChangesetFile(t, h, ahpWorkspaceChanges, "a.txt")
+	file := reviewWorkspaceChangesetFile(t, h, h.changesChannel(changes.DiffCombined), "a.txt")
 	content, err := resource("resourceRead", map[string]any{"uri": file.Edit.After.Content.Uri})
 	if err != nil || content.(types.ResourceReadResult).Data != string(disk) {
 		t.Fatalf("after content = %+v, %v; disk %q", content, err, disk)

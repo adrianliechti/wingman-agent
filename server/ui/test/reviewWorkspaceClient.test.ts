@@ -142,7 +142,10 @@ async function reviewHost(
 	t.after(() => ahp.stop());
 	ahp.start();
 	await ahp.ready();
-	const client = new WorkspaceClient({ ...reviewScope, protocol: 2 }, ahp);
+	const client = new WorkspaceClient(
+		{ ...reviewScope, protocol: 2, namespace: "wingman/workspace" },
+		ahp,
+	);
 	t.after(() => client.stop());
 	const sent = (method: string) => requests.filter((m) => m.method === method);
 	return { client, ahp, sent };
@@ -259,6 +262,34 @@ test("an unconfirmed send is retried as the same pending message, whatever its i
 		"a later send is a new message",
 	);
 	assert.equal(actions[2].action.kind, "queued");
+});
+
+test("a chat keeps only its latest unconfirmed send for a retry", async (t) => {
+	let drops = 2;
+	const { client, ahp, sent } = await reviewHost(
+		t,
+		{
+			[reviewSessionURI]: reviewSession,
+			[reviewDefaultChat]: reviewChat(reviewDefaultChat),
+		},
+		async (m, server) => {
+			if (m.method !== "dispatchAction" || drops-- <= 0) return false;
+			await server.close();
+			return true;
+		},
+	);
+	const image = "data:image/png;base64,AAAA";
+	await assert.rejects(
+		client.send(reviewDefaultChat, "one", [], [image]),
+		/lost/,
+	);
+	await ahp.ready();
+	await assert.rejects(client.send(reviewDefaultChat, "two"), /lost/);
+	await ahp.ready();
+	await client.send(reviewDefaultChat, "one", [], [image]);
+	const ids = sent("dispatchAction").map((m) => m.params.action.id);
+	assert.equal(ids.length, 3);
+	assert.notEqual(ids[2], ids[0], "a newer send released the older request");
 });
 
 test("identical sends in flight coalesce into one delivery", async (t) => {

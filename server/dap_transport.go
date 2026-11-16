@@ -114,7 +114,7 @@ func (s *Server) handleDAP(w http.ResponseWriter, r *http.Request) {
 			initialized = true
 			// Breakpoint and evaluation features depend on the adapter and arrive
 			// in a capabilities event once a session is known.
-			c.reply(req, map[string]any{"supportsConfigurationDoneRequest": true, "supportsCancelRequest": true, "supportTerminateDebuggee": true, "supportsTerminateRequest": true, "_wingman": map[string]any{"workspacePath": s.workspace.RootPath, "scope": s.scope, "persistentSession": true}}, nil)
+			c.reply(req, map[string]any{"supportsConfigurationDoneRequest": true, "supportsCancelRequest": true, "supportTerminateDebuggee": true, "supportsTerminateRequest": true, "_wingman": map[string]any{"workspacePath": s.Project.workspace.RootPath, "scope": s.Project.scope, "persistentSession": true}}, nil)
 			go c.observe()
 			continue
 		}
@@ -195,19 +195,19 @@ func (c *dapConnection) event(event string, body any) {
 // sourcePath confines a source to the workspace; allowMissing accepts a deleted file.
 func (c *dapConnection) sourcePath(value string, allowMissing bool) (string, error) {
 	if filepath.IsAbs(value) {
-		rel, err := filepath.Rel(c.server.workspace.RootPath, value)
+		rel, err := filepath.Rel(c.server.Project.workspace.RootPath, value)
 		if err != nil {
 			return "", err
 		}
 		value = filepath.ToSlash(rel)
 	}
-	rel, ok := c.server.workspaceRel(value)
+	rel, ok := workspaceRel(value)
 	if !ok {
 		return "", errors.New("source is outside the workspace")
 	}
-	info, err := c.server.workspace.Root.Stat(rel)
+	info, err := c.server.Project.workspace.Root.Stat(rel)
 	if allowMissing && errors.Is(err, fs.ErrNotExist) {
-		return filepath.Join(c.server.workspace.RootPath, rel), nil
+		return filepath.Join(c.server.Project.workspace.RootPath, rel), nil
 	}
 	if err != nil {
 		return "", err
@@ -215,13 +215,13 @@ func (c *dapConnection) sourcePath(value string, allowMissing bool) (string, err
 	if !info.Mode().IsRegular() {
 		return "", errors.New("source must be a regular file")
 	}
-	return filepath.Join(c.server.workspace.RootPath, rel), nil
+	return filepath.Join(c.server.Project.workspace.RootPath, rel), nil
 }
 
 // framePath reports adapter paths through the workspace's own spelling;
 // adapters often resolve symlinks such as macOS /var -> /private/var.
 func (c *dapConnection) framePath(path, resolvedRoot string) string {
-	root := c.server.workspace.RootPath
+	root := c.server.Project.workspace.RootPath
 	if rel, err := filepath.Rel(root, path); err == nil && filepath.IsLocal(rel) {
 		return path
 	}
@@ -256,7 +256,7 @@ func (c *dapConnection) reference(status dap.Status, native int, kind string) (i
 	if id, ok := c.ids[ref]; ok {
 		return id, nil
 	}
-	id := int(c.server.dapReferenceSeq.Add(1))
+	id := int(c.server.editor.dapReferenceSeq.Add(1))
 	if len(c.references) >= 65536 || id >= 1<<31-1 {
 		return 0, errors.New("debug reference limit reached; reconnect")
 	}
@@ -328,7 +328,7 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 		if p.PlanID == "" {
 			return nil, errors.New("launch requires the _wingmanPlanId of a reviewed plan")
 		}
-		if err := c.server.workspace.WithDAPManager(func(manager *dap.Manager) error {
+		if err := c.server.Project.workspace.WithDAPManager(func(manager *dap.Manager) error {
 			var err error
 			plan, err = c.server.reviewedDebugPlan(manager, p.PlanID, p.Plan)
 			return err
@@ -360,7 +360,7 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 		// A configured launch outlives its socket; only cancel or shutdown stops it.
 		requestCtx := ctx
 		var stop context.CancelFunc
-		ctx, stop = context.WithCancel(c.server.ctx)
+		ctx, stop = context.WithCancel(c.server.Project.ctx)
 		defer stop()
 		defer context.AfterFunc(requestCtx, func() {
 			if errors.Is(context.Cause(requestCtx), errEditorCancelled) {
@@ -369,7 +369,7 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 		})()
 	}
 	var result any
-	err := c.server.workspace.WithDAPManager(func(manager *dap.Manager) error {
+	err := c.server.Project.workspace.WithDAPManager(func(manager *dap.Manager) error {
 		switch req.Command {
 		case "launch", "attach":
 			adapters, err := manager.Adapters(ctx)
@@ -489,7 +489,7 @@ func (c *dapConnection) request(ctx context.Context, req dapBrowserRequest) (any
 			if frames == nil {
 				frames = []dap.StackFrame{}
 			}
-			resolvedRoot, _ := pathutil.Resolve(filepath.Clean(c.server.workspace.RootPath))
+			resolvedRoot, _ := pathutil.Resolve(filepath.Clean(c.server.Project.workspace.RootPath))
 			for i := range frames {
 				frames[i].ID, err = c.reference(before, frames[i].ID, "frame")
 				if err != nil {
@@ -601,7 +601,7 @@ func (c *dapConnection) observe() {
 		var session *dap.Session
 		var status *dap.Status
 		var resolved map[int]dap.ResolvedBreakpoint
-		err := c.server.workspace.WithDAPManager(func(manager *dap.Manager) error {
+		err := c.server.Project.workspace.WithDAPManager(func(manager *dap.Manager) error {
 			changed = manager.Changes()
 			resolved = manager.ResolvedBreakpoints()
 			if session = manager.ActiveSession(); session != nil {

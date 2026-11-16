@@ -57,6 +57,8 @@ type Agent struct {
 }
 
 var _ code.Agent = (*Agent)(nil)
+var _ code.HostToolAgent = (*Agent)(nil)
+var _ code.SessionTruncator = (*Agent)(nil)
 
 type sessionState struct {
 	resources sessionResources
@@ -73,6 +75,7 @@ type sessionState struct {
 	unattended atomic.Bool
 	reviews    reviewBreaker
 	tools      []tool.Tool
+	hostTools  atomic.Pointer[func() []tool.Tool]
 
 	schedules     schedule.ObservableStore
 	scriptOptions *schedule.Options
@@ -206,6 +209,13 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 		return "", err
 	}
 	s.startSource = "startup"
+	// A session is saved from its creation; its journal starts with its first event.
+	a.modelMu.Lock()
+	err = a.saveSessionSettingsLocked(s)
+	a.modelMu.Unlock()
+	if err != nil {
+		return "", errors.Join(err, s.close())
+	}
 	if err := a.registerSession(ctx, s); err != nil {
 		return "", err
 	}
@@ -234,6 +244,9 @@ func (a *Agent) loadSession(ctx context.Context, id string) error {
 	a.mu.Unlock()
 
 	saved, err := session.Load(a.sessionsDir, id)
+	if errors.Is(err, os.ErrNotExist) && a.created(id) {
+		saved, err = session.Session{ID: id}, nil // created, but never used
+	}
 	if err != nil {
 		return err
 	}
@@ -287,6 +300,33 @@ func (a *Agent) ForkSession(ctx context.Context, id, title string) (string, erro
 func (a *Agent) ForkSessionThrough(ctx context.Context, id, inputID, title string) (string, error) {
 	return a.fork(ctx, id, func(_ *sessionState, newID string) (bool, error) {
 		return false, session.ForkThrough(a.sessionsDir, id, newID, title, inputID)
+	})
+}
+
+// TruncateSession rewrites the journal and rebuilds the session from it. Files
+// that the dropped turns changed stay as they are.
+func (a *Agent) TruncateSession(ctx context.Context, id, inputID string) error {
+	unlock, err := a.lockSession(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	s := a.session(id)
+	if s == nil {
+		return fmt.Errorf("session %s not found", id)
+	}
+	return s.harness.RunExclusive(ctx, func(context.Context) error {
+		state, err := session.Truncate(a.sessionsDir, id, inputID)
+		if err != nil {
+			return err
+		}
+		_, revision := s.harness.StateVersion()
+		state.Revision = revision + 1
+		if err := s.harness.Restore(state); err != nil {
+			return err
+		}
+		// A steering input shares its turn, which the cut leaves open.
+		return s.harness.ReconcileInterrupted("history was truncated")
 	})
 }
 
@@ -638,6 +678,15 @@ func (a *Agent) SetUnattended(_ context.Context, sessionID string, enabled bool)
 	return nil
 }
 
+func (a *Agent) SetHostTools(sessionID string, tools func() []tool.Tool) error {
+	s := a.session(sessionID)
+	if s == nil {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	s.hostTools.Store(&tools)
+	return nil
+}
+
 func (a *Agent) Tools(id string) []tool.Tool {
 	s := a.session(id)
 	if s == nil {
@@ -849,6 +898,20 @@ func formatFileChangeNotice(paths []string) string {
 func (s *sessionState) catalogTools() []tool.Tool {
 	mcpTools, lspTools := s.parent.workspace.ManagedTools()
 	return slices.Concat(s.tools, mcpTools, lspTools)
+}
+
+// sessionTools adds the host's tools, which only the session's own model
+// reaches. They replace the agent's tools of the same name.
+func (s *sessionState) sessionTools() []tool.Tool {
+	tools := s.catalogTools()
+	if host := s.hostTools.Load(); host != nil {
+		lent := (*host)()
+		tools = slices.DeleteFunc(tools, func(own tool.Tool) bool {
+			return slices.ContainsFunc(lent, func(t tool.Tool) bool { return t.Name == own.Name })
+		})
+		tools = append(tools, lent...)
+	}
+	return tools
 }
 
 func (s *sessionState) filterTools(tools []tool.Tool) []tool.Tool {

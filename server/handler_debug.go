@@ -65,13 +65,13 @@ func (s *Server) handleDebugTargets(w http.ResponseWriter, r *http.Request) {
 		source = []byte(*body.Content)
 	} else {
 		var err error
-		source, err = s.workspace.Root.ReadFile(rel)
+		source, err = s.Project.workspace.Root.ReadFile(rel)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
-	targets, err := s.workspace.DebugRegistry().DetectFile(filepath.ToSlash(rel), source)
+	targets, err := s.Project.workspace.DebugRegistry().DetectFile(filepath.ToSlash(rel), source)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -138,8 +138,8 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	if s.ctx != nil {
-		stop := context.AfterFunc(s.ctx, cancel)
+	if s.Project.ctx != nil {
+		stop := context.AfterFunc(s.Project.ctx, cancel)
 		defer stop()
 	}
 	streaming := strings.Contains(r.Header.Get("Accept"), "application/x-ndjson")
@@ -173,7 +173,7 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	statuses, err := s.workspace.DebugToolStatus(ctx, selected.Language)
+	statuses, err := s.Project.workspace.DebugToolStatus(ctx, selected.Language)
 	if err != nil {
 		fail(err, http.StatusServiceUnavailable)
 		return
@@ -191,12 +191,12 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	previousTool := ""
-	changed, installErr := s.workspace.UpdateDebugTools(ctx, selected.Language, request.Install, func(progress devtools.Progress) {
+	changed, installErr := s.Project.workspace.UpdateDebugTools(ctx, selected.Language, request.Install, func(progress devtools.Progress) {
 		if streaming {
 			// A completed dependency should show its installed state while
 			// setup continues with the next tool (for example Java's host).
 			if progress.Phase == devtools.ProgressChecking && previousTool != "" {
-				if snapshot, err := s.workspace.DebugToolStatus(ctx, selected.Language); err == nil {
+				if snapshot, err := s.Project.workspace.DebugToolStatus(ctx, selected.Language); err == nil {
 					emit(debugPlanEvent{Type: "tools", Tools: snapshot})
 				}
 			}
@@ -205,7 +205,7 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	if changed {
-		s.broadcast(Frame{Type: EvtWorkspaceChanged})
+		s.Project.workspaceChanged(Frame{Type: EvtWorkspaceChanged})
 	}
 	if ctx.Err() != nil {
 		return
@@ -214,7 +214,7 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 		fail(installErr, http.StatusConflict)
 		return
 	}
-	statuses, err = s.workspace.DebugToolStatus(ctx, selected.Language)
+	statuses, err = s.Project.workspace.DebugToolStatus(ctx, selected.Language)
 	if err != nil {
 		fail(err, http.StatusServiceUnavailable)
 		return
@@ -235,7 +235,7 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var adapterInfo []dap.AdapterInfo
-	err = s.workspace.WithDAPManager(func(manager *dap.Manager) error {
+	err = s.Project.workspace.WithDAPManager(func(manager *dap.Manager) error {
 		values, err := manager.Adapters(ctx)
 		adapterInfo = values
 		return err
@@ -249,13 +249,13 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 		fail(errors.Join(err, installErr), http.StatusBadRequest)
 		return
 	}
-	projectDir, err := selectTargetDebugProject(s.workspace.RootPath, adapterInfo[0], *selected)
+	projectDir, err := selectTargetDebugProject(s.Project.workspace.RootPath, adapterInfo[0], *selected)
 	if err != nil {
 		fail(err, http.StatusBadRequest)
 		return
 	}
-	profile, err := s.workspace.DebugRegistry().Plan(adapterInfo[0].Language, debugadapter.Request{
-		Action: request.Action, WorkspaceDir: s.workspace.RootPath, ProjectDir: projectDir,
+	profile, err := s.Project.workspace.DebugRegistry().Plan(adapterInfo[0].Language, debugadapter.Request{
+		Action: request.Action, WorkspaceDir: s.Project.workspace.RootPath, ProjectDir: projectDir,
 		Target: *selected,
 	})
 	if err != nil {
@@ -279,7 +279,7 @@ func (s *Server) handleDebugPlan(w http.ResponseWriter, r *http.Request) {
 		fail(fmt.Errorf("invalid deterministic debug configuration: %w", err), http.StatusUnprocessableEntity)
 		return
 	}
-	if err := s.workspace.WithDAPManager(func(manager *dap.Manager) error {
+	if err := s.Project.workspace.WithDAPManager(func(manager *dap.Manager) error {
 		plan.ID = manager.RememberPlan(cloneDebugLaunchPlan(plan))
 		return nil
 	}); err != nil {
@@ -302,11 +302,11 @@ func decodeDebugJSON(w http.ResponseWriter, r *http.Request, target any) error {
 }
 
 func (s *Server) detectDebugTargets(currentFile string) ([]debugadapter.Target, error) {
-	source, err := s.workspace.Root.ReadFile(currentFile)
+	source, err := s.Project.workspace.Root.ReadFile(currentFile)
 	if err != nil {
 		return nil, err
 	}
-	return s.workspace.DebugRegistry().DetectFile(filepath.ToSlash(currentFile), source)
+	return s.Project.workspace.DebugRegistry().DetectFile(filepath.ToSlash(currentFile), source)
 }
 
 func selectTargetDebugAdapter(values []dap.AdapterInfo, target debugadapter.Target) ([]dap.AdapterInfo, error) {
@@ -386,7 +386,7 @@ func (s *Server) debugStartOptions(plan debugLaunchPlan) dap.StartOptions {
 		Breakpoints:   make(map[string][]dap.SourceBreakpoint),
 	}
 	for _, breakpoint := range plan.Breakpoints {
-		path := filepath.Join(s.workspace.RootPath, filepath.FromSlash(breakpoint.FilePath))
+		path := filepath.Join(s.Project.workspace.RootPath, filepath.FromSlash(breakpoint.FilePath))
 		options.Breakpoints[path] = append(options.Breakpoints[path], dap.SourceBreakpoint{
 			Line: breakpoint.Line, Column: breakpoint.Column, Condition: breakpoint.Condition,
 			HitCondition: breakpoint.HitCondition, LogMessage: breakpoint.LogMessage,
@@ -529,11 +529,11 @@ func (s *Server) validateDebugPlan(plan *debugLaunchPlan, adapters []dap.Adapter
 			plan.PreLaunch.ReadyURL = readyURL.String()
 		}
 	}
-	projectPath, err := dap.ResolveWorkspaceDirectory(s.workspace.RootPath, plan.ProjectDir)
+	projectPath, err := dap.ResolveWorkspaceDirectory(s.Project.workspace.RootPath, plan.ProjectDir)
 	if err != nil {
 		return err
 	}
-	project, err := filepath.Rel(s.workspace.RootPath, projectPath)
+	project, err := filepath.Rel(s.Project.workspace.RootPath, projectPath)
 	if err != nil {
 		return errors.New("project_dir must be inside the workspace")
 	}
@@ -547,17 +547,17 @@ func (s *Server) validateDebugPlan(plan *debugLaunchPlan, adapters []dap.Adapter
 		if breakpoint.Line < 1 || breakpoint.Column < 0 {
 			return fmt.Errorf("breakpoint %d has an invalid position", index+1)
 		}
-		rel, ok := s.workspaceRel(breakpoint.FilePath)
+		rel, ok := workspaceRel(breakpoint.FilePath)
 		if !ok {
 			return fmt.Errorf("breakpoint %d has an invalid path", index+1)
 		}
-		info, err := s.workspace.Root.Stat(rel)
+		info, err := s.Project.workspace.Root.Stat(rel)
 		if err != nil || !info.Mode().IsRegular() {
 			return fmt.Errorf("breakpoint path %q does not exist", breakpoint.FilePath)
 		}
 		breakpoint.FilePath = filepath.ToSlash(rel)
 	}
-	if _, err := dap.ResolveConfigurationPaths(s.workspace.RootPath, projectPath, selectedAdapter.ConfigurationPaths, plan.Configuration); err != nil {
+	if _, err := dap.ResolveConfigurationPaths(s.Project.workspace.RootPath, projectPath, selectedAdapter.ConfigurationPaths, plan.Configuration); err != nil {
 		return err
 	}
 	plan.Title = strings.TrimSpace(plan.Title)

@@ -7,17 +7,13 @@ export interface SessionInfo {
 	session: string;
 	title?: string;
 	updated_at: string;
-	/** The default chat first, then forks. */
-	chats: { id: string; title?: string }[];
+	/** The default chat first, then forks; running as the host last reported. */
+	chats: { id: string; title?: string; running?: boolean }[];
 }
 export interface ModeOption {
 	id: string;
 	name: string;
 	description?: string;
-}
-export interface ModeState {
-	modes: ModeOption[];
-	mode: string;
 }
 export async function deleteSession(key: string): Promise<void> {
 	await workspaceClient().dispose(key);

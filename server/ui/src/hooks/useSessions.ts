@@ -57,10 +57,10 @@ export function useSessions() {
 			files?: string[],
 			images?: string[],
 			intent: TurnInputIntent = "follow_up",
-			completions?: MessageAttachment[],
+			attachments?: MessageAttachment[],
 		) => {
 			try {
-				await client.send(key, text, files, images, intent, completions);
+				await client.send(key, text, files, images, intent, attachments);
 				return true;
 			} catch (error) {
 				toast({

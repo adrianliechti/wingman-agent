@@ -6,11 +6,24 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 	"github.com/coder/websocket"
 	"go.lsp.dev/jsonrpc2"
 )
+
+// editorState belongs to the web adapter. Headless projects have no editor
+// connections, document ownership or browser-facing debug references.
+type editorState struct {
+	dapReferenceSeq  atomic.Uint64
+	lspDocumentsMu   sync.Mutex
+	lspDocuments     map[string]*lspDocument
+	lspRefreshers    map[*lspConnection]struct{}
+	lspExternalMu    sync.Mutex
+	lspExternalPaths map[string]bool
+}
 
 // The browser transports use one UTF-8 JSON message per WebSocket frame.
 // Native language servers and debug adapters keep their Content-Length framing.
@@ -36,7 +49,7 @@ func (s *Server) acceptEditorSocket(w http.ResponseWriter, r *http.Request) (*ed
 		return nil, err
 	}
 	conn.SetReadLimit(8 << 20)
-	ctx, cancel := context.WithCancel(s.ctx)
+	ctx, cancel := context.WithCancel(s.Project.ctx)
 	p := &editorSocket{ctx: ctx, cancel: cancel, writer: newWSClient(conn), pending: map[string]context.CancelCauseFunc{}}
 	go p.writer.run()
 	go func() { <-ctx.Done(); _ = conn.CloseNow() }()
@@ -90,7 +103,7 @@ func editorRequestError(ctx context.Context, err error) error {
 }
 
 func (p *editorSocket) notify(method string, params any) {
-	p.send(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+	p.send(ahp.Notify(method, params))
 }
 
 func (p *editorSocket) reply(id json.RawMessage, result any, err error) {
@@ -98,11 +111,11 @@ func (p *editorSocket) reply(id json.RawMessage, result any, err error) {
 		return
 	}
 	if err == nil {
-		p.send(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+		p.send(ahp.Reply(id, result, nil))
 		return
 	}
-	rpc := &ahpRPCError{Code: -32603, Message: err.Error()}
-	var typed *ahpRPCError
+	rpc := &ahp.Error{Code: -32603, Message: err.Error()}
+	var typed *ahp.Error
 	var native *jsonrpc2.Error
 	switch {
 	case errors.Is(err, errEditorCancelled):
@@ -113,10 +126,10 @@ func (p *editorSocket) reply(id json.RawMessage, result any, err error) {
 		rpc = typed
 	case errors.As(err, &native):
 		// Language server errors such as ContentModified keep their meaning.
-		rpc = &ahpRPCError{Code: int(native.Code), Message: native.Message}
+		rpc = &ahp.Error{Code: int(native.Code), Message: native.Message}
 		if len(native.Data) > 0 {
 			rpc.Data = json.RawMessage(native.Data)
 		}
 	}
-	p.send(map[string]any{"jsonrpc": "2.0", "id": id, "error": rpc})
+	p.send(ahp.Reply(id, nil, rpc))
 }

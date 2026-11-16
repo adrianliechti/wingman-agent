@@ -3,6 +3,7 @@ import test from "node:test";
 import {
 	AHPSessionProjection,
 	inputAnswers,
+	inputRequest,
 	toolLocation,
 } from "../src/state/ahpSession.ts";
 
@@ -94,6 +95,37 @@ const project = (s: any, c: any) =>
 		uri: "ahp-session:/wingman/b25l/c2F2ZWQ",
 		root,
 	});
+
+test("attachments other than workspace files and images are kept as sent", () => {
+	const file = {
+		type: "resource",
+		label: "a.go",
+		uri: "file:///work%20space/a.go",
+	};
+	const kept = [
+		{
+			type: "chat",
+			label: "Earlier",
+			resource: "ahp-chat:/other",
+			endTurn: "t9",
+		},
+		{ type: "resource", label: "b.go", uri: "file:///elsewhere/b.go" },
+		{ ...file, selection: { start: { line: 1, character: 0 } } },
+		{ type: "simple", label: "/review", _meta: { command: "review" } },
+	];
+	const message = { ...user("compare /review"), attachments: [file, ...kept] };
+	const view = project(
+		session(),
+		chat({
+			turns: [{ id: "t1", message, responseParts: [], state: "complete" }],
+			queuedMessages: [{ id: "q1", kind: "queued", message }],
+		}),
+	);
+	assert.deepEqual(view.entries[0].files, ["a.go"]);
+	assert.deepEqual(view.entries[0].attachments, kept);
+	assert.deepEqual(view.pendingInputs[0].files, ["a.go"]);
+	assert.deepEqual(view.pendingInputs[0].attachments, kept);
+});
 
 test("settings come from the chat's config, the schema and the root catalogue", () => {
 	const view = project(
@@ -449,7 +481,7 @@ test("answers map free-form select values and numeric kinds", () => {
 	});
 	assert.deepEqual(
 		{
-			...inputAnswers(state, "q", {
+			...inputAnswers(inputRequest(session(), state, "q"), {
 				count: "3",
 				color: "green",
 				tags: ["a", "c"],
@@ -466,5 +498,46 @@ test("answers map free-form select values and numeric kinds", () => {
 				value: { kind: "selected-many", value: ["a"], freeformValues: ["c"] },
 			},
 		},
+	);
+});
+
+test("a question raised while no turn runs is shown and answered from the session", () => {
+	const request = {
+		id: "ask-1",
+		message: "Which branch?",
+		questions: [{ id: "branch", kind: "text", message: "Branch" }],
+	};
+	const idle = session();
+	idle.inputNeeded = [
+		{ id: "ask-1", chat: chatURI, kind: "chatInput", request },
+		{
+			id: "ask-2",
+			chat: "ahp-chat:/other",
+			kind: "chatInput",
+			request: { ...request, id: "ask-2" },
+		},
+		{
+			id: "call-1",
+			chat: chatURI,
+			kind: "toolClientExecution",
+			turnId: "t",
+			clientId: "c",
+			toolCall: {},
+		},
+	];
+	const view = project(idle, chat());
+	assert.deepEqual(
+		view.prompts.map((prompt) => [
+			prompt.id,
+			prompt.kind,
+			prompt.fields?.map((f) => f.name),
+		]),
+		[["ask-1", "ask", ["branch"]]],
+	);
+	assert.deepEqual(
+		{
+			...inputAnswers(inputRequest(idle, chat(), "ask-1"), { branch: "main" }),
+		},
+		{ branch: { state: "submitted", value: { kind: "text", value: "main" } } },
 	);
 });

@@ -28,13 +28,13 @@ func TestDAPWebSocketLaunchInspectReconnect(t *testing.T) {
 	root := t.TempDir()
 	writeDebugTestFile(t, root, "main.go", "package main\nfunc main() {}\n")
 	app := newDebugTestServer(t, root)
-	app.scope = WorkspaceScope{"workspace", "instance"}
+	app.Project.scope = WorkspaceScope{"workspace", "instance"}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.workspace.DAP.Close()
-	app.workspace.DAP = dap.NewManager(root, browserTestTools(executable), dap.AdapterDescriptor{Name: "fixture", Language: "Test", Command: "fixture", Args: []string{"-test.run=^TestDAPBrowserAdapterProcess$", "--", "wingman-dap-fixture"}, Transport: dap.TransportStdio, SourceExtensions: []string{".go"}})
+	app.Project.workspace.DAP.Close()
+	app.Project.workspace.DAP = dap.NewManager(root, browserTestTools(executable), dap.AdapterDescriptor{Name: "fixture", Language: "Test", Command: "fixture", Args: []string{"-test.run=^TestDAPBrowserAdapterProcess$", "--", "wingman-dap-fixture"}, Transport: dap.TransportStdio, SourceExtensions: []string{".go"}})
 	conn, ctx := dialEditorTest(t, app, "/dap")
 	seq := float64(0)
 	call := func(command string, args any) map[string]any {
@@ -47,7 +47,7 @@ func TestDAPWebSocketLaunchInspectReconnect(t *testing.T) {
 	}
 	call("initialize", map[string]any{"adapterID": "wingman"})
 	plan := debugLaunchPlan{Adapter: "fixture", Request: "launch", ProjectDir: ".", IO: "output", Configuration: map[string]any{"program": filepath.Join(root, "main.go")}}
-	planID := app.workspace.DAP.RememberPlan(plan)
+	planID := app.Project.workspace.DAP.RememberPlan(plan)
 	seq++
 	rejected := editorTestReply(t, conn, ctx, map[string]any{"seq": seq, "type": "request", "command": "launch", "arguments": map[string]any{"_wingmanPlanId": "unknown", "_wingmanPlan": plan}})
 	if rejected["success"] != false {
@@ -159,7 +159,7 @@ func TestDAPWebSocketOrdersBreakpointRequests(t *testing.T) {
 	root := t.TempDir()
 	writeDebugTestFile(t, root, "main.go", "package main\nfunc main() {}\n")
 	app := newDebugTestServer(t, root)
-	app.scope = WorkspaceScope{"workspace", "instance"}
+	app.Project.scope = WorkspaceScope{"workspace", "instance"}
 	conn, ctx := dialEditorTest(t, app, "/dap")
 	if response := editorTestReply(t, conn, ctx, map[string]any{"seq": float64(1), "type": "request", "command": "initialize", "arguments": map[string]any{"adapterID": "wingman"}}); response["success"] != true {
 		t.Fatal(response)

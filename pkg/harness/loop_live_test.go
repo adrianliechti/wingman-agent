@@ -2,7 +2,6 @@ package harness
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,7 +122,7 @@ func TestLiveLoop(t *testing.T) {
 				t.Fatal("resume repeated completed tool work")
 			}
 			usage := restored.UsageSnapshot()
-			t.Log(fmt.Sprintf("model=%s tool calls=3 recovered errors=1 steering messages=1 disk resume=passed input=%d output=%d", model, usage.InputTokens, usage.OutputTokens))
+			t.Logf("model=%s tool calls=3 recovered errors=1 steering messages=1 disk resume=passed input=%d output=%d", model, usage.InputTokens, usage.OutputTokens)
 		})
 	}
 }

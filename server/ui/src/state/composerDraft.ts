@@ -5,13 +5,13 @@ export type ComposerContent = {
 	text: string;
 	files: string[];
 	images: PendingImage[];
-	completions?: MessageAttachment[];
+	attachments?: MessageAttachment[];
 	editingQueueId: string | null;
 	previousDraft?: {
 		text: string;
 		files: string[];
 		images: PendingImage[];
-		completions?: MessageAttachment[];
+		attachments?: MessageAttachment[];
 	};
 };
 type ComposerSnapshot = ComposerContent & {
@@ -53,7 +53,7 @@ export class ComposerDraft {
 	private publish(patch: Partial<ComposerSnapshot>) {
 		this.value = { ...this.value, ...patch };
 		if (!this.value.previousDraft) delete this.value.previousDraft;
-		if (!this.value.completions?.length) delete this.value.completions;
+		if (!this.value.attachments?.length) delete this.value.attachments;
 		for (const listener of this.listeners) listener();
 	}
 	readonly update = (patch: Partial<ComposerContent>) => {
@@ -61,21 +61,21 @@ export class ComposerDraft {
 		this.publish({ ...patch, error: null });
 	};
 	beginQueueEdit(content: ComposerContent) {
-		const { text, files, images, completions, previousDraft } = this.value;
+		const { text, files, images, attachments, previousDraft } = this.value;
 		this.update({
 			...content,
-			completions: content.completions,
+			attachments: content.attachments,
 			previousDraft: previousDraft ?? {
 				text,
 				files,
 				images,
-				...(completions ? { completions } : {}),
+				...(attachments ? { attachments } : {}),
 			},
 		});
 	}
 	cancelQueueEdit() {
 		this.update({
-			completions: undefined,
+			attachments: undefined,
 			...this.value.previousDraft,
 			editingQueueId: null,
 			previousDraft: undefined,
@@ -101,7 +101,7 @@ export class ComposerDraft {
 			...(sent && this.revision === revision
 				? {
 						...emptyContent(),
-						completions: undefined,
+						attachments: undefined,
 						...content.previousDraft,
 						previousDraft: undefined,
 					}

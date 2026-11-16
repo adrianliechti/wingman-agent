@@ -588,7 +588,7 @@ func TestSandboxLoopbackProbe(t *testing.T) {
 		}()
 		report("own server", listener.Addr().String())
 	}
-	for _, port := range strings.Split(spec, ",") {
+	for port := range strings.SplitSeq(spec, ",") {
 		report("port "+port, net.JoinHostPort("127.0.0.1", port))
 	}
 }

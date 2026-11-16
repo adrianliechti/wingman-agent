@@ -3,7 +3,7 @@ package server
 import "net/http"
 
 func serveTestHTTP(app *Server, w http.ResponseWriter, r *http.Request) {
-	r.Header.Set(instanceHeader, app.scope.InstanceID)
+	r.Header.Set(instanceHeader, app.Project.scope.InstanceID)
 	app.ServeHTTP(w, r)
 }
 

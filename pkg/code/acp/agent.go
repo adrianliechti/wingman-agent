@@ -468,7 +468,7 @@ func (a *Agent) applySessionDefaults(ctx context.Context, sess *sessionState) er
 
 	sess.mu.Lock()
 	currentModel, currentEffort := sess.modelID, sess.effortID
-	modelOptID, effortOptID := sess.modelOptID, sess.effortOptID
+	modelOptID := sess.modelOptID
 	sess.mu.Unlock()
 	if modelID != "" && modelID != currentModel {
 		if err := a.setSessionConfig(ctx, sess, modelOptID, modelID); err != nil {
@@ -477,7 +477,7 @@ func (a *Agent) applySessionDefaults(ctx context.Context, sess *sessionState) er
 	}
 	if effortID != "" && effortID != currentEffort {
 		sess.mu.Lock()
-		effortOptID = sess.effortOptID
+		effortOptID := sess.effortOptID
 		sess.mu.Unlock()
 		if err := a.setSessionConfig(ctx, sess, effortOptID, effortID); err != nil {
 			return fmt.Errorf("set default effort: %w", err)
@@ -848,7 +848,8 @@ func (a *Agent) Send(ctx context.Context, id string, input []harness.Content) (i
 	if len(input) == 0 {
 		return nil, code.ErrEmptyInput
 	}
-	input = harness.CloneContent(input)
+	// The external agent reads attached context with the input.
+	input = harness.ContextContent(harness.InputContextFromContext(ctx), harness.CloneContent(input))
 	a.mu.Lock()
 	sess, ok := a.sessions[id]
 	a.mu.Unlock()
@@ -2042,19 +2043,6 @@ func toolCallContentBlocks(items []acpsdk.ToolCallContent) tool.Content {
 		}
 	}
 	return blocks
-}
-
-func toolCallDiffText(items []acpsdk.ToolCallContent) string {
-	var parts []string
-	for _, item := range items {
-		if item.Diff == nil {
-			continue
-		}
-		if text := diffBlockText(item.Diff); text != "" {
-			parts = append(parts, text)
-		}
-	}
-	return strings.Join(parts, "\n")
 }
 
 func semanticToolKind(kind acpsdk.ToolKind, items []acpsdk.ToolCallContent) string {

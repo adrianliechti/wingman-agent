@@ -293,7 +293,7 @@ func testZip(t *testing.T, files map[string]string) []byte {
 }
 
 func githubTestMetadata(tag, name, assetURL, digest string, size int) []byte {
-	return []byte(fmt.Sprintf(`{"tag_name":%q,"assets":[{"name":%q,"browser_download_url":%q,"digest":%q,"size":%d}]}`, tag, name, assetURL, digest, size))
+	return fmt.Appendf(nil, `{"tag_name":%q,"assets":[{"name":%q,"browser_download_url":%q,"digest":%q,"size":%d}]}`, tag, name, assetURL, digest, size)
 }
 
 func githubTestFetcher(t *testing.T, releaseURL, assetURL string, metadata, archive []byte) fetcher {

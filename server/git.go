@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
 	"strings"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/changes"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 )
 
 type GitFileStatus struct {
@@ -61,20 +61,20 @@ func decodeGitParams(data json.RawMessage, target any) error {
 		data = []byte("{}")
 	}
 	if len(data) > gitRequestLimit || data[0] != '{' {
-		return ahpInvalid("params must be an object of at most 1 MiB")
+		return ahp.InvalidParams("params must be an object of at most 1 MiB")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
-		return ahpInvalid("invalid params: " + err.Error())
+		return ahp.InvalidParams("invalid params: " + err.Error())
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return ahpInvalid("expected a single params object")
+		return ahp.InvalidParams("expected a single params object")
 	}
 	return nil
 }
 
-func (s *Server) gitStatus(ctx context.Context) (GitStatus, error) {
+func (s *Project) gitStatus(ctx context.Context) (GitStatus, error) {
 	status, err := s.workspace.GitStatus(ctx)
 	if err != nil {
 		return GitStatus{}, err
@@ -88,7 +88,7 @@ func (s *Server) gitStatus(ctx context.Context) (GitStatus, error) {
 	return result, nil
 }
 
-func (s *Server) gitBranches(ctx context.Context, refresh bool) (GitBranches, error) {
+func (s *Project) gitBranches(ctx context.Context, refresh bool) (GitBranches, error) {
 	if refresh {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
@@ -105,7 +105,7 @@ func (s *Server) gitBranches(ctx context.Context, refresh bool) (GitBranches, er
 	return result, nil
 }
 
-func (s *Server) gitHistory(ctx context.Context) ([]GitCommit, error) {
+func (s *Project) gitHistory(ctx context.Context) ([]GitCommit, error) {
 	commits, err := s.workspace.GitHistory(ctx)
 	if err != nil {
 		return nil, err
@@ -118,7 +118,7 @@ func (s *Server) gitHistory(ctx context.Context) ([]GitCommit, error) {
 	return result, nil
 }
 
-func (s *Server) gitInsights(ctx context.Context) (changes.GitInsightsResult, error) {
+func (s *Project) gitInsights(ctx context.Context) (changes.GitInsightsResult, error) {
 	result, err := s.workspace.GitInsights(ctx)
 	if err != nil {
 		return changes.GitInsightsResult{}, err
@@ -153,7 +153,7 @@ type gitRunResult struct {
 	Output string `json:"output"`
 }
 
-func (s *Server) runGit(ctx context.Context, p gitAction) (gitRunResult, error) {
+func (s *Project) runGit(ctx context.Context, p gitAction) (gitRunResult, error) {
 	result := gitRunResult{}
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -164,7 +164,7 @@ func (s *Server) runGit(ctx context.Context, p gitAction) (gitRunResult, error) 
 	case "init":
 		err = s.workspace.GitInit()
 		if err == nil {
-			s.broadcast(Frame{Type: EvtWorkspaceChanged})
+			s.workspaceChanged(Frame{Type: EvtWorkspaceChanged})
 			flush = true
 		}
 	case "createBranch":
@@ -182,12 +182,12 @@ func (s *Server) runGit(ctx context.Context, p gitAction) (gitRunResult, error) 
 	case "stage", "unstage", "revert":
 		paths := []string{}
 		if len(p.Paths) == 0 {
-			return result, ahpInvalid("at least one path is required")
+			return result, ahp.InvalidParams("at least one path is required")
 		}
 		for _, path := range p.Paths {
-			rel, ok := s.workspaceRel(path)
+			rel, ok := workspaceRel(path)
 			if !ok {
-				return result, ahpInvalid("invalid path")
+				return result, ahp.InvalidParams("invalid path")
 			}
 			paths = append(paths, rel)
 		}
@@ -198,7 +198,7 @@ func (s *Server) runGit(ctx context.Context, p gitAction) (gitRunResult, error) 
 			err = s.workspace.GitUnstage(ctx, paths)
 		case "revert":
 			if len(paths) != 1 {
-				return result, ahpInvalid("revert requires one path")
+				return result, ahp.InvalidParams("revert requires one path")
 			}
 			err = s.workspace.RevertChange(ctx, paths[0])
 			flush = true
@@ -206,7 +206,7 @@ func (s *Server) runGit(ctx context.Context, p gitAction) (gitRunResult, error) 
 	case "commit":
 		message := strings.TrimSpace(p.Message)
 		if message == "" || len(message) > 10000 {
-			return result, ahpInvalid("commit message must contain 1 to 10000 bytes")
+			return result, ahp.InvalidParams("commit message must contain 1 to 10000 bytes")
 		}
 		result.Output, err = s.workspace.GitCommit(ctx, message)
 	case "pull":
@@ -215,7 +215,7 @@ func (s *Server) runGit(ctx context.Context, p gitAction) (gitRunResult, error) 
 	case "push":
 		result.Output, err = s.workspace.GitPush(ctx)
 	default:
-		return result, ahpInvalid("unknown Git action")
+		return result, ahp.InvalidParams("unknown Git action")
 	}
 	if err != nil {
 		return result, err
@@ -245,116 +245,12 @@ func decodeGitAction(data json.RawMessage) (gitAction, error) {
 	case "commit":
 		allowed += "message "
 	default:
-		return p, ahpInvalid("unknown Git action; file operations use AHP changesets")
+		return p, ahp.InvalidParams("unknown Git action; file operations use AHP changesets")
 	}
 	for key := range fields {
 		if !strings.Contains(allowed, " "+key+" ") {
-			return p, ahpInvalid("unexpected field: " + key)
+			return p, ahp.InvalidParams("unexpected field: " + key)
 		}
 	}
 	return p, nil
-}
-
-func (s *Server) handleWorkspaceGit(w http.ResponseWriter, r *http.Request) {
-	if !s.workspace.HasChanges() {
-		writeJSON(w, nil)
-		return
-	}
-	result, err := s.gitStatus(r.Context())
-	writeGitResult(w, result, err)
-}
-
-// HTTP commands remain deliberately small. File edits and layer mutations use AHP.
-func (s *Server) handleGitBranches(w http.ResponseWriter, r *http.Request) {
-	result, err := s.gitBranches(r.Context(), false)
-	writeGitResult(w, result, err)
-}
-func (s *Server) handleGitFetch(w http.ResponseWriter, r *http.Request) {
-	result, err := s.gitBranches(r.Context(), true)
-	writeGitResult(w, result, err)
-}
-func (s *Server) handleGitCommits(w http.ResponseWriter, r *http.Request) {
-	result, err := s.gitHistory(r.Context())
-	writeGitResult(w, result, err)
-}
-func (s *Server) handleWorkspaceInsights(w http.ResponseWriter, r *http.Request) {
-	result, err := s.gitInsights(r.Context())
-	writeGitResult(w, result, err)
-}
-func (s *Server) handleGitAction(action string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, gitRequestLimit))
-		if err != nil {
-			http.Error(w, "invalid Git request body", http.StatusBadRequest)
-			return
-		}
-		if len(bytes.TrimSpace(data)) == 0 {
-			data = []byte("{}")
-		}
-		var fields map[string]json.RawMessage
-		if err := decodeGitParams(data, &fields); err != nil {
-			writeGitResult(w, nil, err)
-			return
-		}
-		if _, exists := fields["action"]; exists {
-			writeGitResult(w, nil, ahpInvalid("action is determined by the endpoint"))
-			return
-		}
-		fields["action"], _ = json.Marshal(action)
-		data, _ = json.Marshal(fields)
-		p, err := decodeGitAction(data)
-		if err != nil {
-			writeGitResult(w, nil, err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-		defer cancel()
-		result, err := s.runGit(ctx, p)
-		if err == nil {
-			s.ahpHost().refreshChangesets()
-		}
-		writeGitResult(w, result, err)
-	}
-}
-func (s *Server) handleGitDiff(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	base, head, mode := strings.TrimSpace(query.Get("base")), strings.TrimSpace(query.Get("head")), query.Get("mode")
-	if base == "" || head == "" {
-		writeGitResult(w, nil, ahpInvalid("base and head revisions are required"))
-		return
-	}
-	if mode == "" {
-		mode = "direct"
-	}
-	if mode != "direct" && mode != "merge-base" {
-		writeGitResult(w, nil, ahpInvalid("invalid compare mode"))
-		return
-	}
-	comparison, err := s.workspace.GitCompare(r.Context(), base, head, mode == "merge-base")
-	if err != nil {
-		writeGitResult(w, nil, err)
-		return
-	}
-	channel, err := s.ahpHost().comparisonChangeset(comparison.Diffs)
-	if err != nil {
-		writeGitResult(w, nil, err)
-		return
-	}
-	writeJSON(w, map[string]string{"channel": channel, "base": base, "head": head, "base_hash": comparison.BaseHash,
-		"head_hash": comparison.HeadHash, "merge_base_hash": comparison.MergeBaseHash})
-}
-func writeGitResult(w http.ResponseWriter, result any, err error) {
-	if err == nil {
-		writeJSON(w, result)
-		return
-	}
-	status := http.StatusConflict
-	var rpc *ahpRPCError
-	if errors.As(err, &rpc) && rpc.Code == -32602 {
-		status = http.StatusBadRequest
-	}
-	if errors.Is(err, changes.ErrNotGitRepository) {
-		status = http.StatusNotFound
-	}
-	http.Error(w, err.Error(), status)
 }

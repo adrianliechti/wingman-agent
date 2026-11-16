@@ -874,3 +874,33 @@ func TestCompleteRetriesStreamWithoutTerminalAfterOutput(t *testing.T) {
 		t.Fatalf("post-output incomplete stream should be retryable: %v", err)
 	}
 }
+
+// Attached context is recorded with its input, right before it, and not when the input is refused.
+func TestAttachedContextGoesWithItsInput(t *testing.T) {
+	block := false
+	a := &Agent{Config: &Config{Hooks: hook.Hooks{
+		UserPromptSubmit: []hook.UserPromptSubmit{func(context.Context, string) (hook.Outcome, error) {
+			return hook.Outcome{Block: block}, nil
+		}},
+	}}}
+	block = true
+	ctx := WithInputContext(WithInputID(context.Background(), "refused"), []string{"refused context"})
+	if _, err := a.Send(ctx, []Content{{Text: "refused"}}); err == nil {
+		t.Fatal("the hook did not refuse the input")
+	}
+	block = false
+	ctx = WithInputContext(WithInputID(context.Background(), "accepted"), []string{"an attached chat"})
+	// Setup records the input; the turn itself is never run.
+	if _, err := a.Send(ctx, []Content{{Text: "accepted"}}); err != nil {
+		t.Fatal(err)
+	}
+	var users []Message
+	for _, m := range a.MessagesSnapshot() {
+		if m.Role == RoleUser {
+			users = append(users, m)
+		}
+	}
+	if len(users) != 2 || !users[0].Hidden || users[0].InputID != "accepted" || users[0].Content[0].Text != "an attached chat" || users[1].Hidden || users[1].Content[0].Text != "accepted" {
+		t.Fatalf("user messages = %+v", users)
+	}
+}

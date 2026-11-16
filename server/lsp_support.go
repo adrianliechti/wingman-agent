@@ -64,11 +64,11 @@ func (s *Server) handleWorkspaceActivity(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) lspActivity() lspActivityResponse {
-	activities := s.workspace.LSPActivities()
+	activities := s.Project.workspace.LSPActivities()
 	services := make([]lspServiceActivity, 0, len(activities))
 	analyzing := false
 	for _, activity := range activities {
-		project, err := filepath.Rel(s.workspace.RootPath, activity.ProjectDir)
+		project, err := filepath.Rel(s.Project.workspace.RootPath, activity.ProjectDir)
 		if err != nil || project == ".." || filepath.IsAbs(project) || strings.HasPrefix(project, ".."+string(filepath.Separator)) {
 			project = filepath.Base(activity.ProjectDir)
 		}
@@ -86,13 +86,13 @@ func (s *Server) lspActivity() lspActivityResponse {
 }
 
 func (s *Server) lspEditorCapabilities(ctx context.Context, filePath string) editorCapabilitiesResponse {
-	capabilities, hasServer, err := s.workspace.EditorLSPCapabilities(ctx, filePath)
+	capabilities, hasServer, err := s.Project.workspace.EditorLSPCapabilities(ctx, filePath)
 	if err != nil {
 		// A missing or failed server must not disable structural fallbacks.
 		hasServer = false
 	}
 	response := editorCapabilitiesResponse{
-		WorkspaceURI:       fileuri.FromPath(s.workspace.RootPath),
+		WorkspaceURI:       fileuri.FromPath(s.Project.workspace.RootPath),
 		LanguageServer:     hasServer,
 		Completion:         true,
 		Hover:              true,
@@ -181,7 +181,7 @@ func (s *Server) lspSource(location string) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		if rel, err := filepath.Rel(s.workspace.RootPath, path); err == nil && filepath.IsLocal(rel) {
+		if rel, err := filepath.Rel(s.Project.workspace.RootPath, path); err == nil && filepath.IsLocal(rel) {
 			return "", false
 		}
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
@@ -200,12 +200,12 @@ func (s *Server) lspSource(location string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	s.lspExternalMu.Lock()
-	defer s.lspExternalMu.Unlock()
-	if s.lspExternalPaths == nil {
-		s.lspExternalPaths = make(map[string]bool)
+	s.editor.lspExternalMu.Lock()
+	defer s.editor.lspExternalMu.Unlock()
+	if s.editor.lspExternalPaths == nil {
+		s.editor.lspExternalPaths = make(map[string]bool)
 	}
-	s.lspExternalPaths[canonical] = true
+	s.editor.lspExternalPaths[canonical] = true
 	return canonical, true
 }
 
@@ -223,9 +223,9 @@ func (s *Server) lspSourceTarget(source string) (path, virtual string, ok bool) 
 	if !ok {
 		return "", "", false
 	}
-	s.lspExternalMu.Lock()
-	allowed := s.lspExternalPaths[canonical]
-	s.lspExternalMu.Unlock()
+	s.editor.lspExternalMu.Lock()
+	allowed := s.editor.lspExternalPaths[canonical]
+	s.editor.lspExternalMu.Unlock()
 	u, err := url.Parse(canonical)
 	if !allowed || err != nil {
 		return "", "", false
@@ -258,15 +258,15 @@ func (s *Server) workspaceEditDocuments(edits ...*lsp.WorkspaceEdit) (map[string
 			if !ok {
 				return nil, fmt.Errorf("language server edit targets a non-file URI")
 			}
-			rel, err := filepath.Rel(s.workspace.RootPath, filePath)
+			rel, err := filepath.Rel(s.Project.workspace.RootPath, filePath)
 			if err != nil || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return nil, fmt.Errorf("language server edit targets a file outside the workspace")
 			}
-			content, err := s.workspace.Root.ReadFile(rel)
+			content, err := s.Project.workspace.Root.ReadFile(rel)
 			switch {
 			case err == nil:
 				document := lspWorkspaceDocument{Path: filepath.ToSlash(rel), Revision: fileRevision(content), Exists: true}
-				if buffer, ok := s.workspace.EditorLSPDocumentContent(filePath); ok {
+				if buffer, ok := s.Project.workspace.EditorLSPDocumentContent(filePath); ok {
 					document.Revision = fileRevision([]byte(buffer))
 				}
 				documents[key] = document

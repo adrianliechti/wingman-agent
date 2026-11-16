@@ -15,32 +15,33 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microsoft/agent-host-protocol/clients/go/ahp"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
+	sdk "github.com/microsoft/agent-host-protocol/clients/go/ahp"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
-func reviewWorkspaceResourceHost(t *testing.T) (*Server, *ahpHost, string) {
+func reviewWorkspaceResourceHost(t *testing.T) (*Server, *Project, string) {
 	t.Helper()
 	root := t.TempDir()
 	app := newDebugTestServer(t, root)
-	h := app.ahpHost()
-	t.Cleanup(h.close)
+	h := app.Project
+	t.Cleanup(h.host.Close)
 	return app, h, root
 }
 
-func reviewWorkspaceResourceCall(h *ahpHost, method string, params map[string]any) (any, error) {
+func reviewWorkspaceResourceCall(h *Project, method string, params map[string]any) (any, error) {
 	params["channel"] = types.RootResourceURI
 	raw, _ := json.Marshal(params)
 	if method == "createResourceWatch" {
 		return h.createResourceWatch(raw)
 	}
-	result, err := h.resource(ahpRequest{Method: method, Params: raw})
-	return result, ahpResourceError(err)
+	result, err := h.resource(ahp.Request{Method: method, Params: raw})
+	return result, resourceError(err)
 }
 
 func reviewWorkspaceResourceCode(t *testing.T, err error, want int) {
 	t.Helper()
-	var rpc *ahpRPCError
+	var rpc *ahp.Error
 	if !errors.As(err, &rpc) || rpc.Code != want {
 		t.Fatalf("want error %d, got %v", want, err)
 	}
@@ -315,7 +316,7 @@ func TestReviewWorkspaceResourceSizeLimits(t *testing.T) {
 	_, h, root := reviewWorkspaceResourceHost(t)
 	uri := h.fileURI("big.txt")
 	path := filepath.Join(root, "big.txt")
-	exact := strings.Repeat("a", ahpResourceLimit)
+	exact := strings.Repeat("a", resourceLimit)
 	if _, err := reviewWorkspaceResourceCall(h, "resourceWrite", map[string]any{"uri": uri, "data": exact, "encoding": "utf-8"}); err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +339,7 @@ func TestReviewWorkspaceResourceSizeLimits(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "other.txt")); !os.IsNotExist(err) {
 		t.Fatal("oversized write created a file")
 	}
-	if info, err := os.Stat(path); err != nil || info.Size() != ahpResourceLimit {
+	if info, err := os.Stat(path); err != nil || info.Size() != resourceLimit {
 		t.Fatalf("rejected append changed the file: %v, %v", info, err)
 	}
 	if err := os.WriteFile(path, []byte(exact+"b"), 0o644); err != nil {
@@ -351,7 +352,7 @@ func TestReviewWorkspaceResourceSizeLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info := result.(types.ResourceResolveResult); info.Etag != nil || info.Size == nil || *info.Size != ahpResourceLimit+1 {
+	if info := result.(types.ResourceResolveResult); info.Etag != nil || info.Size == nil || *info.Size != resourceLimit+1 {
 		t.Fatalf("oversized resolve = %+v", info)
 	}
 	if _, err := reviewWorkspaceResourceCall(h, "resourceWrite", map[string]any{"uri": uri, "data": "c", "encoding": "utf-8", "ifMatch": *etag}); err == nil {
@@ -395,7 +396,7 @@ func TestReviewWorkspaceResourceResolveSymlinks(t *testing.T) {
 	if _, err := reviewWorkspaceResourceCall(h, "resourceRead", map[string]any{"uri": followed.Uri}); err != nil {
 		t.Fatalf("canonical URI is not readable: %v", err)
 	}
-	link, err := resolve(h.fileURI("link.txt"), ahpPtr(false))
+	link, err := resolve(h.fileURI("link.txt"), new(false))
 	if err != nil || link.Type != types.ResourceTypeSymlink || link.Uri != h.fileURI("link.txt") || link.Etag != nil {
 		t.Fatalf("lstat = %+v, %v", link, err)
 	}
@@ -405,7 +406,7 @@ func TestReviewWorkspaceResourceResolveSymlinks(t *testing.T) {
 	}
 	_, err = resolve(h.fileURI("dangling"), nil)
 	reviewWorkspaceResourceCode(t, err, int(types.ErrorCodeNotFound))
-	if dangling, err := resolve(h.fileURI("dangling"), ahpPtr(false)); err != nil || dangling.Type != types.ResourceTypeSymlink {
+	if dangling, err := resolve(h.fileURI("dangling"), new(false)); err != nil || dangling.Type != types.ResourceTypeSymlink {
 		t.Fatalf("dangling lstat = %+v, %v", dangling, err)
 	}
 	_, err = resolve(h.fileURI("missing"), nil)
@@ -434,11 +435,12 @@ func TestReviewWorkspaceResourceWatchPatternValidationAndLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	same, err := reviewWorkspaceResourceCall(h, "createResourceWatch", map[string]any{"uri": h.fileURI("src"), "recursive": true})
-	if err != nil || same != first {
-		t.Fatalf("identical watch = %v, %v", same, err)
+	// The protocol gives every watch its own channel, also an identical one.
+	second, err := reviewWorkspaceResourceCall(h, "createResourceWatch", map[string]any{"uri": h.fileURI("src"), "recursive": true})
+	if err != nil || second == first {
+		t.Fatalf("identical watch = %v, %v", second, err)
 	}
-	for i := 1; i < 64; i++ {
+	for i := 2; i < 64; i++ {
 		if _, err := reviewWorkspaceResourceCall(h, "createResourceWatch", map[string]any{"uri": h.fileURI("src"), "excludes": items(fmt.Sprint(i))}); err != nil {
 			t.Fatal(i, err)
 		}
@@ -454,8 +456,8 @@ func TestReviewWorkspaceResourceWatchReportsFilteredBatches(t *testing.T) {
 	reviewWorkspaceResourceWrite(t, root, "src/skip/old.go", "package skip")
 	web := httptest.NewServer(app)
 	t.Cleanup(web.Close)
-	client := ahpTestClient(t, "ws"+strings.TrimPrefix(web.URL, "http")+"/ahp", "watch-batches")
-	watch := func(params map[string]any) *ahp.Subscription {
+	client := protocolTestClient(t, "ws"+strings.TrimPrefix(web.URL, "http")+"/ahp", "watch-batches")
+	watch := func(params map[string]any) *sdk.Subscription {
 		t.Helper()
 		params["channel"] = types.RootResourceURI
 		var created types.CreateResourceWatchResult
@@ -487,7 +489,7 @@ func TestReviewWorkspaceResourceWatchReportsFilteredBatches(t *testing.T) {
 	if _, err := reviewWorkspaceResourceCall(h, "resourceDelete", map[string]any{"uri": h.fileURI("src/keep.go")}); err != nil {
 		t.Fatal(err)
 	}
-	collect := func(sub *ahp.Subscription, until func(map[string]types.ResourceChangeType) bool) map[string]types.ResourceChangeType {
+	collect := func(sub *sdk.Subscription, until func(map[string]types.ResourceChangeType) bool) map[string]types.ResourceChangeType {
 		t.Helper()
 		seen := map[string]types.ResourceChangeType{}
 		deadline := time.After(5 * time.Second)
@@ -499,7 +501,7 @@ func TestReviewWorkspaceResourceWatchReportsFilteredBatches(t *testing.T) {
 			}
 			select {
 			case event := <-sub.Events():
-				action, ok := event.(ahp.SubscriptionEventAction)
+				action, ok := event.(sdk.SubscriptionEventAction)
 				if !ok {
 					continue
 				}
@@ -567,9 +569,9 @@ func TestReviewWorkspaceResourceConcurrentMutationsUnderWatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	channel := string(result.(types.CreateResourceWatchResult).Channel)
-	h.mu.Lock()
+	h.host.mu.Lock()
 	scanner := h.watches[channel].scanner
-	h.mu.Unlock()
+	h.host.mu.Unlock()
 	var wg sync.WaitGroup
 	for worker := range 4 {
 		wg.Go(func() {

@@ -92,10 +92,6 @@ func Supported() bool {
 	return ptySupported
 }
 
-func newSession(id, shell, dir string, cols, rows int, onExit func(*Session)) (*Session, error) {
-	return newCommandSession(id, CommandSpec{Path: shell, Dir: dir}, cols, rows, onExit)
-}
-
 func newCommandSession(id string, spec CommandSpec, cols, rows int, onExit func(*Session)) (*Session, error) {
 	if !ptySupported {
 		return nil, ErrUnsupported

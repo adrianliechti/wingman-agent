@@ -1,5 +1,5 @@
 import type { WorkspaceInfo } from "../api/workspace.ts";
-import { ChangesetClient, workspaceChangeset } from "./changesetClient.ts";
+import { ChangesetClient } from "./changesetClient.ts";
 import { FileClient } from "./fileClient.ts";
 import { DAPClient } from "./dapClient.ts";
 import { LSPClient } from "./lspClient.ts";
@@ -22,7 +22,11 @@ import {
 } from "./ahpValues.ts";
 import { RpcError } from "@microsoft/agent-host-protocol/client";
 import { AHPConnection } from "./ahpConnection.ts";
-import { AHPSessionProjection, inputAnswers } from "./ahpSession.ts";
+import {
+	AHPSessionProjection,
+	inputAnswers,
+	inputRequest,
+} from "./ahpSession.ts";
 import {
 	APIError,
 	createWorkspaceHTTP,
@@ -42,12 +46,21 @@ import {
 	type WorkspaceScope,
 } from "./sessionStore.ts";
 
-export type Bootstrap = WorkspaceScope & { protocol: number };
+/** The namespace is where the host names this project's channels. */
+export type Bootstrap = WorkspaceScope & {
+	protocol: number;
+	namespace: string;
+};
 export async function fetchWorkspace(): Promise<WorkspaceInfo & Bootstrap> {
 	const response = await fetch("/api/workspace");
 	if (!response.ok) throw new APIError(await response.text(), response.status);
 	const scope = (await response.json()) as WorkspaceInfo;
-	if (scope.protocol !== 2 || !scope.instanceId || !scope.workspaceId)
+	if (
+		scope.protocol !== 2 ||
+		!scope.instanceId ||
+		!scope.workspaceId ||
+		!scope.namespace
+	)
 		throw new Error("Unsupported workspace protocol. Reload the application.");
 	return scope;
 }
@@ -58,8 +71,14 @@ type SendRequest = {
 	files: string[];
 	images: string[];
 	intent: string;
-	completions: MessageAttachment[];
+	attachments: MessageAttachment[];
 };
+type Send = { request: SendRequest; pending?: Promise<void> };
+const same = (a: readonly unknown[], b: readonly unknown[]) =>
+	a.length === b.length && a.every((value, i) => value === b[i]);
+// SessionStatus.InProgress, which InputNeeded includes.
+const SESSION_IN_PROGRESS = 1 << 3;
+
 export function chatPath(key: string): string {
 	return `/api/v2/chats/${encodeURIComponent(key)}`;
 }
@@ -84,12 +103,12 @@ export class WorkspaceClient {
 	private sessions = new Map<string, string>();
 	private providers = new Map<string, string>();
 	private catalogue?: Promise<void>;
+	/** Agents started on this connection, which can list their sessions. */
+	private started = new Map<string, Promise<unknown>>();
 	private redirects = new Map<string, string>();
 	private redirectListeners = new Set<(from: string, to: string) => void>();
-	private sends = new Map<
-		string,
-		{ request: SendRequest; pending?: Promise<void> }
-	>();
+	/** Each chat's latest send, kept after a failure so a retry reuses its request. */
+	private sends = new Map<string, Send>();
 	private forks = new Map<string, { uri: string; pending?: Promise<string> }>();
 	private creations = new Map<
 		string,
@@ -99,12 +118,14 @@ export class WorkspaceClient {
 		this.lsp = new LSPClient(scope.instanceId);
 		this.dap = new DAPClient(scope.instanceId);
 		this.files = new FileClient(ahp, this.lsp);
-		this.changesets = new ChangesetClient(ahp);
+		this.changesets = new ChangesetClient(ahp, scope.namespace);
 		this.scope = scope;
 		this.ahp = ahp;
 		this.http = createWorkspaceHTTP(scope.instanceId);
 		ahp.subscribeConnection(() => {
-			if (!ahp.getConnected()) this.store.disconnect();
+			if (ahp.getConnected()) return;
+			this.store.disconnect();
+			this.started.clear();
 		});
 	}
 	readonly getReplaced = () => this.ahp.getReplaced();
@@ -136,7 +157,7 @@ export class WorkspaceClient {
 	start() {
 		this.ahp.start();
 		// Changeset actions are the client's only signal that workspace changes moved.
-		this.changesets.watch(workspaceChangeset());
+		this.changesets.watch(this.changesets.layer());
 	}
 	stop() {
 		this.changesets.close();
@@ -279,11 +300,8 @@ export class WorkspaceClient {
 								this.providers.set(key, session.provider);
 								for (const summary of session.chats)
 									this.sessions.set(summary.resource, uri);
-								// A disposed fork leaves the session's chat list.
-								if (
-									session.chats.length &&
-									!session.chats.some((summary) => summary.resource === key)
-								)
+								// A disposed chat leaves the session's chat list; a disposed session lists none.
+								if (!session.chats.some((summary) => summary.resource === key))
 									deleted();
 								else update();
 							},
@@ -298,15 +316,15 @@ export class WorkspaceClient {
 							},
 							(error) => failed(error, true),
 						);
-						// Disposal is announced on the root channel only.
-						const releaseRemoval = this.ahp.onNotification((method, params) => {
-							if (method === "root/sessionRemoved" && params?.session === uri)
-								deleted();
+						// A session's config schema follows its agent's models without an action.
+						const releaseAgents = this.ahp.watch("ahp-root://", (event) => {
+							if (event.action?.action.type === "root/agentsChanged")
+								this.ahp.refresh(uri);
 						});
 						releaseChannels = () => {
 							releaseSession();
 							releaseChat();
-							releaseRemoval();
+							releaseAgents();
 						};
 					})
 					.catch(failed)
@@ -341,9 +359,9 @@ export class WorkspaceClient {
 		text: string,
 		files: string[] = [],
 		images: string[] = [],
-		completions: MessageAttachment[] = [],
+		attachments: MessageAttachment[] = [],
 	): Message {
-		const attachments: MessageAttachment[] = files.map((file) => ({
+		const encoded: MessageAttachment[] = files.map((file) => ({
 			type: MessageAttachmentKind.Resource,
 			label: file,
 			uri: new URL(
@@ -354,7 +372,7 @@ export class WorkspaceClient {
 		for (const image of images) {
 			const match = /^data:(image\/[^;]+);base64,(.*)$/.exec(image);
 			if (match)
-				attachments.push({
+				encoded.push({
 					type: MessageAttachmentKind.EmbeddedResource,
 					label: "Image",
 					contentType: match[1],
@@ -363,7 +381,7 @@ export class WorkspaceClient {
 		}
 		return {
 			text,
-			attachments: [...attachments, ...completions],
+			attachments: [...encoded, ...attachments],
 			origin: { kind: MessageKind.User },
 		};
 	}
@@ -389,18 +407,12 @@ export class WorkspaceClient {
 	}
 	async clearQueue(key: string) {
 		const chat = await this.chat(key);
-		const pending = [
-			...(chat.steeringMessage ? [chat.steeringMessage] : []),
-			...(chat.queuedMessages ?? []),
-		];
+		// Protocol 1.1 lists steering messages in the queue as well.
 		await Promise.all(
-			pending.map((input) =>
+			(chat.queuedMessages ?? []).map((input) =>
 				this.ahp.dispatch(chat.resource, {
 					type: ActionType.ChatPendingMessageRemoved,
-					kind:
-						input === chat.steeringMessage
-							? PendingMessageKind.Steering
-							: (input.kind ?? PendingMessageKind.Queued),
+					kind: input.kind ?? PendingMessageKind.Queued,
 					id: input.id,
 				}),
 			),
@@ -414,9 +426,7 @@ export class WorkspaceClient {
 		const chat = await this.chat(key);
 		const kind =
 			chat.queuedMessages?.find((input) => input.id === inputId)?.kind ??
-			(chat.steeringMessage?.id === inputId
-				? PendingMessageKind.Steering
-				: PendingMessageKind.Queued);
+			PendingMessageKind.Queued;
 		await this.ahp.dispatch(chat.resource, {
 			type: ActionType.ChatPendingMessageRemoved,
 			kind,
@@ -429,18 +439,17 @@ export class WorkspaceClient {
 		text: string,
 		files: string[] = [],
 		images: string[] = [],
-		completions: MessageAttachment[] = [],
+		attachments: MessageAttachment[] = [],
 	) {
 		const chat = await this.chat(key);
 		const steering =
-			chat.steeringMessage?.id === inputId ||
 			chat.queuedMessages?.find((input) => input.id === inputId)?.kind ===
-				PendingMessageKind.Steering;
+			PendingMessageKind.Steering;
 		await this.ahp.dispatch(chat.resource, {
 			type: ActionType.ChatPendingMessageSet,
 			kind: steering ? PendingMessageKind.Steering : PendingMessageKind.Queued,
 			id: inputId,
-			message: this.message(text, files, images, completions),
+			message: this.message(text, files, images, attachments),
 		});
 	}
 	async respond(key: string, promptId: string, reply: PromptReply) {
@@ -473,17 +482,20 @@ export class WorkspaceClient {
 					: { approved: false, reason: ToolCallCancellationReason.Denied }),
 				...(option ? { selectedOptionId: option.id } : {}),
 			});
-		} else
+		} else {
+			const session = await this.ahp.read<SessionState>(
+				await this.sessionOf(key),
+			);
 			await this.ahp.dispatch(chat.resource, {
 				type: ActionType.ChatInputCompleted,
 				requestId: promptId,
 				response: reply.action as ChatInputResponseKind,
 				answers: inputAnswers(
-					chat,
-					promptId,
+					inputRequest(session, chat, promptId),
 					(reply.action === "accept" && reply.content) || {},
 				),
 			});
+		}
 	}
 	async configure(key: string, settings: SettingsPatch) {
 		const chat = await this.chat(key);
@@ -497,6 +509,7 @@ export class WorkspaceClient {
 	}
 	/** Disposing a session's default chat disposes the session with its forks. */
 	async dispose(key: string) {
+		this.sends.delete(key);
 		const uri = await this.sessionOf(key);
 		const session = await this.ahp.read<SessionState>(uri);
 		if (session.defaultChat && session.defaultChat !== key)
@@ -509,57 +522,73 @@ export class WorkspaceClient {
 		files: string[] = [],
 		images: string[] = [],
 		intent = "follow_up",
-		completions: MessageAttachment[] = [],
+		attachments: MessageAttachment[] = [],
 	) {
 		// The session phase may change before the user retries, so intent must not
 		// split the retry identity; a retry keeps the original request.
-		const fingerprint = JSON.stringify([key, text, files, images, completions]);
-		let entry = this.sends.get(fingerprint);
-		if (!entry) {
-			entry = {
-				request: {
-					id: crypto.randomUUID(),
-					text,
-					files: [...files],
-					images: [...images],
-					completions: structuredClone(completions),
-					intent,
-				},
-			};
-			this.sends.set(fingerprint, entry);
-		}
-		if (!entry.pending) {
-			const current = entry;
-			current.pending = this.deliver(key, current.request)
-				.then(() => {
-					this.sends.delete(fingerprint);
-				})
-				.finally(() => {
-					current.pending = undefined;
-				});
-		}
+		const previous = this.sends.get(key);
+		const retry =
+			previous?.request.text === text &&
+			same(previous.request.files, files) &&
+			same(previous.request.images, images) &&
+			JSON.stringify(previous.request.attachments) ===
+				JSON.stringify(attachments);
+		const entry: Send = retry
+			? previous
+			: {
+					request: {
+						id: crypto.randomUUID(),
+						text,
+						files: [...files],
+						images: [...images],
+						attachments: structuredClone(attachments),
+						intent,
+					},
+				};
+		this.sends.set(key, entry);
+		entry.pending ??= this.deliver(key, entry.request)
+			.then(() => {
+				if (this.sends.get(key) === entry) this.sends.delete(key);
+			})
+			.finally(() => {
+				entry.pending = undefined;
+			});
 		await entry.pending;
 	}
 	private async deliver(key: string, request: SendRequest) {
 		const chat = await this.chat(key);
+		const message = this.message(
+			request.text,
+			request.files,
+			request.images,
+			request.attachments,
+		);
+		const steer = request.intent === "steer";
 		await this.ahp.dispatch(
 			chat.resource,
 			{
 				type: ActionType.ChatPendingMessageSet,
-				kind:
-					request.intent === "steer"
-						? PendingMessageKind.Steering
-						: PendingMessageKind.Queued,
+				kind: steer ? PendingMessageKind.Steering : PendingMessageKind.Queued,
 				id: request.id,
-				message: this.message(
-					request.text,
-					request.files,
-					request.images,
-					request.completions,
-				),
+				message,
 			},
 			request.id,
 		);
+		// Steering that missed its turn waits for the next one; the user meant to be answered now.
+		const now = await this.chat(key);
+		if (
+			steer &&
+			!now.activeTurn &&
+			now.queuedMessages?.some(
+				(m) => m.id === request.id && m.kind === PendingMessageKind.Steering,
+			)
+		)
+			await this.ahp.dispatch(now.resource, {
+				type: ActionType.ChatPendingMessageSet,
+				kind: PendingMessageKind.Queued,
+				id: request.id,
+				message,
+			});
 	}
 	/** Creates the session a draft becomes and returns its default chat. */
 	create(backend: string, draftID: string): Promise<string> {
@@ -648,10 +677,20 @@ export class WorkspaceClient {
 	}
 	async list(backend: string): Promise<SessionInfo[]> {
 		// Resolve config starts a lazily loaded provider before cataloguing it.
-		await this.ahp.request("resolveSessionConfig", {
-			channel: "ahp-root://",
-			provider: backend,
-		});
+		let started = this.started.get(backend);
+		if (!started) {
+			started = this.ahp
+				.request("resolveSessionConfig", {
+					channel: "ahp-root://",
+					provider: backend,
+				})
+				.catch((error) => {
+					this.started.delete(backend);
+					throw error;
+				});
+			this.started.set(backend, started);
+		}
+		await started;
 		const items = await this.listSessions();
 		return items
 			.filter((summary) => summary.provider === backend)
@@ -659,7 +698,13 @@ export class WorkspaceClient {
 				const fallback = summary.defaultChat ?? sessionToChat(summary.resource);
 				const chats = summary.chats?.length
 					? summary.chats
-					: [{ resource: fallback, title: summary.title }];
+					: [
+							{
+								resource: fallback,
+								title: summary.title,
+								status: summary.status,
+							},
+						];
 				const first =
 					chats.find((chat) => chat.resource === summary.defaultChat) ??
 					chats[0];
@@ -669,7 +714,11 @@ export class WorkspaceClient {
 					title: summary.title,
 					updated_at: summary.modifiedAt,
 					chats: [first, ...chats.filter((chat) => chat !== first)].map(
-						(chat) => ({ id: chat.resource, title: chat.title }),
+						(chat) => ({
+							id: chat.resource,
+							title: chat.title,
+							running: ((chat.status ?? 0) & SESSION_IN_PROGRESS) !== 0,
+						}),
 					),
 				};
 			});

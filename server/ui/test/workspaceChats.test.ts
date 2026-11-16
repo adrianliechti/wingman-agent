@@ -130,7 +130,10 @@ async function host(t: TestContext, states: Record<string, unknown>) {
 	t.after(() => ahp.stop());
 	ahp.start();
 	await ahp.ready();
-	const client = new WorkspaceClient({ ...scope, protocol: 2 }, ahp);
+	const client = new WorkspaceClient(
+		{ ...scope, protocol: 2, namespace: "wingman/workspace" },
+		ahp,
+	);
 	t.after(() => client.stop());
 	const sent = (method: string) => requests.filter((m) => m.method === method);
 	return { client, ahp, sent };
@@ -252,12 +255,18 @@ test("stop cancels the turn, clearing removes each queued message, compact is a 
 			usage: undefined,
 			responseParts: [],
 		},
+		// Protocol 1.1 lists the steering message in the queue too.
 		steeringMessage: {
 			id: "s",
 			kind: "steering",
 			message: { text: "s", origin: { kind: "user" } },
 		},
 		queuedMessages: [
+			{
+				id: "s",
+				kind: "steering",
+				message: { text: "s", origin: { kind: "user" } },
+			},
 			{
 				id: "q",
 				kind: "queued",

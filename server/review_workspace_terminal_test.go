@@ -32,11 +32,11 @@ func reviewWorkspaceTerminalServer(t *testing.T) (*Server, string) {
 	if !terminal.Supported() {
 		t.Skip("no PTY support")
 	}
-	s, _, _, endpoint := ahpTestServer(t)
-	s.terminals = terminal.NewManager(t.TempDir())
+	s, _, _, endpoint := protocolTestServer(t)
+	s.Project.terminals = terminal.NewManager(t.TempDir())
 	// Closing sessions (not the manager) first releases any PTY write a test left blocked.
 	t.Cleanup(func() {
-		for _, session := range s.terminals.List() {
+		for _, session := range s.Project.terminals.List() {
 			_ = session.Close()
 		}
 	})
@@ -52,10 +52,10 @@ type reviewWorkspaceTerminalView struct {
 }
 
 func reviewWorkspaceTerminalLookup(s *Server, uri string) (reviewWorkspaceTerminalView, bool) {
-	h := s.ahpHost()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	a := h.terminals[uri]
+	h := s.Project
+	h.host.mu.Lock()
+	defer h.host.mu.Unlock()
+	a := h.terminalChannels[uri]
 	if a == nil {
 		return reviewWorkspaceTerminalView{}, false
 	}
@@ -114,10 +114,10 @@ func reviewWorkspaceTerminalDispatch(t *testing.T, client *ahp.Client, sub *ahp.
 
 func reviewWorkspaceTerminalClientGone(s *Server, id string) func() bool {
 	return func() bool {
-		h := s.ahpHost()
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		for c := range h.clients {
+		h := s.Project
+		h.host.mu.Lock()
+		defer h.host.mu.Unlock()
+		for c := range h.host.clients {
 			if c.id == id {
 				return false
 			}
@@ -129,7 +129,7 @@ func reviewWorkspaceTerminalClientGone(s *Server, id string) func() bool {
 // Bug: disposeTerminal waits for the terminal's opMu, which an input write blocked by a process that never reads stdin holds forever; dispose must close the PTY instead of hanging behind the write.
 func TestReviewWorkspaceTerminalDisposeNotBlockedByStalledInput(t *testing.T) {
 	s, endpoint := reviewWorkspaceTerminalServer(t)
-	client := ahpTestClient(t, endpoint, "owner")
+	client := protocolTestClient(t, endpoint, "owner")
 	uri := "ahp-terminal:/stalled-input"
 	createTestTerminal(t, client, uri, "owner")
 	_, sub, err := subscribeTerminal(t.Context(), client, uri)
@@ -153,7 +153,7 @@ func TestReviewWorkspaceTerminalDisposeNotBlockedByStalledInput(t *testing.T) {
 	if err := client.Request(ctx, "disposeTerminal", types.DisposeTerminalParams{Channel: uri}, nil); err != nil {
 		t.Fatalf("dispose hung behind a stalled input write: %v", err)
 	}
-	if s.terminals.Get(view.session.ID()) != nil {
+	if s.Project.terminals.Get(view.session.ID()) != nil {
 		t.Fatal("disposed terminal still runs")
 	}
 }
@@ -161,31 +161,31 @@ func TestReviewWorkspaceTerminalDisposeNotBlockedByStalledInput(t *testing.T) {
 // Bug: when the process exits while the host's output subscriber is a whole scrollback behind, the closed stream is taken for a clean exit and the end of the output is lost; the host must recover the session snapshot before publishing the exit.
 func TestReviewWorkspaceTerminalExitWhileBehindKeepsFinalOutput(t *testing.T) {
 	s, endpoint := reviewWorkspaceTerminalServer(t)
-	client := ahpTestClient(t, endpoint, "observer")
+	client := protocolTestClient(t, endpoint, "observer")
 	gate := filepath.Join(t.TempDir(), "go")
 	script := `while [ ! -e "$GATE" ]; do sleep 0.01; done; head -c 600000 /dev/zero | tr '\0' a; printf '\nfinal-marker\n'; exit 3`
-	session, err := s.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", script}, Env: map[string]*string{"GATE": &gate}}, 80, 24)
+	session, err := s.Project.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", script}, Env: map[string]*string{"GATE": &gate}}, 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
-	uri := "ahp-terminal:/wingman/" + session.ID()
+	uri := "ahp-terminal:/" + s.Project.namespace + "/" + session.ID()
 	reviewWorkspaceTerminalEventually(t, "terminal attached", func() bool {
 		_, ok := reviewWorkspaceTerminalLookup(s, uri)
 		return ok
 	})
-	h := s.ahpHost()
-	h.mu.Lock() // a busy host: the terminal's output pump cannot publish
+	h := s.Project
+	h.host.mu.Lock() // a busy host: the terminal's output pump cannot publish
 	if err := os.WriteFile(gate, nil, 0600); err != nil {
-		h.mu.Unlock()
+		h.host.mu.Unlock()
 		t.Fatal(err)
 	}
 	select {
 	case <-session.Done():
 	case <-time.After(10 * time.Second):
-		h.mu.Unlock()
+		h.host.mu.Unlock()
 		t.Fatal("command did not exit")
 	}
-	h.mu.Unlock()
+	h.host.mu.Unlock()
 	reviewWorkspaceTerminalEventually(t, "exit published", func() bool {
 		view, _ := reviewWorkspaceTerminalLookup(s, uri)
 		return view.exit != nil
@@ -268,11 +268,11 @@ func TestReviewWorkspaceTerminalOwnerReconnectAndTakeover(t *testing.T) {
 func testReviewWorkspaceTerminalOwnerReconnectAndTakeover(t *testing.T, scheme string) {
 	t.Helper()
 	s, endpoint := reviewWorkspaceTerminalServer(t)
-	first := ahpTestClient(t, endpoint, "owner")
+	first := protocolTestClient(t, endpoint, "owner")
 	uri := scheme + ":/reconnect"
 	createTestTerminal(t, first, uri, "owner")
 	// The same identity reconnects on a new socket before the old one closes.
-	second := ahpTestClient(t, endpoint, "")
+	second := protocolTestClient(t, endpoint, "")
 	var raw json.RawMessage
 	if err := second.Request(t.Context(), "reconnect", types.ReconnectParams{Channel: types.RootResourceURI, ClientId: "owner", Subscriptions: []string{uri, scheme + ":/missing"}}, &raw); err != nil {
 		t.Fatal(err)
@@ -291,11 +291,11 @@ func testReviewWorkspaceTerminalOwnerReconnectAndTakeover(t *testing.T, scheme s
 	defer secondSub.Close()
 	_ = first.Shutdown(t.Context())
 	reviewWorkspaceTerminalEventually(t, "first socket closed", func() bool {
-		h := s.ahpHost()
-		h.mu.Lock()
-		defer h.mu.Unlock()
+		h := s.Project
+		h.host.mu.Lock()
+		defer h.host.mu.Unlock()
 		n := 0
-		for c := range h.clients {
+		for c := range h.host.clients {
 			if c.id == "owner" {
 				n++
 			}
@@ -308,7 +308,7 @@ func testReviewWorkspaceTerminalOwnerReconnectAndTakeover(t *testing.T, scheme s
 	if reason := reviewWorkspaceTerminalDispatch(t, second, secondSub, "owner", uri, 1, reviewWorkspaceTerminalInput("printf 'after-reconnect\\n'\n")); reason != nil {
 		t.Fatalf("reconnected owner input rejected: %s", *reason)
 	}
-	observer := ahpTestClient(t, endpoint, "observer")
+	observer := protocolTestClient(t, endpoint, "observer")
 	_, observerSub, err := subscribeTerminal(t.Context(), observer, uri)
 	if err != nil {
 		t.Fatal(err)
@@ -320,13 +320,13 @@ func testReviewWorkspaceTerminalOwnerReconnectAndTakeover(t *testing.T, scheme s
 	_ = second.Shutdown(t.Context())
 	reviewWorkspaceTerminalEventually(t, "handover to the host", func() bool {
 		view, _ := reviewWorkspaceTerminalLookup(s, uri)
-		return view.owner == ahpHostClient
+		return view.owner == hostClient
 	})
 	if reason := reviewWorkspaceTerminalDispatch(t, observer, observerSub, "observer", uri, 2, reviewWorkspaceTerminalClaim("observer")); reason != nil {
 		t.Fatalf("takeover of a released terminal rejected: %s", *reason)
 	}
 	// The old owner returns but stays read-only while the new owner is connected.
-	third := ahpTestClient(t, endpoint, "owner")
+	third := protocolTestClient(t, endpoint, "owner")
 	_, thirdSub, err := subscribeTerminal(t.Context(), third, uri)
 	if err != nil {
 		t.Fatal(err)
@@ -386,9 +386,9 @@ func TestReviewWorkspaceTerminalSlowOwnerIsDisconnectedAndReleased(t *testing.T)
 	reviewWorkspaceTerminalEventually(t, "slow owner dropped", reviewWorkspaceTerminalClientGone(s, "slow"))
 	reviewWorkspaceTerminalEventually(t, "terminal released", func() bool {
 		view, _ := reviewWorkspaceTerminalLookup(s, uri)
-		return view.owner == ahpHostClient
+		return view.owner == hostClient
 	})
-	observer := ahpTestClient(t, endpoint, "observer")
+	observer := protocolTestClient(t, endpoint, "observer")
 	_, sub, err := subscribeTerminal(t.Context(), observer, uri)
 	if err != nil {
 		t.Fatal(err)
@@ -404,15 +404,15 @@ func TestReviewWorkspaceTerminalSlowOwnerIsDisconnectedAndReleased(t *testing.T)
 
 func TestReviewWorkspaceTerminalConcurrentClaimsHaveOneWinner(t *testing.T) {
 	s, endpoint := reviewWorkspaceTerminalServer(t)
-	_ = ahpTestClient(t, endpoint, "starter")
-	session, err := s.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", "sleep 30"}}, 80, 24)
+	_ = protocolTestClient(t, endpoint, "starter")
+	session, err := s.Project.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", "sleep 30"}}, 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
-	uri := "ahp-terminal:/wingman/" + session.ID()
+	uri := "ahp-terminal:/" + s.Project.namespace + "/" + session.ID()
 	reviewWorkspaceTerminalEventually(t, "terminal attached", func() bool {
 		view, ok := reviewWorkspaceTerminalLookup(s, uri)
-		return ok && view.owner == ahpHostClient
+		return ok && view.owner == hostClient
 	})
 	const clients = 8
 	var mu sync.Mutex
@@ -421,7 +421,7 @@ func TestReviewWorkspaceTerminalConcurrentClaimsHaveOneWinner(t *testing.T) {
 	start := make(chan struct{})
 	for i := range clients {
 		id := fmt.Sprintf("claimer-%d", i)
-		client := ahpTestClient(t, endpoint, id)
+		client := protocolTestClient(t, endpoint, id)
 		_, sub, err := subscribeTerminal(t.Context(), client, uri)
 		if err != nil {
 			t.Fatal(err)
@@ -453,7 +453,7 @@ func TestReviewWorkspaceTerminalActionValidation(t *testing.T) {
 func testReviewWorkspaceTerminalActionValidation(t *testing.T, scheme string) {
 	t.Helper()
 	s, endpoint := reviewWorkspaceTerminalServer(t)
-	owner := ahpTestClient(t, endpoint, "owner")
+	owner := protocolTestClient(t, endpoint, "owner")
 	uri := scheme + ":/validation"
 	createTestTerminal(t, owner, uri, "owner")
 	_, ownerSub, err := subscribeTerminal(t.Context(), owner, uri)
@@ -461,7 +461,7 @@ func testReviewWorkspaceTerminalActionValidation(t *testing.T, scheme string) {
 		t.Fatal(err)
 	}
 	defer ownerSub.Close()
-	observer := ahpTestClient(t, endpoint, "observer")
+	observer := protocolTestClient(t, endpoint, "observer")
 	_, observerSub, err := subscribeTerminal(t.Context(), observer, uri)
 	if err != nil {
 		t.Fatal(err)
@@ -491,7 +491,7 @@ func testReviewWorkspaceTerminalActionValidation(t *testing.T, scheme string) {
 		title(""), title("   "), title(strings.Repeat("t", 1025)),
 		reviewWorkspaceTerminalInput(strings.Repeat("x", 1<<20+1)),
 		{Value: &types.TerminalDataAction{Type: types.ActionTypeTerminalData, Data: "forged output"}},
-		{Value: &types.TerminalExitedAction{Type: types.ActionTypeTerminalExited, ExitCode: ahpPtr(int64(0))}},
+		{Value: &types.TerminalExitedAction{Type: types.ActionTypeTerminalExited, ExitCode: new(int64(0))}},
 		{Value: &types.TerminalCwdChangedAction{Type: types.ActionTypeTerminalCwdChanged, Cwd: "file:///etc"}},
 		{Value: &types.TerminalClaimedAction{Type: types.ActionTypeTerminalClaimed, Claim: types.TerminalClaim{Value: &types.TerminalClientClaim{Kind: types.TerminalClaimKindClient}}}},
 	} {
@@ -506,10 +506,10 @@ func testReviewWorkspaceTerminalActionValidation(t *testing.T, scheme string) {
 		t.Fatalf("PTY size %dx%d", cols, rows)
 	}
 	expect(owner, ownerSub, "owner", title("renamed"), true)
-	h := s.ahpHost()
-	h.mu.Lock()
-	catalogue := h.terminalCatalogueLocked()
-	h.mu.Unlock()
+	h := s.Project
+	h.host.mu.Lock()
+	catalogue := h.host.terminalsLocked()
+	h.host.mu.Unlock()
 	if i := slices.IndexFunc(catalogue, func(info types.TerminalInfo) bool { return info.Resource == uri }); i < 0 || catalogue[i].Title != "renamed" {
 		t.Fatalf("catalogue: %+v", catalogue)
 	}
@@ -537,7 +537,7 @@ func TestReviewWorkspaceTerminalCreateValidation(t *testing.T) {
 func testReviewWorkspaceTerminalCreateValidation(t *testing.T, scheme string) {
 	t.Helper()
 	s, endpoint := reviewWorkspaceTerminalServer(t)
-	client := ahpTestClient(t, endpoint, "owner")
+	client := protocolTestClient(t, endpoint, "owner")
 	claim := types.TerminalClaim{Value: &types.TerminalClientClaim{Kind: types.TerminalClaimKindClient, ClientId: "owner"}}
 	outside := t.TempDir()
 	for name, params := range map[string]types.CreateTerminalParams{
@@ -556,10 +556,10 @@ func testReviewWorkspaceTerminalCreateValidation(t *testing.T, scheme string) {
 		"host form":        {Channel: scheme + "://host/x", Claim: claim},
 		"query":            {Channel: scheme + ":/x?y=1", Claim: claim},
 		"foreign claim":    {Channel: scheme + ":/x", Claim: types.TerminalClaim{Value: &types.TerminalClientClaim{Kind: types.TerminalClaimKindClient, ClientId: "someone-else"}}},
-		"host claim":       {Channel: scheme + ":/x", Claim: ahpHostTerminalClaim()},
-		"zero cols":        {Channel: scheme + ":/x", Claim: claim, Cols: ahpPtr(int64(0))},
-		"huge rows":        {Channel: scheme + ":/x", Claim: claim, Rows: ahpPtr(int64(5000))},
-		"outside cwd":      {Channel: scheme + ":/x", Claim: claim, Cwd: ahpPtr((&url.URL{Scheme: "file", Path: filepath.ToSlash(outside)}).String())},
+		"host claim":       {Channel: scheme + ":/x", Claim: hostTerminalClaim()},
+		"zero cols":        {Channel: scheme + ":/x", Claim: claim, Cols: new(int64(0))},
+		"huge rows":        {Channel: scheme + ":/x", Claim: claim, Rows: new(int64(5000))},
+		"outside cwd":      {Channel: scheme + ":/x", Claim: claim, Cwd: new((&url.URL{Scheme: "file", Path: filepath.ToSlash(outside)}).String())},
 		"unknown shell":    {Channel: scheme + ":/x", Claim: claim, Meta: map[string]json.RawMessage{"wingman.shell": json.RawMessage(`"/bin/rm"`)}},
 		"malformed shell":  {Channel: scheme + ":/x", Claim: claim, Meta: map[string]json.RawMessage{"wingman.shell": json.RawMessage(`42`)}},
 	} {
@@ -567,8 +567,8 @@ func testReviewWorkspaceTerminalCreateValidation(t *testing.T, scheme string) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if len(s.terminals.List()) != 0 {
-		t.Fatalf("rejected requests started %d terminals", len(s.terminals.List()))
+	if len(s.Project.terminals.List()) != 0 {
+		t.Fatalf("rejected requests started %d terminals", len(s.Project.terminals.List()))
 	}
 	uri := scheme + ":/dup"
 	createTestTerminal(t, client, uri, "owner")
@@ -577,22 +577,22 @@ func testReviewWorkspaceTerminalCreateValidation(t *testing.T, scheme string) {
 	if !errors.As(err, &rpc) || rpc.Code != types.ErrorCodeAlreadyExists {
 		t.Fatalf("duplicate channel: %v", err)
 	}
-	if len(s.terminals.List()) != 1 {
+	if len(s.Project.terminals.List()) != 1 {
 		t.Fatal("duplicate create started another shell")
 	}
 }
 
 func TestReviewWorkspaceTerminalTrimKeepsValidUTF8(t *testing.T) {
 	s, endpoint := reviewWorkspaceTerminalServer(t)
-	client := ahpTestClient(t, endpoint, "observer")
+	client := protocolTestClient(t, endpoint, "observer")
 	gate := filepath.Join(t.TempDir(), "go")
 	// 75,000 two-byte characters on one line: no newline or escape to trim at.
 	script := `while [ ! -e "$GATE" ]; do sleep 0.01; done; yes é | tr -d '\n' | head -c 150000; printf 'utf8-end'; exit 0`
-	session, err := s.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", script}, Env: map[string]*string{"GATE": &gate}}, 80, 24)
+	session, err := s.Project.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", script}, Env: map[string]*string{"GATE": &gate}}, 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
-	uri := "ahp-terminal:/wingman/" + session.ID()
+	uri := "ahp-terminal:/" + s.Project.namespace + "/" + session.ID()
 	reviewWorkspaceTerminalEventually(t, "terminal attached", func() bool {
 		_, ok := reviewWorkspaceTerminalLookup(s, uri)
 		return ok
@@ -629,43 +629,43 @@ func TestReviewWorkspaceTerminalTrimKeepsValidUTF8(t *testing.T) {
 		t.Fatalf("live stream tail %q", live.String()[max(0, live.Len()-20):])
 	}
 	view, _ := reviewWorkspaceTerminalLookup(s, uri)
-	if len(view.content) > ahpTerminalMaxContent || !utf8.ValidString(view.content) || strings.ContainsRune(view.content, utf8.RuneError) || !strings.HasSuffix(view.content, "utf8-end") || !strings.HasPrefix(view.content, "é") {
+	if len(view.content) > terminalMaxContent || !utf8.ValidString(view.content) || strings.ContainsRune(view.content, utf8.RuneError) || !strings.HasSuffix(view.content, "utf8-end") || !strings.HasPrefix(view.content, "é") {
 		t.Fatalf("trimmed snapshot: %d bytes, head %q", len(view.content), view.content[:min(len(view.content), 12)])
 	}
 }
 
 func TestReviewWorkspaceTerminalCatalogueRecoversFromOverflow(t *testing.T) {
 	s, endpoint := reviewWorkspaceTerminalServer(t)
-	_ = ahpTestClient(t, endpoint, "observer")
-	h := s.ahpHost()
+	_ = protocolTestClient(t, endpoint, "observer")
+	h := s.Project
 	// Stall the catalogue pump so the manager drops it as a slow observer.
-	h.terminalMu.Lock()
+	h.host.terminalMu.Lock()
 	for range 40 {
-		session, err := s.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", "true"}}, 80, 24)
+		session, err := s.Project.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", "true"}}, 80, 24)
 		if err != nil {
-			h.terminalMu.Unlock()
+			h.host.terminalMu.Unlock()
 			t.Fatal(err)
 		}
 		<-session.Done()
 	}
-	running, err := s.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", "sleep 30"}}, 80, 24)
-	h.terminalMu.Unlock()
+	running, err := s.Project.terminals.CreateCommand(terminal.CommandSpec{Path: "/bin/sh", Args: []string{"-c", "sleep 30"}}, 80, 24)
+	h.host.terminalMu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := func() []string {
 		var ids []string
-		for _, session := range s.terminals.List() {
-			ids = append(ids, "ahp-terminal:/wingman/"+session.ID())
+		for _, session := range s.Project.terminals.List() {
+			ids = append(ids, "ahp-terminal:/"+s.Project.namespace+"/"+session.ID())
 		}
 		slices.Sort(ids)
 		return ids
 	}
 	got := func() []string {
-		h.mu.Lock()
-		defer h.mu.Unlock()
+		h.host.mu.Lock()
+		defer h.host.mu.Unlock()
 		var ids []string
-		for _, info := range h.terminalCatalogueLocked() {
+		for _, info := range h.host.terminalsLocked() {
 			ids = append(ids, info.Resource)
 		}
 		return ids
@@ -673,38 +673,38 @@ func TestReviewWorkspaceTerminalCatalogueRecoversFromOverflow(t *testing.T) {
 	reviewWorkspaceTerminalEventually(t, "catalogue to match the manager", func() bool {
 		return slices.Equal(got(), want())
 	})
-	if !slices.Contains(got(), "ahp-terminal:/wingman/"+running.ID()) || len(got()) > 33 {
+	if !slices.Contains(got(), "ahp-terminal:/"+s.Project.namespace+"/"+running.ID()) || len(got()) > 33 {
 		t.Fatalf("catalogue %d entries", len(got()))
 	}
 }
 
 func TestReviewWorkspaceTerminalDebugTerminalsReplaceExitedOnes(t *testing.T) {
 	s, endpoint := reviewWorkspaceTerminalServer(t)
-	client := ahpTestClient(t, endpoint, "observer")
+	client := protocolTestClient(t, endpoint, "observer")
 	launch := func(script string) dap.TerminalProcess {
 		t.Helper()
-		process, err := s.LaunchTerminal(t.Context(), dap.TerminalLaunch{Title: "Debug", Path: "/bin/sh", Args: []string{"-c", script}})
+		process, err := s.Project.LaunchTerminal(t.Context(), dap.TerminalLaunch{Title: "Debug", Path: "/bin/sh", Args: []string{"-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return process
 	}
 	first := launch("printf 'debuggee-out\\n'; exit 4")
-	firstURI := "ahp-terminal:/wingman/" + first.ID()
+	firstURI := "ahp-terminal:/" + s.Project.namespace + "/" + first.ID()
 	reviewWorkspaceTerminalEventually(t, "debuggee exit published", func() bool {
 		view, _ := reviewWorkspaceTerminalLookup(s, firstURI)
 		return view.exit != nil
 	})
 	view, _ := reviewWorkspaceTerminalLookup(s, firstURI)
-	if view.owner != ahpHostClient || view.title != "Debug" || !strings.Contains(view.content, "debuggee-out") || view.exit.ExitCode == nil || *view.exit.ExitCode != 4 {
+	if view.owner != hostClient || view.title != "Debug" || !strings.Contains(view.content, "debuggee-out") || view.exit.ExitCode == nil || *view.exit.ExitCode != 4 {
 		t.Fatalf("debug terminal: %+v", view)
 	}
-	shell := ahpTestClient(t, endpoint, "user")
+	shell := protocolTestClient(t, endpoint, "user")
 	createTestTerminal(t, shell, "ahp-terminal:/user-shell", "user")
 	second := launch("sleep 30")
 	reviewWorkspaceTerminalEventually(t, "exited debuggee removed", func() bool {
 		_, old := reviewWorkspaceTerminalLookup(s, firstURI)
-		_, current := reviewWorkspaceTerminalLookup(s, "ahp-terminal:/wingman/"+second.ID())
+		_, current := reviewWorkspaceTerminalLookup(s, "ahp-terminal:/"+s.Project.namespace+"/"+second.ID())
 		return !old && current
 	})
 	if _, ok := reviewWorkspaceTerminalLookup(s, "ahp-terminal:/user-shell"); !ok {
@@ -717,7 +717,7 @@ func TestReviewWorkspaceTerminalDebugTerminalsReplaceExitedOnes(t *testing.T) {
 
 func TestReviewWorkspaceTerminalStatusRoute(t *testing.T) {
 	s, endpoint := reviewWorkspaceTerminalServer(t)
-	client := ahpTestClient(t, endpoint, "owner")
+	client := protocolTestClient(t, endpoint, "owner")
 	router := chi.NewRouter()
 	router.Get("/api/workspace/terminals/{terminal}/status", s.handleTerminalStatus)
 	handler := LocalHostOnly(s.checkInstance(router))
@@ -744,23 +744,23 @@ func TestReviewWorkspaceTerminalStatusRoute(t *testing.T) {
 	if code, _ := status(uri, "stale-instance"); code != http.StatusConflict {
 		t.Fatalf("stale instance: %d", code)
 	}
-	if code, _ := status("ahp-terminal:/review/üA x", s.scope.InstanceID); code != http.StatusNotFound {
+	if code, _ := status("ahp-terminal:/review/üA x", s.Project.scope.InstanceID); code != http.StatusNotFound {
 		t.Fatalf("decoded twice: %d", code)
 	}
-	if code, busy := status(uri, s.scope.InstanceID); code != http.StatusOK || busy {
+	if code, busy := status(uri, s.Project.scope.InstanceID); code != http.StatusOK || busy {
 		t.Fatalf("idle shell: %d busy=%v", code, busy)
 	}
 	if reason := reviewWorkspaceTerminalDispatch(t, client, sub, "owner", uri, 1, reviewWorkspaceTerminalInput("sleep 30\n")); reason != nil {
 		t.Fatal(*reason)
 	}
 	reviewWorkspaceTerminalEventually(t, "busy status", func() bool {
-		code, busy := status(uri, s.scope.InstanceID)
+		code, busy := status(uri, s.Project.scope.InstanceID)
 		return code == http.StatusOK && busy
 	})
 	if err := client.Request(t.Context(), "disposeTerminal", types.DisposeTerminalParams{Channel: uri}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if code, _ := status(uri, s.scope.InstanceID); code != http.StatusNotFound {
+	if code, _ := status(uri, s.Project.scope.InstanceID); code != http.StatusNotFound {
 		t.Fatalf("disposed terminal: %d", code)
 	}
 }

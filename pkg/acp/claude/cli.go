@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
@@ -74,8 +75,8 @@ func claudeConfigDir(env []string) string {
 			return os.Getenv(key)
 		}
 		// exec.Cmd uses the last value, and only inherits the parent environment when Env is nil.
-		for i := len(env) - 1; i >= 0; i-- {
-			name, value, ok := strings.Cut(env[i], "=")
+		for _, e := range slices.Backward(env) {
+			name, value, ok := strings.Cut(e, "=")
 			if ok && (name == key || runtime.GOOS == "windows" && strings.EqualFold(name, key)) {
 				return value
 			}

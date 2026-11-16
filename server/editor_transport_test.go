@@ -26,7 +26,7 @@ func dialEditorTest(t *testing.T, app *Server, path string) (*websocket.Conn, co
 	t.Cleanup(web.Close)
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	t.Cleanup(cancel)
-	conn, _, err := websocket.Dial(ctx, strings.Replace(web.URL, "http:", "ws:", 1)+path+"?instance="+app.scope.InstanceID, nil)
+	conn, _, err := websocket.Dial(ctx, strings.Replace(web.URL, "http:", "ws:", 1)+path+"?instance="+app.Project.scope.InstanceID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestLSPWebSocketDocumentVersionsAndScope(t *testing.T) {
 	root := t.TempDir()
 	writeDebugTestFile(t, root, "main.go", "package main\nfunc Disk() {}\n")
 	app := newDebugTestServer(t, root)
-	app.scope = WorkspaceScope{"workspace", "instance"}
+	app.Project.scope = WorkspaceScope{"workspace", "instance"}
 	conn, ctx := dialEditorTest(t, app, "/lsp")
 	call := func(id float64, method string, params any) map[string]any {
 		return editorTestReply(t, conn, ctx, map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
@@ -121,9 +121,9 @@ func TestLSPWebSocketDocumentVersionsAndScope(t *testing.T) {
 	if response := call(6, "shutdown", nil); response["error"] != nil {
 		t.Fatal(response)
 	}
-	app.lspDocumentsMu.Lock()
-	remaining := len(app.lspDocuments)
-	app.lspDocumentsMu.Unlock()
+	app.editor.lspDocumentsMu.Lock()
+	remaining := len(app.editor.lspDocuments)
+	app.editor.lspDocumentsMu.Unlock()
 	if remaining != 0 {
 		t.Fatal("closing a deleted file retained its language document")
 	}
@@ -238,7 +238,7 @@ func TestEditorSocketsRejectForeignOrigins(t *testing.T) {
 	t.Cleanup(web.Close)
 	for _, path := range []string{"/lsp", "/dap"} {
 		for _, origin := range []string{"null", "https://client.example", "vscode-file://vscode-app"} {
-			conn, _, err := websocket.Dial(t.Context(), strings.Replace(web.URL, "http:", "ws:", 1)+path+"?instance="+app.scope.InstanceID, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{origin}}})
+			conn, _, err := websocket.Dial(t.Context(), strings.Replace(web.URL, "http:", "ws:", 1)+path+"?instance="+app.Project.scope.InstanceID, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{origin}}})
 			if err == nil {
 				conn.CloseNow()
 				t.Fatalf("%s accepted origin %s", path, origin)
@@ -284,7 +284,7 @@ func TestDAPWebSocketBreakpointsAndReferenceLifetime(t *testing.T) {
 	root := t.TempDir()
 	writeDebugTestFile(t, root, "main.go", "package main\nfunc main() {}\n")
 	app := newDebugTestServer(t, root)
-	app.scope = WorkspaceScope{"workspace", "instance"}
+	app.Project.scope = WorkspaceScope{"workspace", "instance"}
 	conn, ctx := dialEditorTest(t, app, "/dap")
 	call := func(seq float64, command string, args any) map[string]any {
 		return editorTestReply(t, conn, ctx, map[string]any{"seq": seq, "type": "request", "command": command, "arguments": args})

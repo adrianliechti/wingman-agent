@@ -21,7 +21,8 @@ import { useColorScheme } from "../hooks/useColorScheme";
 import { useCanCompact, useChatCommands } from "../hooks/useChatCommands";
 import {
 	type ChatCommand,
-	selectedCommandAttachments,
+	sentAttachments,
+	visibleAttachments,
 } from "../api/chatCommands";
 import type {
 	ChatEntry,
@@ -38,6 +39,7 @@ import { type PendingImage, processImage } from "./chat/images";
 import { PromptBar } from "./chat/PromptBar";
 import { ScrollSnapshot } from "./chat/ScrollSnapshot";
 import { TurnView } from "./chat/TurnView";
+import { AttachmentChip } from "./chat/entries";
 import { buildTurns, findEntryElement, type Turn } from "./chat/turns";
 import { FilePicker } from "./FilePicker";
 import { AgentPicker } from "./AgentPicker";
@@ -62,7 +64,7 @@ export interface ChatPanelProps {
 		files?: string[],
 		images?: string[],
 		intent?: TurnInputIntent,
-		completions?: MessageAttachment[],
+		attachments?: MessageAttachment[],
 	) => boolean | Promise<boolean>;
 	onCancel: () => void;
 	onCompact?: (focus: string) => boolean | Promise<boolean>;
@@ -73,7 +75,7 @@ export interface ChatPanelProps {
 		text: string,
 		files?: string[],
 		images?: string[],
-		completions?: MessageAttachment[],
+		attachments?: MessageAttachment[],
 	) => boolean | Promise<boolean>;
 	onClearQueue?: () => void;
 	loading?: boolean;
@@ -86,7 +88,7 @@ export interface ChatPanelProps {
 	onOpenFile?: (path: string, line?: number) => void;
 	seed?: {
 		text: string;
-		completions?: MessageAttachment[];
+		attachments?: MessageAttachment[];
 		files?: string[];
 		append?: boolean;
 		nonce: number;
@@ -176,10 +178,12 @@ export function ChatPanel({
 		text: input,
 		files,
 		images,
+		attachments,
 		editingQueueId,
 		submitting,
 		error: sendError,
 	} = useSyncExternalStore(draft.subscribe, draft.getSnapshot);
+	// The host needs text, a file or an image; other attachments only add context.
 	const hasDraft = !!input.trim() || images.length > 0 || files.length > 0;
 	const blocked = !available || submitting || prompts.length > 0;
 	const [caret, setCaret] = useState(input.length);
@@ -322,9 +326,9 @@ export function ChatPanel({
 		consumedSeed.current = seed.nonce;
 		const current = draft.getSnapshot();
 		draft.update({
-			completions: seed.append
-				? [...(current.completions ?? []), ...(seed.completions ?? [])]
-				: seed.completions,
+			attachments: seed.append
+				? [...(current.attachments ?? []), ...(seed.attachments ?? [])]
+				: seed.attachments,
 		});
 		setDraft(
 			seed.append && current.text.trim()
@@ -337,6 +341,8 @@ export function ChatPanel({
 		textareaRef.current?.focus();
 		onSeedConsumed?.(seed.nonce);
 	}, [draft, onSeedConsumed, seed, setDraft]);
+
+	const shownAttachments = visibleAttachments(attachments);
 
 	const skillToken = slashTokenAt(input, caret);
 	const tokenKey = skillToken
@@ -554,7 +560,10 @@ export function ChatPanel({
 			onCompact &&
 			canCompact &&
 			!current.editingQueueId &&
-			current.files.length + current.images.length === 0
+			current.files.length +
+				current.images.length +
+				visibleAttachments(current.attachments).length ===
+				0
 		) {
 			if (!sessionId || isDraft(sessionId)) {
 				toast({ title: "Nothing to compact yet" });
@@ -565,8 +574,8 @@ export function ChatPanel({
 		submitPendingRef.current = true;
 		const focused = document.activeElement;
 		const sent = await draft.submit(
-			({ images, files, editingQueueId, completions }) => {
-				const selected = selectedCommandAttachments(text, completions);
+			({ images, files, editingQueueId, attachments }) => {
+				const selected = sentAttachments(text, attachments);
 				const imageData =
 					images.length > 0 ? images.map((i) => i.dataUrl) : undefined;
 				if (editingQueueId && onUpdateQueued) {
@@ -614,8 +623,8 @@ export function ChatPanel({
 		const needsInput = !!s.input_hint;
 		if (s.attachment)
 			draft.update({
-				completions: [
-					...(draft.getSnapshot().completions ?? []).filter(
+				attachments: [
+					...(draft.getSnapshot().attachments ?? []).filter(
 						(item) => item.label !== s.attachment!.label,
 					),
 					s.attachment,
@@ -718,6 +727,7 @@ export function ChatPanel({
 				id: crypto.randomUUID(),
 				dataUrl,
 			})),
+			attachments: item.attachments,
 			editingQueueId: item.state === "queued" ? item.id : null,
 		};
 		if (next.editingQueueId) draft.beginQueueEdit(next);
@@ -736,6 +746,14 @@ export function ChatPanel({
 	const removeFile = (path: string) => {
 		draft.update({
 			files: draft.getSnapshot().files.filter((p) => p !== path),
+		});
+	};
+
+	const removeAttachment = (attachment: MessageAttachment) => {
+		draft.update({
+			attachments: draft
+				.getSnapshot()
+				.attachments?.filter((item) => item !== attachment),
 		});
 	};
 
@@ -1011,7 +1029,7 @@ export function ChatPanel({
 									onClose={() => setDismissedToken(tokenKey)}
 								/>
 							)}
-							{files.length > 0 && (
+							{files.length + shownAttachments.length > 0 && (
 								<div className="flex flex-wrap gap-1 px-2.5 pt-2">
 									{files.map((p) => {
 										const name = p.split("/").pop() || p;
@@ -1033,6 +1051,21 @@ export function ChatPanel({
 											</span>
 										);
 									})}
+									{shownAttachments.map((attachment, i) => (
+										<AttachmentChip
+											key={`attachment-${i}`}
+											attachment={attachment}
+										>
+											<button
+												type="button"
+												className="text-fg-dim hover:text-fg cursor-pointer"
+												onClick={() => removeAttachment(attachment)}
+												aria-label="Remove attachment"
+											>
+												<X size={10} />
+											</button>
+										</AttachmentChip>
+									))}
 								</div>
 							)}
 

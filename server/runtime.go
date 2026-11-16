@@ -7,26 +7,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
-	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 
-	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agents"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
-	"github.com/go-chi/chi/v5"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 	"github.com/google/uuid"
-	t "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
+	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 	"golang.org/x/sync/singleflight"
 )
-
-const instanceHeader = "X-Wingman-Instance"
 
 type WorkspaceScope struct {
 	WorkspaceID string `json:"workspaceId"`
@@ -53,81 +46,26 @@ type SessionRef struct {
 
 func workspaceScope(root string) WorkspaceScope {
 	// Connection identity is for the opened root, independent of legacy disk layout.
-	if resolved, err := pathutil.Resolve(root); err == nil {
-		root = resolved
-	}
-	sum := sha256.Sum256([]byte(filepath.Clean(root)))
+	sum := sha256.Sum256([]byte(canonicalPath(root)))
 	return WorkspaceScope{WorkspaceID: hex.EncodeToString(sum[:]), InstanceID: uuid.NewString()}
 }
 
-func (s *Server) InstanceID() string { return s.scope.InstanceID }
+func (s *Project) InstanceID() string { return s.scope.InstanceID }
 
-func (s *Server) checkInstance(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		instance := r.Header.Get(instanceHeader)
-		if instance == "" {
-			instance = r.URL.Query().Get("instance")
-		}
-		// Discovery is initially unscoped. Later refreshes carry the instance
-		// and must reject a replacement workspace like all other operations.
-		protected := (strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/workspace") || r.URL.Path == "/lsp" || r.URL.Path == "/dap" || r.URL.Path == "/content" || r.URL.Path == "/preview"
-		if protected || r.URL.Path == "/api/workspace" && instance != "" {
-			if instance != s.scope.InstanceID || s.ctx.Err() != nil {
-				http.Error(w, "workspace instance changed; reload the workspace", http.StatusConflict)
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// Each backend owns its agent, turn manager, and session controllers for the
-// workspace lifetime. Browser navigation never replaces execution ownership.
+// Each backend owns its agent, turn manager, and session controllers for its project's lifetime.
 type backendRuntime struct {
-	*Server
+	Project        *Project
 	id             string
 	agent          code.Agent
 	turns          *code.TurnManager
-	mu             sync.Mutex
+	mu             sync.Mutex // protects sessions and task pumps
 	sessions       map[string]*sessionController
-	createMu       sync.Mutex
-	creations      map[string]creationReceipt
-	taskPumpMu     sync.Mutex
 	taskPumps      map[*task.Registry]bool
-	operationMu    sync.Mutex
-	operations     sync.WaitGroup
-	closing        bool
 	modelDiscovery singleflight.Group
 }
 
-// Operations may nest (commands refresh metadata), but admission closes before
-// shutdown waits. Backend resources outlive every admitted operation.
-func (b *backendRuntime) beginOperation() bool {
-	b.operationMu.Lock()
-	defer b.operationMu.Unlock()
-	if b.closing || b.ctx.Err() != nil {
-		return false
-	}
-	b.operations.Add(1)
-	return true
-}
-
-func (s *Server) backendOperation(fn func(*backendRuntime, http.ResponseWriter, *http.Request)) http.HandlerFunc {
-	return s.backendHandler(func(b *backendRuntime, w http.ResponseWriter, r *http.Request) {
-		if !b.beginOperation() {
-			http.Error(w, "workspace closed", 409)
-			return
-		}
-		defer b.operations.Done()
-		ctx, cancel := context.WithCancel(r.Context())
-		stop := context.AfterFunc(b.ctx, cancel)
-		defer func() { stop(); cancel() }()
-		fn(b, w, r.WithContext(ctx))
-	})
-}
-
-func (s *Server) bindBackend(id string, a code.Agent) *backendRuntime {
-	b := &backendRuntime{Server: s, id: id, agent: a, sessions: map[string]*sessionController{}, creations: map[string]creationReceipt{}}
+func (s *Project) bindBackend(id string, a code.Agent) *backendRuntime {
+	b := &backendRuntime{Project: s, id: id, agent: a, sessions: map[string]*sessionController{}}
 	if ui, ok := a.(interface{ SetUI(code.UI) }); ok {
 		ui.SetUI(b)
 	}
@@ -138,7 +76,7 @@ func (s *Server) bindBackend(id string, a code.Agent) *backendRuntime {
 				return
 			}
 			b.session(sid).refreshSettings()
-			b.broadcast(Frame{Type: EvtSkillsChanged})
+			b.Project.workspaceChanged(Frame{Type: EvtSkillsChanged})
 		})
 	}
 	return b
@@ -152,13 +90,27 @@ type backendEntry struct {
 	err     error
 }
 
-func (s *Server) backend(id string) (*backendRuntime, error) {
-	return s.resolveBackend(id, func(ctx context.Context) (code.Agent, error) {
-		return agents.NewExternal(ctx, s.workspace, id)
+// backend resolves an agent provider, reporting an unknown one as AHP's
+// ProviderNotFound rather than a startup failure.
+func (p *Project) backend(provider string) (*backendRuntime, error) {
+	b, err := p.resolveBackend(provider, func(ctx context.Context) (code.Agent, error) {
+		return agents.NewExternal(ctx, p.workspace, provider)
 	})
+	if err == nil {
+		return b, nil
+	}
+	known := provider == code.BuiltinAgentName
+	if p.workspace != nil && !known {
+		external, _ := agents.Available()
+		known = slices.ContainsFunc(external, func(a agents.Registration) bool { return a.ID == provider })
+	}
+	if !known {
+		return nil, &ahp.Error{Code: int(types.ErrorCodeProviderNotFound), Message: "unknown agent provider: " + provider}
+	}
+	return nil, err
 }
 
-func (s *Server) resolveBackend(id string, create func(context.Context) (code.Agent, error)) (*backendRuntime, error) {
+func (s *Project) resolveBackend(id string, create func(context.Context) (code.Agent, error)) (*backendRuntime, error) {
 	s.backendsMu.Lock()
 	if err := s.ctx.Err(); err != nil {
 		s.backendsMu.Unlock()
@@ -203,6 +155,10 @@ func (s *Server) resolveBackend(id string, create func(context.Context) (code.Ag
 	if err != nil && a != nil {
 		_ = a.Close()
 	}
+	// The root lists the models and capabilities of started agents.
+	if err == nil && s.host != nil {
+		s.host.publishAgents()
+	}
 	return entry.runtime, entry.err
 }
 
@@ -210,14 +166,16 @@ func (s *Server) resolveBackend(id string, create func(context.Context) (code.Ag
 // unknown session id, so lookups cannot grow the session map.
 func (b *backendRuntime) discard(id string, c *sessionController) {
 	c.opMu.Lock()
-	loaded := c.loaded
-	c.opMu.Unlock()
+	defer c.opMu.Unlock()
 	c.mu.Lock()
-	attached := c.ahp != nil
+	discard := c.chat == nil && (c.state.Status == sessionLoading || c.state.Status == sessionError)
 	c.mu.Unlock()
+	if !discard {
+		return
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !loaded && !attached && b.sessions[id] == c {
+	if b.sessions[id] == c {
 		delete(b.sessions, id)
 	}
 }
@@ -233,70 +191,23 @@ func (b *backendRuntime) session(id string) *sessionController {
 	return c
 }
 
-func (s *Server) backendHandler(fn func(*backendRuntime, http.ResponseWriter, *http.Request)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		b, err := s.backend(r.PathValue("backend"))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		fn(b, w, r)
-	}
-}
-
-func (s *Server) registerSessionRoutes(r chi.Router) {
-	r.Route("/v2", func(r chi.Router) {
-		r.Post("/backends/{backend}/models/refresh", s.backendOperation((*backendRuntime).handleRefreshModels))
-		r.Route("/chats/{chat}", func(r chi.Router) {
-			r.Use(s.chatRoute)
-			r.Get("/reviews", s.backendOperation((*backendRuntime).handleTurnReviews))
-			r.Get("/reviews/{turnID}", s.backendOperation((*backendRuntime).handleTurnReviews))
-			r.Post("/reviews/{turnID}/undo", s.backendOperation((*backendRuntime).handleTurnUndo))
-			r.Get("/tasks", s.backendOperation((*backendRuntime).handleTasks))
-			r.Get("/tasks/{taskID}", s.backendOperation((*backendRuntime).handleTask))
-			r.Post("/tasks/{taskID}/stop", s.backendOperation((*backendRuntime).handleTaskStop))
-			r.Get("/schedules", s.backendOperation((*backendRuntime).handleSchedules))
-			r.Delete("/schedules/{scheduleID}", s.backendOperation((*backendRuntime).handleScheduleDelete))
-			r.Post("/schedules/{scheduleID}/pause", s.backendOperation((*backendRuntime).handleSchedulePause))
-			r.Post("/schedules/{scheduleID}/resume", s.backendOperation((*backendRuntime).handleScheduleResume))
-		})
-	})
-}
-
-// chatRoute resolves the AHP chat URI in the path to the native session the
-// handlers address by backend and id.
-func (s *Server) chatRoute(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		chat, err := url.PathUnescape(chi.URLParam(r, "chat"))
-		if err != nil {
-			http.Error(w, "invalid chat URI", http.StatusBadRequest)
-			return
-		}
-		_, ch, err := s.ahpHost().ensureSession(chat)
-		if err != nil || ch == nil {
-			http.Error(w, "chat not found", http.StatusNotFound)
-			return
-		}
-		r.SetPathValue("backend", ch.controller.backend.id)
-		r.SetPathValue("id", ch.controller.ref.SessionID)
-		next.ServeHTTP(w, r)
-	})
-}
-
 type Command struct {
 	requireIdle bool
-	option      *t.ConfirmationOption // the approval option an AHP client chose
+	wait        bool                             // steering that waits for a turn instead of starting one
+	sync        bool                             // settings that its AHP chat wants when they run
+	option      *types.ConfirmationOption        // the approval option an AHP client chose
+	answers     map[string]types.ChatInputAnswer // an AHP client's answers with its drafts, as its reducer keeps them
 
 	ID         string               `json:"id"`
-	Epoch      string               `json:"epoch,omitempty"`
 	Type       string               `json:"type"`
 	InputID    string               `json:"inputId,omitempty"`
 	Text       string               `json:"text,omitempty"`
-	Context    []string             `json:"context,omitempty"` // model-only attachment text
+	Context    []string             `json:"context,omitempty"` // model-only attachment text, read before the input
+	Message    json.RawMessage      `json:"message,omitempty"` // the input in its client's own form
 	Files      []string             `json:"files,omitempty"`
 	Images     []string             `json:"images,omitempty"`
 	Intent     code.TurnInputIntent `json:"intent,omitempty"`
-	ClearQueue bool                 `json:"clearQueue,omitempty"`
+	Order      []string             `json:"order,omitempty"`
 	PromptID   string               `json:"promptId,omitempty"`
 	Action     string               `json:"action,omitempty"`
 	Content    map[string]any       `json:"content,omitempty"`
@@ -309,23 +220,14 @@ type Command struct {
 }
 
 type Receipt struct {
-	ID      string     `json:"id"`
-	Ref     SessionRef `json:"ref"`
-	Epoch   string     `json:"epoch"`
-	Outcome string     `json:"outcome"`
+	Ref SessionRef `json:"ref"`
 }
 
 type commandReceipt struct {
 	fingerprint [32]byte
 	receipt     Receipt
-	status      int
-	message     string
+	err         error
 	done        chan struct{}
-}
-
-type creationReceipt struct {
-	fingerprint [32]byte
-	receipt     Receipt
 }
 
 func commandFingerprint(command Command) [32]byte {
@@ -333,59 +235,45 @@ func commandFingerprint(command Command) [32]byte {
 	return sha256.Sum256(data)
 }
 
-// createSession owns native creation and its retry receipt independently of transport.
+// createSession creates a native session, or forks one. Callers own retries:
+// AHP creation is serialised per URI and recorded in the session's alias.
 func (b *backendRuntime) createSession(command Command) commandReceipt {
-	failure := func(status int, message string) commandReceipt {
-		return commandReceipt{status: status, message: message}
+	failure := func(message string) commandReceipt {
+		return commandReceipt{err: errors.New(message)}
 	}
-	if !b.beginOperation() {
-		return failure(409, "workspace closed")
+	if !b.Project.beginOperation() {
+		return commandReceipt{err: errWorkspaceClosed}
 	}
-	defer b.operations.Done()
-	if command.ID == "" || command.Type != "create" && command.Type != "fork" {
-		return failure(400, "create or fork command and request id required")
+	defer b.Project.operations.Done()
+	if command.Type != "create" && command.Type != "fork" {
+		return failure("create or fork command required")
 	}
 	forker, canFork := b.agent.(code.SessionForker)
 	if command.Type == "fork" && (!canFork || command.Source == "") {
-		return failure(400, "fork requires a source session on an agent that supports forking")
-	}
-	b.createMu.Lock()
-	defer b.createMu.Unlock()
-	fingerprint := commandFingerprint(command)
-	if previous, ok := b.creations[command.ID]; ok {
-		if previous.fingerprint != fingerprint {
-			return failure(409, "request id reused with different content")
-		}
-		return commandReceipt{receipt: previous.receipt}
+		return failure("fork requires a source session on an agent that supports forking")
 	}
 	var id string
 	var err error
 	if command.Type == "fork" && command.InputID != "" {
 		through, ok := b.agent.(code.SessionTurnForker)
 		if !ok {
-			return failure(400, "agent cannot fork through an earlier turn")
+			return failure("agent cannot fork through an earlier turn")
 		}
-		id, err = through.ForkSessionThrough(code.WithSessionID(b.ctx, command.Source), command.Source, command.InputID, command.Title)
+		id, err = through.ForkSessionThrough(code.WithSessionID(b.Project.ctx, command.Source), command.Source, command.InputID, command.Title)
 	} else if command.Type == "fork" {
-		id, err = forker.ForkSession(code.WithSessionID(b.ctx, command.Source), command.Source, command.Title)
+		id, err = forker.ForkSession(code.WithSessionID(b.Project.ctx, command.Source), command.Source, command.Title)
 	} else {
-		id, err = b.agent.NewSession(b.ctx)
+		id, err = b.agent.NewSession(b.Project.ctx)
 	}
 	if err != nil {
-		status := 502
-		if errors.Is(err, code.ErrTurnInProgress) {
-			status = 409
-		}
-		return failure(status, err.Error())
+		return commandReceipt{err: err}
 	}
 	c := b.session(id)
 	c.opMu.Lock()
-	receipt := Receipt{ID: command.ID, Ref: c.ref, Epoch: c.epoch, Outcome: "created"}
-	b.creations[command.ID] = creationReceipt{fingerprint, receipt}
-	c.loaded = true
+	receipt := Receipt{Ref: c.ref}
 	c.replaceHistory()
 	c.mu.Lock()
-	c.state.Status = "ready"
+	c.state.Status = sessionReady
 	c.publishStateLocked()
 	c.mu.Unlock()
 	c.opMu.Unlock()
@@ -398,31 +286,27 @@ func (b *backendRuntime) createSession(command Command) commandReceipt {
 // waiting on opMu so an in-flight operation cannot have its ID reused to answer
 // its own prompt. Never hold a receipt/projection lock while doing backend I/O.
 func (c *sessionController) command(ctx context.Context, command Command) commandReceipt {
-	failure := func(message string) commandReceipt { return commandReceipt{status: 409, message: message} }
-	if c.epoch != command.Epoch {
-		return failure("session epoch changed; subscribe again")
-	}
 	fingerprint := commandFingerprint(command)
-	c.receiptMu.Lock()
+	c.mu.Lock()
 	if previous := c.receipts[command.ID]; previous != nil {
-		c.receiptMu.Unlock()
+		c.mu.Unlock()
 		if previous.fingerprint != fingerprint {
-			return failure("request id reused with different content")
+			return commandReceipt{err: errors.New("request id reused with different content")}
 		}
 		select {
 		case <-previous.done:
 			return *previous
 		case <-ctx.Done():
-			return failure(ctx.Err().Error())
-		case <-c.backend.ctx.Done():
-			return failure("workspace closed")
+			return commandReceipt{err: ctx.Err()}
+		case <-c.backend.Project.ctx.Done():
+			return commandReceipt{err: errWorkspaceClosed}
 		}
 	}
-	record := &commandReceipt{fingerprint: fingerprint, done: make(chan struct{}), receipt: Receipt{ID: command.ID, Ref: c.ref, Epoch: c.epoch, Outcome: "accepted"}}
+	record := &commandReceipt{fingerprint: fingerprint, done: make(chan struct{}), receipt: Receipt{Ref: c.ref}}
 	c.receipts[command.ID] = record
 	c.receiptOrder = append(c.receiptOrder, command.ID)
 	c.pruneReceiptsLocked()
-	c.receiptMu.Unlock()
+	c.mu.Unlock()
 	defer close(record.done)
 	var err error
 	if command.Type == "prompt_response" {
@@ -435,16 +319,14 @@ func (c *sessionController) command(ctx context.Context, command Command) comman
 			err = c.execute(command)
 		}
 	}
-	if err != nil {
-		record.status, record.message = http.StatusConflict, err.Error()
-	}
+	record.err = err
 	return *record
 }
 
 const receiptLimit = 1024
 
 // pruneReceiptsLocked forgets the oldest completed receipts beyond the limit;
-// in-flight ones stay so their IDs cannot be reused. Caller holds receiptMu.
+// in-flight ones stay so their IDs cannot be reused. Caller holds mu.
 func (c *sessionController) pruneReceiptsLocked() {
 	for i := 0; len(c.receipts) > receiptLimit && i < len(c.receiptOrder); {
 		id := c.receiptOrder[i]
@@ -458,30 +340,36 @@ func (c *sessionController) pruneReceiptsLocked() {
 	}
 }
 
+// cuttable reports whether the agent's history holds an input, after whose turn it can be cut.
+func (c *sessionController) cuttable(inputID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.compactionsLocked()[inputID] && slices.ContainsFunc(c.entries, func(e TranscriptEntry) bool { return e.Type == "user" && e.InputID == inputID })
+}
+
+// compactionsLocked are the inputs of compaction turns, which the agent's history has no input for. Caller holds c.mu.
+func (c *sessionController) compactionsLocked() map[string]bool {
+	compactions := map[string]bool{}
+	for _, turn := range c.hostTurns {
+		if turn.compact {
+			compactions[turn.entries[0].InputID] = true
+		}
+	}
+	return compactions
+}
+
 func (c *sessionController) execute(command Command) error {
 	b, sid := c.backend, c.ref.SessionID
-	if err := b.ctx.Err(); err != nil {
+	if err := b.Project.ctx.Err(); err != nil {
 		return err
-	}
-	if c.deleted {
-		return errors.New("session deleted")
 	}
 	switch command.Type {
 	case "send", "queue_update":
-		if command.requireIdle {
-			snapshot := b.turns.Snapshot(sid)
-			if snapshotHasActive(snapshot) || snapshot.Compacting {
-				return code.ErrTurnInProgress
-			}
+		id := command.ID
+		if command.Type == "queue_update" {
+			id = command.InputID
 		}
-		if command.Type == "send" && command.InputID != "" && command.InputID != command.ID {
-			return errors.New("input id must equal the send request id")
-		}
-		id := command.InputID
-		if id == "" {
-			id = command.ID
-		}
-		input := code.TurnInput{ID: id, Intent: command.Intent, Origin: "user", Display: &code.TurnInputDisplay{Text: command.Text, Files: command.Files, Images: command.Images}}
+		input := code.TurnInput{ID: id, Intent: command.Intent, Wait: command.wait, Origin: "user", Context: command.Context, Display: &code.TurnInputDisplay{Text: command.Text, Files: command.Files, Images: command.Images, Source: command.Message}}
 		if _, canCompact := b.agent.(code.Compactor); canCompact && isCompactCommand(command.Text) {
 			input.Compact = true
 			if focus := compactFocus(command.Text); focus != "" {
@@ -492,45 +380,42 @@ func (c *sessionController) execute(command Command) error {
 		}
 		// A queue recovered after a restart waits for the user; sending continues
 		// it, after the input when that input must start now.
-		if command.Type == "send" && b.turns.Snapshot(sid).Paused {
-			if command.requireIdle {
-				if err := b.turns.Unpause(sid); err != nil {
-					return err
-				}
-			} else {
-				b.turns.Resume(sid)
-			}
+		if command.Type == "send" && !command.wait && !command.requireIdle && b.turns.Snapshot(sid).Paused {
+			b.turns.Resume(sid)
 		}
-		if command.Type == "queue_update" {
-			if err := b.turns.ReplaceQueued(sid, id, input); err != nil {
-				return err
-			}
-		} else {
-			if _, err := b.turns.Submit(b.ctx, sid, input); err != nil {
-				return err
-			}
+		var err error
+		switch {
+		case command.Type == "queue_update":
+			err = b.turns.ReplaceQueued(sid, id, input)
+		case command.requireIdle:
+			_, err = b.turns.Start(b.Project.ctx, sid, input)
+		default:
+			_, err = b.turns.Submit(b.Project.ctx, sid, input)
+		}
+		if err != nil {
+			return err
 		}
 		b.ensureTaskPump(sid)
 	case "queue_remove":
 		if err := b.turns.RemoveQueued(sid, command.InputID); err != nil {
 			return err
 		}
+	case "queue_reorder":
+		if err := b.turns.ReorderQueued(sid, command.Order); err != nil {
+			return err
+		}
 	case "cancel":
-		if command.InputID != "" {
-			if err := b.turns.CancelTurn(sid, command.InputID, command.ClearQueue); err != nil {
-				return err
-			}
-		} else if command.ClearQueue {
-			if err := b.turns.CancelAll(sid); err != nil {
-				return err
-			}
-		} else {
-			if err := b.turns.CancelCurrent(sid); err != nil {
+		// Stopping a turn also drops what was queued behind it.
+		if err := b.turns.CancelTurn(sid, command.InputID, true); err != nil {
+			return err
+		}
+	case "settings":
+		if command.sync {
+			if err := c.wantedSettings(&command); err != nil {
 				return err
 			}
 		}
-	case "settings":
-		ctx := code.WithSessionID(b.ctx, sid)
+		ctx := code.WithSessionID(b.Project.ctx, sid)
 		// Always refresh, including partial failures or provider-normalized values.
 		defer c.refreshSettings()
 		if command.Model != nil {
@@ -557,25 +442,49 @@ func (c *sessionController) execute(command Command) error {
 				return err
 			}
 		}
+	case "truncate":
+		truncator, ok := b.agent.(code.SessionTruncator)
+		if !ok {
+			return errors.ErrUnsupported
+		}
+		if command.InputID != "" && !c.cuttable(command.InputID) {
+			return errors.New("history can only be cut after a turn of the conversation")
+		}
+		// What runs or waits belongs to the history that goes.
+		if err := b.turns.StopSession(b.Project.ctx, sid); err != nil {
+			return err
+		}
+		if err := truncator.TruncateSession(b.Project.ctx, sid, command.InputID); err != nil {
+			return err
+		}
+		kept := len(transcriptEntries(b.agent.Messages(sid)))
+		c.mu.Lock()
+		c.hostTurns = slices.DeleteFunc(c.hostTurns, func(turn hostTurn) bool { return turn.at >= kept })
+		// The outcome of the last turn stays with it.
+		if c.lastInput != command.InputID {
+			c.lastOutcome, c.lastInput, c.state.Error = "", "", nil
+		}
+		c.mu.Unlock()
+		c.refreshSettings() // the usage of the dropped turns goes with them
+		c.replaceHistory()
 	case "delete":
 		if !supportsDelete(b.agent) {
 			return errors.ErrUnsupported
 		}
 		// A terminal tombstone is retained for this server lifetime. Late callbacks
 		// cannot recreate a deleted view or admit a new input under the old identity.
-		if err := b.turns.StopSession(b.ctx, sid); err != nil {
+		if err := b.turns.StopSession(b.Project.ctx, sid); err != nil {
 			return err
 		}
-		if err := b.agent.DeleteSession(b.ctx, sid); err != nil {
+		if err := b.agent.DeleteSession(b.Project.ctx, sid); err != nil {
 			return err
 		}
-		c.deleted = true
 		c.mu.Lock()
 		for _, prompt := range c.prompts {
 			prompt.reply <- Command{Action: "cancel"}
 		}
 		c.prompts = map[string]pendingPrompt{}
-		c.state.Status = "deleted"
+		c.state.Status = sessionDeleted
 		c.state.Phase = "idle"
 		c.state.PendingInputs = []TurnQueueEntry{}
 		c.state.Prompts = []PromptView{}

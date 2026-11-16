@@ -14,6 +14,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/language"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 )
 
 type lspFeatureParams struct {
@@ -50,7 +51,7 @@ type lspQuery struct {
 	unchanged func() bool
 }
 
-var errLSPContentModified = &ahpRPCError{Code: -32801, Message: "another editor changed the document"}
+var errLSPContentModified = &ahp.Error{Code: -32801, Message: "another editor changed the document"}
 
 func (q lspQuery) textEdits(edits []lsp.TextEdit, err error) ([]lsp.TextEdit, error) {
 	if err == nil && q.unchanged != nil && !q.unchanged() {
@@ -105,13 +106,13 @@ func lspNull(lspQuery) any             { return nil }
 func lspUnchanged(q lspQuery) any      { return q.raw }
 func lspEmptyDiagnostics(lspQuery) any { return map[string]any{"kind": "full", "items": []any{}} }
 
-func (c *lspConnection) request(ctx context.Context, req ahpRequest, buffers map[string]lspBuffer) (any, error) {
+func (c *lspConnection) request(ctx context.Context, req ahp.Request, buffers map[string]lspBuffer) (any, error) {
 	if handle := lspWorkspaceMethods[req.Method]; handle != nil {
 		return handle(c, ctx, req.Params)
 	}
 	method, ok := lspDocumentMethods[req.Method]
 	if !ok {
-		return nil, &ahpRPCError{Code: -32601, Message: "unsupported language method: " + req.Method}
+		return nil, &ahp.Error{Code: -32601, Message: "unsupported language method: " + req.Method}
 	}
 	q := lspQuery{id: req.ID, raw: req.Params, buffers: buffers}
 	if method.resolve {
@@ -120,7 +121,7 @@ func (c *lspConnection) request(ctx context.Context, req ahpRequest, buffers map
 			Data json.RawMessage `json:"data"`
 		}
 		if json.Unmarshal(req.Params, &item) != nil {
-			return nil, ahpInvalid("invalid language request")
+			return nil, ahp.InvalidParams("invalid language request")
 		}
 		uri, raw, err := unwrapLSPResolve(item.Data, req.Params)
 		if err != nil {
@@ -129,7 +130,7 @@ func (c *lspConnection) request(ctx context.Context, req ahpRequest, buffers map
 		q.uri, q.raw = uri, raw
 	} else {
 		if err := lsp.Unmarshal(req.Params, &q.params); err != nil {
-			return nil, ahpInvalid("invalid language request")
+			return nil, ahp.InvalidParams("invalid language request")
 		}
 		q.uri = q.params.TextDocument.URI
 	}
@@ -137,7 +138,7 @@ func (c *lspConnection) request(ctx context.Context, req ahpRequest, buffers map
 	if q.path, err = c.path(q.uri); err != nil {
 		return nil, err
 	}
-	if method.empty != nil && !c.server.workspace.HasLSPFor(q.path) {
+	if method.empty != nil && !c.server.Project.workspace.HasLSPFor(q.path) {
 		return method.empty(q), nil
 	}
 	if doc, ok := buffers[q.uri]; ok {
@@ -148,7 +149,7 @@ func (c *lspConnection) request(ctx context.Context, req ahpRequest, buffers map
 	}
 	q.line, q.column = q.params.Position.Line, q.params.Position.Character
 	if q.line < 0 || q.column < 0 {
-		return nil, ahpInvalid("negative document position")
+		return nil, ahp.InvalidParams("negative document position")
 	}
 	return method.handle(c, ctx, q)
 }
@@ -162,7 +163,7 @@ func unwrapLSPResolve(data, params json.RawMessage) (string, json.RawMessage, er
 	}
 	var wrapper map[string]json.RawMessage
 	if json.Unmarshal(data, &wrapper) != nil || json.Unmarshal(wrapper["wingman"], &route) != nil || route.URI == "" {
-		return "", nil, ahpInvalid("missing resolve routing data")
+		return "", nil, ahp.InvalidParams("missing resolve routing data")
 	}
 	var item map[string]json.RawMessage
 	_ = json.Unmarshal(params, &item)
@@ -180,14 +181,14 @@ func (c *lspConnection) textDocumentContent(ctx context.Context, raw json.RawMes
 		URI string `json:"uri"`
 	}
 	if json.Unmarshal(raw, &p) != nil {
-		return nil, ahpInvalid("invalid content request")
+		return nil, ahp.InvalidParams("invalid content request")
 	}
 	path, virtual, ok := c.server.lspSourceTarget(p.URI)
 	if !ok {
-		return nil, &ahpRPCError{Code: -32803, Message: "source not found"}
+		return nil, &ahp.Error{Code: -32803, Message: "source not found"}
 	}
 	if virtual != "" {
-		text, err := c.server.workspace.LSPVirtualContent(ctx, virtual)
+		text, err := c.server.Project.workspace.LSPVirtualContent(ctx, virtual)
 		if err != nil {
 			return nil, err
 		}
@@ -202,21 +203,21 @@ func (c *lspConnection) textDocumentContent(ctx context.Context, raw json.RawMes
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > ahpResourceLimit {
-		return nil, ahpInvalid("source is not a readable text file")
+	if !info.Mode().IsRegular() || info.Size() > resourceLimit {
+		return nil, ahp.InvalidParams("source is not a readable text file")
 	}
-	data, err := io.ReadAll(io.LimitReader(f, ahpResourceLimit+1))
+	data, err := io.ReadAll(io.LimitReader(f, resourceLimit+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > ahpResourceLimit || isBinary(data) || !utf8.Valid(data) {
-		return nil, ahpInvalid("source is not a readable text file")
+	if len(data) > resourceLimit || isBinary(data) || !utf8.Valid(data) {
+		return nil, ahp.InvalidParams("source is not a readable text file")
 	}
 	return map[string]string{"text": string(data)}, nil
 }
 
 func (c *lspConnection) workspaceDiagnostics(ctx context.Context, _ json.RawMessage) (any, error) {
-	report := c.server.workspace.Diagnostics(ctx)
+	report := c.server.Project.workspace.Diagnostics(ctx)
 	items := []any{}
 	reported := map[string]bool{}
 	for path, diagnostics := range report.Diagnostics {
@@ -237,12 +238,12 @@ func (c *lspConnection) workspaceDiagnostics(ctx context.Context, _ json.RawMess
 }
 
 func (c *lspConnection) diagnostic(ctx context.Context, q lspQuery) (any, error) {
-	diagnostics, known, err := c.server.workspace.FileDiagnostics(ctx, q.path, q.content)
+	diagnostics, known, err := c.server.Project.workspace.FileDiagnostics(ctx, q.path, q.content)
 	if err != nil {
 		return nil, err
 	}
 	if !known {
-		return nil, &ahpRPCError{Code: -32802, Message: "diagnostics are not available yet", Data: map[string]any{"retriggerRequest": true}}
+		return nil, &ahp.Error{Code: -32802, Message: "diagnostics are not available yet", Data: map[string]any{"retriggerRequest": true}}
 	}
 	return map[string]any{"kind": "full", "items": lspDiagnostics(diagnostics)}, nil
 }
@@ -251,7 +252,7 @@ type lspLocationFinder func(*code.Workspace, context.Context, string, *string, i
 
 func lspLocations(find lspLocationFinder) func(*lspConnection, context.Context, lspQuery) (any, error) {
 	return func(c *lspConnection, ctx context.Context, q lspQuery) (any, error) {
-		locations, err := find(c.server.workspace, ctx, q.path, q.content, q.line, q.column)
+		locations, err := find(c.server.Project.workspace, ctx, q.path, q.content, q.line, q.column)
 		return c.allowLocations(locations), err
 	}
 }
@@ -275,14 +276,14 @@ func (c *lspConnection) references(ctx context.Context, q lspQuery) (any, error)
 		IncludeDeclaration bool `json:"includeDeclaration"`
 	}
 	if len(q.params.Context) > 0 && json.Unmarshal(q.params.Context, &reference) != nil {
-		return nil, ahpInvalid("invalid reference context")
+		return nil, ahp.InvalidParams("invalid reference context")
 	}
-	locations, err := c.server.workspace.ReferenceLocations(ctx, q.path, q.content, q.line, q.column, reference.IncludeDeclaration)
+	locations, err := c.server.Project.workspace.ReferenceLocations(ctx, q.path, q.content, q.line, q.column, reference.IncludeDeclaration)
 	return c.allowLocations(locations), err
 }
 
 func (c *lspConnection) hover(ctx context.Context, q lspQuery) (any, error) {
-	text, textRange, err := c.server.workspace.HoverRange(ctx, q.path, q.content, q.line, q.column)
+	text, textRange, err := c.server.Project.workspace.HoverRange(ctx, q.path, q.content, q.line, q.column)
 	if err != nil || strings.TrimSpace(text) == "" {
 		return nil, err
 	}
@@ -300,7 +301,7 @@ func (c *lspConnection) completion(ctx context.Context, q lspQuery) (any, error)
 			return nil, err
 		}
 	}
-	list, err := c.server.workspace.CompletionItems(ctx, q.path, q.content, q.line, q.column, trigger)
+	list, err := c.server.Project.workspace.CompletionItems(ctx, q.path, q.content, q.line, q.column, trigger)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +316,7 @@ func (c *lspConnection) resolveCompletion(ctx context.Context, q lspQuery) (any,
 	if err := lsp.Unmarshal(q.raw, &item); err != nil {
 		return nil, err
 	}
-	return c.server.workspace.ResolveCompletionItem(ctx, q.path, q.content, item)
+	return c.server.Project.workspace.ResolveCompletionItem(ctx, q.path, q.content, item)
 }
 
 func (c *lspConnection) signatureHelp(ctx context.Context, q lspQuery) (any, error) {
@@ -325,11 +326,11 @@ func (c *lspConnection) signatureHelp(ctx context.Context, q lspQuery) (any, err
 			return nil, err
 		}
 	}
-	return c.server.workspace.SignatureHelp(ctx, q.path, q.content, q.line, q.column, trigger)
+	return c.server.Project.workspace.SignatureHelp(ctx, q.path, q.content, q.line, q.column, trigger)
 }
 
 func (c *lspConnection) documentSymbols(ctx context.Context, q lspQuery) (any, error) {
-	documents, flat, err := c.server.workspace.DocumentSymbolItems(ctx, q.path, q.content)
+	documents, flat, err := c.server.Project.workspace.DocumentSymbolItems(ctx, q.path, q.content)
 	if len(documents) > 0 {
 		return documents, err
 	}
@@ -341,15 +342,15 @@ func (c *lspConnection) documentSymbols(ctx context.Context, q lspQuery) (any, e
 }
 
 func (c *lspConnection) documentHighlights(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.workspace.DocumentHighlights(ctx, q.path, q.content, q.line, q.column)
+	return c.server.Project.workspace.DocumentHighlights(ctx, q.path, q.content, q.line, q.column)
 }
 
 func (c *lspConnection) foldingRanges(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.workspace.FoldingRanges(ctx, q.path, q.content)
+	return c.server.Project.workspace.FoldingRanges(ctx, q.path, q.content)
 }
 
 func (c *lspConnection) semanticTokens(ctx context.Context, q lspQuery) (any, error) {
-	tokens, err := c.server.workspace.SemanticTokens(ctx, q.path, q.content)
+	tokens, err := c.server.Project.workspace.SemanticTokens(ctx, q.path, q.content)
 	if err != nil {
 		return nil, err
 	}
@@ -357,14 +358,14 @@ func (c *lspConnection) semanticTokens(ctx context.Context, q lspQuery) (any, er
 }
 
 func (c *lspConnection) prepareRename(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.workspace.PrepareRename(ctx, q.path, q.content, q.line, q.column)
+	return c.server.Project.workspace.PrepareRename(ctx, q.path, q.content, q.line, q.column)
 }
 
 func (c *lspConnection) rename(ctx context.Context, q lspQuery) (any, error) {
 	if strings.TrimSpace(q.params.NewName) == "" {
-		return nil, ahpInvalid("newName is required")
+		return nil, ahp.InvalidParams("newName is required")
 	}
-	edit, err := c.server.workspace.Rename(ctx, q.path, q.content, q.line, q.column, q.params.NewName)
+	edit, err := c.server.Project.workspace.Rename(ctx, q.path, q.content, q.line, q.column, q.params.NewName)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +382,7 @@ func (c *lspConnection) codeActions(ctx context.Context, q lspQuery) (any, error
 			return nil, err
 		}
 	}
-	actions, err := c.server.workspace.CodeActions(ctx, q.path, q.content, q.params.Range, actionContext.Only, actionContext.TriggerKind)
+	actions, err := c.server.Project.workspace.CodeActions(ctx, q.path, q.content, q.params.Range, actionContext.Only, actionContext.TriggerKind)
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +414,7 @@ func (c *lspConnection) resolveCodeAction(ctx context.Context, q lspQuery) (any,
 	if err := lsp.Unmarshal(q.raw, &action); err != nil {
 		return nil, err
 	}
-	resolved, err := c.server.workspace.ResolveCodeAction(ctx, q.path, q.content, action)
+	resolved, err := c.server.Project.workspace.ResolveCodeAction(ctx, q.path, q.content, action)
 	if err != nil {
 		return nil, err
 	}
@@ -433,16 +434,16 @@ func (c *lspConnection) resolveCodeAction(ctx context.Context, q lspQuery) (any,
 }
 
 func (c *lspConnection) executeCommand(ctx context.Context, q lspQuery) (any, error) {
-	w := c.server.workspace
+	w := c.server.Project.workspace
 	if q.params.Command == "" {
-		return nil, ahpInvalid("command is required")
+		return nil, ahp.InvalidParams("command is required")
 	}
 	capabilities, _, err := w.EditorLSPCapabilities(ctx, q.path)
 	if err != nil {
 		return nil, err
 	}
 	if !slices.Contains(capabilities.ExecuteCommandProvider.Commands, q.params.Command) {
-		return nil, ahpInvalid("the language server does not provide command " + q.params.Command)
+		return nil, ahp.InvalidParams("the language server does not provide command " + q.params.Command)
 	}
 	// The native call stays bounded, except while the user reviews an edit.
 	native, cancel := context.WithCancelCause(ctx)
@@ -464,19 +465,19 @@ func (c *lspConnection) executeCommand(ctx context.Context, q lspQuery) (any, er
 }
 
 func (c *lspConnection) formatting(ctx context.Context, q lspQuery) (any, error) {
-	return q.textEdits(c.server.workspace.Formatting(ctx, q.path, q.content, q.params.Options))
+	return q.textEdits(c.server.Project.workspace.Formatting(ctx, q.path, q.content, q.params.Options))
 }
 
 func (c *lspConnection) rangeFormatting(ctx context.Context, q lspQuery) (any, error) {
-	return q.textEdits(c.server.workspace.RangeFormatting(ctx, q.path, q.content, q.params.Range, q.params.Options))
+	return q.textEdits(c.server.Project.workspace.RangeFormatting(ctx, q.path, q.content, q.params.Range, q.params.Options))
 }
 
 func (c *lspConnection) onTypeFormatting(ctx context.Context, q lspQuery) (any, error) {
-	return q.textEdits(c.server.workspace.OnTypeFormatting(ctx, q.path, q.content, q.line, q.column, q.params.Character, q.params.Options))
+	return q.textEdits(c.server.Project.workspace.OnTypeFormatting(ctx, q.path, q.content, q.line, q.column, q.params.Character, q.params.Options))
 }
 
 func (c *lspConnection) inlayHints(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.workspace.InlayHints(ctx, q.path, q.content, q.params.Range)
+	return c.server.Project.workspace.InlayHints(ctx, q.path, q.content, q.params.Range)
 }
 
 func routeLSPItems(value any, uri, field string) (any, error) {

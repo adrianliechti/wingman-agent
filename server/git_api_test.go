@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/adrianliechti/wingman-agent/pkg/changes"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
@@ -244,9 +245,9 @@ func TestGitAPIRejectsInvalidPath(t *testing.T) {
 	web := httptest.NewServer(scopedTestHandler(app))
 	defer web.Close()
 
-	client := ahpTestClient(t, "ws"+strings.TrimPrefix(web.URL, "http")+"/ahp", "path-test")
+	client := protocolTestClient(t, "ws"+strings.TrimPrefix(web.URL, "http")+"/ahp", "path-test")
 	var result any
-	err = client.Request(t.Context(), "invokeChangesetOperation", map[string]any{"channel": ahpUnstagedChanges, "operationId": "stage", "target": map[string]any{"kind": "resource", "resource": "file:///outside"}}, &result)
+	err = client.Request(t.Context(), "invokeChangesetOperation", map[string]any{"channel": app.Project.changesChannel(changes.DiffUnstaged), "operationId": "stage", "target": map[string]any{"kind": "resource", "resource": "file:///outside"}}, &result)
 	if err == nil {
 		t.Fatal("outside path accepted")
 	}
@@ -485,11 +486,11 @@ func postGit(t *testing.T, baseURL, action, body string) {
 		}
 	}
 	if action == "stage" || action == "unstage" {
-		channel := ahpUnstagedChanges
+		channel := webChanges(t, baseURL, "unstaged")
 		if action == "unstage" {
-			channel = ahpStagedChanges
+			channel = webChanges(t, baseURL, "staged")
 		}
-		client := ahpTestClient(t, "ws"+strings.TrimPrefix(baseURL, "http")+"/ahp", "git-"+action+body)
+		client := protocolTestClient(t, "ws"+strings.TrimPrefix(baseURL, "http")+"/ahp", "git-"+action+body)
 		result, sub, err := client.Subscribe(t.Context(), channel)
 		if err != nil {
 			t.Fatal(err)
@@ -624,7 +625,7 @@ func getGitComparison(t *testing.T, baseURL, base, head, mode string) GitCompare
 		Channel string `json:"channel"`
 	}
 	gitCall(t, baseURL, "git/diff", map[string]any{"base": base, "head": head, "mode": mode}, &result)
-	client := ahpTestClient(t, "ws"+strings.TrimPrefix(baseURL, "http")+"/ahp", "comparison"+result.Channel)
+	client := protocolTestClient(t, "ws"+strings.TrimPrefix(baseURL, "http")+"/ahp", "comparison"+result.Channel)
 	snapshot, sub, err := client.Subscribe(t.Context(), result.Channel)
 	if err != nil {
 		t.Fatal(err)

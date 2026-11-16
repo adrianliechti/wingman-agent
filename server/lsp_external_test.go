@@ -156,12 +156,12 @@ func TestExternalWatchedFilesReachTheLanguageServer(t *testing.T) {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	app.syncWorkspaceFiles(t.Context()) // baseline
+	app.Project.syncWorkspaceFiles(t.Context()) // baseline
 	// A file created outside any editor reaches gopls only as a watched-file event.
 	if err := os.WriteFile(filepath.Join(root, "helper.go"), []byte("package main\n\nfunc helper() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	app.syncWorkspaceFiles(t.Context())
+	app.Project.syncWorkspaceFiles(t.Context())
 	for undefined() {
 		if time.Now().After(deadline) {
 			t.Fatal("gopls did not learn about helper.go")

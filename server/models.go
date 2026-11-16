@@ -2,36 +2,23 @@ package server
 
 import (
 	"context"
-	"net/http"
 )
 
 type modelFetcher interface {
 	FetchModels(context.Context) error
 }
 
-func (b *backendRuntime) handleRefreshModels(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.agent.(modelFetcher); !ok {
-		http.Error(w, "model discovery is managed by this agent", http.StatusMethodNotAllowed)
-		return
-	}
-	if err := b.refreshModels(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
 // Startup and retries share one request. Closing a picker does not cancel
 // discovery for other sessions; workspace shutdown still cancels it promptly.
 func (b *backendRuntime) refreshModels() error {
 	_, err, _ := b.modelDiscovery.Do("models", func() (any, error) {
-		if !b.beginOperation() {
+		if !b.Project.beginOperation() {
 			return nil, context.Canceled
 		}
-		defer b.operations.Done()
-		err := b.agent.(modelFetcher).FetchModels(b.ctx)
-		if b.ctx.Err() != nil {
-			return nil, b.ctx.Err()
+		defer b.Project.operations.Done()
+		err := b.agent.(modelFetcher).FetchModels(b.Project.ctx)
+		if b.Project.ctx.Err() != nil {
+			return nil, b.Project.ctx.Err()
 		}
 		b.mu.Lock()
 		views := make([]*sessionController, 0, len(b.sessions))
@@ -42,8 +29,8 @@ func (b *backendRuntime) refreshModels() error {
 		for _, view := range views {
 			view.refreshSettings()
 		}
-		if b.ahp != nil {
-			b.ahp.publishAgents()
+		if b.Project != nil {
+			b.Project.host.publishAgents()
 		}
 		return nil, err
 	})

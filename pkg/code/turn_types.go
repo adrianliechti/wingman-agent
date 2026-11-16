@@ -2,7 +2,9 @@ package code
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"slices"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
@@ -38,8 +40,9 @@ type TurnFeatureProvider interface {
 }
 
 // TurnSteerer injects input into the currently active turn. ErrNoActiveTurn and
-// ErrTurnNotSteerable ask TurnManager to preserve the input as a FIFO follow-up;
-// other errors are returned to the caller. Implementations must not mutate
+// ErrTurnNotSteerable ask TurnManager to preserve the input as a FIFO follow-up,
+// or, for an input that waits, ErrNoActiveTurn to keep it waiting; other errors
+// are returned to the caller. Implementations must not mutate
 // input and must copy its content if they retain it after Steer returns.
 type TurnSteerer interface {
 	Steer(ctx context.Context, sessionID string, input TurnInput) error
@@ -50,7 +53,8 @@ var (
 	ErrNoActiveTurn = errors.New("no active turn")
 	// ErrTurnNotSteerable means the active backend turn rejects same-turn input.
 	ErrTurnNotSteerable = errors.New("active turn is not steerable")
-	// ErrInputNotQueued means a queue mutation targeted a non-queued input.
+	// ErrInputNotQueued means a queue mutation targeted an input that is not
+	// queued, or steering that is being delivered to its turn.
 	ErrInputNotQueued = errors.New("turn input is not queued")
 	// ErrDuplicateInput means an input ID is already live in the session.
 	ErrDuplicateInput = errors.New("turn input id already exists")
@@ -68,20 +72,30 @@ type TurnInput struct {
 	Origin  string            `json:"origin,omitempty"`
 	// Compact runs compaction instead of a model turn; Content is its focus.
 	Compact bool `json:"compact,omitempty"`
+	// Context is what the model reads before the input and the transcript does
+	// not show. Agents receive it through harness.WithInputContext.
+	Context []string `json:"context,omitempty"`
+	// Wait keeps a steer that no turn can take queued until a turn runs,
+	// instead of making it a follow-up that starts one.
+	Wait bool `json:"wait,omitempty"`
 }
 
 type TurnInputDisplay struct {
 	Text   string   `json:"text"`
 	Files  []string `json:"files,omitempty"`
 	Images []string `json:"images,omitempty"`
+	// Source is the input in its client's own form, which a host shows as is.
+	Source json.RawMessage `json:"source,omitempty"`
 }
 
 func CloneTurnInput(input TurnInput) TurnInput {
 	input.Content = harness.CloneContent(input.Content)
+	input.Context = append([]string(nil), input.Context...)
 	if input.Display != nil {
 		display := *input.Display
 		display.Files = append([]string(nil), display.Files...)
 		display.Images = append([]string(nil), display.Images...)
+		display.Source = slices.Clone(display.Source)
 		input.Display = &display
 	}
 	return input

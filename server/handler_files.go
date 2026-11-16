@@ -1,60 +1,16 @@
 package server
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
-	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
 )
-
-var excludedDirs = map[string]bool{
-	".git":         true,
-	".hg":          true,
-	".svn":         true,
-	"node_modules": true,
-	"__pycache__":  true,
-	".venv":        true,
-	"vendor":       true,
-	"dist":         true,
-	"build":        true,
-	"target":       true,
-	".next":        true,
-	".cache":       true,
-}
-
-func fileRevision(data []byte) string {
-	return fmt.Sprintf("%x", sha256.Sum256(data))
-}
-
-func isBinary(data []byte) bool {
-	const sniff = 8192
-	head := data
-	if len(head) > sniff {
-		head = head[:sniff]
-	}
-	return bytes.IndexByte(head, 0) >= 0
-}
-
-func (s *Server) workspaceRel(p string) (string, bool) {
-	if p == "" {
-		return "", false
-	}
-	cleaned := path.Clean(p)
-	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || path.IsAbs(cleaned) {
-		return "", false
-	}
-	return filepath.FromSlash(cleaned), true
-}
 
 func (s *Server) resolveExistingRegularFile(w http.ResponseWriter, p string) (string, bool) {
 	rel, info, ok := s.resolveExistingPath(w, p)
@@ -73,65 +29,17 @@ func (s *Server) resolveExistingRegularFile(w http.ResponseWriter, p string) (st
 }
 
 func (s *Server) resolveExistingPath(w http.ResponseWriter, p string) (string, os.FileInfo, bool) {
-	rel, ok := s.workspaceRel(p)
+	rel, ok := workspaceRel(p)
 	if !ok {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return "", nil, false
 	}
-	info, err := s.workspace.Root.Lstat(rel)
+	info, err := s.Project.workspace.Root.Lstat(rel)
 	if err != nil {
 		http.Error(w, "path not found", http.StatusNotFound)
 		return "", nil, false
 	}
 	return rel, info, true
-}
-
-func copyPathInRoot(root *os.Root, src, dst string, info os.FileInfo) error {
-	if info.Mode()&os.ModeSymlink != 0 {
-		target, err := root.Readlink(src)
-		if err != nil {
-			return err
-		}
-		return root.Symlink(target, dst)
-	}
-	if info.IsDir() {
-		if err := root.MkdirAll(dst, info.Mode().Perm()); err != nil {
-			return err
-		}
-		entries, err := fs.ReadDir(root.FS(), filepath.ToSlash(src))
-		if err != nil {
-			return err
-		}
-		for _, e := range entries {
-			ei, err := e.Info()
-			if err != nil {
-				return err
-			}
-			if err := copyPathInRoot(root, filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), ei); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	if !info.Mode().IsRegular() {
-		return nil
-	}
-
-	in, err := root.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := root.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	return err
 }
 
 func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +48,7 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	root := s.workspace.Root
+	root := s.Project.workspace.Root
 	f, err := root.Open(rel)
 	if err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
@@ -184,7 +92,7 @@ func (s *Server) handleFileSearch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	visited := 0
-	err := fs.WalkDir(s.workspace.Root.FS(), ".", func(path string, entry fs.DirEntry, err error) error {
+	err := fs.WalkDir(s.Project.workspace.Root.FS(), ".", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -233,7 +141,7 @@ func (s *Server) handleReveal(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := revealPath(filepath.Join(s.workspace.RootPath, rel), info.IsDir()); err != nil {
+	if err := revealPath(filepath.Join(s.Project.workspace.RootPath, rel), info.IsDir()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

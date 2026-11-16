@@ -16,13 +16,13 @@ type turnReviewer interface {
 	UndoTurn(context.Context, string, string) error
 }
 
-func (b *backendRuntime) handleTurnReviews(w http.ResponseWriter, r *http.Request) {
-	reviewer, ok := b.agent.(turnReviewer)
+func handleTurnReviews(c *sessionController, w http.ResponseWriter, r *http.Request) {
+	reviewer, ok := c.backend.agent.(turnReviewer)
 	if !ok {
 		writeJSON(w, []harness.TurnReview{})
 		return
 	}
-	reviews, err := reviewer.TurnReviews(r.Context(), r.PathValue("id"))
+	reviews, err := reviewer.TurnReviews(r.Context(), c.ref.SessionID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -81,17 +81,17 @@ func netFileChanges(changes []tool.FileChange) []tool.FileChange {
 	return net
 }
 
-func (b *backendRuntime) handleTurnUndo(w http.ResponseWriter, r *http.Request) {
-	reviewer, ok := b.agent.(turnReviewer)
+func handleTurnUndo(c *sessionController, w http.ResponseWriter, r *http.Request) {
+	reviewer, ok := c.backend.agent.(turnReviewer)
 	if !ok {
 		http.Error(w, "turn undo is unavailable for this agent", http.StatusNotImplemented)
 		return
 	}
-	if err := reviewer.UndoTurn(r.Context(), r.PathValue("id"), r.PathValue("turnID")); err != nil {
+	if err := reviewer.UndoTurn(r.Context(), c.ref.SessionID, r.PathValue("turnID")); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	b.flushFiles()
-	b.ahpHost().refreshChangesets()
+	c.backend.Project.flushFiles()
+	c.backend.Project.refreshChangesets()
 	w.WriteHeader(http.StatusNoContent)
 }

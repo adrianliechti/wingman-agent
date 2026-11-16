@@ -1,0 +1,116 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"sort"
+
+	"github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/google/uuid"
+)
+
+type pendingPrompt struct {
+	view  PromptView
+	reply chan Command
+}
+
+func (b *backendRuntime) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.ElicitResult, error) {
+	reply, err := b.prompt(ctx, PromptKindAsk, req.Message, req.Fields)
+	if err != nil {
+		return tool.ElicitResult{}, err
+	}
+	return tool.ElicitResult{Action: tool.ElicitAction(reply.Action), Content: reply.Content}, nil
+}
+
+func (b *backendRuntime) Confirm(ctx context.Context, message string) (bool, error) {
+	sid := code.SessionIDFromContext(ctx)
+	if sid == "" {
+		return false, errors.New("prompt requires an explicit session")
+	}
+	reply, err := b.prompt(ctx, PromptKindConfirm, message, nil)
+	if err != nil {
+		return false, err
+	}
+	return reply.Action == string(tool.ElicitAccept), nil
+}
+
+// Warn shows a non-fatal agent warning, such as truncated project
+// instructions, as a notice in the session's transcript.
+func (b *backendRuntime) Warn(sessionID, message string) {
+	if sessionID == "" {
+		return
+	}
+	c := b.session(sessionID)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state.Status != sessionDeleted {
+		c.warnLocked(message)
+	}
+}
+
+func (b *backendRuntime) prompt(ctx context.Context, kind, message string, fields []tool.ElicitField) (Command, error) {
+	sid := code.SessionIDFromContext(ctx)
+	if sid == "" {
+		return Command{}, errors.New("prompt requires an explicit session")
+	}
+	c := b.session(sid)
+	id := uuid.NewString()
+	p := pendingPrompt{view: PromptView{ID: id, Kind: kind, Message: message, Fields: fields, InputID: harness.InputIDFromContext(ctx)}, reply: make(chan Command, 1)}
+	c.mu.Lock()
+	if c.state.Status == sessionDeleted {
+		c.mu.Unlock()
+		return Command{}, errSessionDeleted
+	}
+	c.prompts[id] = p
+	c.publishPromptsLocked()
+	c.mu.Unlock()
+	defer func() { c.mu.Lock(); delete(c.prompts, id); c.publishPromptsLocked(); c.mu.Unlock() }()
+	select {
+	case reply := <-p.reply:
+		return reply, nil
+	case <-ctx.Done():
+		return Command{}, ctx.Err()
+	case <-b.Project.ctx.Done():
+		return Command{}, b.Project.ctx.Err()
+	}
+}
+
+func (c *sessionController) publishPromptsLocked() {
+	c.state.Prompts = make([]PromptView, 0, len(c.prompts))
+	for _, p := range c.prompts {
+		c.state.Prompts = append(c.state.Prompts, p.view)
+	}
+	sort.Slice(c.state.Prompts, func(i, j int) bool { return c.state.Prompts[i].ID < c.state.Prompts[j].ID })
+	c.publishStateLocked()
+}
+
+func (c *sessionController) resolvePrompt(command Command) error {
+	switch tool.ElicitAction(command.Action) {
+	case tool.ElicitAccept, tool.ElicitDecline, tool.ElicitCancel:
+	default:
+		return errors.New("invalid prompt action")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resolvePromptLocked(command)
+}
+
+func (c *sessionController) resolvePromptLocked(command Command) error {
+	if c.state.Status == sessionDeleted || c.backend.Project.ctx.Err() != nil {
+		return errors.New("session closed")
+	}
+	p, ok := c.prompts[command.PromptID]
+	if !ok {
+		return errors.New("prompt already resolved or expired")
+	}
+	// Removal is the atomic winner selection for responses from multiple clients.
+	delete(c.prompts, command.PromptID)
+	if c.chat != nil {
+		c.chat.resolvePromptLocked(command)
+	}
+	p.reply <- command
+	c.publishPromptsLocked()
+	return nil
+}

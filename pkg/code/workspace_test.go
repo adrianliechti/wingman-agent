@@ -545,6 +545,7 @@ func TestProtectedLSPCallDoesNotHoldWorkspaceStateLock(t *testing.T) {
 	read := make(chan struct{})
 	go func() {
 		w.mu.RLock()
+		//lint:ignore SA2001 the read lock is only taken to show it is available
 		w.mu.RUnlock()
 		close(read)
 	}()

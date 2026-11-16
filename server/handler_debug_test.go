@@ -17,13 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/debugadapter"
 	"github.com/adrianliechti/wingman-agent/pkg/devtools"
+	"github.com/go-chi/chi/v5"
 )
 
 func TestDebugTargetsReturnsGoCodeLensCandidates(t *testing.T) {
@@ -145,7 +144,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 		}
 	}
 	app := newDebugTestServer(t, root)
-	if app.debugAvailable(context.Background()) {
+	if app.Project.debugAvailable(context.Background()) {
 		t.Fatal("system or project debugger was treated as managed")
 	}
 
@@ -160,7 +159,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 	if err := json.Unmarshal(response.Body.Bytes(), &targets); err != nil || len(targets.Targets) != 1 {
 		t.Fatalf("targets = %+v, error = %v", targets, err)
 	}
-	if app.workspace.DevTools.Resolve("dlv") != "" {
+	if app.Project.workspace.DevTools.Resolve("dlv") != "" {
 		t.Fatal("debugger was installed before requesting a launch plan")
 	}
 	body, err := json.Marshal(debugPlanRequest{Action: "debug", TargetID: targets.Targets[0].ID, CurrentPath: "main.go"})
@@ -179,7 +178,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 		if result.Type != "installation_required" || len(result.Tools) != 1 || result.Tools[0].Tool != "delve" || result.Tools[0].Installed || !result.Tools[0].Installable {
 			t.Fatalf("%s: installation prompt = %+v", accept, result)
 		}
-		if app.workspace.DevTools.Resolve("dlv") != "" {
+		if app.Project.workspace.DevTools.Resolve("dlv") != "" {
 			t.Fatal("opening the debug popup installed a debugger without confirmation")
 		}
 	}
@@ -188,7 +187,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 		t.Fatal(err)
 	}
 	t.Run("busy debugger does not install tools", func(t *testing.T) {
-		release, err := app.workspace.DAP.BeginPreparation()
+		release, err := app.Project.workspace.DAP.BeginPreparation()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -204,7 +203,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 			if accept == "application/json" && response.Code != http.StatusConflict {
 				t.Fatalf("busy status = %d, want conflict", response.Code)
 			}
-			if app.workspace.DevTools.Resolve("dlv") != "" {
+			if app.Project.workspace.DevTools.Resolve("dlv") != "" {
 				t.Fatal("setup installed tools while debugger was busy")
 			}
 		}
@@ -250,7 +249,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 	if len(statuses) != 1 || !statuses[0].Installed {
 		t.Fatalf("installed tool status = %+v", statuses)
 	}
-	if app.workspace.DevTools.Resolve("dlv") == "" || app.workspace.DevTools.Resolve("debugpy-adapter") != "" {
+	if app.Project.workspace.DevTools.Resolve("dlv") == "" || app.Project.workspace.DevTools.Resolve("debugpy-adapter") != "" {
 		t.Fatal("launch preparation did not install only the selected debugger")
 	}
 
@@ -271,7 +270,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 
 	// A due update is attempted without another install confirmation. A failed
 	// refresh keeps the existing managed debugger and reports the failure.
-	statusPath := filepath.Join(app.workspace.DevTools.ToolDir("delve"), ".status")
+	statusPath := filepath.Join(app.Project.workspace.DevTools.ToolDir("delve"), ".status")
 	if err := os.WriteFile(statusPath, []byte(time.Now().Add(-48*time.Hour).UTC().Format(time.RFC3339Nano)), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +302,7 @@ printf '#!/bin/sh\nexit 0\n' > "$GOBIN/dlv"
 	if !updating || plan == nil || !strings.Contains(warning, "Could not update debugger tools") {
 		t.Fatalf("update = %v, plan = %+v, warning = %q", updating, plan, warning)
 	}
-	if app.workspace.DevTools.Resolve("dlv") == "" {
+	if app.Project.workspace.DevTools.Resolve("dlv") == "" {
 		t.Fatal("failed refresh removed the managed debugger")
 	}
 }
@@ -319,12 +318,12 @@ func TestDebugPlanFindsToolInstalledAfterCachedDiscovery(t *testing.T) {
 	writeDebugTestFile(t, root, "go.mod", "module example.com/demo\n\ngo 1.25\n")
 	writeDebugTestFile(t, root, "main.go", "package main\n\nfunc main() {}\n")
 	app := newDebugTestServer(t, root)
-	if app.debugAvailable(context.Background()) {
+	if app.Project.debugAvailable(context.Background()) {
 		t.Fatal("debugger was available before installation")
 	}
 	// Simulate another workspace installing a fresh copy while this workspace
 	// still has cached discovery results for the missing debugger.
-	directory := filepath.Join(app.workspace.DevTools.Root(), "delve")
+	directory := filepath.Join(app.Project.workspace.DevTools.Root(), "delve")
 	if err := os.MkdirAll(filepath.Join(directory, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +378,7 @@ func TestDebugPlanRechecksHostAfterUpdateLockFailure(t *testing.T) {
 			writeDebugTestFile(t, root, "pom.xml", "<project/>\n")
 			writeDebugTestFile(t, root, "Main.java", "public class Main { public static void main(String[] args) {} }\n")
 			app := newDebugTestServer(t, root)
-			tools := app.workspace.DevTools.Root()
+			tools := app.Project.workspace.DevTools.Root()
 			for _, path := range []string{"jdtls/bin/jdtls", "java-debug/bin/java-debug-adapter", "java-debug/java-debug/com.microsoft.java.debug.plugin-test.jar"} {
 				writeDebugTestFile(t, tools, path, "#!/bin/sh\nexit 0\n")
 				if err := os.Chmod(filepath.Join(tools, path), 0o755); err != nil {
@@ -537,7 +536,10 @@ func newDebugTestServer(t *testing.T, root string) *Server {
 	}
 	workspace.WarmUp()
 	t.Cleanup(workspace.Close)
-	server := &Server{workspace: workspace, ctx: context.Background()}
+	ctx, cancel := context.WithCancel(t.Context())
+	server := &Server{Project: &Project{workspace: workspace, ctx: ctx, cancel: cancel, scope: workspaceScope(root)}}
+	server.Project = webProject(server, root)
+	t.Cleanup(server.Close)
 	router := chi.NewRouter()
 	server.registerRoutes(router)
 	server.mux = router

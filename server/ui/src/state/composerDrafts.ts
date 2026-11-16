@@ -20,19 +20,21 @@ const hasContent = (c: ComposerContent) =>
 		c.text ||
 		c.files.length ||
 		c.images.length ||
+		c.attachments?.length ||
 		c.previousDraft?.text ||
 		c.previousDraft?.files.length ||
-		c.previousDraft?.images.length
+		c.previousDraft?.images.length ||
+		c.previousDraft?.attachments?.length
 	);
 const contentOf = (draft: ComposerDraft): ComposerContent => {
-	const { text, files, images, completions, editingQueueId, previousDraft } =
+	const { text, files, images, attachments, editingQueueId, previousDraft } =
 		draft.getSnapshot();
 	return {
 		text,
 		files,
 		images,
 		editingQueueId,
-		...(completions?.length ? { completions } : {}),
+		...(attachments?.length ? { attachments } : {}),
 		...(previousDraft ? { previousDraft } : {}),
 	};
 };
@@ -43,10 +45,11 @@ function isDraftContent(value: unknown): boolean {
 	const content = value as Partial<ComposerContent> | null;
 	return (
 		typeof content?.text === "string" &&
-		(content.completions === undefined ||
-			(Array.isArray(content.completions) &&
-				content.completions.every(
-					(item) => item?.type === "simple" && typeof item.label === "string",
+		(content.attachments === undefined ||
+			(Array.isArray(content.attachments) &&
+				content.attachments.every(
+					(item) =>
+						typeof item?.type === "string" && typeof item.label === "string",
 				))) &&
 		Array.isArray(content.files) &&
 		content.files.every((path) => typeof path === "string") &&
@@ -193,7 +196,7 @@ export class ComposerDrafts {
 				content.text === previous.text &&
 				content.files === previous.files &&
 				content.images === previous.images &&
-				content.completions === previous.completions &&
+				content.attachments === previous.attachments &&
 				content.previousDraft === previous.previousDraft &&
 				content.editingQueueId === previous.editingQueueId
 			)

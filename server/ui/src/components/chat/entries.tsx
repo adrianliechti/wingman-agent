@@ -7,12 +7,16 @@ import {
 	FileText,
 	Globe,
 	LoaderCircle,
+	MessageSquare,
+	Paperclip,
 	Search,
 	SquareTerminal,
 	Trash2,
 	Wrench,
 } from "lucide-react";
-import { memo, useEffect, useRef, useState } from "react";
+import type { MessageAttachment } from "@microsoft/agent-host-protocol";
+import { memo, type ReactNode, useEffect, useRef, useState } from "react";
+import { visibleAttachments } from "../../api/chatCommands";
 import type { ChatEntry } from "../../types/session";
 import type { Phase, ToolLocation } from "../../types/protocol";
 import { MarkdownContent } from "../MarkdownContent";
@@ -46,6 +50,8 @@ export const EntryView = memo(function EntryView({
 	}
 
 	if (entry.type === "user") {
+		const shown = visibleAttachments(entry.attachments);
+		const chips = (entry.files?.length ?? 0) + shown.length > 0;
 		return (
 			<div
 				data-entry-id={entry.id}
@@ -55,11 +61,11 @@ export const EntryView = memo(function EntryView({
 					{entry.content && (
 						<div className="whitespace-pre-wrap">{entry.content}</div>
 					)}
-					{entry.files && entry.files.length > 0 && (
+					{chips && (
 						<div
 							className={`flex flex-wrap gap-1 ${entry.content ? "mt-2" : ""}`}
 						>
-							{entry.files.map((path) => (
+							{entry.files?.map((path) => (
 								<span
 									key={path}
 									className="max-w-[240px] truncate rounded bg-bg-active px-1.5 py-0.5 font-mono text-[11px] text-fg-muted"
@@ -68,12 +74,15 @@ export const EntryView = memo(function EntryView({
 									{path.split("/").pop() || path}
 								</span>
 							))}
+							{shown.map((attachment, i) => (
+								<AttachmentChip
+									key={`attachment-${i}`}
+									attachment={attachment}
+								/>
+							))}
 						</div>
 					)}
-					<EntryImages
-						entry={entry}
-						spaced={!!entry.content || (entry.files?.length ?? 0) > 0}
-					/>
+					<EntryImages entry={entry} spaced={!!entry.content || chips} />
 				</div>
 			</div>
 		);
@@ -89,6 +98,30 @@ export const EntryView = memo(function EntryView({
 		</div>
 	);
 });
+
+export function AttachmentChip({
+	attachment,
+	children,
+}: {
+	attachment: MessageAttachment;
+	children?: ReactNode;
+}) {
+	const Icon = attachment.type === "chat" ? MessageSquare : Paperclip;
+	return (
+		<span
+			className="flex max-w-[240px] items-center gap-1 rounded bg-bg-active px-1.5 py-0.5 font-mono text-[11px] text-fg-muted"
+			title={
+				attachment.type === "chat"
+					? `Chat: ${attachment.label}`
+					: attachment.label
+			}
+		>
+			<Icon size={10} className="shrink-0" />
+			<span className="truncate">{attachment.label}</span>
+			{children}
+		</span>
+	);
+}
 
 function EntryImages({ entry, spaced }: { entry: ChatEntry; spaced: boolean }) {
 	if (!entry.images?.length) return null;

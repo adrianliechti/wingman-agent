@@ -56,6 +56,116 @@ URL schemes such as `vscode-file://`. Other websites, including sandboxed
 `Origin: null` frames, are rejected. `/lsp` and `/dap` accept only the
 same-origin Web UI.
 
+## One host for every project
+
+`wingman host` serves any project: a session names its working directory and
+the host opens that project when the session is created or reopened.
+`wingman server` is the same host, rooted at the directory it was started in,
+with the web UI for that directory's project.
+
+```bash
+wingman host --root ~/Projects --token "$(openssl rand -hex 16)"
+```
+
+The host prints its address, normally `ws://localhost:9100/ahp`, and has no
+web UI. Add it in VS Code like any other host and choose a folder per session;
+the folder picker starts in the host's root.
+
+- `--root PATH` limits the directories the host serves; the default is the
+  home directory. Sessions and file access outside it are refused with AHP
+  `PermissionDenied`.
+- `--token TOKEN` (or `WINGMAN_HOST_TOKEN`) is required from every client as
+  the `tkn` query parameter, which VS Code sends from a host entry's
+  `connectionToken`. Without a token the endpoint is open to local clients,
+  like `wingman server`.
+- Before a session exists, directories can be listed and files read so that a
+  client can choose a folder; files become writable once a session uses their
+  directory. A session created without a working directory uses the host's
+  root.
+- A project closes after 15 minutes without a subscribed client, a request
+  that reaches it, or work: a running turn, queued input its agent does not
+  save, an open question, a background task, a schedule or a live terminal
+  keep it open. The builtin agent saves its queue, which waits for the session
+  to open again.
+- Sessions the host created are listed after a restart without opening their
+  projects, with their title, read and archived flags and last change;
+  subscribing to one opens its project. A session or chat opens again even if
+  it never ran a turn. A creation that fails leaves no session behind, nor
+  does a chat whose initial message fails, and a disposed session's or chat's
+  URI can be used again.
+
+A host owns the connections, the order of their actions and the channel
+namespace. A project owns its agents, sessions, terminals, file watches and
+changesets, and is the directory its sessions work in. Sessions carry it as
+the protocol's `project` (`uri` and `displayName`), with links in the
+directory resolved; a directory reached through a link opens the project it
+leads to. On `wingman server` the web UI, `/lsp`, `/dap` and the REST routes
+describe the project of its directory, which stays open; projects below it
+open on demand as on any host, and the REST routes refuse their chats.
+
+In the server package, `Host` owns connections, ordered publication, saved
+session identities, and the project registry. `Project` owns the workspace,
+agents, controllers, terminals, watches, and changesets. `Server` is the web
+adapter: HTTP routing, browser preferences, preview hosting, and the embedded
+UI. Its editor state owns browser LSP document ownership, diagnostic subscribers,
+external-source permissions, and DAP reference IDs. Language servers and debug
+adapters remain workspace resources. Projects notify the optional editor adapter
+of diagnostic invalidation through a callback invoked outside the host lock.
+The standalone host opens projects without constructing a web server.
+
+Both `Server` and each backend hold an explicit `Project` reference. HTTP
+handlers belong to the web adapter; native controllers and backends expose
+operations without HTTP request or response types. Command receipts retain
+the operation's error directly, with protocol error mapping at the boundary.
+
+`host.go` and `projects.go` handle host lifetime and project routing;
+`project.go` owns project startup, teardown, and channel attachment.
+`connection.go` dispatches protocol requests. The `server/ahp` package contains
+JSON-RPC framing, errors, origin checks, and channel URI rules, with no
+project or web dependencies. `aliases.go` persists protocol-to-native session
+identities, `sessions.go` creates and loads sessions, and `session.go` and
+`chat.go` maintain their protocol state. `controller.go` and `runtime.go` own
+native execution, with turn processing in `turns.go`, prompts in `prompts.go`,
+and background task delivery in `tasks.go`. `routes.go` resolves HTTP chat routes
+directly to their controllers. `handler_*.go` files adapt project services to
+HTTP; file operations, search, Git, skills, and model discovery keep their service
+code in separate files. Retained messages convert directly to transcript entries,
+preserving their existing identities without an intermediate conversation model.
+
+The host publication mutex orders snapshots and actions. Controller state
+locks precede it and also protect command receipts; backend I/O runs outside
+them. The connection read loop owns its channel queues. Each backend uses one
+mutex for its session registry and task pumps. The project admits backend
+operations under its backend registry lock; cancellation closes admission,
+and teardown joins all admitted operations before closing agents. Project
+startup and teardown remain serialized so a replacement cannot open files
+while the previous instance is closing.
+
+Alias persistence has one writer per project. Updates and deletions are staged
+under the host lock, then written outside it. A successful write clears only the
+change it wrote; a newer change remains pending. Failed changes retry on the next
+update and at project teardown. Session creation waits for its own alias to be
+saved, independently of failures for other sessions. This also orders deletion
+against reuse of the same URI without a separate per-session dirty flag.
+
+Context cancellation determines host and project lifetime. A controller's
+status is its session lifecycle, including the retained deletion tombstone.
+Host registries determine which sessions, chats and terminals are live;
+stale handles cannot publish to a replacement using the same URI.
+
+Closing a project removes its live channels but keeps its saved aliases.
+Reopening waits for the previous instance to finish closing. Host shutdown
+rejects new project lookups and joins any startup already in progress.
+
+Channels a project names itself carry the project:
+`ahp-changeset:/wingman/<project>/uncommitted`,
+`ahp-terminal:/wingman/<project>/<id>`, and a third path segment with the
+project directory on unaliased session URIs. Clients read them from session
+and root state; the web UI takes its project's namespace (`wingman/<project>`)
+from `/api/workspace`. The `wingman.workspace` root metadata and the
+`x-wingman/workspaceChanged` notification exist only on `wingman server`, for
+the web UI's project.
+
 ## Shared host and browser architecture
 
 The web UI and VS Code use the same AHP host for sessions, chat, approvals,
@@ -139,8 +249,8 @@ Status and insights have workspace endpoints; stage, unstage, and discard
 operations use AHP.
 
 Three shared AHP channels describe workspace changes:
-`ahp-changeset:/wingman/uncommitted`, `ahp-changeset:/wingman/staged`, and
-`ahp-changeset:/wingman/unstaged`. The browser subscribes to standard
+`ahp-changeset:/<namespace>/uncommitted`, `ahp-changeset:/<namespace>/staged`,
+and `ahp-changeset:/<namespace>/unstaged`, in the project's namespace. The browser subscribes to standard
 `ChangesetState`, applies the official reducer, and retrieves immutable
 before/after `ContentRef`s through `resourceRead` and computes diffs from them.
 A rename has different before/after URIs; binary content has the
@@ -167,8 +277,9 @@ its channel has expired.
 
 Supported features include provider/model discovery; session creation, listing
 and reopening; forked chats; history and streaming text/reasoning; tool
-activity; approvals and typed questions; cancellation; per-chat model, effort,
-mode and unattended settings; and editable queued/steering messages. The
+activity; client-provided tools; chat attachments; approvals and typed
+questions; cancellation; history truncation; per-chat model, effort, mode and
+unattended settings; and editable, reorderable queued/steering messages. The
 controller remains the single authority when browser and IDE clients act
 concurrently. Retry receipts are bounded and scoped to a running host; they do
 not survive a server restart. Session and chat URI mappings are saved under
@@ -176,20 +287,46 @@ not survive a server restart. Session and chat URI mappings are saved under
 
 Sessions and chats are identified only by their AHP URIs. A native session that
 was never given an alias is reachable at
-`ahp-session:/wingman/<base64url(backend)>/<base64url(id)>`, with its default
-chat at the same path under `ahp-chat:`. When the session lives under an alias,
-subscribing to that canonical URI fails with InvalidParams and error data
-`{ "resource": "<alias>" }`.
+`ahp-session:/wingman/<base64url(backend)>/<base64url(id)>/<base64url(project)>`,
+with its default chat at the same path under `ahp-chat:`. When the session
+lives under an alias, subscribing to that canonical URI fails with
+InvalidParams and error data `{ "resource": "<alias>" }`. The same redirect
+answers the earlier form without the project segment on `wingman server`,
+pointing at the web UI's project.
 
 Each chat projects one native session. `createChat` with
 `source: { kind: "fork", chat, turnId }` forks a completed turn of a chat in the
 same session into a new native session, which becomes a chat of that session.
 Forks from an earlier turn copy the journal up to the next input, so the source
-may keep running; only the builtin agent supports this. `disposeChat` deletes a
+may keep running; only the builtin agent supports this. The fork's turns keep
+what only the host knows of them: their timing, usage and messages as sent. `disposeChat` deletes a
 forked chat, and `disposeSession` deletes the session with all its chats. Each
-chat has its own queue, turns and settings: `chat/configChanged` changes one
-chat, while `session/configChanged` and the session's config values address the
-default chat.
+chat has its own queue, turns and settings. As the proposed per-chat
+configuration describes, a chat's config is an overlay on its session's values:
+what a client set on that chat, and any setting that differs from the session's,
+such as a model a message chose or an effort its backend adjusted.
+`session/configChanged` changes the session's values and every chat that does
+not set them; a new chat starts with the session's values and a fork with its
+source's. A replaced overlay returns the values it omits to the session's.
+The session's values start from its default chat and, like the values clients
+set, last for the host process. The default chat has an empty title, which
+inherits the session's, as in VS Code's host: 1.1 has no action that renames a
+chat.
+
+`chat/queuedMessagesReordered` moves the named pending messages to the head of
+the queue in the given order; the others keep theirs, and the host answers with
+the order the queue then has. A turn that consumes a pending message carries
+its id as `queuedMessageId`, after a `chat/pendingMessageRemoved` for it; this
+also holds for a message that an idle chat runs at once. A `chat/turnStarted`
+that arrives while the last turn settles starts once it has; one that arrives
+while another turn or a compaction runs is rejected. Steering that a turn took
+stays part of that turn.
+
+`chat/truncated` rewinds a chat of the builtin agent: it keeps the history
+through `turnId`, or none without one, in the agent's journal as well, so the
+model no longer sees the dropped turns. A running turn is stopped and the queue
+is cleared first, as when a turn is stopped. Files changed by the dropped turns
+stay as they are. External agents reject the action.
 
 Stopping a turn (`chat/turnCancelled`) also removes the messages queued behind
 it. A message `/compact [focus]` runs as a compaction turn when the backend can
@@ -206,8 +343,47 @@ follows VS Code's convention (`terminal` for shell commands). Pending approvals
 offer the confirmation options `once` and `deny`; each approval is answered once. Retries, tool
 progress and compaction are reported as the chat's `activity`. A steering
 message consumed by a running turn appears as a system notification with the
-user's text. `chat/usage` reports the latest request's prompt tokens as
-`inputTokens`, and the turn's output and cache-read tokens.
+user's text. A steering message sent while no turn runs waits in the queue
+(`kind: "steering"`), where it can be edited and removed; several can wait. The
+next turn takes them as soon as its agent accepts steering, in their order;
+while one is handed over it can no longer be edited, and stopping the turn
+removes it unless the agent took it. The builtin agent saves them with its queue. An
+agent that cannot steer answers them after the turn. A question or approval
+that a turn did not raise itself, such as one from a background task, is the
+session's: it is listed in `inputNeeded` and answered with `chat/inputCompleted`.
+A turn's final usage and its failure arrive before its end. `chat/usage` reports the latest request's prompt tokens as
+`inputTokens`, and the turn's output and cache-read tokens; for a provider that
+counts no tokens it names only the model.
+
+A message may attach a chat of any session (`type: "chat"`). The host resolves
+the chat's turns through `endTurn`, or all it has, when it accepts the message,
+and rejects an unknown chat and a turn that is unknown, running or cut away. The
+transcript holds the user texts and markdown answers; attachments inside it stay
+references.
+
+What an attachment gives the model and not the transcript (a chat's transcript,
+a `simple` attachment's `modelRepresentation`, a selection, an embedded text
+resource) precedes the message. The builtin agent keeps it as a message of its
+own that leaves the history with the message's turn; other agents and a steering
+message read it inline. Queued messages and the turns that consume them keep the
+message as the client sent it, a queued one also across a restart; turns loaded
+from an agent's history show only its text, files and images.
+
+The tools of a session's active clients (`session/activeClientSet`) join the
+builtin agent's tools in every chat of the session, from the chat's next turn.
+A client's tool replaces the agent's tool of the same name; subagents keep the
+agent's own tools, and names that model APIs reject are skipped. A call to such
+a tool carries the client as its `contributor`. It stays `streaming` until the
+agent runs it, so a client never starts a call that the agent then refuses:
+plan mode runs only tools with `readOnlyHint`. The call then waits in `running`
+for its owner, which also finds it as a `toolClientExecution` request in the
+session's `inputNeeded`. `toolInput` is the model's unmodified input. Only the
+owner may dispatch `chat/toolCallContentChanged` and `chat/toolCallComplete`.
+The call fails when its owner leaves the session, the turn is stopped, or the
+agent's tool timeout passes. Wingman asks for no approval of a client's tool;
+its client does. The contributor and the structured result last for the host
+process: reloaded history keeps the result as text. External agents receive no
+client tools.
 
 Terminal channels share the workspace terminal manager, including debugger
 terminals. Following the [terminal URI specification](https://microsoft.github.io/agent-host-protocol/specification/terminal-channel.html#uri),
@@ -215,7 +391,7 @@ Wingman accepts client-chosen schemes, including VS Code's `agenthost-terminal`
 and custom schemes such as `x-my-terminal`. URIs must have the form
 `<scheme>:/<id>`; other `ahp-*` namespaces remain reserved for protocol channels.
 The original URI is preserved in the catalogue, subscriptions, actions, and
-reconnection. Wingman-created terminals use `ahp-terminal:/wingman/<id>`.
+reconnection. Wingman-created terminals use `ahp-terminal:/<namespace>/<id>`.
 
 Terminals support discovery, creation, ownership, input, resize, titles,
 clear, disposal, reconnect scrollback, and retained exit status. A disconnected
@@ -257,9 +433,8 @@ reasoning part starts, or before the turn's terminal action; timing lasts for
 the host process and history from earlier processes is untimed. The initialize
 response supplies standard `environment.pathStyle` metadata for native host
 paths. The web UI negotiates 1.1; 1.0 clients receive the legacy queue/steering projection.
-Side chats, chats from other providers, client-provided tools, TCP channels,
-experimental channel windows, and protocol-native automations are not
-advertised. Draft/archive/title overrides currently last for the host process.
+Side chats, chats from other providers, TCP channels, experimental channel
+windows, and protocol-native automations are not advertised. Chat drafts and a chat's own read and archived flags last while its project is open.
 The remaining Wingman extensions are the `x-wingman/workspaceChanged` root
 notification (`files_changed`, `workspace_changed`, `skills_changed` and
 `tasks_changed`), the root's `_meta["wingman.workspace"]` identity used to

@@ -21,12 +21,12 @@ func TestListenLocalReservesDefaultAndFallbackPorts(t *testing.T) {
 			listener.Close()
 		}
 	}
-	first, err := listenLocal(0)
+	first, err := listenLocal(0, DefaultPort)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer closeAll(first)
-	second, err := listenLocal(0)
+	second, err := listenLocal(0, DefaultPort)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestListenLocalReservesDefaultAndFallbackPorts(t *testing.T) {
 		if port == 0 {
 			t.Fatal("listener has no assigned port")
 		}
-		duplicate, err := listenLocal(port)
+		duplicate, err := listenLocal(port, DefaultPort)
 		if err == nil {
 			closeAll(duplicate)
 			t.Fatalf("explicit occupied port %d silently fell back", port)
@@ -70,7 +70,7 @@ func TestRunStopsForCancelledContext(t *testing.T) {
 			if source == "caller" {
 				cancel()
 			} else {
-				s.cancel()
+				s.Project.cancel()
 			}
 			done := make(chan error, 1)
 			go func() { done <- s.Run(ctx, 0) }()
@@ -109,7 +109,7 @@ func TestModelRefreshRecoversFromDiscoveryFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app.Close()
-	rt, err := app.backend("wingman")
+	rt, err := app.Project.backend("wingman")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestModelRefreshRecoversFromDiscoveryFailure(t *testing.T) {
 	retry := func(wantStatus int) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodPost, "http://localhost/api/v2/backends/wingman/models/refresh", nil)
-		req.Header.Set(instanceHeader, app.scope.InstanceID)
+		req.Header.Set(instanceHeader, app.Project.scope.InstanceID)
 		rec := httptest.NewRecorder()
 		app.ServeHTTP(rec, req)
 		if rec.Code != wantStatus {
@@ -177,7 +177,7 @@ func TestModelDiscoverySharesConcurrentRetries(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		a := &blockedDiscoveryAgent{protocolAgent: &protocolAgent{}}
-		b := &backendRuntime{Server: &Server{ctx: ctx}, agent: a}
+		b := &backendRuntime{Project: &Project{ctx: ctx}, agent: a}
 		results := make(chan error, 2)
 		for range 2 {
 			go func() { results <- b.refreshModels() }()
@@ -192,14 +192,14 @@ func TestModelDiscoverySharesConcurrentRetries(t *testing.T) {
 				t.Fatalf("shutdown did not cancel retry: %v", err)
 			}
 		}
-		b.operations.Wait()
+		b.Project.operations.Wait()
 	})
 }
 
 func TestNativeAgentDoesNotRefreshGatewayModels(t *testing.T) {
 	b := &backendRuntime{agent: &protocolAgent{}}
 	rec := httptest.NewRecorder()
-	b.handleRefreshModels(rec, httptest.NewRequest(http.MethodPost, "/", nil))
+	handleRefreshModels(b, rec, httptest.NewRequest(http.MethodPost, "/", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("native refresh status = %d", rec.Code)
 	}

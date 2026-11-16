@@ -15,16 +15,18 @@ function isTextType(type: string): boolean {
 	);
 }
 
-export function workspaceChangeset(layer?: DiffLayer) {
-	return `ahp-changeset:/wingman/${layer || "uncommitted"}`;
-}
-
 /** Standard AHP file edits and operations, shared with other agent clients. */
 export class ChangesetClient {
 	readonly ahp: AHPConnection;
+	private readonly namespace: string;
 	private subscriptions = new Map<string, () => void>();
-	constructor(ahp: AHPConnection) {
+	constructor(ahp: AHPConnection, namespace: string) {
 		this.ahp = ahp;
+		this.namespace = namespace;
+	}
+	/** The channel of a layer of the workspace's changes. */
+	layer(layer?: DiffLayer) {
+		return `ahp-changeset:/${this.namespace}/${layer || "uncommitted"}`;
 	}
 	close() {
 		for (const release of this.subscriptions.values()) release();

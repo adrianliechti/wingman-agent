@@ -90,6 +90,10 @@ func (a *protocolAgent) Close() error  { return nil }
 func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Content) (iter.Seq2[harness.Message, error], error) {
 	a.sent.Add(1)
 	a.mu.Lock()
+	// Attached context precedes its input, as the harness records it.
+	for _, text := range harness.InputContextFromContext(ctx) {
+		a.messages = append(a.messages, harness.Message{Role: harness.RoleUser, InputID: harness.InputIDFromContext(ctx), Hidden: true, Content: []harness.Content{{Text: text, Hidden: true}}})
+	}
 	a.messages = append(a.messages, harness.Message{Role: harness.RoleUser, InputID: harness.InputIDFromContext(ctx), Content: harness.CloneContent(input)})
 	a.mu.Unlock()
 	return func(yield func(harness.Message, error) bool) {
@@ -110,16 +114,29 @@ func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Cont
 	}, nil
 }
 
+// webProject makes a test server the project its own host's web UI shows.
+func webProject(s *Server, dir string) *Project {
+	h := newHost(s.Project.ctx)
+	p := h.attach(s.Project)
+	p.dir = canonicalPath(dir)
+	h.show(p)
+	return p
+}
+
+// A restarted protocol server finds its sessions under the same project.
+const protocolProject = "/workspace"
+
 func newProtocolServer(t *testing.T) (*Server, *backendRuntime, *protocolAgent) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &Server{ctx: ctx, cancel: cancel, scope: WorkspaceScope{"workspace", "instance"}, backends: map[string]*backendEntry{}}
+	s := &Server{Project: &Project{ctx: ctx, cancel: cancel, scope: workspaceScope(protocolProject), backends: map[string]*backendEntry{}}}
+	s.Project = webProject(s, protocolProject)
 	a := &protocolAgent{}
-	b := s.bindBackend("one", a)
-	s.backends[b.id] = &backendEntry{runtime: b}
+	b := s.Project.bindBackend("one", a)
+	s.Project.backends[b.id] = &backendEntry{runtime: b}
 	s.mux = chi.NewRouter()
 	s.mux.Route("/api", s.registerSessionRoutes)
-	s.mux.Get("/ahp", s.handleAHP)
+	s.mux.Get("/ahp", s.Project.host.handleAHP)
 	s.handler = s.checkInstance(s.mux)
 	t.Cleanup(s.Close)
 	return s, b, a
@@ -130,7 +147,7 @@ func newProtocolServer(t *testing.T) (*Server, *backendRuntime, *protocolAgent) 
 func protocolRequest(t *testing.T, s *Server, path string, command Command) *httptest.ResponseRecorder {
 	t.Helper()
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	b, err := s.backend(parts[3])
+	b, err := s.Project.backend(parts[3])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,16 +155,16 @@ func protocolRequest(t *testing.T, s *Server, path string, command Command) *htt
 	if len(parts) == 5 {
 		record = b.createSession(command)
 	} else {
-		if !b.beginOperation() {
-			record = commandReceipt{status: 409, message: "workspace closed"}
+		if !b.Project.beginOperation() {
+			record = commandReceipt{err: errors.New("workspace closed")}
 		} else {
-			defer b.operations.Done()
+			defer b.Project.operations.Done()
 			record = b.session(parts[5]).command(t.Context(), command)
 		}
 	}
 	rec := httptest.NewRecorder()
-	if record.status != 0 {
-		http.Error(rec, record.message, record.status)
+	if record.err != nil {
+		http.Error(rec, record.err.Error(), http.StatusConflict)
 	} else {
 		writeJSON(rec, record.receipt)
 	}
@@ -176,7 +193,7 @@ func TestSessionRestoresEditableQueueAndRejectsMissingHistory(t *testing.T) {
 	if len(state.PendingInputs) != 1 || state.PendingInputs[0].ID != "saved-input" || state.PendingInputs[0].Text != "original" || !b.turns.Snapshot("saved").Paused {
 		t.Fatalf("restored queue: %+v", state)
 	}
-	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "edit", Epoch: c.epoch, Type: "queue_update", InputID: "saved-input", Text: "edited", Files: []string{"next.go"}})
+	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "edit", Type: "queue_update", InputID: "saved-input", Text: "edited", Files: []string{"next.go"}})
 	if rec.Code != 200 {
 		t.Fatalf("edit: %d %s", rec.Code, rec.Body)
 	}
@@ -193,24 +210,19 @@ func TestSessionRestoresEditableQueueAndRejectsMissingHistory(t *testing.T) {
 	}
 }
 
-func TestSessionReceiptsDeduplicateAfterCompletionAndCreation(t *testing.T) {
+func TestSessionReceiptsDeduplicateAfterCompletion(t *testing.T) {
 	s, b, a := newProtocolServer(t)
 	var created Receipt
-	for range 2 {
-		rec := protocolRequest(t, s, "/api/v2/backends/one/sessions", Command{ID: "draft-request", Type: "create"})
-		if rec.Code != 200 {
-			t.Fatalf("create: %s", rec.Body)
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
-			t.Fatal(err)
-		}
+	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions", Command{ID: "draft-request", Type: "create"})
+	if rec.Code != 200 {
+		t.Fatalf("create: %s", rec.Body)
 	}
-	if a.created.Load() != 1 {
-		t.Fatalf("created %d sessions", a.created.Load())
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
 	}
 	path := "/api/v2/backends/one/sessions/" + created.Ref.SessionID + "/commands"
-	command := Command{ID: "send-request", Epoch: created.Epoch, Type: "send", Text: "hello"}
-	rec := protocolRequest(t, s, path, command)
+	command := Command{ID: "send-request", Type: "send", Text: "hello"}
+	rec = protocolRequest(t, s, path, command)
 	if rec.Code != 200 {
 		t.Fatalf("send: %d %s", rec.Code, rec.Body)
 	}
@@ -223,11 +235,6 @@ func TestSessionReceiptsDeduplicateAfterCompletionAndCreation(t *testing.T) {
 	if rec := protocolRequest(t, s, path, command); rec.Code != 409 {
 		t.Fatalf("changed request accepted: %d", rec.Code)
 	}
-	command.ID = "new"
-	command.Epoch = "old-epoch"
-	if rec := protocolRequest(t, s, path, command); rec.Code != 409 {
-		t.Fatalf("old epoch accepted: %d", rec.Code)
-	}
 }
 
 func TestSessionPromptResponsesRemainAvailableDuringLoadAndHaveOneWinner(t *testing.T) {
@@ -235,7 +242,7 @@ func TestSessionPromptResponsesRemainAvailableDuringLoadAndHaveOneWinner(t *test
 	c := b.session("saved")
 	c.opMu.Lock() // A backend load/settings operation is waiting for UI.
 	defer c.opMu.Unlock()
-	ctx, cancel := context.WithCancel(code.WithSessionID(b.ctx, "saved"))
+	ctx, cancel := context.WithCancel(code.WithSessionID(b.Project.ctx, "saved"))
 	defer cancel()
 	done := make(chan bool, 1)
 	go func() { approved, _ := b.Confirm(ctx, "Proceed?"); done <- approved }()
@@ -244,7 +251,7 @@ func TestSessionPromptResponsesRemainAvailableDuringLoadAndHaveOneWinner(t *test
 	id := c.state.Prompts[0].ID
 	c.mu.Unlock()
 	path := "/api/v2/backends/one/sessions/saved/commands"
-	command := Command{ID: "answer", Epoch: c.epoch, Type: "prompt_response", PromptID: id, Action: "accept"}
+	command := Command{ID: "answer", Type: "prompt_response", PromptID: id, Action: "accept"}
 	rec := protocolRequest(t, s, path, command)
 	if rec.Code != 200 {
 		t.Fatalf("response: %d %s", rec.Code, rec.Body)
@@ -272,29 +279,29 @@ func TestSessionPromptResponsesRemainAvailableDuringLoadAndHaveOneWinner(t *test
 func TestSessionBackendsOwnIdenticalNativeIDsAndDeletionIsTerminal(t *testing.T) {
 	s, one, a := newProtocolServer(t)
 	otherAgent := &protocolAgent{}
-	two := s.bindBackend("two", otherAgent)
-	s.backends["two"] = &backendEntry{runtime: two}
+	two := s.Project.bindBackend("two", otherAgent)
+	s.Project.backends["two"] = &backendEntry{runtime: two}
 	c := one.session("same")
 	c.load()
 	other := two.session("same")
 	other.load()
-	if c.ref == other.ref || c.epoch == other.epoch {
+	if c.ref == other.ref {
 		t.Fatal("session identity collided")
 	}
 	value := "model-b"
-	rec := protocolRequest(t, s, "/api/v2/backends/two/sessions/same/commands", Command{ID: "settings", Epoch: other.epoch, Type: "settings", Model: &value})
+	rec := protocolRequest(t, s, "/api/v2/backends/two/sessions/same/commands", Command{ID: "settings", Type: "settings", Model: &value})
 	if rec.Code != 200 {
 		t.Fatalf("settings: %s", rec.Body)
 	}
 	if _, model := a.Models("same"); model != "" {
 		t.Fatal("settings crossed backends")
 	}
-	rec = protocolRequest(t, s, "/api/v2/backends/one/sessions/same/commands", Command{ID: "delete", Epoch: c.epoch, Type: "delete"})
+	rec = protocolRequest(t, s, "/api/v2/backends/one/sessions/same/commands", Command{ID: "delete", Type: "delete"})
 	if rec.Code != 200 {
 		t.Fatalf("delete: %s", rec.Body)
 	}
 	c.apply(Frame{Type: EvtTextDelta, Text: "late"})
-	rec = protocolRequest(t, s, "/api/v2/backends/one/sessions/same/commands", Command{ID: "late", Epoch: c.epoch, Type: "send", Text: "late"})
+	rec = protocolRequest(t, s, "/api/v2/backends/one/sessions/same/commands", Command{ID: "late", Type: "send", Text: "late"})
 	if rec.Code == 200 || a.sent.Load() != 0 {
 		t.Fatal("deleted session accepted input")
 	}
@@ -328,13 +335,13 @@ func (a *unattendedProtocolAgent) SetUnattended(_ context.Context, _ string, ena
 func TestSessionSettingsRoundTripIndependentUnattendedPolicy(t *testing.T) {
 	s, other, _ := newProtocolServer(t)
 	a := &unattendedProtocolAgent{protocolAgent: &protocolAgent{model: "selected-model"}}
-	b := s.bindBackend("policy", a)
-	s.backends["policy"] = &backendEntry{runtime: b}
+	b := s.Project.bindBackend("policy", a)
+	s.Project.backends["policy"] = &backendEntry{runtime: b}
 	c := b.session("saved")
 	c.load()
 	for _, enabled := range []bool{true, false} {
 		rec := protocolRequest(t, s, "/api/v2/backends/policy/sessions/saved/commands", Command{
-			ID: fmt.Sprintf("unattended-%t", enabled), Epoch: c.epoch, Type: "settings", Unattended: &enabled,
+			ID: fmt.Sprintf("unattended-%t", enabled), Type: "settings", Unattended: &enabled,
 		})
 		if rec.Code != 200 {
 			t.Fatalf("settings: %d %s", rec.Code, rec.Body)
@@ -349,7 +356,7 @@ func TestSessionSettingsRoundTripIndependentUnattendedPolicy(t *testing.T) {
 	}
 }
 
-func TestSessionQueuePersistenceFailureDoesNotAcknowledgeClearing(t *testing.T) {
+func TestSessionQueuePersistenceFailureDoesNotAcknowledgeRemoval(t *testing.T) {
 	s, b, a := newProtocolServer(t)
 	a.queue = code.TurnQueueState{Inputs: []code.TurnInput{{ID: "queued", Content: []harness.Content{{Text: "keep me"}}}}}
 	c := b.session("saved")
@@ -357,9 +364,9 @@ func TestSessionQueuePersistenceFailureDoesNotAcknowledgeClearing(t *testing.T) 
 	a.mu.Lock()
 	a.failSave = true
 	a.mu.Unlock()
-	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "cancel", Epoch: c.epoch, Type: "cancel", ClearQueue: true})
+	rec := protocolRequest(t, s, "/api/v2/backends/one/sessions/saved/commands", Command{ID: "remove", Type: "queue_remove", InputID: "queued"})
 	if rec.Code != 409 {
-		t.Fatalf("cancel silently succeeded: %d", rec.Code)
+		t.Fatalf("the removal silently succeeded: %d", rec.Code)
 	}
 	if len(b.turns.Snapshot("saved").Inputs) != 1 {
 		t.Fatal("failed persistence removed the input")
@@ -440,8 +447,8 @@ func (a *compactingProtocolAgent) Compact(ctx context.Context, _, focus string) 
 func TestSessionCompactMessageRunsAsTurn(t *testing.T) {
 	s, other, _ := newProtocolServer(t)
 	a := &compactingProtocolAgent{protocolAgent: &protocolAgent{}, focus: make(chan string, 1), release: make(chan error, 1)}
-	b := s.bindBackend("compact", a)
-	s.backends["compact"] = &backendEntry{runtime: b}
+	b := s.Project.bindBackend("compact", a)
+	s.Project.backends["compact"] = &backendEntry{runtime: b}
 	c := b.session("saved")
 	c.load()
 	if !b.settings("saved").CanCompact || other.settings("saved").CanCompact {
@@ -459,7 +466,7 @@ func TestSessionCompactMessageRunsAsTurn(t *testing.T) {
 		return slices.Clone(c.entries)
 	}
 
-	rec := protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-1", Epoch: c.epoch, Type: "send", Text: "/compact api design"})
+	rec := protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-1", Type: "send", Text: "/compact api design"})
 	if rec.Code != 200 {
 		t.Fatalf("compact: %d %s", rec.Code, rec.Body)
 	}
@@ -475,7 +482,7 @@ func TestSessionCompactMessageRunsAsTurn(t *testing.T) {
 		t.Fatalf("compaction turn = %+v", e)
 	}
 
-	rec = protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-2", Epoch: c.epoch, Type: "send", Text: "/compact"})
+	rec = protocolRequest(t, s, "/api/v2/backends/compact/sessions/saved/commands", Command{ID: "compact-2", Type: "send", Text: "/compact"})
 	if rec.Code != 200 {
 		t.Fatalf("compact: %d %s", rec.Code, rec.Body)
 	}

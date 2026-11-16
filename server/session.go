@@ -1,510 +1,333 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
-	"fmt"
+	"maps"
 	"reflect"
 	"slices"
-	"strings"
-	"sync"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/adrianliechti/wingman-agent/pkg/harness"
-	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
-	"github.com/adrianliechti/wingman-agent/pkg/tui"
-	"github.com/google/uuid"
+	"github.com/microsoft/agent-host-protocol/clients/go/ahp"
+	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
-// TranscriptEntry is the visible Wingman model. Provider messages, retry
-// bookkeeping, hidden instructions and journal events never cross this boundary.
-type TranscriptEntry struct {
-	ID            string                 `json:"id"`
-	Type          string                 `json:"type"`
-	Content       string                 `json:"content"`
-	MessageID     string                 `json:"messageId,omitempty"`
-	InputID       string                 `json:"inputId,omitempty"`
-	Files         []string               `json:"files,omitempty"`
-	Images        []string               `json:"images,omitempty"`
-	ToolID        string                 `json:"toolId,omitempty"`
-	ToolName      string                 `json:"toolName,omitempty"`
-	ToolKind      string                 `json:"toolKind,omitempty"`
-	ToolArgs      string                 `json:"toolArgs,omitempty"`
-	ToolLocations []harness.ToolLocation `json:"toolLocations,omitempty"`
-	ToolHint      string                 `json:"toolHint,omitempty"`
-	ToolResult    *string                `json:"toolResult,omitempty"`
-	ToolPartial   bool                   `json:"toolPartial,omitempty"`
-	ReasoningID   string                 `json:"reasoningId,omitempty"`
+// Session is an AHP session: shared state and its chats, each projected
+// from its own native session. The default chat comes first.
+type Session struct {
+	project  *Project
+	resource string
+	created  string
+	modified string // the session's last change before it was loaded
+	state    types.SessionState
+	chats    []*Chat
+	pending  map[string]*pendingAction
+	acks     map[types.ActionOrigin]ack
+	ackOrder []types.ActionOrigin
 }
 
-type PromptView struct {
-	ID      string             `json:"id"`
-	Kind    string             `json:"kind"`
-	Message string             `json:"message"`
-	Fields  []tool.ElicitField `json:"fields,omitempty"`
+func newSession(p *Project, resource, provider, title string, created, modified time.Time, own types.SessionStatus) *Session {
+	if title == "" {
+		title = "New session"
+	}
+	return &Session{project: p, resource: resource, created: created.UTC().Format(time.RFC3339Nano), modified: modified.UTC().Format(time.RFC3339Nano), pending: map[string]*pendingAction{}, acks: map[types.ActionOrigin]ack{},
+		state: types.SessionState{Changesets: p.changesetCatalogue(), Provider: provider, Title: title, Status: types.SessionStatusIdle | own&^activityBits, Lifecycle: types.SessionLifecycleReady, ActiveClients: []types.SessionActiveClient{}, Chats: []types.ChatSummary{}, Project: p.info(), WorkingDirectories: []string{p.directoryURI()}},
+	}
 }
 
-type SessionSettings struct {
-	Models     []modelOption `json:"models"`
-	Model      string        `json:"model"`
-	Effort     string        `json:"effort"`
-	Efforts    []string      `json:"efforts"`
-	Mode       string        `json:"mode"`
-	Modes      []modeOption  `json:"modes"`
-	Unattended *bool         `json:"unattended,omitempty"`
-	CanFork    bool          `json:"canFork"`
-	CanCompact bool          `json:"canCompact"`
+// addChat projects a native session as a chat. Chats after the default one
+// are announced with session/chatAdded. The default chat's empty title
+// inherits the session's, as in VS Code's host.
+func (a *Session) addChat(c *sessionController, resource, title string, origin *types.ChatOrigin, created time.Time) *Chat {
+	if title == "" && len(a.chats) > 0 {
+		title = a.state.Title
+	}
+	stamp := a.modified
+	if !created.IsZero() {
+		stamp = created.UTC().Format(time.RFC3339Nano)
+	}
+	ch := newChat(a, c, resource, title, stamp)
+	ch.chat.Origin = origin
+	if origin != nil {
+		if fork, ok := origin.Value.(*types.ChatForkOrigin); ok {
+			ch.inherit(a.chat(fork.Chat), fork.TurnId)
+		}
+	}
+	c.chat = ch
+	if agent, ok := c.backend.agent.(code.HostToolAgent); ok {
+		_ = agent.SetHostTools(c.ref.SessionID, ch.offerTools)
+	}
+	a.chats = append(a.chats, ch)
+	a.project.host.chats[resource] = ch
+	if len(a.chats) == 1 {
+		a.state.DefaultChat = &resource
+		a.state.Config = configFromSettings(c.state.Settings)
+		a.state.Chats = append(a.state.Chats, ch.summary())
+	} else {
+		a.sessionAction(types.StateAction{Value: &types.SessionChatAddedAction{Type: types.ActionTypeSessionChatAdded, Summary: ch.summary()}})
+	}
+	ch.syncProjection(c, nil)
+	return ch
 }
 
-type modelOption struct {
-	ID        string   `json:"id"`
-	Name      string   `json:"name"`
-	Namespace string   `json:"namespace"`
-	Efforts   []string `json:"efforts,omitempty"`
-}
-
-type UsageView struct {
-	InputTokens     int64 `json:"inputTokens"`
-	CachedTokens    int64 `json:"cachedTokens"`
-	OutputTokens    int64 `json:"outputTokens"`
-	LastInputTokens int64 `json:"lastInputTokens"`
-	ContextWindow   int64 `json:"contextWindow"`
-}
-
-type SessionState struct {
-	Status        string             `json:"status"`
-	Phase         string             `json:"phase"`
-	Retry         *harness.RetryInfo `json:"retry,omitempty"`
-	Error         *string            `json:"error"`
-	Usage         UsageView          `json:"usage"`
-	Prompts       []PromptView       `json:"prompts"`
-	PendingInputs []TurnQueueEntry   `json:"pendingInputs"`
-	CanSteer      bool               `json:"canSteer"`
-	Settings      SessionSettings    `json:"settings"`
-	ToolProgress  map[string]string  `json:"toolProgress"`
-}
-
-type SessionChange struct {
-	Type    string
-	Entry   *TranscriptEntry
-	Entries []TranscriptEntry
-	ID      string
-	Text    string
-	IDs     []string
-	State   *SessionState
-}
-
-type sessionController struct {
-	metadataMu sync.Mutex
-	receiptMu  sync.Mutex
-	backend    *backendRuntime
-	ref        SessionRef
-	epoch      string
-	// opMu serializes load and commands, never stream callbacks.
-	opMu           sync.Mutex
-	loaded         bool
-	deleted        bool
-	receipts       map[string]*commandReceipt
-	receiptOrder   []string
-	deliveredTasks map[string]bool
-	// mu protects the complete projection AND subscription registration/publication.
-	mu          sync.Mutex
-	entries     []TranscriptEntry
-	state       SessionState
-	prompts     map[string]pendingPrompt
-	textID      string
-	reasoningID string
-	attempt     map[string]bool
-	activeInput string
-	lastOutcome string
-	hostTurns   []hostTurn
-	ahp         *ahpChat
-}
-
-// hostTurn keeps a turn whose input the agent's history does not show, a
-// compaction or an invisible input such as a task result, at its place in the
-// transcript.
-type hostTurn struct {
-	at      int // history entries before it
-	entries []TranscriptEntry
-	compact bool // the agent's journal has no input for it
-}
-
-func newSessionController(b *backendRuntime, id string) *sessionController {
-	return &sessionController{backend: b, ref: SessionRef{b.scope.WorkspaceID, b.id, id}, epoch: uuid.NewString(), receipts: map[string]*commandReceipt{}, deliveredTasks: map[string]bool{}, entries: []TranscriptEntry{}, prompts: map[string]pendingPrompt{}, attempt: map[string]bool{}, state: SessionState{Status: "loading", Phase: "idle", Prompts: []PromptView{}, PendingInputs: []TurnQueueEntry{}, ToolProgress: map[string]string{}, Settings: SessionSettings{Models: []modelOption{}, Efforts: []string{}, Modes: []modeOption{}}}}
-}
-
-func (c *sessionController) load() {
-	if !c.backend.beginOperation() {
+// inherit gives a fork what only the host knows of the turns it copies, such
+// as their timing, usage and messages as they were sent.
+func (a *Chat) inherit(source *Chat, through string) {
+	if source == nil {
 		return
 	}
-	defer c.backend.operations.Done()
-	c.opMu.Lock()
-	defer c.opMu.Unlock()
-	_ = c.loadLocked()
+	i := slices.IndexFunc(source.chat.Turns, func(turn types.Turn) bool { return turn.Id == through })
+	a.chat.Turns = slices.Clone(source.chat.Turns[:i+1])
+	maps.Copy(a.reasoning, source.reasoning)
+	for _, turn := range a.chat.Turns {
+		if ending, ok := source.endings[turn.Id]; ok {
+			a.endings[turn.Id] = ending
+		}
+		for _, part := range turn.ResponseParts {
+			if tool, ok := part.Value.(*types.ToolCallResponsePart); ok && source.clientCalls[toolCallID(tool.ToolCall)] != nil {
+				a.clientCalls[toolCallID(tool.ToolCall)] = source.clientCalls[toolCallID(tool.ToolCall)]
+			}
+		}
+		for id, prompt := range source.prompts {
+			if prompt.turn == turn.Id {
+				a.prompts[id] = prompt
+			}
+		}
+	}
+	a.promptSeq = source.promptSeq
+	maps.Copy(a.own, source.own)
 }
 
-func (c *sessionController) loadLocked() error {
-	if err := c.backend.ctx.Err(); err != nil {
-		return err
+func (a *Session) chat(resource string) *Chat {
+	for _, ch := range a.chats {
+		if ch.chat.Resource == resource {
+			return ch
+		}
 	}
-	if c.deleted {
-		return errors.New("session deleted")
-	}
-	if c.loaded {
-		return nil
-	}
-	err := c.backend.agent.LoadSession(code.WithSessionID(c.backend.ctx, c.ref.SessionID), c.ref.SessionID)
-	if err != nil {
-		c.mu.Lock()
-		message := err.Error()
-		c.state.Status = "error"
-		c.state.Error = &message
-		c.publishStateLocked()
-		c.mu.Unlock()
-		return err
-	}
-	c.loaded = true
-	c.replaceHistory()
-	c.refreshSettings()
-	c.mu.Lock()
-	c.state.Status = "ready"
-	c.state.Error = nil
-	c.publishStateLocked()
-	c.mu.Unlock()
-	c.backend.sendTurnSnapshot(c.ref.SessionID)
-	c.backend.ensureTaskPump(c.ref.SessionID)
 	return nil
 }
 
-func (b *backendRuntime) settings(sid string) SessionSettings {
-	models, model := b.agent.Models(sid)
-	effort, efforts := b.agent.Effort(sid)
-	modes, mode := b.agent.Modes(sid)
-	_, canFork := b.agent.(code.SessionForker)
-	_, canCompact := b.agent.(code.Compactor)
-	state := SessionSettings{Model: model, Effort: effort, Efforts: append([]string{}, efforts...), Mode: mode, Modes: toModeState(modes, mode).Modes, Models: []modelOption{}, CanFork: canFork, CanCompact: canCompact}
-	if policy, ok := b.agent.(code.UnattendedAgent); ok {
-		enabled := policy.Unattended(sid)
-		state.Unattended = &enabled
-	}
-	for _, m := range models {
-		state.Models = append(state.Models, modelOption{ID: m.ID, Name: m.Name, Namespace: m.Namespace, Efforts: slices.Clone(m.Efforts)})
-	}
-	return state
+func (a *Chat) summary() types.ChatSummary {
+	return types.ChatSummary{Resource: a.chat.Resource, Title: a.chat.Title, Status: a.chat.Status, ModifiedAt: a.chat.ModifiedAt, Origin: a.chat.Origin}
 }
 
-func (c *sessionController) refreshSettings() {
-	if !c.backend.beginOperation() {
-		return
+func (a *Session) summary() types.SessionSummary {
+	summary := types.SessionSummary{Resource: a.resource, Provider: a.state.Provider, Title: a.state.Title, Status: a.state.Status, CreatedAt: a.created, ModifiedAt: a.modified, Project: a.state.Project, WorkingDirectories: a.state.WorkingDirectories, DefaultChat: a.state.DefaultChat, Chats: []types.SessionChatSummary{}}
+	for _, ch := range a.chats {
+		status := ch.chat.Status
+		summary.Chats = append(summary.Chats, types.SessionChatSummary{Resource: ch.chat.Resource, Title: ch.chat.Title, Status: &status})
+		summary.ModifiedAt = max(summary.ModifiedAt, ch.chat.ModifiedAt)
 	}
-	defer c.backend.operations.Done()
-	c.metadataMu.Lock()
-	defer c.metadataMu.Unlock()
-	settings := c.backend.settings(c.ref.SessionID)
-	usage := c.backend.agent.Usage(c.ref.SessionID)
-	if usage.ContextWindow <= 0 && usage.LastInputTokens > 0 {
-		usage.ContextWindow = int64(harness.ContextWindowFor(settings.Model))
-	}
-	u := UsageView{usage.InputTokens, usage.CacheReadInputTokens, usage.OutputTokens, usage.LastInputTokens, usage.ContextWindow}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.state.Status == "deleted" {
-		return
-	}
-	if reflect.DeepEqual(c.state.Settings, settings) && c.state.Usage == u {
-		return
-	}
-	c.state.Settings = settings
-	c.state.Usage = u
-	c.publishStateLocked()
+	return summary
 }
 
-func (c *sessionController) publishStateLocked() {
-	c.publishLocked(SessionChange{Type: "state.replace", State: &c.state})
-}
-
-func (c *sessionController) replaceHistory() {
-	entries := transcriptEntries(c.backend.agent.Messages(c.ref.SessionID))
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.state.Status == "deleted" {
-		return
+// configure changes the session's values and every chat that does not set its
+// own, and keeps the values as its default chat runs them, which its backend
+// may have normalized. Caller does not hold host.mu.
+func (a *Session) configure(id string, config map[string]json.RawMessage) error {
+	values, err := configValues(config)
+	if err != nil {
+		return err
 	}
-	inserted := 0
-	for _, turn := range c.hostTurns {
-		at := min(turn.at+inserted, len(entries))
-		entries = slices.Insert(entries, at, turn.entries...)
-		inserted += len(turn.entries)
+	h := a.project.host
+	h.mu.Lock()
+	merged := maps.Clone(a.state.Config.Values)
+	maps.Copy(merged, values)
+	a.state.Config.Values = merged
+	chats := slices.Clone(a.chats)
+	h.mu.Unlock()
+	var errs []error
+	for _, ch := range chats {
+		errs = append(errs, ch.syncSettings(commandID(id, ch.chat.Resource)))
 	}
-	c.entries = entries
-	c.textID = ""
-	c.reasoningID = ""
-	c.attempt = map[string]bool{}
-	// Explicit authoritative replacement at load/commit boundaries. No client
-	// tries to match streamed text against history by content or timing.
-	c.publishLocked(SessionChange{Type: "entries.replace", Entries: entries})
-}
-
-func (b *backendRuntime) sendSession(sid string, f Frame) {
-	if sid == "" {
-		return
-	}
-	if f.Type == EvtTasksChanged {
-		f.Session = sid
-		f.Backend = b.id
-		b.Server.send(f)
-		return
-	}
-	b.session(sid).apply(f)
-}
-
-func (b *backendRuntime) setSessionPhase(sid, phase string) {
-	b.sendSession(sid, Frame{Type: EvtPhase, Phase: phase})
-}
-
-func (c *sessionController) compactedLocked(inputID string, result harness.CompactResult) {
-	notice := TranscriptEntry{ID: "notice:" + inputID, Type: "notice", Content: fmt.Sprintf("Context compacted · ~%s → ~%s tokens", tui.FormatTokens(result.TokensBefore), tui.FormatTokens(result.TokensAfter))}
-	if n := len(c.hostTurns); n > 0 && c.hostTurns[n-1].entries[0].InputID == inputID {
-		c.hostTurns[n-1].entries = append(c.hostTurns[n-1].entries, notice)
-	}
-	c.upsertLocked(notice)
-}
-
-// warnLocked adds a notice the agent's history does not contain and keeps it at
-// its place when the history is replaced. During a compaction or an invisible
-// input it joins that turn, which must stay the last host turn until it ends.
-func (c *sessionController) warnLocked(message string) {
-	notice := TranscriptEntry{ID: "notice:" + uuid.NewString(), Type: "notice", Content: "Warning: " + message}
-	if n := len(c.hostTurns); n > 0 && c.activeInput != "" && c.hostTurns[n-1].entries[0].InputID == c.activeInput {
-		c.hostTurns[n-1].entries = append(c.hostTurns[n-1].entries, notice)
-	} else {
-		at := len(c.entries)
-		for _, turn := range c.hostTurns {
-			at -= len(turn.entries)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	main := a.chats[0]
+	normalized := maps.Clone(a.state.Config.Values)
+	for key := range values {
+		if _, own := main.own[key]; !own && main.config.Values[key] != nil {
+			normalized[key] = main.config.Values[key]
 		}
-		c.hostTurns = append(c.hostTurns, hostTurn{at: max(0, at), entries: []TranscriptEntry{notice}})
 	}
-	c.upsertLocked(notice)
+	a.state.Config.Values = normalized
+	return errors.Join(errs...)
 }
 
-func (c *sessionController) index(id string) int {
-	return slices.IndexFunc(c.entries, func(e TranscriptEntry) bool { return e.ID == id })
+func (a *Session) sessionAction(action types.StateAction) {
+	ahp.ApplyActionToSession(&a.state, action)
+	a.emit(a.resource, action)
 }
 
-func (c *sessionController) upsertLocked(e TranscriptEntry) {
-	if i := c.index(e.ID); i >= 0 {
-		c.entries[i] = e
-	} else {
-		c.entries = append(c.entries, e)
-	}
-	c.publishLocked(SessionChange{Type: "entry.upsert", Entry: &e})
-}
-
-func (c *sessionController) apply(f Frame) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.state.Status == "deleted" {
+// keep holds in the session's alias what a host lists before it opens the
+// session's project: its title, read and archived flags and last change.
+// Caller holds host.mu.
+func (a *Session) keep(summary types.SessionSummary) {
+	alias, ok := a.project.host.aliases[a.resource]
+	modified, _ := time.Parse(time.RFC3339Nano, summary.ModifiedAt)
+	own := a.state.Status &^ activityBits
+	if !ok || alias.Title == a.state.Title && alias.Status == own && alias.Modified.Equal(modified) {
 		return
 	}
-	switch f.Type {
-	case EvtPhase:
-		if c.state.Phase == f.Phase {
+	alias.Title, alias.Status, alias.Modified = a.state.Title, own, modified
+	a.project.host.rememberAliasLocked(alias)
+	a.project.stageAliasLocked(alias, false)
+}
+
+func (a *Session) removeClient(id string) {
+	for _, client := range a.state.ActiveClients {
+		if client.ClientId == id {
+			a.sessionAction(types.StateAction{Value: &types.SessionActiveClientRemovedAction{Type: types.ActionTypeSessionActiveClientRemoved, ClientId: id}})
+			for _, ch := range a.chats {
+				ch.clientLeft(id)
+			}
 			return
 		}
-		c.state.Phase = f.Phase
-		if f.Phase != "retrying" {
-			c.state.Retry = nil
-		}
-	case EvtError:
-		c.state.Error = &f.Message
-	case EvtToolProgress:
-		c.state.ToolProgress[f.ID] = f.Text
-	case EvtTurnInput:
-		if f.Input != nil {
-			switch code.TurnInputState(f.Input.State) {
-			case code.TurnInputActive:
-				c.activeInput, c.lastOutcome = f.Input.ID, ""
-			case code.TurnInputCompleted, code.TurnInputIncomplete, code.TurnInputFailed, code.TurnInputCancelled:
-				if c.activeInput == f.Input.ID {
-					c.activeInput, c.lastOutcome = "", f.Input.State
-				}
-			}
-		}
-		if f.Input != nil && (f.Input.State == string(code.TurnInputActive) || f.Input.State == string(code.TurnInputSteered)) {
-			c.state.Error = nil
-			visible := f.Input.Origin != "task" && (f.Input.Text != "" || len(f.Input.Files)+len(f.Input.Images) > 0)
-			// An active input without visible content still opens its own turn.
-			if visible || f.Input.State == string(code.TurnInputActive) {
-				entry := TranscriptEntry{ID: "input:" + f.Input.ID, InputID: f.Input.ID, Type: "user"}
-				if visible {
-					entry.Content, entry.Files, entry.Images = f.Input.Text, f.Input.Files, f.Input.Images
-				}
-				c.upsertLocked(entry)
-				if (f.Input.Compact || !visible) && c.index(entry.ID) >= 0 && !slices.ContainsFunc(c.hostTurns, func(turn hostTurn) bool { return turn.entries[0].ID == entry.ID }) {
-					at := c.index(entry.ID)
-					for _, turn := range c.hostTurns {
-						at -= len(turn.entries)
-					}
-					c.hostTurns = append(c.hostTurns, hostTurn{at: max(0, at), entries: []TranscriptEntry{entry}, compact: f.Input.Compact})
-				}
-			}
-			c.textID = ""
-			c.reasoningID = ""
-		}
-	case EvtTextDelta, EvtReasoningDelta:
-		typ, current := "assistant", &c.textID
-		if f.Type == EvtReasoningDelta {
-			typ = "reasoning"
-			current = &c.reasoningID
-		}
-		i := c.index(*current)
-		if i < 0 || (f.ID != "" && c.entries[i].MessageID != f.ID) {
-			id := uuid.NewString()
-			if f.ID != "" {
-				id = typ + ":" + f.ID
-			}
-			e := TranscriptEntry{ID: id, Type: typ, Content: f.Text, MessageID: f.ID}
-			if typ == "reasoning" {
-				e.ReasoningID = f.ID
-			}
-			*current = e.ID
-			c.attempt[e.ID] = true
-			c.upsertLocked(e)
-		} else {
-			c.entries[i].Content += f.Text
-			c.publishLocked(SessionChange{Type: "entry.append", ID: c.entries[i].ID, Text: f.Text})
-		}
-		return
-	case EvtImage:
-		if f.Content == "" {
-			return
-		}
-		c.textID = ""
-		c.reasoningID = ""
-		c.upsertLocked(TranscriptEntry{ID: uuid.NewString(), Type: "assistant", Images: []string{f.Content}})
-		return
-	case EvtToolCall, EvtToolResult:
-		c.textID = ""
-		c.reasoningID = ""
-		id := "tool:" + f.ID
-		if f.ID == "" {
-			id = uuid.NewString()
-		} // adapters should supply IDs; never match by text/name
-		e := TranscriptEntry{ID: id, Type: "tool", ToolID: f.ID, ToolName: f.Name, ToolKind: f.Kind, ToolArgs: f.Args, ToolLocations: f.Locations, ToolHint: f.Hint, ToolPartial: f.Partial}
-		if i := c.index(id); i >= 0 {
-			e.ToolResult = c.entries[i].ToolResult
-		}
-		if f.Type == EvtToolResult {
-			e.ToolResult = &f.Content
-			delete(c.state.ToolProgress, f.ID)
-		}
-		c.upsertLocked(e)
-	case EvtStreamReset:
-		ids := []string{}
-		c.entries = slices.DeleteFunc(c.entries, func(e TranscriptEntry) bool {
-			if c.attempt[e.ID] || (e.Type == "tool" && e.ToolPartial) {
-				ids = append(ids, e.ID)
-				return true
-			}
-			return false
-		})
-		c.attempt = map[string]bool{}
-		c.textID = ""
-		c.reasoningID = ""
-		c.publishLocked(SessionChange{Type: "entries.remove", IDs: ids})
-		return
-	default:
-		return
 	}
-	c.publishStateLocked()
 }
 
-func visibleInput(input code.TurnInput) code.TurnInputDisplay {
-	if input.Display != nil {
-		return *input.Display
+// activityBits are the status bits a session derives from its chats; its
+// read and archived flags are its own.
+const activityBits = types.SessionStatus(1<<5 - 1)
+
+// activity is the default chat's, unless another chat needs input or failed.
+func (a *Session) activity() types.SessionStatus {
+	activity := a.chats[0].chat.Status & activityBits
+	failed := false
+	for _, ch := range a.chats[1:] {
+		if ch.chat.Status.Has(types.SessionStatusInputNeeded) {
+			return types.SessionStatusInputNeeded
+		}
+		failed = failed || ch.chat.Status.Has(types.SessionStatusError)
 	}
-	// Legacy disk reader: infer the original visible envelope once, at the Go
-	// boundary. Hidden task/skill content is never rendered as user input.
-	var out code.TurnInputDisplay
-	var texts []string
-	for _, part := range input.Content {
-		if part.Hidden {
-			continue
-		}
-		if strings.HasPrefix(part.Text, "[File: ") && strings.HasSuffix(part.Text, "]") && !strings.Contains(part.Text, "\n") {
-			out.Files = append(out.Files, strings.TrimSuffix(strings.TrimPrefix(part.Text, "[File: "), "]"))
-		} else if part.Text != "" {
-			texts = append(texts, part.Text)
-		}
-		if part.File != nil && part.File.Data != "" {
-			if part.File.Name != "" && slices.Contains(out.Files, part.File.Name) {
-				continue
-			}
-			out.Images = append(out.Images, part.File.Data)
-		}
+	if failed && !activity.Has(types.SessionStatusInputNeeded) {
+		return types.SessionStatusError
 	}
-	out.Text = strings.Join(texts, "\n")
-	return out
+	return activity
 }
 
-func transcriptEntries(messages []harness.Message) []TranscriptEntry {
-	entries := []TranscriptEntry{}
-	for mi, m := range convertMessages(messages) {
-		if m.Role == "user" {
-			input := code.TurnInput{}
-			for _, part := range m.Content {
-				if part.Text != "" {
-					input.Content = append(input.Content, harness.Content{Text: part.Text})
-				}
-				if part.Image != nil {
-					input.Content = append(input.Content, harness.Content{File: &harness.File{Data: part.Image.Data}})
-				}
-			}
-			v := visibleInput(input)
-			if v.Text != "" || len(v.Files)+len(v.Images) > 0 {
-				id := fmt.Sprintf("history:%d:user", mi)
-				if m.InputID != "" {
-					id = "input:" + m.InputID
-				}
-				entries = append(entries, TranscriptEntry{ID: id, InputID: m.InputID, Type: "user", Content: v.Text, Files: v.Files, Images: v.Images})
-			}
-			continue
+// syncChats publishes session-level consequences of a chat's projection.
+func (a *Session) syncChats(previous types.SessionSummary) {
+	// The session's values are its own; a setting it lacks takes the default chat's value.
+	config := a.chats[0].config
+	values := map[string]json.RawMessage{}
+	for key, value := range config.Values {
+		if own, ok := a.state.Config.Values[key]; ok {
+			value = own
 		}
-		for ci, part := range m.Content {
-			id := fmt.Sprintf("history:%d:%d", mi, ci)
-			if part.Text != "" {
-				textID := id + ":text"
-				if part.TextID != "" {
-					textID = "assistant:" + part.TextID
-				}
-				entries = append(entries, TranscriptEntry{ID: textID, Type: "assistant", Content: part.Text, MessageID: part.TextID})
+		values[key] = value
+	}
+	if !reflect.DeepEqual(a.state.Config.Values, values) {
+		a.sessionAction(types.StateAction{Value: &types.SessionConfigChangedAction{Type: types.ActionTypeSessionConfigChanged, Config: values, Replace: new(true)}})
+		for _, ch := range a.chats {
+			ch.syncOverlay()
+		}
+	}
+	// Choices change when a provider discovers models; snapshots carry the new schema.
+	a.state.Config.Schema = config.Schema
+	for _, ch := range a.chats {
+		next := ch.summary()
+		if i := slices.IndexFunc(a.state.Chats, func(s types.ChatSummary) bool { return s.Resource == next.Resource }); i >= 0 && !reflect.DeepEqual(a.state.Chats[i], next) {
+			a.sessionAction(types.StateAction{Value: &types.SessionChatUpdatedAction{Type: types.ActionTypeSessionChatUpdated, Chat: next.Resource, Changes: types.PartialChatSummary{Title: &next.Title, Status: &next.Status, ModifiedAt: &next.ModifiedAt}}})
+		}
+	}
+	a.state.Status = a.activity() | a.state.Status&^activityBits
+	a.syncInputNeeded()
+	next := a.summary()
+	if !reflect.DeepEqual(previous, next) {
+		a.project.host.notifyRoot("root/sessionSummaryChanged", types.SessionSummaryChangedParams{Channel: types.RootResourceURI, Session: a.resource, Changes: types.PartialSessionSummary{Title: &next.Title, Status: &next.Status, ModifiedAt: &next.ModifiedAt, Chats: next.Chats}})
+	}
+	a.keep(next)
+}
+
+func (a *Session) syncInputNeeded() {
+	wanted := map[string]types.SessionInputRequest{}
+	for _, ch := range a.chats {
+		ch.inputRequests(wanted)
+	}
+	for _, request := range slices.Clone(a.state.InputNeeded) {
+		id := ""
+		switch r := request.Value.(type) {
+		case *types.SessionChatInputRequest:
+			id = r.Id
+		case *types.SessionToolConfirmationRequest:
+			id = r.Id
+		case *types.SessionToolClientExecutionRequest:
+			id = r.Id
+		}
+		if _, ok := wanted[id]; !ok {
+			a.sessionAction(types.StateAction{Value: &types.SessionInputNeededRemovedAction{Type: types.ActionTypeSessionInputNeededRemoved, Id: id}})
+		}
+	}
+	for _, request := range wanted {
+		if !slices.ContainsFunc(a.state.InputNeeded, func(old types.SessionInputRequest) bool { return reflect.DeepEqual(old, request) }) {
+			a.sessionAction(types.StateAction{Value: &types.SessionInputNeededSetAction{Type: types.ActionTypeSessionInputNeededSet, Request: request}})
+		}
+	}
+}
+
+func (a *Chat) inputRequests(wanted map[string]types.SessionInputRequest) {
+	// A prompt raised outside a turn has no part to answer, only this request.
+	for _, p := range a.prompts {
+		if p.turn == "" && p.response == nil {
+			wanted[p.view.ID] = types.SessionInputRequest{Value: &types.SessionChatInputRequest{Id: p.view.ID, Chat: a.chat.Resource, Kind: types.SessionInputRequestKindChatInput, Request: promptRequest(p)}}
+		}
+	}
+	active := a.chat.ActiveTurn
+	if active == nil {
+		return
+	}
+	for _, part := range active.ResponseParts {
+		switch p := part.Value.(type) {
+		case *types.InputRequestResponsePart:
+			if p.Response == nil {
+				wanted[p.Request.Id] = types.SessionInputRequest{Value: &types.SessionChatInputRequest{Id: p.Request.Id, Chat: a.chat.Resource, Kind: types.SessionInputRequestKindChatInput, Request: p.Request}}
 			}
-			if part.Image != nil && part.Image.Data != "" {
-				entries = append(entries, TranscriptEntry{ID: id + ":image", Type: "assistant", Images: []string{part.Image.Data}})
+		case *types.ToolCallResponsePart:
+			if call, ok := p.ToolCall.Value.(*types.ToolCallPendingConfirmationState); ok {
+				wanted[call.ToolCallId] = types.SessionInputRequest{Value: &types.SessionToolConfirmationRequest{Id: call.ToolCallId, Chat: a.chat.Resource, Kind: types.SessionInputRequestKindToolConfirmation, TurnId: active.Id, ToolCall: types.ToolCallConfirmationState{Value: call}}}
 			}
-			if part.Reasoning != nil {
-				reasonID := id + ":reasoning"
-				if part.Reasoning.ID != "" {
-					reasonID = "reasoning:" + part.Reasoning.ID
+			// A client finds the calls to its tools here, without following the chat.
+			if call, ok := p.ToolCall.Value.(*types.ToolCallRunningState); ok && call.Contributor != nil {
+				if client, ok := call.Contributor.Value.(*types.ToolCallClientContributor); ok {
+					wanted[call.ToolCallId] = types.SessionInputRequest{Value: &types.SessionToolClientExecutionRequest{Id: call.ToolCallId, Chat: a.chat.Resource, Kind: types.SessionInputRequestKindToolClientExecution, TurnId: active.Id, ClientId: client.ClientId, ToolCall: *call}}
 				}
-				entries = append(entries, TranscriptEntry{ID: reasonID, Type: "reasoning", Content: part.Reasoning.Summary, ReasoningID: part.Reasoning.ID})
-			}
-			if t := part.ToolCall; t != nil {
-				tid := "tool:" + t.ID
-				if t.ID == "" {
-					tid = id + ":tool"
-				}
-				entries = append(entries, TranscriptEntry{ID: tid, Type: "tool", ToolID: t.ID, ToolName: t.Name, ToolKind: t.Kind, ToolArgs: t.Args, ToolLocations: t.Locations, ToolHint: t.Hint})
-			}
-			if t := part.ToolResult; t != nil {
-				i := slices.IndexFunc(entries, func(e TranscriptEntry) bool { return t.ID != "" && e.ToolID == t.ID })
-				if i >= 0 {
-					entries[i].ToolResult = &t.Content
-					continue
-				}
-				entries = append(entries, TranscriptEntry{ID: id + ":result", Type: "tool", ToolID: t.ID, ToolName: t.Name, ToolKind: t.Kind, ToolArgs: t.Args, ToolLocations: t.Locations, ToolResult: &t.Content})
 			}
 		}
 	}
-	return entries
+}
+
+// chatDeleted removes a disposed chat. Disposing the default chat's native
+// session disposes the whole session, which clients learn of from the root.
+func (a *Session) chatDeleted(ch *Chat) {
+	if ch != a.chats[0] {
+		previous := a.summary()
+		a.chats = slices.DeleteFunc(a.chats, func(other *Chat) bool { return other == ch })
+		delete(a.project.host.chats, ch.chat.Resource)
+		for client := range a.project.host.clients {
+			delete(client.subscriptions, ch.chat.Resource)
+		}
+		a.sessionAction(types.StateAction{Value: &types.SessionChatRemovedAction{Type: types.ActionTypeSessionChatRemoved, Chat: ch.chat.Resource}})
+		a.syncChats(previous)
+		a.project.forgetChatAlias(ch.chat.Resource)
+		return
+	}
+	for _, other := range a.chats {
+		// The session's subscribers learn of every chat that goes with it.
+		a.sessionAction(types.StateAction{Value: &types.SessionChatRemovedAction{Type: types.ActionTypeSessionChatRemoved, Chat: other.chat.Resource}})
+		delete(a.project.host.chats, other.chat.Resource)
+		for client := range a.project.host.clients {
+			delete(client.subscriptions, other.chat.Resource)
+		}
+	}
+	for client := range a.project.host.clients {
+		delete(client.subscriptions, a.resource)
+	}
+	// A chat created while the session was disposed goes with it.
+	for _, fork := range a.project.host.forksLocked(a.resource) {
+		a.project.forgetChatAlias(fork.Chat)
+	}
+	a.project.forgetAlias(a.resource)
+	delete(a.project.host.sessions, a.resource)
+	a.project.host.notifyRoot("root/sessionRemoved", types.SessionRemovedParams{Channel: types.RootResourceURI, Session: a.resource})
 }

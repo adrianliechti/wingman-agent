@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	completionCommand,
-	selectedCommandAttachments,
+	sentAttachments,
 	chatCommandsQuery,
 } from "../src/api/chatCommands.ts";
 import { ComposerDraft } from "../src/state/composerDraft.ts";
@@ -34,9 +34,7 @@ test("completion selection preserves opaque metadata and drops removed invocatio
 		"/reports:shared topic",
 		"Use /reports:shared and continue",
 	]) {
-		assert.deepEqual(selectedCommandAttachments(text, [attachment]), [
-			attachment,
-		]);
+		assert.deepEqual(sentAttachments(text, [attachment]), [attachment]);
 	}
 	for (const text of [
 		"no command",
@@ -44,8 +42,17 @@ test("completion selection preserves opaque metadata and drops removed invocatio
 		"/reports:shared-extra",
 		"/reports:shared/file",
 	]) {
-		assert.deepEqual(selectedCommandAttachments(text, [attachment]), []);
+		assert.deepEqual(sentAttachments(text, [attachment]), []);
 	}
+});
+
+test("attachments that are not commands are sent as they are", () => {
+	const chat = {
+		type: "chat" as any,
+		label: "Earlier",
+		resource: "ahp-chat:/c",
+	};
+	assert.deepEqual(sentAttachments("no command", [attachment, chat]), [chat]);
 });
 
 test("drafts query only the workspace catalogue without allocating a backend session", async (t) => {
@@ -71,27 +78,55 @@ test("completion metadata survives saved drafts, queue editing and retry, then c
 	const tab = draftChatTab("wingman", "skills");
 	const drafts = new ComposerDrafts(storage);
 	const draft = drafts.get(tab);
-	draft.update({ text: "/reports:shared topic", completions: [attachment] });
+	draft.update({ text: "/reports:shared topic", attachments: [attachment] });
 	await drafts.flush();
 	const reloaded = new ComposerDrafts(storage);
 	await reloaded.load();
 	const restored = reloaded.get(tab);
-	assert.deepEqual(restored.getSnapshot().completions, [attachment]);
+	assert.deepEqual(restored.getSnapshot().attachments, [attachment]);
 	restored.beginQueueEdit({
 		text: "another message",
 		files: [],
 		images: [],
 		editingQueueId: "queued",
 	});
-	assert.equal(restored.getSnapshot().completions, undefined);
+	assert.equal(restored.getSnapshot().attachments, undefined);
 	restored.cancelQueueEdit();
-	assert.deepEqual(restored.getSnapshot().completions, [attachment]);
+	assert.deepEqual(restored.getSnapshot().attachments, [attachment]);
 	await restored.submit(() => false);
-	assert.deepEqual(restored.getSnapshot().completions, [attachment]);
+	assert.deepEqual(restored.getSnapshot().attachments, [attachment]);
 	await restored.submit((content) => {
-		assert.deepEqual(content.completions, [attachment]);
+		assert.deepEqual(content.attachments, [attachment]);
 		return true;
 	});
-	assert.equal(restored.getSnapshot().completions, undefined);
+	assert.equal(restored.getSnapshot().attachments, undefined);
 	assert.deepEqual(restored.getSnapshot(), new ComposerDraft().getSnapshot());
+});
+
+test("a draft holding only a chat attachment is saved and restored", async () => {
+	let stored: any[] = [];
+	const storage = {
+		read: async () => structuredClone(stored),
+		write: async (value: any) => {
+			stored = [structuredClone(value)];
+		},
+	};
+	const tab = draftChatTab("wingman", "chat");
+	const drafts = new ComposerDrafts(storage);
+	const chat = {
+		type: "chat" as any,
+		label: "Earlier",
+		resource: "ahp-chat:/c",
+	};
+	drafts.get(tab).update({ attachments: [chat] });
+	await drafts.flush();
+	drafts.syncTabs([]);
+	await drafts.flush();
+	const reloaded = new ComposerDrafts(storage);
+	await reloaded.load();
+	assert.deepEqual(
+		reloaded.closedTabs().map((closed) => closed.tab.id),
+		[tab.id],
+	);
+	assert.deepEqual(reloaded.get(tab).getSnapshot().attachments, [chat]);
 });

@@ -1,6 +1,7 @@
 import { Pencil, X } from "lucide-react";
 import type { PendingTurnInput } from "../types/session";
 import type { TurnInputState } from "../types/protocol";
+import { visibleAttachments } from "../api/chatCommands";
 
 interface Props {
 	items: PendingTurnInput[];
@@ -48,7 +49,8 @@ export function TurnQueue({ items, onEdit, onRemove, onClear }: Props) {
 			</div>
 			<div className="max-h-28 overflow-y-auto overscroll-contain py-0.5">
 				{items.map((item) => {
-					const attachments = item.files.length + item.images.length;
+					const others = visibleAttachments(item.attachments).length;
+					const attachments = item.files.length + item.images.length + others;
 					const editable =
 						item.state === "queued" ||
 						item.state === "failed" ||
@@ -72,11 +74,13 @@ export function TurnQueue({ items, onEdit, onRemove, onClear }: Props) {
 							</span>
 							<span className="min-w-0 flex-1 truncate text-[11px] font-mono text-fg-muted">
 								{item.text ||
-									(item.files.length > 0
-										? "File context"
-										: item.images.length > 0
-											? "Image attachment"
-											: "Empty message")}
+									(others > 0
+										? "Attachments"
+										: item.files.length > 0
+											? "File context"
+											: item.images.length > 0
+												? "Image attachment"
+												: "Empty message")}
 							</span>
 							{attachments > 0 && (
 								<span className="shrink-0 text-[9px] font-mono text-fg-dim">

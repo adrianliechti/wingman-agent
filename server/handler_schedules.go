@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 )
 
@@ -20,16 +19,8 @@ type ScheduleEntry struct {
 	Failures int    `json:"failures,omitempty"`
 }
 
-func (s *backendRuntime) sessionSchedules(sessionID string) schedule.Store {
-	ca, ok := s.agent.(*agent.Agent)
-	if !ok {
-		return nil
-	}
-	return ca.Schedules(sessionID)
-}
-
-func (s *backendRuntime) handleSchedules(w http.ResponseWriter, r *http.Request) {
-	store := s.sessionSchedules(r.PathValue("id"))
+func handleSchedules(c *sessionController, w http.ResponseWriter, r *http.Request) {
+	store := c.backend.sessionSchedules(c.ref.SessionID)
 	if store == nil {
 		writeJSON(w, []ScheduleEntry{})
 		return
@@ -69,8 +60,8 @@ func (s *backendRuntime) handleSchedules(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, out)
 }
 
-func (s *backendRuntime) handleScheduleDelete(w http.ResponseWriter, r *http.Request) {
-	store := s.sessionSchedules(r.PathValue("id"))
+func handleScheduleDelete(c *sessionController, w http.ResponseWriter, r *http.Request) {
+	store := c.backend.sessionSchedules(c.ref.SessionID)
 	if store == nil {
 		http.Error(w, "scheduled tasks unavailable", http.StatusNotFound)
 		return
@@ -90,20 +81,20 @@ func (s *backendRuntime) handleScheduleDelete(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	s.sendSession(r.PathValue("id"), Frame{Type: EvtTasksChanged})
+	c.backend.sendSession(c.ref.SessionID, Frame{Type: EvtTasksChanged})
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *backendRuntime) handleSchedulePause(w http.ResponseWriter, r *http.Request) {
-	s.handleScheduleStatus(w, r, schedule.StatusPaused)
+func handleSchedulePause(c *sessionController, w http.ResponseWriter, r *http.Request) {
+	handleScheduleStatus(c, w, r, schedule.StatusPaused)
 }
 
-func (s *backendRuntime) handleScheduleResume(w http.ResponseWriter, r *http.Request) {
-	s.handleScheduleStatus(w, r, schedule.StatusActive)
+func handleScheduleResume(c *sessionController, w http.ResponseWriter, r *http.Request) {
+	handleScheduleStatus(c, w, r, schedule.StatusActive)
 }
 
-func (s *backendRuntime) handleScheduleStatus(w http.ResponseWriter, r *http.Request, status string) {
-	store := s.sessionSchedules(r.PathValue("id"))
+func handleScheduleStatus(c *sessionController, w http.ResponseWriter, r *http.Request, status string) {
+	store := c.backend.sessionSchedules(c.ref.SessionID)
 	if store == nil {
 		http.Error(w, "scheduled tasks unavailable", http.StatusNotFound)
 		return
@@ -123,6 +114,6 @@ func (s *backendRuntime) handleScheduleStatus(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	s.sendSession(r.PathValue("id"), Frame{Type: EvtTasksChanged})
+	c.backend.sendSession(c.ref.SessionID, Frame{Type: EvtTasksChanged})
 	w.WriteHeader(http.StatusNoContent)
 }

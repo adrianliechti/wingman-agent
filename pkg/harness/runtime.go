@@ -291,15 +291,6 @@ func validRuntimeStatus(status RuntimeStatus) bool {
 	}
 }
 
-func isTerminalEvent(t RuntimeEventType) bool {
-	switch t {
-	case EventTurnTerminal, EventRunTerminal, EventToolTerminal:
-		return true
-	default:
-		return false
-	}
-}
-
 func runtimeEntityID(event RuntimeEvent) string {
 	switch event.Type {
 	case EventTurnStarted, EventTurnTerminal:

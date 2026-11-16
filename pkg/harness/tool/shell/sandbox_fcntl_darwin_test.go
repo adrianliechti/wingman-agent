@@ -90,6 +90,7 @@ func TestSandboxFcntlProbe(t *testing.T) {
 	// F_MAKECOMPRESSED acts only when given the file's current generation.
 	list := unix.Attrlist{Bitmapcount: unix.ATTR_BIT_MAP_COUNT, Commonattr: unix.ATTR_CMN_GEN_COUNT}
 	var reply struct{ length, generation uint32 }
+	//lint:ignore SA1019 libSystem has no wrapper for the file generation count
 	if _, _, errno := unix.Syscall6(unix.SYS_FGETATTRLIST, canary.Fd(), uintptr(unsafe.Pointer(&list)), uintptr(unsafe.Pointer(&reply)), unsafe.Sizeof(reply), unix.FSOPT_ATTR_CMN_EXTENDED, 0); errno != 0 {
 		t.Fatalf("read file generation: %v", errno)
 	}

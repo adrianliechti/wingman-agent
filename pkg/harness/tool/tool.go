@@ -184,20 +184,6 @@ func IntArg(args map[string]any, key string) (int, bool) {
 	return IntValue(args[key])
 }
 
-func OptionalIntArg(args map[string]any, key string) (int, bool, error) {
-	raw, present := args[key]
-	if !present {
-		return 0, false, nil
-	}
-
-	value, ok := IntValue(raw)
-	if !ok {
-		return 0, true, fmt.Errorf("%s must be an integer", key)
-	}
-
-	return value, true, nil
-}
-
 func NonNegIntArg(args map[string]any, key string) (value int, present bool, err error) {
 	raw, present := args[key]
 	if !present {

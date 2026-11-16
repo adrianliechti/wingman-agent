@@ -109,11 +109,6 @@ func CaptureWorkspaceSnapshot(ctx context.Context, root *os.Root) (*WorkspaceSna
 	return &WorkspaceSnapshot{files: files, complete: complete, enumerated: enumerated, skipped: skipped}, nil
 }
 
-// Complete reports whether every eligible workspace file fit within snapshot limits.
-func (s *WorkspaceSnapshot) Complete() bool {
-	return s != nil && s.complete
-}
-
 // absent distinguishes a missing file from a path omitted by filters or limits.
 func (s *WorkspaceSnapshot) absent(path string) bool {
 	if !s.enumerated {

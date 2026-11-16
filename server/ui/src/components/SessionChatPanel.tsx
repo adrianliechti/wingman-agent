@@ -67,7 +67,7 @@ export function SessionChatPanel({
 					if (state === "queued" || state === "sending")
 						void act((client) => client.removeQueued(session, inputId));
 				}}
-				onUpdateQueued={(inputId, text, files, images, completions) =>
+				onUpdateQueued={(inputId, text, files, images, attachments) =>
 					act((client) =>
 						client.updateQueued(
 							session,
@@ -75,7 +75,7 @@ export function SessionChatPanel({
 							text,
 							files,
 							images,
-							completions,
+							attachments,
 						),
 					)
 				}

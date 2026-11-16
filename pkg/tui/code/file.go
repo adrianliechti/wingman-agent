@@ -1,17 +1,15 @@
 package code
 
 import (
-	"bufio"
+	"context"
 	"fmt"
 	"io/fs"
-	pathpkg "path"
 	"path/filepath"
 	"slices"
 	"strings"
 
-	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
-
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	toolfs "github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
@@ -36,9 +34,11 @@ func (a *App) collectFiles() []fileMatch {
 	var files []fileMatch
 	fsys := a.agent.Workspace().Root.FS()
 
-	var allPatterns []gitignore.Pattern
-	allPatterns = append(allPatterns, loadGitignore(fsys, nil)...)
-	matcher := gitignore.NewMatcher(allPatterns)
+	gitignore := toolfs.NewGitignore(context.Background(), fsys)
+	ignored := func(path string, isDir bool) bool {
+		ignored, _ := gitignore.Ignored(filepath.ToSlash(path), isDir)
+		return ignored
+	}
 
 	fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -56,18 +56,8 @@ func (a *App) collectFiles() []fileMatch {
 				return filepath.SkipDir
 			}
 
-			relPath := filepath.ToSlash(path)
-			pathParts := strings.Split(relPath, "/")
-
-			if matcher.Match(pathParts, true) {
+			if name != "." && ignored(path, true) {
 				return filepath.SkipDir
-			}
-
-			newPatterns := loadGitignore(fsys, strings.Split(path, "/"))
-
-			if len(newPatterns) > 0 {
-				allPatterns = append(allPatterns, newPatterns...)
-				matcher = gitignore.NewMatcher(allPatterns)
 			}
 
 			return nil
@@ -77,10 +67,7 @@ func (a *App) collectFiles() []fileMatch {
 			return nil
 		}
 
-		relPath := filepath.ToSlash(path)
-		pathParts := strings.Split(relPath, "/")
-
-		if matcher.Match(pathParts, false) {
+		if ignored(path, false) {
 			return nil
 		}
 
@@ -93,37 +80,6 @@ func (a *App) collectFiles() []fileMatch {
 	})
 
 	return files
-}
-
-func loadGitignore(fsys fs.FS, domain []string) []gitignore.Pattern {
-	gitignorePath := ".gitignore"
-
-	if len(domain) > 0 {
-		gitignorePath = pathpkg.Join(append(domain, ".gitignore")...)
-	}
-
-	f, err := fsys.Open(gitignorePath)
-
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-
-	var patterns []gitignore.Pattern
-	scanner := bufio.NewScanner(f)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
-
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		patterns = append(patterns, gitignore.ParsePattern(line, domain))
-	}
-
-	return patterns
 }
 
 // contextFileID normalizes to slashes so pending paths (possibly OS-native)

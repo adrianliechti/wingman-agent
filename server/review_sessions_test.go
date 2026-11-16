@@ -17,16 +17,17 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
-	"github.com/microsoft/agent-host-protocol/clients/go/ahp"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
+	sdk "github.com/microsoft/agent-host-protocol/clients/go/ahp"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
-func reviewSessionsAttach(t *testing.T) (*Server, *backendRuntime, *protocolAgent, *sessionController, *ahpChat) {
+func reviewSessionsAttach(t *testing.T) (*Server, *backendRuntime, *protocolAgent, *sessionController, *Chat) {
 	t.Helper()
 	s, b, a := newProtocolServer(t)
 	c := b.session("saved")
 	c.load()
-	ch, err := s.ahpHost().attachSession(c, canonicalAHPURI("one", "saved"), "Test", time.Now())
+	ch, err := s.Project.attachSession(c, s.Project.canonicalURI("one", "saved"), "Test", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,19 +35,19 @@ func reviewSessionsAttach(t *testing.T) (*Server, *backendRuntime, *protocolAgen
 }
 
 // reviewSessionsObserver subscribes a connection without a socket to channels.
-func reviewSessionsObserver(t *testing.T, h *ahpHost, version string, channels ...string) *ahpConnection {
-	conn := &ahpConnection{host: h, writer: newWSClient(nil), initialized: true, id: "observer-" + version, version: version, subscriptions: map[string]bool{}}
-	t.Cleanup(func() { h.mu.Lock(); delete(h.clients, conn); h.mu.Unlock() })
-	h.mu.Lock()
-	defer h.mu.Unlock()
+func reviewSessionsObserver(t *testing.T, h *Project, version string, channels ...string) *connection {
+	conn := &connection{host: h.host, writer: newWSClient(nil), id: "observer-" + version, version: version, subscriptions: map[string]bool{}}
+	t.Cleanup(func() { h.host.mu.Lock(); delete(h.host.clients, conn); h.host.mu.Unlock() })
+	h.host.mu.Lock()
+	defer h.host.mu.Unlock()
 	for _, channel := range channels {
 		conn.subscriptions[channel] = true
 	}
-	h.clients[conn] = struct{}{}
+	h.host.clients[conn] = struct{}{}
 	return conn
 }
 
-func reviewSessionsDrain(t *testing.T, conn *ahpConnection) []types.ActionEnvelope {
+func reviewSessionsDrain(t *testing.T, conn *connection) []types.ActionEnvelope {
 	t.Helper()
 	var actions []types.ActionEnvelope
 	for {
@@ -83,13 +84,13 @@ func reviewSessionsTypes(actions []types.ActionEnvelope) []string {
 
 // reviewSessionsReproject projects an unchanged controller again and returns
 // what that published; a stable projection publishes nothing.
-func reviewSessionsReproject(t *testing.T, c *sessionController, ch *ahpChat, observer *ahpConnection) []string {
+func reviewSessionsReproject(t *testing.T, c *sessionController, ch *Chat, observer *connection) []string {
 	t.Helper()
 	reviewSessionsDrain(t, observer)
 	c.mu.Lock()
-	ch.host.mu.Lock()
+	ch.project.host.mu.Lock()
 	ch.syncProjection(c, nil)
-	ch.host.mu.Unlock()
+	ch.project.host.mu.Unlock()
 	c.mu.Unlock()
 	return reviewSessionsTypes(reviewSessionsDrain(t, observer))
 }
@@ -131,7 +132,7 @@ func reviewSessionsPrompt(t *testing.T, b *backendRuntime, c *sessionController,
 	return id, reply
 }
 
-func reviewSessionsDispatch(t *testing.T, client *ahp.Client, channel string, seq int64, action any) {
+func reviewSessionsDispatch(t *testing.T, client *sdk.Client, channel string, seq int64, action any) {
 	t.Helper()
 	var value types.StateAction
 	data, _ := json.Marshal(action)
@@ -188,8 +189,8 @@ func (a *reviewSessionsAgent) SetModel(ctx context.Context, id, value string) er
 }
 
 func reviewSessionsReceipt(c *sessionController, id string) (reserved, done bool) {
-	c.receiptMu.Lock()
-	defer c.receiptMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	record := c.receipts[id]
 	if record == nil {
 		return false, false
@@ -204,48 +205,48 @@ func reviewSessionsReceipt(c *sessionController, id string) (reserved, done bool
 
 // Bug: a stop that loses the race to its turn's end is rejected, yet its queued CancelAll still runs and cancels the next turn the user never stopped; cancel must be scoped to the turn it names.
 func TestReviewSessionsLostCancelDoesNotStopTheNextTurn(t *testing.T) {
-	s, _, _, endpoint := ahpTestServer(t)
+	s, _, _, endpoint := protocolTestServer(t)
 	agent := &reviewSessionsAgent{protocolAgent: &protocolAgent{}, modelGate: make(chan struct{}), inModel: make(chan struct{}, 1)}
-	s.backends["review"] = &backendEntry{runtime: s.bindBackend("review", agent)}
+	s.Project.backends["review"] = &backendEntry{runtime: s.Project.bindBackend("review", agent)}
 	var releaseModel sync.Once
 	t.Cleanup(func() { releaseModel.Do(func() { close(agent.modelGate) }) })
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	client := ahpTestClient(t, endpoint, "stopper")
+	client := protocolTestClient(t, endpoint, "stopper")
 	session := "ahp-session:/race"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("review")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("review")}, nil); err != nil {
 		t.Fatal(err)
 	}
-	chat := ahpChatURI(session)
-	state, sub := ahpSubscribeChat(t, client, chat)
-	ahpSend(t, client, chat, "turn-1", 1)
-	ahpUntil(t, state, sub, func(types.ActionEnvelope) bool {
+	chat := ahp.ChatURI(session)
+	state, sub := subscribeChat(t, client, chat)
+	send(t, client, chat, "turn-1", 1)
+	until(t, state, sub, func(types.ActionEnvelope) bool {
 		return state.ActiveTurn != nil && len(state.ActiveTurn.ResponseParts) > 0
 	})
 	reviewSessionsDispatch(t, client, chat, 2, &types.ChatPendingMessageSetAction{Type: types.ActionTypeChatPendingMessageSet, Kind: types.PendingMessageKindQueued, Id: "turn-2", Message: types.Message{Text: "next", Origin: types.MessageOrigin{Kind: types.MessageKindUser}}})
-	ahpUntil(t, state, sub, func(types.ActionEnvelope) bool { return len(state.QueuedMessages) == 1 })
+	until(t, state, sub, func(types.ActionEnvelope) bool { return len(state.QueuedMessages) == 1 })
 
 	// Another client's model switch holds the controller while the stop arrives.
-	other := ahpTestClient(t, endpoint, "configurer")
+	other := protocolTestClient(t, endpoint, "configurer")
 	reviewSessionsDispatch(t, other, chat, 1, &types.ChatConfigChangedAction{Type: types.ActionTypeChatConfigChanged, Config: map[string]json.RawMessage{"model": json.RawMessage(`"slow"`)}})
 	<-agent.inModel
 	reviewSessionsDispatch(t, client, chat, 3, &types.ChatTurnCancelledAction{Type: types.ActionTypeChatTurnCancelled, TurnId: "turn-1"})
-	s.ahp.mu.Lock()
-	c := s.ahp.chats[chat].controller
-	s.ahp.mu.Unlock()
-	stop := ahpCommandID("cancel", "turn-1")
+	s.Project.host.mu.Lock()
+	c := s.Project.host.chats[chat].controller
+	s.Project.host.mu.Unlock()
+	stop := commandID("cancel", "turn-1")
 	waitProtocol(t, func() bool { reserved, _ := reviewSessionsReceipt(c, stop); return reserved })
 
 	close(agent.gate("turn-1"))
-	ack := ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { return e.Origin != nil && e.Origin.ClientSeq == 3 })
+	ack := until(t, state, sub, func(e types.ActionEnvelope) bool { return e.Origin != nil && e.Origin.ClientSeq == 3 })
 	if ack.RejectionReason == nil {
 		t.Fatal("the stop was acknowledged although turn-1 had finished")
 	}
-	ahpUntil(t, state, sub, func(types.ActionEnvelope) bool { return state.ActiveTurn != nil && state.ActiveTurn.Id == "turn-2" })
+	until(t, state, sub, func(types.ActionEnvelope) bool { return state.ActiveTurn != nil && state.ActiveTurn.Id == "turn-2" })
 	releaseModel.Do(func() { close(agent.modelGate) })
 	waitProtocol(t, func() bool { _, done := reviewSessionsReceipt(c, stop); return done })
 	close(agent.gate("turn-2"))
-	end := ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool {
+	end := until(t, state, sub, func(e types.ActionEnvelope) bool {
 		switch a := e.Action.Value.(type) {
 		case *types.ChatTurnCompleteAction:
 			return a.TurnId == "turn-2"
@@ -261,17 +262,17 @@ func TestReviewSessionsLostCancelDoesNotStopTheNextTurn(t *testing.T) {
 
 // Bug: a turnStarted action on an idle chat whose recovered queue is paused resumes that queue and runs the recovered message first; the requested turn is queued and its acknowledgement is withheld until it eventually starts.
 func TestReviewSessionsTurnStartedIsNotQueuedBehindARecoveredQueue(t *testing.T) {
-	_, _, agent, endpoint := ahpTestServer(t)
+	s, _, agent, endpoint := protocolTestServer(t)
 	agent.gate = make(chan struct{})
 	agent.queue = code.TurnQueueState{Inputs: []code.TurnInput{{ID: "recovered", Content: []harness.Content{{Text: "from before the restart"}}}}}
-	client := ahpTestClient(t, endpoint, "ide")
-	chat := ahpChatURI(canonicalAHPURI("one", "saved"))
-	state, sub := ahpSubscribeChat(t, client, chat)
+	client := protocolTestClient(t, endpoint, "ide")
+	chat := ahp.ChatURI(s.Project.canonicalURI("one", "saved"))
+	state, sub := subscribeChat(t, client, chat)
 	if state.ActiveTurn != nil || len(state.QueuedMessages) != 1 {
 		t.Fatalf("recovered queue = %+v", state.QueuedMessages)
 	}
-	ahpSend(t, client, chat, "fresh", 1)
-	first := ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool {
+	send(t, client, chat, "fresh", 1)
+	first := until(t, state, sub, func(e types.ActionEnvelope) bool {
 		_, started := e.Action.Value.(*types.ChatTurnStartedAction)
 		return started || e.Origin != nil && e.Origin.ClientSeq == 1
 	})
@@ -290,8 +291,8 @@ func TestReviewSessionsTaskTurnKeepsThePreviousTurn(t *testing.T) {
 	c.apply(Frame{Type: EvtTextDelta, ID: "a1", Text: "answer"})
 	reviewSessionsInput(c, "t1", "hello", "user", code.TurnInputCompleted)
 	reviewSessionsInput(c, "task-1", "background agent finished", "task", code.TurnInputActive)
-	s.ahp.mu.Lock()
-	defer s.ahp.mu.Unlock()
+	s.Project.host.mu.Lock()
+	defer s.Project.host.mu.Unlock()
 	if len(ch.chat.Turns) != 1 || ch.chat.Turns[0].Id != "t1" {
 		active := ""
 		if ch.chat.ActiveTurn != nil {
@@ -304,14 +305,14 @@ func TestReviewSessionsTaskTurnKeepsThePreviousTurn(t *testing.T) {
 // Bug: finishing a turn truncates and reloads the whole history, and the reloaded turn has lost the duration the completion carried.
 func TestReviewSessionsTurnCompletionKeepsDurationWithoutReload(t *testing.T) {
 	s, _, _, c, ch := reviewSessionsAttach(t)
-	observer := reviewSessionsObserver(t, s.ahp, "1.1.0", ch.chat.Resource)
+	observer := reviewSessionsObserver(t, s.Project, "1.1.0", ch.chat.Resource)
 	reviewSessionsInput(c, "t1", "hello", "user", code.TurnInputActive)
 	c.apply(Frame{Type: EvtTextDelta, ID: "a1", Text: "answer"})
 	reviewSessionsDrain(t, observer)
 	reviewSessionsInput(c, "t1", "hello", "user", code.TurnInputCompleted)
 	published := reviewSessionsTypes(reviewSessionsDrain(t, observer))
-	s.ahp.mu.Lock()
-	defer s.ahp.mu.Unlock()
+	s.Project.host.mu.Lock()
+	defer s.Project.host.mu.Unlock()
 	if slices.Contains(published, string(types.ActionTypeChatTruncated)) || len(ch.chat.Turns) != 1 || ch.chat.Turns[0].Duration == nil {
 		t.Fatalf("completion published %v; turns=%+v", published, ch.chat.Turns)
 	}
@@ -320,7 +321,7 @@ func TestReviewSessionsTurnCompletionKeepsDurationWithoutReload(t *testing.T) {
 // Bug: prompt parts are appended after every entry of their turn, so each part that follows an answered approval truncates and replays the whole active turn.
 func TestReviewSessionsPartsAfterAnApprovalDoNotReplayTheTurn(t *testing.T) {
 	s, b, _, c, ch := reviewSessionsAttach(t)
-	observer := reviewSessionsObserver(t, s.ahp, "1.1.0", ch.chat.Resource)
+	observer := reviewSessionsObserver(t, s.Project, "1.1.0", ch.chat.Resource)
 	reviewSessionsInput(c, "t1", "hello", "user", code.TurnInputActive)
 	c.apply(Frame{Type: EvtToolCall, ID: "run", Name: "shell", Kind: "execute", Args: `{"command":"ls"}`})
 	id, reply := reviewSessionsPrompt(t, b, c, PromptKindConfirm)
@@ -382,24 +383,24 @@ func cmpOr(value, fallback string) string {
 
 // Bug: a config change the backend normalizes is acknowledged by echoing the client's raw values after the host's own replace, so every subscriber ends with a value the host does not hold and is never corrected.
 func TestReviewSessionsNormalizedConfigReachesSubscribers(t *testing.T) {
-	s, _, _, endpoint := ahpTestServer(t)
+	s, _, _, endpoint := protocolTestServer(t)
 	agent := &reviewSessionsModeAgent{protocolAgent: &protocolAgent{}}
-	s.backends["modes"] = &backendEntry{runtime: s.bindBackend("modes", agent)}
+	s.Project.backends["modes"] = &backendEntry{runtime: s.Project.bindBackend("modes", agent)}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	client := ahpTestClient(t, endpoint, "settings")
+	client := protocolTestClient(t, endpoint, "settings")
 	session := "ahp-session:/modes"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("modes")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("modes")}, nil); err != nil {
 		t.Fatal(err)
 	}
-	chat := ahpChatURI(session)
-	observer := ahpTestClient(t, endpoint, "observer")
-	state, sub := ahpSubscribeChat(t, observer, chat)
+	chat := ahp.ChatURI(session)
+	observer := protocolTestClient(t, endpoint, "observer")
+	state, sub := subscribeChat(t, observer, chat)
 	reviewSessionsDispatch(t, client, chat, 1, &types.ChatConfigChangedAction{Type: types.ActionTypeChatConfigChanged, Config: map[string]json.RawMessage{"mode": json.RawMessage(`"unattended"`)}})
-	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { return e.Origin != nil && e.Origin.ClientId == "settings" })
-	s.ahp.mu.Lock()
-	host := string(s.ahp.chats[chat].chat.Config.Values["mode"])
-	s.ahp.mu.Unlock()
+	until(t, state, sub, func(e types.ActionEnvelope) bool { return e.Origin != nil && e.Origin.ClientId == "settings" })
+	s.Project.host.mu.Lock()
+	host := string(s.Project.host.chats[chat].chat.Config.Values["mode"])
+	s.Project.host.mu.Unlock()
 	if seen := string(state.Config.Values["mode"]); seen != host {
 		t.Fatalf("subscriber holds mode %s, host holds %s", seen, host)
 	}
@@ -407,23 +408,23 @@ func TestReviewSessionsNormalizedConfigReachesSubscribers(t *testing.T) {
 
 // Bug: disposing a session keeps its alias on disk and in memory, so the record leaks forever and the URI stays taken after a restart.
 func TestReviewSessionsDisposeSessionForgetsItsAlias(t *testing.T) {
-	s, _, _, endpoint := ahpTestServer(t)
-	client := ahpTestClient(t, endpoint, "disposer")
+	s, _, _, endpoint := protocolTestServer(t)
+	client := protocolTestClient(t, endpoint, "disposer")
 	session := "ahp-session:/short-lived"
-	ahpCreate(t, client, session)
+	create(t, client, session)
 	if err := client.Request(t.Context(), "disposeSession", types.DisposeSessionParams{Channel: session}, nil); err != nil {
 		t.Fatal(err)
 	}
-	dir, err := s.ahp.aliasDirectory()
+	dir, err := s.Project.aliasDirectory()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(s.ahp.aliasPath(dir, ahpAlias{Resource: session})); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(aliasPath(dir, sessionAlias{Resource: session})); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("disposed session's alias file remains: %v", err)
 	}
-	s.ahp.mu.Lock()
-	_, aliased := s.ahp.aliases[session]
-	s.ahp.mu.Unlock()
+	s.Project.host.mu.Lock()
+	_, aliased := s.Project.host.aliases[session]
+	s.Project.host.mu.Unlock()
 	if aliased {
 		t.Fatal("disposed session kept its alias")
 	}
@@ -431,13 +432,13 @@ func TestReviewSessionsDisposeSessionForgetsItsAlias(t *testing.T) {
 
 // Bug: createSession accepts a URI in the host's canonical namespace, binding a new native session to another session's canonical URI and making that session unreachable.
 func TestReviewSessionsCreateSessionCannotClaimACanonicalURI(t *testing.T) {
-	s, _, _, endpoint := ahpTestServer(t)
-	client := ahpTestClient(t, endpoint, "squatter")
-	existing := canonicalAHPURI("one", "saved")
+	s, _, _, endpoint := protocolTestServer(t)
+	client := protocolTestClient(t, endpoint, "squatter")
+	existing := s.Project.canonicalURI("one", "saved")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	_ = client.Request(ctx, "createSession", types.CreateSessionParams{Channel: existing, Provider: ahpPtr("one")}, nil)
-	_, ch, err := s.ahp.ensureSession(ahpChatURI(existing))
+	_ = client.Request(ctx, "createSession", types.CreateSessionParams{Channel: existing, Provider: new("one")}, nil)
+	_, ch, err := s.Project.host.ensureSession(ahp.ChatURI(existing))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,25 +449,25 @@ func TestReviewSessionsCreateSessionCannotClaimACanonicalURI(t *testing.T) {
 
 // Bug: the canonical chat URI of a forked native session redirects to the parent session, whose default chat clients then open instead of the fork.
 func TestReviewSessionsCanonicalForkURIRedirectsToTheForkChat(t *testing.T) {
-	s, _, _, endpoint := ahpTestServer(t)
+	s, _, _, endpoint := protocolTestServer(t)
 	agent := &turnForkingAgent{protocolAgent: &protocolAgent{}}
-	s.backends["fork"] = &backendEntry{runtime: s.bindBackend("fork", agent)}
+	s.Project.backends["fork"] = &backendEntry{runtime: s.Project.bindBackend("fork", agent)}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	client := ahpTestClient(t, endpoint, "forks")
+	client := protocolTestClient(t, endpoint, "forks")
 	session := "ahp-session:/parent"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("fork")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("fork")}, nil); err != nil {
 		t.Fatal(err)
 	}
-	main := ahpChatURI(session)
-	state, sub := ahpSubscribeChat(t, client, main)
-	ahpSend(t, client, main, "turn-1", 1)
-	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
+	main := ahp.ChatURI(session)
+	state, sub := subscribeChat(t, client, main)
+	send(t, client, main, "turn-1", 1)
+	until(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
 	if err := client.Request(ctx, "createChat", types.CreateChatParams{Channel: session, Chat: "ahp-chat:/branch", Source: &types.ChatSource{Value: &types.ForkChatSource{Kind: types.ChatSourceKindFork, Chat: main, TurnId: "turn-1"}}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := client.Subscribe(ctx, ahpChatURI(canonicalAHPURI("fork", "fork-1")))
-	var rpc *ahp.RPCError
+	_, _, err := client.Subscribe(ctx, ahp.ChatURI(s.Project.canonicalURI("fork", "fork-1")))
+	var rpc *sdk.RPCError
 	var data struct {
 		Resource string `json:"resource"`
 	}
@@ -481,7 +482,7 @@ func TestReviewSessionsCanonicalForkURIRedirectsToTheForkChat(t *testing.T) {
 // Bug: syncChats reads the default chat controller's settings under the host lock only, racing with refreshSettings, which writes them under the controller lock.
 func TestReviewSessionsSessionActionsDoNotRaceSettingsRefresh(t *testing.T) {
 	s, _, agent, c, ch := reviewSessionsAttach(t)
-	conn := &ahpConnection{host: s.ahp, id: "racer", initialized: true}
+	conn := &connection{host: s.Project.host, id: "racer"}
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for i := range 200 {
@@ -507,8 +508,8 @@ func TestReviewSessionsSessionActionsDoNotRaceSettingsRefresh(t *testing.T) {
 func TestReviewSessionsQuestionOutsideATurnIsSurfaced(t *testing.T) {
 	s, b, _, c, ch := reviewSessionsAttach(t)
 	id, _ := reviewSessionsPrompt(t, b, c, PromptKindAsk)
-	s.ahp.mu.Lock()
-	defer s.ahp.mu.Unlock()
+	s.Project.host.mu.Lock()
+	defer s.Project.host.mu.Unlock()
 	for _, request := range ch.session.state.InputNeeded {
 		if r, ok := request.Value.(*types.SessionChatInputRequest); ok && r.Id == id {
 			return
@@ -517,20 +518,20 @@ func TestReviewSessionsQuestionOutsideATurnIsSurfaced(t *testing.T) {
 	t.Fatalf("question %s is invisible: inputNeeded=%+v active=%v", id, ch.session.state.InputNeeded, ch.chat.ActiveTurn != nil)
 }
 
-// Bug: naming a new session after its first message renames only the session; its default chat keeps "New session" until a restart, where the catalog title appears instead.
-func TestReviewSessionsDefaultChatTakesTheSessionTitle(t *testing.T) {
-	s, _, _, endpoint := ahpTestServer(t)
-	client := ahpTestClient(t, endpoint, "titles")
+// Bug: naming a new session after its first message renames only the session; its default chat keeps "New session" until a restart, where the catalog title appears instead. The default chat now inherits the session's title.
+func TestReviewSessionsDefaultChatInheritsTheSessionTitle(t *testing.T) {
+	s, _, _, endpoint := protocolTestServer(t)
+	client := protocolTestClient(t, endpoint, "titles")
 	session := "ahp-session:/titled"
-	chat := ahpCreate(t, client, session)
-	state, sub := ahpSubscribeChat(t, client, chat)
+	chat := create(t, client, session)
+	state, sub := subscribeChat(t, client, chat)
 	reviewSessionsDispatch(t, client, chat, 1, &types.ChatTurnStartedAction{Type: types.ActionTypeChatTurnStarted, TurnId: "first", StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Message: types.Message{Text: "Fix the login bug", Origin: types.MessageOrigin{Kind: types.MessageKindUser}}})
-	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
-	s.ahp.mu.Lock()
-	defer s.ahp.mu.Unlock()
-	a := s.ahp.sessions[session]
-	if summary := a.summary(); summary.Title != "Fix the login bug" || summary.Chats[0].Title != summary.Title {
-		t.Fatalf("session %q lists its default chat as %q", summary.Title, summary.Chats[0].Title)
+	until(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
+	s.Project.host.mu.Lock()
+	defer s.Project.host.mu.Unlock()
+	a := s.Project.host.sessions[session]
+	if summary := a.summary(); summary.Title != "Fix the login bug" || summary.Chats[0].Title != "" || a.chats[0].chat.Title != "" {
+		t.Fatalf("session %q lists its default chat as %q, which calls itself %q", summary.Title, summary.Chats[0].Title, a.chats[0].chat.Title)
 	}
 }
 
@@ -554,26 +555,26 @@ func (a *reviewSessionsCompactForkAgent) ForkSessionThrough(_ context.Context, i
 
 // Bug: compaction turns are offered as chat turns but are not inputs of the agent's journal, so forking through one fails.
 func TestReviewSessionsForkThroughACompactionTurn(t *testing.T) {
-	s, _, _, endpoint := ahpTestServer(t)
+	s, _, _, endpoint := protocolTestServer(t)
 	agent := &reviewSessionsCompactForkAgent{&compactingProtocolAgent{protocolAgent: &protocolAgent{}, focus: make(chan string, 4), release: make(chan error, 4)}}
 	agent.release <- nil
-	s.backends["compact"] = &backendEntry{runtime: s.bindBackend("compact", agent)}
+	s.Project.backends["compact"] = &backendEntry{runtime: s.Project.bindBackend("compact", agent)}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	client := ahpTestClient(t, endpoint, "compactor")
+	client := protocolTestClient(t, endpoint, "compactor")
 	session := "ahp-session:/compacted"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("compact")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("compact")}, nil); err != nil {
 		t.Fatal(err)
 	}
-	main := ahpChatURI(session)
-	state, sub := ahpSubscribeChat(t, client, main)
+	main := ahp.ChatURI(session)
+	state, sub := subscribeChat(t, client, main)
 	for i, text := range []string{"first", "/compact", "second"} {
 		turn := "turn-" + text
 		if text == "/compact" {
 			turn = "compaction"
 		}
 		reviewSessionsDispatch(t, client, main, int64(i+1), &types.ChatTurnStartedAction{Type: types.ActionTypeChatTurnStarted, TurnId: turn, StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Message: types.Message{Text: text, Origin: types.MessageOrigin{Kind: types.MessageKindUser}}})
-		ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool {
+		until(t, state, sub, func(e types.ActionEnvelope) bool {
 			done, ok := e.Action.Value.(*types.ChatTurnCompleteAction)
 			return ok && done.TurnId == turn
 		})
@@ -587,11 +588,11 @@ func TestReviewSessionsForkThroughACompactionTurn(t *testing.T) {
 	}
 }
 
-func reviewSessionsDiverged(c *sessionController, ch *ahpChat) string {
+func reviewSessionsDiverged(c *sessionController, ch *Chat) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ch.host.mu.Lock()
-	defer ch.host.mu.Unlock()
+	ch.project.host.mu.Lock()
+	defer ch.project.host.mu.Unlock()
 	turns, active := ch.transcript(c)
 	if !reflect.DeepEqual(turns, ch.chat.Turns) {
 		a, _ := json.Marshal(turns)
@@ -610,7 +611,7 @@ func reviewSessionsDiverged(c *sessionController, ch *ahpChat) string {
 // change, or each later sync truncates and replays.
 func TestReviewSessionsProjectionIsAFixedPoint(t *testing.T) {
 	s, b, _, c, ch := reviewSessionsAttach(t)
-	observer := reviewSessionsObserver(t, s.ahp, "1.1.0", ch.chat.Resource)
+	observer := reviewSessionsObserver(t, s.Project, "1.1.0", ch.chat.Resource)
 	step := func(name string) {
 		t.Helper()
 		if d := reviewSessionsDiverged(c, ch); d != "" {
@@ -653,23 +654,25 @@ func TestReviewSessionsProjectionIsAFixedPoint(t *testing.T) {
 
 // Bug: text attachments are appended to the command text that also becomes the input's display text, so once the turn completes the user's message shows the attachment's full contents.
 func TestReviewSessionsAttachmentContentStaysOutOfTheMessageText(t *testing.T) {
-	_, _, agent, endpoint := ahpTestServer(t)
-	client := ahpTestClient(t, endpoint, "attacher")
-	chat := ahpCreate(t, client, "ahp-session:/attachments")
-	state, sub := ahpSubscribeChat(t, client, chat)
+	_, _, agent, endpoint := protocolTestServer(t)
+	client := protocolTestClient(t, endpoint, "attacher")
+	chat := create(t, client, "ahp-session:/attachments")
+	state, sub := subscribeChat(t, client, chat)
 	attachment := types.MessageAttachment{Value: &types.MessageEmbeddedResourceAttachment{Type: "embeddedResource", ContentType: "text/plain", Label: "notes.txt", Data: "UFJJVkFURSBGSUxFIEJPRFk="}}
 	reviewSessionsDispatch(t, client, chat, 1, &types.ChatTurnStartedAction{Type: types.ActionTypeChatTurnStarted, TurnId: "explain", StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Message: types.Message{Text: "explain", Origin: types.MessageOrigin{Kind: types.MessageKindUser}, Attachments: []types.MessageAttachment{attachment}}})
-	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
+	until(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
 	agent.mu.Lock()
 	sent := ""
-	for _, content := range agent.messages[0].Content {
-		sent += content.Text // the attachment may arrive as its own content part
+	for _, message := range agent.messages {
+		for _, content := range message.Content {
+			sent += content.Text // the attachment arrives as context of its own
+		}
 	}
 	agent.mu.Unlock()
 	if !strings.Contains(sent, "PRIVATE FILE BODY") {
 		t.Fatalf("the agent did not receive the attachment: %q", sent)
 	}
-	snapshot, _ := ahpSubscribeChat(t, ahpTestClient(t, endpoint, "reader"), chat)
+	snapshot, _ := subscribeChat(t, protocolTestClient(t, endpoint, "reader"), chat)
 	if len(snapshot.Turns) != 1 || snapshot.Turns[0].Message.Text != "explain" {
 		t.Fatalf("message text became %q", snapshot.Turns[0].Message.Text)
 	}
@@ -678,17 +681,17 @@ func TestReviewSessionsAttachmentContentStaysOutOfTheMessageText(t *testing.T) {
 // Bug: controller command receipts are never evicted, so every action a client ever sent stays in memory for the host's lifetime although the docs promise bounded receipts.
 func TestReviewSessionsCommandReceiptsAreBounded(t *testing.T) {
 	_, b, _, c, _ := reviewSessionsAttach(t)
-	if !b.beginOperation() {
+	if !b.Project.beginOperation() {
 		t.Fatal("workspace closed")
 	}
-	defer b.operations.Done()
+	defer b.Project.operations.Done()
 	const commands = 10000
 	for i := range commands {
-		c.command(t.Context(), Command{ID: "answer-" + strconv.Itoa(i), Epoch: c.epoch, Type: "prompt_response", PromptID: "gone", Action: "accept"})
+		c.command(t.Context(), Command{ID: "answer-" + strconv.Itoa(i), Type: "prompt_response", PromptID: "gone", Action: "accept"})
 	}
-	c.receiptMu.Lock()
+	c.mu.Lock()
 	kept := len(c.receipts)
-	c.receiptMu.Unlock()
+	c.mu.Unlock()
 	if kept >= commands {
 		t.Fatalf("%d receipts retained for %d commands", kept, commands)
 	}
@@ -697,15 +700,15 @@ func TestReviewSessionsCommandReceiptsAreBounded(t *testing.T) {
 func TestReviewSessionsConcurrentCreateSessionCreatesOnce(t *testing.T) {
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, _, agent := newProtocolServer(t)
-	h := s.ahpHost()
-	raw, _ := json.Marshal(types.CreateSessionParams{Channel: "ahp-session:/contended", Provider: ahpPtr("one")})
+	h := s.Project
+	raw, _ := json.Marshal(types.CreateSessionParams{Channel: "ahp-session:/contended", Provider: new("one")})
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	succeeded := 0
 	for range 16 {
 		wg.Go(func() {
 			_, err := h.createSession(raw, "client")
-			var rpc *ahpRPCError
+			var rpc *ahp.Error
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -719,7 +722,7 @@ func TestReviewSessionsConcurrentCreateSessionCreatesOnce(t *testing.T) {
 	}
 	for i := range 8 {
 		wg.Go(func() {
-			other, _ := json.Marshal(types.CreateSessionParams{Channel: "ahp-session:/distinct-" + strconv.Itoa(i), Provider: ahpPtr("one")})
+			other, _ := json.Marshal(types.CreateSessionParams{Channel: "ahp-session:/distinct-" + strconv.Itoa(i), Provider: new("one")})
 			if _, err := h.createSession(other, "client"); err != nil {
 				t.Error(err)
 			}
@@ -729,10 +732,10 @@ func TestReviewSessionsConcurrentCreateSessionCreatesOnce(t *testing.T) {
 	if succeeded != 1 || agent.created.Load() != 9 {
 		t.Fatalf("succeeded=%d created=%d", succeeded, agent.created.Load())
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.host.mu.Lock()
+	defer h.host.mu.Unlock()
 	natives := map[string]bool{}
-	for _, alias := range h.aliases {
+	for _, alias := range h.host.aliases {
 		if natives[alias.Session] {
 			t.Fatalf("two URIs share native session %s", alias.Session)
 		}
@@ -741,20 +744,20 @@ func TestReviewSessionsConcurrentCreateSessionCreatesOnce(t *testing.T) {
 }
 
 func TestReviewSessionsConcurrentReloadAttachesEachForkOnce(t *testing.T) {
-	s, _, _, endpoint := ahpTestServer(t)
+	s, _, _, endpoint := protocolTestServer(t)
 	agent := &turnForkingAgent{protocolAgent: &protocolAgent{}}
-	s.backends["fork"] = &backendEntry{runtime: s.bindBackend("fork", agent)}
+	s.Project.backends["fork"] = &backendEntry{runtime: s.Project.bindBackend("fork", agent)}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	client := ahpTestClient(t, endpoint, "forks")
+	client := protocolTestClient(t, endpoint, "forks")
 	session := "ahp-session:/family"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("fork")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("fork")}, nil); err != nil {
 		t.Fatal(err)
 	}
-	main := ahpChatURI(session)
-	state, sub := ahpSubscribeChat(t, client, main)
-	ahpSend(t, client, main, "turn-1", 1)
-	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
+	main := ahp.ChatURI(session)
+	state, sub := subscribeChat(t, client, main)
+	send(t, client, main, "turn-1", 1)
+	until(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
 	chats := []string{main}
 	for i := range 4 {
 		chat := "ahp-chat:/branch-" + strconv.Itoa(i)
@@ -765,8 +768,8 @@ func TestReviewSessionsConcurrentReloadAttachesEachForkOnce(t *testing.T) {
 	}
 
 	other, _, _ := newProtocolServer(t)
-	other.backends["fork"] = &backendEntry{runtime: other.bindBackend("fork", agent)}
-	h := other.ahpHost()
+	other.Project.backends["fork"] = &backendEntry{runtime: other.Project.bindBackend("fork", agent)}
+	h := other.Project
 	var wg sync.WaitGroup
 	for i := range 24 {
 		channel := chats[i%len(chats)]
@@ -774,15 +777,15 @@ func TestReviewSessionsConcurrentReloadAttachesEachForkOnce(t *testing.T) {
 			channel = session
 		}
 		wg.Go(func() {
-			if _, _, err := h.ensureSession(channel); err != nil {
+			if _, _, err := h.host.ensureSession(channel); err != nil {
 				t.Error(channel, err)
 			}
 		})
 	}
 	wg.Wait()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	a := h.sessions[session]
+	h.host.mu.Lock()
+	defer h.host.mu.Unlock()
+	a := h.host.sessions[session]
 	got := []string{}
 	for _, ch := range a.chats {
 		got = append(got, ch.chat.Resource)
@@ -791,7 +794,7 @@ func TestReviewSessionsConcurrentReloadAttachesEachForkOnce(t *testing.T) {
 	for _, summary := range a.state.Chats {
 		listed = append(listed, summary.Resource)
 	}
-	if !slices.Equal(got, chats) || !slices.Equal(listed, chats) || len(h.chats) != len(chats) {
+	if !slices.Equal(got, chats) || !slices.Equal(listed, chats) || len(h.host.chats) != len(chats) {
 		t.Fatalf("chats = %v, state = %v, want %v", got, listed, chats)
 	}
 }
@@ -799,25 +802,25 @@ func TestReviewSessionsConcurrentReloadAttachesEachForkOnce(t *testing.T) {
 // A retried send must not run twice or leave a queued message behind, whether
 // it arrives while its turn runs or after it finished.
 func TestReviewSessionsRetriedPendingSendNeverDuplicates(t *testing.T) {
-	_, _, agent, endpoint := ahpTestServer(t)
+	_, _, agent, endpoint := protocolTestServer(t)
 	agent.gate = make(chan struct{})
-	client := ahpTestClient(t, endpoint, "web")
-	chat := ahpCreate(t, client, "ahp-session:/retries")
-	state, sub := ahpSubscribeChat(t, client, chat)
+	client := protocolTestClient(t, endpoint, "web")
+	chat := create(t, client, "ahp-session:/retries")
+	state, sub := subscribeChat(t, client, chat)
 	send := &types.ChatPendingMessageSetAction{Type: types.ActionTypeChatPendingMessageSet, Kind: types.PendingMessageKindQueued, Id: "message", Message: types.Message{Text: "do it", Origin: types.MessageOrigin{Kind: types.MessageKindUser}}}
 	reviewSessionsDispatch(t, client, chat, 1, send)
-	ahpUntil(t, state, sub, func(types.ActionEnvelope) bool { return state.ActiveTurn != nil && state.ActiveTurn.Id == "message" })
+	until(t, state, sub, func(types.ActionEnvelope) bool { return state.ActiveTurn != nil && state.ActiveTurn.Id == "message" })
 	for seq := int64(2); seq <= 4; seq++ {
 		if seq == 4 {
 			close(agent.gate)
-			ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
+			until(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
 		}
 		reviewSessionsDispatch(t, client, chat, seq, send)
-		ack := ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { return e.Origin != nil && e.Origin.ClientSeq == seq })
+		ack := until(t, state, sub, func(e types.ActionEnvelope) bool { return e.Origin != nil && e.Origin.ClientSeq == seq })
 		if ack.RejectionReason != nil {
 			t.Fatalf("retry %d rejected: %s", seq, *ack.RejectionReason)
 		}
-		ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool {
+		until(t, state, sub, func(e types.ActionEnvelope) bool {
 			removed, ok := e.Action.Value.(*types.ChatPendingMessageRemovedAction)
 			return ok && removed.Id == "message"
 		})
@@ -825,22 +828,22 @@ func TestReviewSessionsRetriedPendingSendNeverDuplicates(t *testing.T) {
 	if agent.sent.Load() != 1 || len(state.QueuedMessages) != 0 {
 		t.Fatalf("sent=%d queued=%+v", agent.sent.Load(), state.QueuedMessages)
 	}
-	snapshot, _ := ahpSubscribeChat(t, ahpTestClient(t, endpoint, "reader"), chat)
+	snapshot, _ := subscribeChat(t, protocolTestClient(t, endpoint, "reader"), chat)
 	if len(snapshot.QueuedMessages) != 0 || len(snapshot.Turns) != 1 {
 		t.Fatalf("host kept a ghost: %+v", snapshot)
 	}
 }
 
 func TestReviewSessionsHostileActionsAreRejected(t *testing.T) {
-	_, _, agent, endpoint := ahpTestServer(t)
+	_, _, agent, endpoint := protocolTestServer(t)
 	agent.gate = make(chan struct{})
 	defer close(agent.gate)
-	client := ahpTestClient(t, endpoint, "hostile")
+	client := protocolTestClient(t, endpoint, "hostile")
 	session := "ahp-session:/hostile"
-	chat := ahpCreate(t, client, session)
-	state, sub := ahpSubscribeChat(t, client, chat)
-	ahpSend(t, client, chat, "running", 1)
-	ahpUntil(t, state, sub, func(types.ActionEnvelope) bool {
+	chat := create(t, client, session)
+	state, sub := subscribeChat(t, client, chat)
+	send(t, client, chat, "running", 1)
+	until(t, state, sub, func(types.ActionEnvelope) bool {
 		return state.ActiveTurn != nil && len(state.ActiveTurn.ResponseParts) > 0
 	})
 	user := types.MessageOrigin{Kind: types.MessageKindUser}
@@ -871,11 +874,10 @@ func TestReviewSessionsHostileActionsAreRejected(t *testing.T) {
 		{session, &types.SessionActiveClientSetAction{Type: types.ActionTypeSessionActiveClientSet, ActiveClient: types.SessionActiveClient{ClientId: "impostor"}}},
 		{session, &types.ChatDraftChangedAction{Type: types.ActionTypeChatDraftChanged}},
 		{chat, &types.SessionIsReadChangedAction{Type: types.ActionTypeSessionIsReadChanged, IsRead: true}},
-		{"ahp-chat:/nowhere", &types.ChatDraftChangedAction{Type: types.ActionTypeChatDraftChanged}},
 		{"ahp-session:/wingman/!!/!!", &types.SessionIsReadChangedAction{Type: types.ActionTypeSessionIsReadChanged, IsRead: true}},
 	}
 	snapshot := func() string {
-		chat, _ := ahpSubscribeChat(t, ahpTestClient(t, endpoint, "reader"), chat)
+		chat, _ := subscribeChat(t, protocolTestClient(t, endpoint, "reader"), chat)
 		chat.ModifiedAt = ""
 		data, _ := json.Marshal(chat)
 		return string(data)
@@ -890,7 +892,7 @@ func TestReviewSessionsHostileActionsAreRejected(t *testing.T) {
 		for acked := false; !acked; {
 			select {
 			case event := <-events.Events():
-				action, ok := event.Event.(ahp.SubscriptionEventAction)
+				action, ok := event.Event.(sdk.SubscriptionEventAction)
 				if !ok || action.Envelope.Origin == nil || action.Envelope.Origin.ClientSeq != seq {
 					continue
 				}
@@ -905,29 +907,41 @@ func TestReviewSessionsHostileActionsAreRejected(t *testing.T) {
 		}
 		timer.Stop()
 	}
+	// An action for a chat that does not exist is ignored, without an echo.
+	reviewSessionsDispatch(t, client, "ahp-chat:/nowhere", 900, &types.ChatDraftChangedAction{Type: types.ActionTypeChatDraftChanged})
+	for quiet := time.After(300 * time.Millisecond); quiet != nil; {
+		select {
+		case event := <-events.Events():
+			if action, ok := event.Event.(sdk.SubscriptionEventAction); ok && action.Envelope.Origin != nil && action.Envelope.Origin.ClientSeq == 900 {
+				t.Fatal("an action for an unknown chat was echoed")
+			}
+		case <-quiet:
+			quiet = nil
+		}
+	}
 	if after := snapshot(); before != after || agent.sent.Load() != 1 {
 		t.Fatalf("rejected actions changed the chat:\n%s\n%s", before, after)
 	}
 }
 
 func TestReviewSessionsForkCutsAtTheChosenTurnWhileTheSourceRuns(t *testing.T) {
-	s, _, _, endpoint := ahpTestServer(t)
+	s, _, _, endpoint := protocolTestServer(t)
 	agent := &turnForkingAgent{protocolAgent: &protocolAgent{}}
-	s.backends["fork"] = &backendEntry{runtime: s.bindBackend("fork", agent)}
+	s.Project.backends["fork"] = &backendEntry{runtime: s.Project.bindBackend("fork", agent)}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	client := ahpTestClient(t, endpoint, "brancher")
+	client := protocolTestClient(t, endpoint, "brancher")
 	session := "ahp-session:/running-source"
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: ahpPtr("fork")}, nil); err != nil {
+	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: session, Provider: new("fork")}, nil); err != nil {
 		t.Fatal(err)
 	}
-	main := ahpChatURI(session)
-	state, sub := ahpSubscribeChat(t, client, main)
-	ahpSend(t, client, main, "turn-1", 1)
-	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
+	main := ahp.ChatURI(session)
+	state, sub := subscribeChat(t, client, main)
+	send(t, client, main, "turn-1", 1)
+	until(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
 	agent.gate = make(chan struct{})
-	ahpSend(t, client, main, "turn-2", 2)
-	ahpUntil(t, state, sub, func(types.ActionEnvelope) bool { return state.ActiveTurn != nil && state.ActiveTurn.Id == "turn-2" })
+	send(t, client, main, "turn-2", 2)
+	until(t, state, sub, func(types.ActionEnvelope) bool { return state.ActiveTurn != nil && state.ActiveTurn.Id == "turn-2" })
 	fork := func(chat, turn string) error {
 		return client.Request(ctx, "createChat", types.CreateChatParams{Channel: session, Chat: chat, Source: &types.ChatSource{Value: &types.ForkChatSource{Kind: types.ChatSourceKindFork, Chat: main, TurnId: turn}}}, nil)
 	}
@@ -938,7 +952,7 @@ func TestReviewSessionsForkCutsAtTheChosenTurnWhileTheSourceRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(agent.gate)
-	ahpUntil(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
+	until(t, state, sub, func(e types.ActionEnvelope) bool { _, ok := e.Action.Value.(*types.ChatTurnCompleteAction); return ok })
 	if err := fork("ahp-chat:/after", "turn-2"); err != nil {
 		t.Fatal(err)
 	}
@@ -958,8 +972,8 @@ func TestReviewSessionsForkCutsAtTheChosenTurnWhileTheSourceRuns(t *testing.T) {
 func TestReviewSessionsCorruptAliasFilesAreSkipped(t *testing.T) {
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, _, _ := newProtocolServer(t)
-	h := s.ahpHost()
-	if err := h.saveAlias(ahpAlias{Resource: "ahp-session:/kept", Backend: "one", Session: "saved"}); err != nil {
+	h := s.Project
+	if err := h.saveAlias(sessionAlias{Resource: "ahp-session:/kept", Backend: "one", Session: "saved"}); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := h.aliasDirectory()
@@ -979,14 +993,14 @@ func TestReviewSessionsCorruptAliasFilesAreSkipped(t *testing.T) {
 		}
 	}
 	other, _, _ := newProtocolServer(t)
-	restarted := other.ahpHost()
-	restarted.mu.Lock()
-	aliases := len(restarted.aliases) + len(restarted.chatAliases)
-	restarted.mu.Unlock()
+	restarted := other.Project
+	restarted.host.mu.Lock()
+	aliases := len(restarted.host.aliases) + len(restarted.host.chatAliases)
+	restarted.host.mu.Unlock()
 	if aliases != 1 {
 		t.Fatalf("loaded %d aliases", aliases)
 	}
-	if a, ch, err := restarted.ensureSession(ahpChatURI("ahp-session:/kept")); err != nil || a.resource != "ahp-session:/kept" || ch.controller.ref.SessionID != "saved" {
+	if a, ch, err := restarted.host.ensureSession(ahp.ChatURI("ahp-session:/kept")); err != nil || a.resource != "ahp-session:/kept" || ch.controller.ref.SessionID != "saved" {
 		t.Fatalf("valid alias lost: %v", err)
 	}
 }

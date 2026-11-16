@@ -79,8 +79,7 @@ func protocolError(err error) *acp.RequestError {
 	if err == nil {
 		return nil
 	}
-	var rpc *acp.RequestError
-	if errors.As(err, &rpc) {
+	if rpc, ok := errors.AsType[*acp.RequestError](err); ok {
 		return rpc
 	}
 	if errors.Is(err, context.Canceled) {
@@ -569,7 +568,7 @@ func (c *v2Connection) setConfig(ctx context.Context, raw json.RawMessage) (any,
 		c.mu.Unlock()
 		return nil, acp.NewInvalidParams(map[string]any{"sessionId": id})
 	}
-	mode := s != nil && s.modes != nil && p["configId"] == "mode"
+	mode := s.modes != nil && p["configId"] == "mode"
 	valid := false
 	for _, value := range v2Config(s.config, s.modes) {
 		option := value.(map[string]any)
