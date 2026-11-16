@@ -17,6 +17,30 @@ func (a *Agent) Transcriber(sessionID string) (*audio.Transcriber, bool) {
 	return a.cfg.Transcriber(id), true
 }
 
+// Realtime resolves the voice model independently of the session's coding model.
+func (a *Agent) Realtime(sessionID string) (*audio.Realtime, bool) {
+	if a.cfg.DisableVoice {
+		return nil, false
+	}
+	id := a.cfg.RealtimeModel
+	if id == "" {
+		a.modelMu.Lock()
+		var candidates []string
+		for name := range a.upstreamModels {
+			if audio.IsRealtimeModel(name) {
+				candidates = append(candidates, name)
+			}
+		}
+		a.modelMu.Unlock()
+		slices.Sort(candidates)
+		if len(candidates) == 0 {
+			return nil, false
+		}
+		id = candidates[0]
+	}
+	return a.cfg.Realtime(id), true
+}
+
 // transcriptionModel prefers the session model's family, then sorted order,
 // so the choice stays stable across discovery refreshes.
 func (a *Agent) transcriptionModel(s *sessionState) (string, bool) {

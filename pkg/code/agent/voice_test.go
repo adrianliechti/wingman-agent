@@ -39,3 +39,31 @@ func TestTranscriptionModel(t *testing.T) {
 		})
 	}
 }
+
+func TestRealtimeModel(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		models  []string
+		options Options
+		want    string
+	}{
+		{name: "discovered", models: []string{"gpt-6-sol", "gpt-realtime-2.1", "gpt-4o-mini-realtime-preview", "gpt-transcribe"}, want: "gpt-realtime-2.1"},
+		{name: "no compatible protocol", models: []string{"gpt-live-1", "gpt-live-transcribe"}},
+		{name: "pinned", options: Options{RealtimeModel: "voice-deployment"}, want: "voice-deployment"},
+		{name: "disabled", options: Options{RealtimeModel: "voice-deployment", DisableVoice: true}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, err := DefaultConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := upstreamAgent(c.models...)
+			cfg.Options = c.options
+			a.cfg = cfg
+			model, ok := a.Realtime("")
+			if ok != (c.want != "") || ok && model.Model != c.want {
+				t.Fatalf("realtime model = %+v, %v; want %q", model, ok, c.want)
+			}
+		})
+	}
+}

@@ -42,6 +42,7 @@ func (c slashCommand) Label() string {
 
 func (a *App) builtinCommands() []slashCommand {
 	cmds := []slashCommand{
+		{Name: "/voice", Hint: "[headphone]", Desc: "Start or end voice; headphone allows spoken interruptions", Busy: true, Run: (*App).toggleConversation, RunArgs: (*App).runVoiceCommand},
 		{Name: "/queue", Desc: "Resume, edit or remove queued inputs", Busy: true, Run: (*App).showTurnQueue, RunArgs: (*App).runQueueCommand},
 		{Name: "/discard", Desc: "Discard the current draft", Busy: true, Run: func(a *App) {
 			a.editor.SetText("")

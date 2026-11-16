@@ -6612,6 +6612,149 @@ test("holding Space dictates into the composer", async ({ page }) => {
 	await expect(input).toHaveValue("run dictated by voice");
 });
 
+test("voice conversation delegates to the coding model and preserves the draft", async ({
+	page,
+	request,
+}) => {
+	const input = await composer(page);
+	await input.fill("keep this draft");
+	await page
+		.getByRole("button", { name: "Start voice conversation", exact: true })
+		.click();
+	await expect(
+		page.getByRole("button", { name: "End voice conversation", exact: true }),
+	).toBeVisible();
+	await expect(
+		page.locator("[data-chat-history]").filter({ visible: true }),
+	).toContainText("Voice coding task complete.");
+	await expect(input).toHaveValue("keep this draft");
+	await expect(
+		page.getByRole("status").filter({ hasText: "Speaking…" }),
+	).toBeVisible();
+	await page
+		.getByRole("button", { name: "Mute microphone", exact: true })
+		.click();
+	await expect(
+		page.getByRole("button", { name: "Unmute microphone", exact: true }),
+	).toBeVisible();
+	await page.keyboard.press("Control+k");
+	const palette = page.getByRole("dialog", { name: "Command palette" });
+	await expect(palette).toBeVisible();
+	await palette.getByRole("combobox").press("Escape");
+	await expect(palette).toBeHidden();
+	await expect(
+		page.getByRole("button", { name: "End voice conversation", exact: true }),
+	).toBeVisible();
+	await input.press("Escape");
+	await expect(
+		page.getByRole("button", { name: "Start voice conversation", exact: true }),
+	).toBeVisible();
+	await expect
+		.poll(
+			async () =>
+				(await (await request.get(`${controlURL()}/voice-stats`)).json())
+					.active,
+		)
+		.toBe(0);
+	await expect(input).toHaveValue("keep this draft");
+});
+
+test("voice conversation interrupts queued playback and closes on tab changes", async ({
+	page,
+}) => {
+	const truncations: { item_id: string; played_ms: number }[] = [];
+	let closed = false;
+	let interrupt: (() => void) | undefined;
+	await page.routeWebSocket(
+		/\/api\/v2\/chats\/.*\/conversation\?/,
+		(socket) => {
+			socket.onClose(() => {
+				closed = true;
+			});
+			let sent = false;
+			const send = (event: unknown) => socket.send(JSON.stringify(event));
+			interrupt = () => send({ type: "interrupted" });
+			send({ type: "ready" });
+			socket.onMessage((message) => {
+				const event = JSON.parse(String(message));
+				if (event.type === "truncate") truncations.push(event);
+				if (event.type !== "audio" || sent) return;
+				sent = true;
+				const audio = Buffer.alloc(24000 * 2).toString("base64");
+				for (const id of ["first", "queued"]) {
+					send({ type: "audio", audio, item_id: id });
+					send({ type: "audio_done", item_id: id });
+				}
+			});
+		},
+	);
+	await composer(page);
+	await page
+		.getByRole("button", { name: "Start voice conversation", exact: true })
+		.click();
+	await expect(
+		page.getByRole("status").filter({ hasText: "Speaking…" }),
+	).toBeVisible();
+	interrupt!();
+	await expect.poll(() => truncations.length).toBe(2);
+	expect(truncations[0].item_id).toBe("first");
+	expect(truncations[0].played_ms).toBeLessThan(1000);
+	expect(truncations[1]).toMatchObject({ item_id: "queued", played_ms: 0 });
+	await expect(
+		page.getByRole("status").filter({ hasText: "Listening…" }),
+	).toBeVisible();
+	const menu = await openNewMenu(page);
+	await menu.getByRole("menuitem", { name: "Chat", exact: true }).click();
+	await expect(
+		page.getByRole("button", { name: "End voice conversation", exact: true }),
+	).toBeHidden();
+	await expect.poll(() => closed).toBe(true);
+});
+
+test("voice conversation can queue more than thirty seconds of speech", async ({
+	page,
+}) => {
+	await page.routeWebSocket(
+		/\/api\/v2\/chats\/.*\/conversation\?/,
+		(socket) => {
+			let sent = false;
+			const send = (event: unknown) => socket.send(JSON.stringify(event));
+			send({ type: "ready" });
+			socket.onMessage((message) => {
+				if (JSON.parse(String(message)).type !== "audio" || sent) return;
+				sent = true;
+				const audio = Buffer.alloc(24000 * 2).toString("base64");
+				for (let i = 0; i < 40; i++)
+					send({ type: "audio", audio, item_id: "long" });
+				send({ type: "audio_done", item_id: "long" });
+				// This notice is ordered after all chunks, so observing it verifies
+				// the entire long reply was accepted without closing the socket.
+				send({ type: "notice", message: "Long voice reply received" });
+			});
+		},
+	);
+	await composer(page);
+	await page
+		.getByRole("button", { name: "Start voice conversation", exact: true })
+		.click();
+	await expect(
+		page.getByText("Long voice reply received", { exact: true }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("status").filter({ hasText: "Speaking…" }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("button", { name: "End voice conversation", exact: true }),
+	).toBeVisible();
+	await page
+		.getByRole("button", { name: "Mute microphone", exact: true })
+		.click();
+	await page.keyboard.press("Escape");
+	await expect(
+		page.getByRole("button", { name: "Start voice conversation", exact: true }),
+	).toBeVisible();
+});
+
 test("switching harness cancels dictation", async ({ page }) => {
 	await mockACPBackend(page);
 	const requests: string[] = [];

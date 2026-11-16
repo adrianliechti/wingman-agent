@@ -38,6 +38,7 @@ var errNoAudio = errors.New("No audio detected from microphone")
 type voiceState struct {
 	clock   func() time.Time
 	capture func(context.Context, io.Writer) error
+	play    func(context.Context, []byte) error
 
 	// pending is set after a typed space while it may still turn into a hold;
 	// spaces arriving meanwhile are swallowed until that is decided.
@@ -72,6 +73,16 @@ func (a *App) voiceNow() time.Time {
 
 // handleVoiceKey reports whether ev was consumed by voice input.
 func (a *App) handleVoiceKey(ev inline.KeyEvent) bool {
+	if a.conversation != nil {
+		if a.overlay != nil || a.popup != nil || a.promptActive || a.askActive || a.editingQueueID != "" || a.operationCancel != nil {
+			return false
+		}
+		if ev.Key == inline.KeyEsc || ev.Key == inline.KeyCtrl && ev.Rune == 'c' {
+			a.endConversation()
+			return true
+		}
+		return false
+	}
 	space := ev.Key == inline.KeyRune && ev.Rune == ' ' && !ev.Alt
 	now := a.voiceNow()
 
@@ -272,6 +283,16 @@ func (a *App) endVoice() {
 }
 
 func (a *App) voiceStatus() string {
+	if s := a.conversation; s != nil {
+		status := "Connecting voice…"
+		if s.ready.Load() {
+			status = voiceMeter(math.Float64frombits(s.level.Load())) + " Listening"
+			if s.playing.Load() {
+				status = "Speaking…"
+			}
+		}
+		return colored(theme.Default.Cyan, status) + dim(" · /voice or esc ends")
+	}
 	s := a.voice.session
 	if s == nil {
 		return ""

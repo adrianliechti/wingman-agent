@@ -133,7 +133,8 @@ type App struct {
 	clipboardRead  func() ([]clipboard.Content, error)
 	clipboardWrite func(string) error
 
-	voice voiceState
+	voice        voiceState
+	conversation *tuiConversation
 
 	turns           *code.TurnManager
 	queuePaused     bool
@@ -284,6 +285,7 @@ func (a *App) WithTerminal(t *inline.Terminal) {
 func (a *App) activateSession(id string) {
 	a.resolveVoicePending()
 	a.endVoice()
+	a.endConversation()
 	if a.dismissPrompt != nil {
 		a.dismissPrompt()
 	}
@@ -816,6 +818,7 @@ func (a *App) shutdown() {
 	a.stop()
 	a.term.Stop()
 	a.endVoice()
+	a.endConversation()
 	if a.operationCancel != nil {
 		a.operationCancel()
 	}

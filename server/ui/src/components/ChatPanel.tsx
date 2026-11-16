@@ -1,6 +1,17 @@
 import type { MessageAttachment } from "@microsoft/agent-host-protocol";
 import { VirtualTurns } from "./chat/VirtualTurns";
-import { ArrowUp, ListEnd, Loader2, Mic, Plus, Square, X } from "lucide-react";
+import {
+	ArrowUp,
+	Headphones,
+	ListEnd,
+	Loader2,
+	Mic,
+	MicOff,
+	PhoneOff,
+	Plus,
+	Square,
+	X,
+} from "lucide-react";
 import {
 	useEffect,
 	useEffectEvent,
@@ -20,7 +31,11 @@ import { atTextareaEdge } from "../utils/textareaNavigation";
 import { useColorScheme } from "../hooks/useColorScheme";
 import { useCanCompact, useChatCommands } from "../hooks/useChatCommands";
 import { useVoiceAvailable, useVoiceInput } from "../hooks/useVoiceInput";
-import { VoiceMeter } from "./chat/VoiceMeter";
+import {
+	useConversation,
+	useConversationAvailable,
+} from "../hooks/useConversation";
+import { ConversationMeter, VoiceMeter } from "./chat/VoiceMeter";
 import {
 	type ChatCommand,
 	sentAttachments,
@@ -52,6 +67,7 @@ import { TurnQueue } from "./TurnQueue";
 import { IncompleteTurnNotice } from "./chat/IncompleteTurnNotice";
 
 export interface ChatPanelProps {
+	onConversationSession?: () => Promise<string>;
 	draft: ComposerDraft;
 	draftId: string;
 	sessionId?: string;
@@ -146,6 +162,7 @@ const composerIconButton =
 	"flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40";
 
 export function ChatPanel({
+	onConversationSession,
 	draft,
 	draftId,
 	sessionId,
@@ -405,6 +422,30 @@ export function ChatPanel({
 				tone: "error",
 			}),
 	});
+	const conversationAvailable = useConversationAvailable(
+		voiceBackend,
+		settings.models.map((m) => m.id).join(),
+	);
+	const conversation = useConversation({
+		backend: voiceBackend,
+		owner: draftId ?? sessionId ?? "",
+		getSession:
+			onConversationSession ??
+			(async () => {
+				if (!sessionId || isDraft(sessionId))
+					throw new Error("Open a chat before starting a voice conversation.");
+				return sessionId;
+			}),
+		onError: (error) =>
+			toast({
+				title: "Voice conversation ended",
+				description: error.message,
+				tone: "error",
+			}),
+		onNotice: (message) =>
+			toast({ title: "Voice conversation", description: message }),
+	});
+	const conversationActive = conversation.phase !== "idle";
 	const spaceHold = useRef<{
 		at: number;
 		started: boolean;
@@ -420,6 +461,7 @@ export function ChatPanel({
 		else voice.cancel();
 	};
 	const handleVoiceKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+		if (conversationActive) return false;
 		if (voice.phase === "recording") {
 			e.preventDefault();
 			// Another key ends a dictation, like releasing Space.
@@ -781,6 +823,12 @@ export function ChatPanel({
 			e.preventDefault();
 			void handleSubmit(e.altKey ? "follow_up" : undefined);
 		}
+		if (e.key === "Escape" && conversationActive) {
+			e.preventDefault();
+			e.stopPropagation();
+			conversation.stop();
+			return;
+		}
 		if (e.key === "Escape" && isActive) {
 			onCancel();
 		}
@@ -1104,6 +1152,18 @@ export function ChatPanel({
 						<div
 							ref={setComposer}
 							data-chat-composer
+							onKeyDown={(event) => {
+								if (
+									event.key === "Escape" &&
+									!event.defaultPrevented &&
+									conversationActive &&
+									event.currentTarget.contains(event.target as Node)
+								) {
+									event.preventDefault();
+									event.stopPropagation();
+									conversation.stop();
+								}
+							}}
 							className="relative rounded-xl"
 						>
 							{editingQueueId && (
@@ -1324,7 +1384,80 @@ export function ChatPanel({
 											<Square size={11} fill="currentColor" />
 										</button>
 									)}
-									{voiceAvailable && (
+									{conversationActive && (
+										<span
+											role="status"
+											className="flex items-center gap-1.5 px-1 text-[11px] text-fg-muted"
+										>
+											{conversation.phase === "connecting"
+												? "Connecting…"
+												: conversation.muted
+													? "Muted"
+													: conversation.phase === "speaking"
+														? "Speaking…"
+														: "Listening…"}
+											{conversation.phase !== "connecting" && (
+												<ConversationMeter level={conversation.level} />
+											)}
+										</span>
+									)}
+									{conversationActive &&
+										conversation.phase !== "connecting" && (
+											<button
+												type="button"
+												className={composerIconButton}
+												onClick={conversation.toggleMuted}
+												aria-label={
+													conversation.muted
+														? "Unmute microphone"
+														: "Mute microphone"
+												}
+												title={
+													conversation.muted
+														? "Unmute microphone"
+														: "Mute microphone"
+												}
+											>
+												{conversation.muted ? (
+													<MicOff size={14} />
+												) : (
+													<Mic size={14} />
+												)}
+											</button>
+										)}
+									{(conversationAvailable || conversationActive) && (
+										<button
+											type="button"
+											className={composerIconButton}
+											disabled={!available && !conversationActive}
+											onMouseDown={(e) => e.preventDefault()}
+											onClick={() => {
+												if (conversationActive) conversation.stop();
+												else {
+													endSpaceHold(false);
+													voice.cancel();
+													void conversation.start();
+												}
+											}}
+											aria-label={
+												conversationActive
+													? "End voice conversation"
+													: "Start voice conversation"
+											}
+											title={
+												conversationActive
+													? "End voice conversation · Esc"
+													: "Start voice conversation"
+											}
+										>
+											{conversationActive ? (
+												<PhoneOff size={14} />
+											) : (
+												<Headphones size={14} />
+											)}
+										</button>
+									)}
+									{voiceAvailable && !conversationActive && (
 										<button
 											type="button"
 											className={composerIconButton}

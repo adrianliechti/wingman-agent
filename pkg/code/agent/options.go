@@ -32,6 +32,7 @@ type Options struct {
 	ComplexModel    string
 	UtilityModel    string
 	TranscribeModel string
+	RealtimeModel   string
 }
 
 // optionsFromEnvironment reads startup settings for DefaultConfig.
@@ -49,6 +50,7 @@ func optionsFromEnvironment() Options {
 		ComplexModel:           harness.DefaultComplexModel(),
 		UtilityModel:           harness.DefaultUtilityModel(),
 		TranscribeModel:        harness.DefaultTranscribeModel(),
+		RealtimeModel:          harness.DefaultRealtimeModel(),
 	}
 }
 

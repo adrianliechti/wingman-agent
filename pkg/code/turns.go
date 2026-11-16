@@ -46,8 +46,10 @@ type TurnManager struct {
 	cancel context.CancelFunc
 	agent  Agent
 
-	handlerMu sync.RWMutex
-	handler   func(TurnEvent)
+	handlerMu    sync.RWMutex
+	handler      func(TurnEvent)
+	observers    map[uint64]func(TurnEvent)
+	nextObserver uint64
 
 	mu       sync.Mutex
 	workers  sync.WaitGroup
@@ -71,9 +73,34 @@ func (m *TurnManager) SetHandler(handler func(TurnEvent)) {
 func (m *TurnManager) emit(ev TurnEvent) {
 	m.handlerMu.RLock()
 	h := m.handler
+	observers := make([]func(TurnEvent), 0, len(m.observers))
+	for _, observer := range m.observers {
+		observers = append(observers, observer)
+	}
 	m.handlerMu.RUnlock()
 	if h != nil {
 		h(ev)
+	}
+	for _, observer := range observers {
+		observer(ev)
+	}
+}
+
+// Subscribe observes turns without replacing their frontend handler. Callbacks
+// run synchronously and must copy borrowed messages and return promptly.
+func (m *TurnManager) Subscribe(handler func(TurnEvent)) func() {
+	m.handlerMu.Lock()
+	if m.observers == nil {
+		m.observers = make(map[uint64]func(TurnEvent))
+	}
+	m.nextObserver++
+	id := m.nextObserver
+	m.observers[id] = handler
+	m.handlerMu.Unlock()
+	return func() {
+		m.handlerMu.Lock()
+		delete(m.observers, id)
+		m.handlerMu.Unlock()
 	}
 }
 

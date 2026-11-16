@@ -14,6 +14,11 @@ const chunkBytes = SampleRate * 2 / 10
 
 // WAV wraps PCM16LE mono samples at SampleRate in a WAV container.
 func WAV(pcm []byte) []byte {
+	return WAVAtRate(pcm, SampleRate)
+}
+
+// WAVAtRate wraps mono PCM16LE at the given sample rate.
+func WAVAtRate(pcm []byte, rate int) []byte {
 	b := make([]byte, 44, 44+len(pcm))
 	copy(b[0:], "RIFF")
 	binary.LittleEndian.PutUint32(b[4:], uint32(36+len(pcm)))
@@ -21,8 +26,8 @@ func WAV(pcm []byte) []byte {
 	binary.LittleEndian.PutUint32(b[16:], 16)
 	binary.LittleEndian.PutUint16(b[20:], 1) // PCM
 	binary.LittleEndian.PutUint16(b[22:], 1) // mono
-	binary.LittleEndian.PutUint32(b[24:], SampleRate)
-	binary.LittleEndian.PutUint32(b[28:], SampleRate*2)
+	binary.LittleEndian.PutUint32(b[24:], uint32(rate))
+	binary.LittleEndian.PutUint32(b[28:], uint32(rate*2))
 	binary.LittleEndian.PutUint16(b[32:], 2)
 	binary.LittleEndian.PutUint16(b[34:], 16)
 	copy(b[36:], "data")
