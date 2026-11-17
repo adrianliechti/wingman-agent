@@ -199,14 +199,18 @@ test(
 					session.chats.map((c: any) => c.resource),
 					[key],
 				);
-				const list = await browser.list("one");
-				const listed = list.filter((s) => s.id === key);
+				await browser.catalog.include("one");
+				const listed = browser.catalog
+					.getSnapshot()
+					.sessions.filter((s) => s.resource === uri);
 				assert.equal(listed.length, 1);
-				assert.equal(listed[0].session, uri);
+				assert.equal(listed[0].defaultChat, key);
 				assert.deepEqual(
-					listed[0].chats.map((c) => c.id),
+					listed[0].chats?.map((c) => c.resource),
 					[key],
 				);
+				// A session no client has left unread lists as read (SessionStatus.IsRead).
+				assert.ok(listed[0].status & 32);
 				assert.equal(browser.backendOf(key), "one");
 			},
 		);

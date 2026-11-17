@@ -35,6 +35,8 @@ type Chat struct {
 	projectedInput   string
 	projectedOutcome string
 	projectedPrompts []PromptView
+	changesRunning   bool // a count of the files it changed runs
+	changesStale     bool // and must run again when it ends
 }
 
 // The host is the producer of reasoning timing: a run starts at its first
@@ -145,7 +147,12 @@ func actionKey(channel string, action types.StateAction) string {
 }
 
 func (a *Chat) chatAction(action types.StateAction) {
+	read := a.chat.Status.Has(types.SessionStatusIsRead)
 	ahp.ApplyActionToChat(&a.chat, action)
+	// Loading replays turns the chat's clients have seen; only live turns are new.
+	if !a.projected {
+		a.chat.Status = withRead(a.chat.Status, read)
+	}
 	a.session.emit(a.chat.Resource, action)
 }
 
@@ -295,6 +302,10 @@ func (a *Chat) syncProjection(c *sessionController, changes []SessionChange) {
 			} else {
 				a.chatAction(types.StateAction{Value: &types.ChatTurnsLoadedAction{Type: types.ActionTypeChatTurnsLoaded, Turns: turns}})
 			}
+			// A rewound history may have dropped the turns that changed files.
+			if a.projected {
+				a.refreshChangesLocked()
+			}
 		}
 		if active != nil {
 			if a.chat.ActiveTurn == nil || a.chat.ActiveTurn.Id != active.Id {
@@ -356,6 +367,11 @@ func (a *Chat) finishTurn(id string, state types.TurnState, message *string) {
 	}
 	a.endings[id] = ending
 	a.chatAction(ending)
+	if a.projected {
+		// A client that shows the chat reads the ending at once; others list it as new.
+		a.markRead(false)
+		a.refreshChangesLocked()
+	}
 	if state == types.TurnStateCancelled {
 		return
 	}

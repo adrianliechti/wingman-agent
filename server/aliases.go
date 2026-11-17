@@ -22,18 +22,31 @@ import (
 // sessionAlias maps an AHP URI to the native session behind it. A session's
 // alias names its default chat; a forked chat's alias also names the chat.
 type sessionAlias struct {
-	Resource      string              `json:"resource"`
-	Project       string              `json:"project,omitempty"` // directory
-	Chat          string              `json:"chat,omitempty"`
-	Title         string              `json:"title,omitempty"`
-	Backend       string              `json:"backend"`
-	Session       string              `json:"session"`
-	Fork          string              `json:"fork,omitempty"` // source chat
-	Turn          string              `json:"turn,omitempty"` // source turn
-	Created       time.Time           `json:"created,omitzero"`
-	Modified      time.Time           `json:"modified,omitzero"` // the session's last change
-	Status        types.SessionStatus `json:"status,omitempty"`  // the session's own read and archived flags
-	CreationError string              `json:"creationError,omitempty"`
+	Resource      string                `json:"resource"`
+	Project       string                `json:"project,omitempty"` // directory
+	Chat          string                `json:"chat,omitempty"`
+	Title         string                `json:"title,omitempty"`
+	Backend       string                `json:"backend"`
+	Session       string                `json:"session"`
+	Fork          string                `json:"fork,omitempty"` // source chat
+	Turn          string                `json:"turn,omitempty"` // source turn
+	Created       time.Time             `json:"created,omitzero"`
+	Modified      time.Time             `json:"modified,omitzero"` // the session's last change
+	Status        types.SessionStatus   `json:"status,omitempty"`  // the session's own read and archived flags
+	Unread        bool                  `json:"unread,omitempty"`  // activity no client has seen yet
+	Changes       *types.ChangesSummary `json:"changes,omitempty"` // the files its default chat changed
+	CreationError string                `json:"creationError,omitempty"`
+}
+
+// flags are a saved session's read and archived flags. A session is read
+// unless it was saved with activity no client had seen, so sessions saved
+// before the host tracked reading do not all show as new.
+func (a sessionAlias) flags() types.SessionStatus {
+	flags := a.Status & types.SessionStatusIsArchived
+	if !a.Unread {
+		flags |= types.SessionStatusIsRead
+	}
+	return flags
 }
 
 // aliasStore serializes persistence without holding the publication lock.

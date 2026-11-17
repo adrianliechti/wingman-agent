@@ -200,7 +200,7 @@ func (p *Project) attachSession(c *sessionController, resource, title string, up
 	if alias.Modified.After(updated) {
 		updated = alias.Modified
 	}
-	a := newSession(p, resource, c.backend.id, title, cmp.Or(alias.Created, updated), updated, alias.Status)
+	a := newSession(p, resource, c.backend.id, title, cmp.Or(alias.Created, updated), updated, alias.flags())
 	p.host.sessions[resource] = a
 	return a.addChat(c, ahp.ChatURI(resource), "", nil, time.Time{}), nil
 }
@@ -488,7 +488,7 @@ func (h *Host) savedSummaryLocked(alias sessionAlias) types.SessionSummary {
 	modified := cmp.Or(alias.Modified, alias.Created).UTC().Format(time.RFC3339Nano)
 	title := cmp.Or(alias.Title, "Session")
 	chat := ahp.ChatURI(alias.Resource)
-	return types.SessionSummary{Resource: alias.Resource, Provider: alias.Backend, Title: title, Status: types.SessionStatusIdle | alias.Status, CreatedAt: created, ModifiedAt: modified, Project: projectInfo(alias.Project), WorkingDirectories: []string{fileuri.FromPath(alias.Project)}, DefaultChat: &chat, Chats: h.chatSummariesLocked(alias.Resource, chat)}
+	return types.SessionSummary{Resource: alias.Resource, Provider: alias.Backend, Title: title, Status: types.SessionStatusIdle | alias.flags(), CreatedAt: created, ModifiedAt: modified, Project: projectInfo(alias.Project), WorkingDirectories: []string{fileuri.FromPath(alias.Project)}, DefaultChat: &chat, Chats: h.chatSummariesLocked(alias.Resource, chat), Changes: alias.Changes}
 }
 
 // chatSummariesLocked lists a session's default chat and its saved forks.
@@ -554,7 +554,8 @@ func (p *Project) nativeSessions(agents []types.AgentInfo, seen map[string]bool)
 			}
 			stamp := session.UpdatedAt.UTC().Format(time.RFC3339Nano)
 			chat := ahp.ChatURI(resource)
-			items = append(items, types.SessionSummary{Resource: resource, Provider: l.backend, Title: session.Title, Status: types.SessionStatusIdle, CreatedAt: stamp, ModifiedAt: stamp, Project: p.info(), WorkingDirectories: []string{p.directoryURI()}, DefaultChat: &chat, Chats: h.chatSummariesLocked(resource, chat)})
+			// No client has followed a session the host never saved, so it holds nothing new.
+			items = append(items, types.SessionSummary{Resource: resource, Provider: l.backend, Title: session.Title, Status: types.SessionStatusIdle | types.SessionStatusIsRead, CreatedAt: stamp, ModifiedAt: stamp, Project: p.info(), WorkingDirectories: []string{p.directoryURI()}, DefaultChat: &chat, Chats: h.chatSummariesLocked(resource, chat)})
 			seen[resource] = true
 		}
 	}

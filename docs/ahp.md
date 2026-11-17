@@ -285,6 +285,23 @@ concurrently. Retry receipts are bounded and scoped to a running host; they do
 not survive a server restart. Session and chat URI mappings are saved under
 `WINGMAN_HOME/ahp`.
 
+Session summaries carry what a list needs without subscribing to each session.
+`activity` names what the session waits for (an approval's or question's first
+line) or does (a retry, compaction or tool progress, else its latest tool with
+its intention or file); it is empty when idle, and `root/sessionSummaryChanged`
+sends `""` to clear it. `changes` counts the lines and files the builtin
+agent's turns changed, net per file and without undone turns, recounted when a
+turn ends, after an undo or a rewind, and when the session loads; a fork's
+copied history is not counted again. Sessions keep both, with their read flag,
+for listing while their project is closed.
+
+A chat is unread from the start or end of a live turn until a client marks it
+read with `chat/isReadChanged`; replaying history when a session loads does not
+mark it. Reducers do not clear the flag for a turn's end, so the host announces
+it. A session is unread once one of its chats is and read when a client reads
+all of them; `session/isReadChanged` sets every chat. Sessions saved before
+this, and native sessions no client opened, list as read.
+
 Sessions and chats are identified only by their AHP URIs. A native session that
 was never given an alias is reachable at
 `ahp-session:/wingman/<base64url(backend)>/<base64url(id)>/<base64url(project)>`,

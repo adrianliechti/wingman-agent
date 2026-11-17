@@ -13,9 +13,33 @@ wingman --resume <session-id>
 wingman --agent codex --continue
 ```
 
-In the browser, open the session list and select a saved conversation. Switching
-the agent picker changes which sessions you browse and which agent a new chat
-uses. Existing sessions keep their agent and continue running.
+In the browser, open the session list with the history button beside a chat and
+select a conversation. The list holds the sessions of every agent, including
+those made in an agent's own CLI: opening the list starts each installed agent
+so that it can list them.
+
+- **Needs you** comes first: sessions that wait for an approval or an answer.
+  An approval can be allowed or denied right in the list; a question opens its
+  session.
+- **Working** lists the sessions that run a turn, with what each does now, such
+  as the command it runs.
+- The rest follow by day. A blue dot marks a session that finished or failed
+  since you last looked at it, and `+12 −3` shows the lines its turns changed.
+
+Right-click a session to mark it read or unread, archive it, fork it or delete
+it. Archived sessions leave the list until they need you again; the filter
+button shows them, or only one agent's sessions. Opening a session marks it
+read for every browser and for VS Code.
+
+The history button and the page title count the sessions that need you. Press
+`Ctrl+Alt+N` (`⌃⌥N` on macOS), or search for **Go to next session that needs
+you** in the command palette, to open the next one; after those it visits
+sessions that finished unseen. The bell in the list turns on system
+notifications for when a session needs you, finishes or fails while the page
+is in the background.
+
+The agent picker chooses which agent a new chat uses. Existing sessions keep
+their agent and continue running.
 
 Closing a browser tab leaves its running work on the workspace server. Stopping
 the workspace server ends that running work. Deleting a session cancels its

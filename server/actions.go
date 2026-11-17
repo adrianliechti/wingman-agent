@@ -320,12 +320,29 @@ func (c *connection) applyAction(a *Session, ch *Chat, p types.DispatchActionPar
 			return nil, ahp.InvalidParams("nonempty session title required")
 		}
 		a.sessionAction(p.Action)
-	case *types.SessionIsReadChangedAction, *types.SessionIsArchivedChangedAction:
+	case *types.SessionIsReadChangedAction:
 		if !session {
 			return nil, ahp.InvalidParams("session channel required")
 		}
 		a.sessionAction(p.Action)
-	case *types.ChatDraftChangedAction, *types.ChatIsReadChangedAction, *types.ChatIsArchivedChangedAction:
+		// A session is read when each of its chats is.
+		for _, ch := range a.chats {
+			ch.markRead(action.IsRead)
+		}
+	case *types.SessionIsArchivedChangedAction:
+		if !session {
+			return nil, ahp.InvalidParams("session channel required")
+		}
+		a.sessionAction(p.Action)
+	case *types.ChatIsReadChangedAction:
+		if !chat {
+			return nil, ahp.InvalidParams("chat channel required")
+		}
+		ch.chatAction(p.Action)
+		if action.IsRead && !a.state.Status.Has(types.SessionStatusIsRead) && a.chatsRead() {
+			a.sessionAction(types.StateAction{Value: &types.SessionIsReadChangedAction{Type: types.ActionTypeSessionIsReadChanged, IsRead: true}})
+		}
+	case *types.ChatDraftChangedAction, *types.ChatIsArchivedChangedAction:
 		if !chat {
 			return nil, ahp.InvalidParams("chat channel required")
 		}

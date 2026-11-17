@@ -93,5 +93,6 @@ func handleTurnUndo(c *sessionController, w http.ResponseWriter, r *http.Request
 	}
 	c.backend.Project.flushFiles()
 	c.backend.Project.refreshChangesets()
+	c.refreshChanges()
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -33,7 +33,7 @@ import {
 	setWorkspaceHTTP,
 } from "../api/http.ts";
 import type { PromptReply, ServerMessage } from "../types/protocol.ts";
-import type { SessionInfo } from "../api/sessions.ts";
+import { SessionCatalog } from "./sessionCatalog.ts";
 import {
 	SessionStore,
 	canonicalBackend,
@@ -76,8 +76,6 @@ type SendRequest = {
 type Send = { request: SendRequest; pending?: Promise<void> };
 const same = (a: readonly unknown[], b: readonly unknown[]) =>
 	a.length === b.length && a.every((value, i) => value === b[i]);
-// SessionStatus.InProgress, which InputNeeded includes.
-const SESSION_IN_PROGRESS = 1 << 3;
 
 export function chatPath(key: string): string {
 	return `/api/v2/chats/${encodeURIComponent(key)}`;
@@ -98,13 +96,13 @@ export class WorkspaceClient {
 	readonly dap: DAPClient;
 	readonly files: FileClient;
 	readonly changesets: ChangesetClient;
+	/** The host's sessions, kept current from its root notifications. */
+	readonly catalog: SessionCatalog;
 	private observed = new Map<string, { count: number; release: () => void }>();
 	/** Chat URI to the URI of the session that owns it. */
 	private sessions = new Map<string, string>();
 	private providers = new Map<string, string>();
 	private catalogue?: Promise<void>;
-	/** Agents started on this connection, which can list their sessions. */
-	private started = new Map<string, Promise<unknown>>();
 	private redirects = new Map<string, string>();
 	private redirectListeners = new Set<(from: string, to: string) => void>();
 	/** Each chat's latest send, kept after a failure so a retry reuses its request. */
@@ -121,11 +119,11 @@ export class WorkspaceClient {
 		this.changesets = new ChangesetClient(ahp, scope.namespace);
 		this.scope = scope;
 		this.ahp = ahp;
+		this.catalog = new SessionCatalog(ahp, (summary) => this.remember(summary));
 		this.http = createWorkspaceHTTP(scope.instanceId);
 		ahp.subscribeConnection(() => {
 			if (ahp.getConnected()) return;
 			this.store.disconnect();
-			this.started.clear();
 		});
 	}
 	readonly getReplaced = () => this.ahp.getReplaced();
@@ -514,7 +512,26 @@ export class WorkspaceClient {
 		const session = await this.ahp.read<SessionState>(uri);
 		if (session.defaultChat && session.defaultChat !== key)
 			await this.ahp.request("disposeChat", { channel: key });
-		else await this.ahp.request("disposeSession", { channel: uri });
+		else {
+			await this.ahp.request("disposeSession", { channel: uri });
+			this.catalog.forget(uri);
+		}
+	}
+	/** Marks a chat read or unread, or a session with all its chats. */
+	markRead(uri: string, read: boolean): Promise<void> {
+		return this.ahp.dispatch(
+			uri,
+			uri.startsWith("ahp-session:")
+				? { type: ActionType.SessionIsReadChanged, isRead: read }
+				: { type: ActionType.ChatIsReadChanged, isRead: read },
+		);
+	}
+	/** Archived sessions leave the list until they need the user. */
+	archive(session: string, archived: boolean): Promise<void> {
+		return this.ahp.dispatch(session, {
+			type: ActionType.SessionIsArchivedChanged,
+			isArchived: archived,
+		});
 	}
 	async send(
 		key: string,
@@ -674,54 +691,6 @@ export class WorkspaceClient {
 		this.sessions.set(uri, session);
 		this.providers.set(uri, this.backendOf(key));
 		return uri;
-	}
-	async list(backend: string): Promise<SessionInfo[]> {
-		// Resolve config starts a lazily loaded provider before cataloguing it.
-		let started = this.started.get(backend);
-		if (!started) {
-			started = this.ahp
-				.request("resolveSessionConfig", {
-					channel: "ahp-root://",
-					provider: backend,
-				})
-				.catch((error) => {
-					this.started.delete(backend);
-					throw error;
-				});
-			this.started.set(backend, started);
-		}
-		await started;
-		const items = await this.listSessions();
-		return items
-			.filter((summary) => summary.provider === backend)
-			.map((summary) => {
-				const fallback = summary.defaultChat ?? sessionToChat(summary.resource);
-				const chats = summary.chats?.length
-					? summary.chats
-					: [
-							{
-								resource: fallback,
-								title: summary.title,
-								status: summary.status,
-							},
-						];
-				const first =
-					chats.find((chat) => chat.resource === summary.defaultChat) ??
-					chats[0];
-				return {
-					id: first.resource,
-					session: summary.resource,
-					title: summary.title,
-					updated_at: summary.modifiedAt,
-					chats: [first, ...chats.filter((chat) => chat !== first)].map(
-						(chat) => ({
-							id: chat.resource,
-							title: chat.title,
-							running: ((chat.status ?? 0) & SESSION_IN_PROGRESS) !== 0,
-						}),
-					),
-				};
-			});
 	}
 }
 

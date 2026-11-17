@@ -78,6 +78,7 @@ export class AHPConnection {
 	private reads = new Set<(error: Error) => void>();
 	private connectionListeners = new Set<() => void>();
 	private eventListeners = new Set<(event: ServerMessage) => void>();
+	private rootListeners = new Set<(method: string, params: unknown) => void>();
 	private connected = false;
 	private replaced = false;
 	directory = "";
@@ -106,6 +107,15 @@ export class AHPConnection {
 		this.eventListeners.add(fn);
 		return () => {
 			this.eventListeners.delete(fn);
+		};
+	};
+	/** The root's session notifications, which keep a session list current. */
+	readonly onRootNotification = (
+		fn: (method: string, params: unknown) => void,
+	) => {
+		this.rootListeners.add(fn);
+		return () => {
+			this.rootListeners.delete(fn);
 		};
 	};
 	private emit(event: ServerMessage) {
@@ -191,7 +201,8 @@ export class AHPConnection {
 					else if (message.method === "x-wingman/workspaceChanged")
 						this.emit(message.params.event);
 					else if (message.method?.startsWith("root/session"))
-						this.emit({ type: "sessions_changed" });
+						for (const fn of this.rootListeners)
+							fn(message.method, message.params);
 					// Hand the SDK the parsed message so it is not parsed twice.
 					return { kind: "parsed", message };
 				},

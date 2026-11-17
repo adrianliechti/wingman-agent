@@ -346,13 +346,17 @@ async function mockACPBackend(
 	return control;
 }
 
+function sessionsPanel(page: Page) {
+	return page
+		.locator('[data-chat-auxiliary-panel][data-view="sessions"]')
+		.getByRole("navigation", { name: "Sessions", exact: true });
+}
+
 async function openSessions(page: Page) {
 	await page
 		.getByRole("button", { name: "Show sessions", exact: true })
 		.click();
-	await expect(
-		page.locator('[data-chat-auxiliary-panel][data-view="sessions"]'),
-	).toBeVisible();
+	await expect(sessionsPanel(page)).toBeVisible();
 }
 
 async function resetCompletionFile(_request: APIRequestContext) {
@@ -6584,4 +6588,186 @@ test("recovery: streaming output is followed until the user scrolls away", async
 	await expect(jump).toBeHidden();
 	for (let step = 0; step < 3; step++) stream();
 	await expect.poll(distance).toBeLessThan(40);
+});
+
+test.describe("session list", () => {
+	// SessionStatus bits as the host lists them.
+	const IDLE = 1,
+		WORKING = 8,
+		NEEDS_INPUT = 24,
+		READ = 32,
+		ARCHIVED = 64;
+	const ago = (minutes: number) =>
+		new Date(Date.now() - minutes * 60_000).toISOString();
+
+	async function fleet(page: Page) {
+		const fixture = await ahpFixture(page);
+		const dispatched: any[] = [];
+		fixture.resourceObservers.add((request) => {
+			if (request.method === "dispatchAction" && request.params?.action)
+				dispatched.push(request.params);
+		});
+		const commands: any[] = [];
+		fixture.onCommand = async (command) => {
+			commands.push(command);
+		};
+		const waiting = fixture.add(
+			"wingman",
+			{ id: "fleet-waiting", title: "Waiting session", updated_at: ago(5) },
+			[],
+			"tool_running",
+		);
+		waiting.prompts = [
+			{ id: "push", kind: "confirm", message: "Push to origin?\n\nRisk: low" },
+		];
+		waiting.listed = {
+			status: NEEDS_INPUT | READ,
+			activity: "Push to origin?",
+		};
+		const working = fixture.add(
+			"wingman",
+			{ id: "fleet-working", title: "Working session", updated_at: ago(1) },
+			[],
+			"tool_running",
+		);
+		working.listed = {
+			status: WORKING | READ,
+			activity: "Run command: go test ./...",
+		};
+		const finished = fixture.add("wingman", {
+			id: "fleet-finished",
+			title: "Finished session",
+			updated_at: ago(10),
+		});
+		finished.listed = {
+			status: IDLE,
+			changes: { additions: 12, deletions: 3, files: 2 },
+		};
+		const old = fixture.add("wingman", {
+			id: "fleet-old",
+			title: "Old session",
+			updated_at: "2026-01-01T00:00:00Z",
+		});
+		await composer(page);
+		// The history button counts what waits while the list is closed.
+		await expect(page.locator('[data-needs-you="1"]')).toBeVisible();
+		await expect(page).toHaveTitle("(1) Wingman");
+		await openSessions(page);
+		await expect(page.locator("[data-needs-you]")).toHaveCount(0);
+		return { fixture, dispatched, commands, waiting, finished, old };
+	}
+
+	test("shows what needs the user first and answers an approval in place", async ({
+		page,
+	}) => {
+		const { commands } = await fleet(page);
+		const panel = sessionsPanel(page);
+		await expect(panel.getByRole("heading")).toHaveText([
+			/^Needs you\s*1$/,
+			/^Working\s*1$/,
+			"Today",
+			"Older",
+		]);
+		await expect(sessionRow(page, "fleet-working")).toContainText(
+			"Run command: go test ./...",
+		);
+		const finished = sessionRow(page, "fleet-finished");
+		await expect(finished.getByRole("img", { name: "Unread" })).toBeVisible();
+		await expect(finished).toContainText("+12");
+		await expect(finished).toContainText("−3");
+		const request = panel.locator("[data-session-request]");
+		await expect(request).toContainText("Push to origin?");
+		await request.getByRole("button", { name: "Allow", exact: true }).click();
+		await expect
+			.poll(() =>
+				commands.find((command) => command.type === "prompt_response"),
+			)
+			.toMatchObject({ action: "accept", promptId: "push" });
+	});
+
+	test("opening an unseen session reads it, and next goes to what waits", async ({
+		page,
+	}) => {
+		const { dispatched } = await fleet(page);
+		await sessionRow(page, "fleet-finished").click();
+		await expect
+			.poll(() =>
+				dispatched.find(
+					(params) => params.action.type === "chat/isReadChanged",
+				),
+			)
+			.toMatchObject({
+				channel: canonicalChatURI("wingman", "fleet-finished"),
+				action: { isRead: true },
+			});
+		await page.keyboard.press("Control+Alt+n");
+		await expect(sessionTab(page, "fleet-waiting")).toBeVisible();
+	});
+
+	test("lists the sessions of agents that were never picked", async ({
+		page,
+	}) => {
+		const fixture = await ahpFixture(page);
+		fixture.agents.set("codex", "Codex");
+		fixture.add("codex", {
+			id: "fleet-codex-cli",
+			title: "Started in the Codex CLI",
+			updated_at: ago(3),
+		});
+		// An agent lists the sessions of its own CLI only once it runs.
+		let started = false;
+		fixture.resourceObservers.add((request) => {
+			if (
+				request.method === "resolveSessionConfig" &&
+				request.params?.provider === "codex"
+			)
+				started = true;
+		});
+		fixture.listable = (session) => session.backend !== "codex" || started;
+		await composer(page);
+		await openSessions(page);
+		await expect(
+			sessionsPanel(page).getByText("Started in the Codex CLI"),
+		).toBeVisible();
+		expect(started).toBe(true);
+	});
+
+	test("archives a session out of the list and filters it back in", async ({
+		page,
+	}) => {
+		const { fixture, dispatched, old } = await fleet(page);
+		await sessionRow(page, "fleet-old").click({ button: "right" });
+		await page
+			.getByRole("menu", { name: "Actions for Old session" })
+			.getByRole("menuitem", { name: "Archive" })
+			.click();
+		await expect
+			.poll(() =>
+				dispatched.find(
+					(params) => params.action.type === "session/isArchivedChanged",
+				),
+			)
+			.toMatchObject({ channel: old.resource, action: { isArchived: true } });
+		old.listed = { status: IDLE | READ | ARCHIVED };
+		fixture.notifyRoot("root/sessionSummaryChanged", {
+			channel: "ahp-root://",
+			session: old.resource,
+			changes: { status: IDLE | READ | ARCHIVED },
+		});
+		await expect(sessionRow(page, "fleet-old")).toHaveCount(0);
+		await sessionsPanel(page)
+			.getByRole("button", { name: "Filter sessions" })
+			.click();
+		await page.getByRole("menuitemradio", { name: "Archived" }).click();
+		await expect(sessionRow(page, "fleet-old")).toBeVisible();
+		await expect(sessionRow(page, "fleet-finished")).toHaveCount(0);
+		// The list follows the chat it opens, with its filter.
+		await sessionRow(page, "fleet-old").click();
+		await expect(sessionTab(page, "fleet-old")).toBeVisible();
+		await expect(
+			sessionsPanel(page).getByRole("button", {
+				name: "Clear filter Archived",
+			}),
+		).toBeVisible();
+	});
 });

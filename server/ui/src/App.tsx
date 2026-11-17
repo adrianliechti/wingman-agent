@@ -34,6 +34,7 @@ import {
 	GitFork,
 	Globe2,
 	History,
+	Inbox,
 	Loader2,
 	type LucideIcon,
 	MessageSquare,
@@ -83,7 +84,7 @@ import {
 } from "./api/debug";
 import { createWorkspaceFile } from "./api/files";
 import { queryKeys } from "./api/query";
-import { deleteSession, forkSession, type SessionInfo } from "./api/sessions";
+import { deleteSession, forkSession } from "./api/sessions";
 import {
 	setWindowSidebarPosition,
 	setWindowTerminalPosition,
@@ -148,7 +149,14 @@ import {
 	useToast,
 } from "./components/ui/Feedback";
 import { FloatingMenu, FloatingSurface } from "./components/ui/Floating";
-import { AgentSessions } from "./components/AgentSessions";
+import { SessionsPanel } from "./components/SessionsPanel";
+import {
+	useFleet,
+	useFleetNotifications,
+	useMarkShownRead,
+	useTitleCount,
+} from "./hooks/useFleet.ts";
+import { nextAttention } from "./state/fleet.ts";
 import { useWorkspaceInfo } from "./hooks/useWorkspaceInfo";
 import { isAbsolutePath, workspaceFileTarget } from "./utils/workspacePath";
 import { useAutoHidingScrollbars } from "./hooks/useAutoHidingScrollbars";
@@ -742,6 +750,10 @@ export default function App() {
 			e.preventDefault();
 			void createTerminal();
 		}
+		if (e.ctrlKey && e.altKey && !e.metaKey && e.code === "KeyN") {
+			e.preventDefault();
+			goToNextAttention();
+		}
 	});
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => handleShortcutKey(e);
@@ -828,6 +840,17 @@ export default function App() {
 		leftPool.find((tab) => tab.id === leftActiveId) ??
 		leftPool[0] ??
 		(activeTab.id ? activeTab : undefined);
+	const fleet = useFleet();
+	useTitleCount(fleet.counts.needsInput);
+	useMarkShownRead(
+		[leftTab, mobile ? undefined : rightTab].flatMap((tab) =>
+			tab?.type === "chat" && tab.sessionId ? [tab.sessionId] : [],
+		),
+		fleet.sessions,
+	);
+	useFleetNotifications(fleet.sessions, fleet.loaded, (id) =>
+		handleSessionSelect(id, "keep"),
+	);
 	const activeDocument =
 		activeTab.type === "file" && activeTab.path
 			? documents[activeTab.path]
@@ -1807,17 +1830,6 @@ export default function App() {
 			return;
 		}
 		const id = sessionDelete.id;
-		// Deleting a default chat deletes its session; a fork leaves the session.
-		queryClient.setQueryData(
-			queryKeys.sessions.list(client.backendOf(id)),
-			(current: SessionInfo[] = []) =>
-				current
-					.filter((session) => session.id !== id)
-					.map((session) => ({
-						...session,
-						chats: session.chats.filter((chat) => chat.id !== id),
-					})),
-		);
 		setSessionDelete(null);
 		handleSessionDeleted(id);
 	};
@@ -1828,6 +1840,12 @@ export default function App() {
 	) => {
 		selectBackend(client.backendOf(id));
 		openChatTab(id, disposition);
+	};
+	/** Opens the next session that waits for the user or finished unseen. */
+	const goToNextAttention = () => {
+		const next = nextAttention(fleet.sessions, sessionId);
+		if (next) handleSessionSelect(next, "keep");
+		else toast({ title: "No session needs you right now" });
 	};
 
 	const handleSessionFork = async (id: string) => {
@@ -1842,10 +1860,6 @@ export default function App() {
 			});
 			return;
 		}
-		// A new chat changes its session, not the root catalogue.
-		void queryClient.invalidateQueries({
-			queryKey: queryKeys.sessions.list(client.backendOf(id)),
-		});
 		handleSessionSelect(forked, "keep");
 	};
 	const draftCreations = useRef(new Map<string, Promise<string>>());
@@ -2282,6 +2296,13 @@ export default function App() {
 					},
 				]
 			: []),
+		{
+			id: "next-attention",
+			label: "Go to next session that needs you",
+			hint: IS_MAC ? "⌃⌥N" : "Ctrl+Alt+N",
+			icon: <Inbox size={12} className="text-fg-dim shrink-0" />,
+			run: goToNextAttention,
+		},
 		...(canCompact &&
 		activeTab.type === "chat" &&
 		!isDraft(sessionId) &&
@@ -2452,11 +2473,10 @@ export default function App() {
 				<ChatTabLayout
 					view={chatAuxiliaryViews[tab.id]}
 					sessionId={key}
-					backendId={backendId}
-					runningSessionIds={runningSessionIds}
+					running={runningSessionIds.has(key)}
 					onSessionSelect={(id, disposition) => {
-						const tabId = chatTabId(id);
-						setChatAuxiliaryViews({ [tabId]: "sessions" });
+						// The list stays beside the chat it opens.
+						setChatAuxiliaryViews({ [chatTabId(id)]: "sessions" });
 						void handleSessionSelect(id, disposition);
 					}}
 					onSessionDelete={(id, title) => setSessionDelete({ id, title })}
@@ -2806,13 +2826,15 @@ export default function App() {
 					)}
 					<button
 						type="button"
-						className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors hover:text-fg-muted ${activeChatAuxiliary === "sessions" ? "bg-bg-active text-fg" : "text-fg-dim hover:bg-bg-hover"}`}
+						className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors hover:text-fg-muted ${activeChatAuxiliary === "sessions" ? "bg-bg-active text-fg" : "text-fg-dim hover:bg-bg-hover"}`}
 						onClick={() => toggleChatAuxiliary(activeTab.id, "sessions")}
 						aria-pressed={activeChatAuxiliary === "sessions"}
 						title={
 							activeChatAuxiliary === "sessions"
 								? "Hide sessions"
-								: "Show sessions"
+								: fleet.counts.needsInput
+									? `Show sessions · ${fleet.counts.needsInput} ${fleet.counts.needsInput === 1 ? "needs" : "need"} you`
+									: "Show sessions"
 						}
 						aria-label={
 							activeChatAuxiliary === "sessions"
@@ -2821,6 +2843,16 @@ export default function App() {
 						}
 					>
 						<History size={13} />
+						{activeChatAuxiliary !== "sessions" &&
+							fleet.counts.needsInput > 0 && (
+								<span
+									data-needs-you={fleet.counts.needsInput}
+									aria-hidden="true"
+									className="absolute top-0.5 right-0 min-w-[14px] rounded-full bg-warning px-1 text-center text-[9px] leading-[14px] font-semibold text-bg tabular-nums"
+								>
+									{fleet.counts.needsInput}
+								</span>
+							)}
 					</button>
 				</>
 			)}
@@ -3229,10 +3261,11 @@ export default function App() {
 					connected={connected}
 					running={phase !== "idle"}
 					currentSessionId={sessionId}
-					runningSessionIds={runningSessionIds}
+					needsInput={fleet.counts.needsInput}
 					onSelectBackend={handleBackendSelect}
 					onSelectSession={(id) => void handleSessionSelect(id, "keep")}
 					onDeleteSession={(id, title) => setSessionDelete({ id, title })}
+					onForkSession={(id) => void handleSessionFork(id)}
 					onNewSession={() => void handleNewSession()}
 					onBackToChat={activeTab.type === "chat" ? undefined : focusChat}
 				/>
@@ -3742,8 +3775,7 @@ function ChatTabLayout({
 	children,
 	view,
 	sessionId,
-	backendId,
-	runningSessionIds,
+	running,
 	onSessionSelect,
 	onSessionDelete,
 	onSessionFork,
@@ -3752,8 +3784,7 @@ function ChatTabLayout({
 	children: ReactNode;
 	view?: ChatAuxiliaryView;
 	sessionId: string;
-	backendId: string;
-	runningSessionIds: Set<string>;
+	running: boolean;
 	onSessionSelect: (id: string, disposition?: TabDisposition) => void;
 	onSessionDelete: (id: string, title: string) => void;
 	onSessionFork: (id: string) => void;
@@ -3777,19 +3808,17 @@ function ChatTabLayout({
 				style={{ width: view ? RIGHT_PANEL_WIDTH : "0px" }}
 			>
 				<div className="h-full w-full bg-bg">
-					<div className={view === "sessions" ? "h-full" : "hidden"}>
-						<AgentSessions
-							backendId={backendId}
+					{view === "sessions" && (
+						<SessionsPanel
 							currentSessionId={sessionId}
-							runningSessionIds={runningSessionIds}
 							onSessionSelect={onSessionSelect}
 							onSessionDelete={onSessionDelete}
 							onSessionFork={onSessionFork}
 						/>
-					</div>
+					)}
 					<div className={view === "agents" ? "h-full" : "hidden"}>
 						<TasksPanel
-							sessionRunning={runningSessionIds.has(sessionId)}
+							sessionRunning={running}
 							sessionId={isDraft(sessionId) ? "" : sessionId}
 							onOpenTask={onOpenTask}
 						/>

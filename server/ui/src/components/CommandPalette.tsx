@@ -2,9 +2,10 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { File, MessageSquare, Sparkles } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { fileQueries, type FileHit } from "../api/files";
-import { useWorkspace, type SettingsPatch } from "../state/workspaceContext.ts";
+import type { SettingsPatch } from "../state/workspaceContext.ts";
 import type { SessionSettings } from "../state/sessionStore.ts";
-import { sessionQueries, type SessionInfo } from "../api/sessions";
+import { newestFirst } from "../state/fleet.ts";
+import { useFleet } from "../hooks/useFleet.ts";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useChatCommands } from "../hooks/useChatCommands";
 import type { ChatCommand } from "../api/chatCommands";
@@ -30,7 +31,6 @@ interface Item {
 	run: () => void;
 }
 
-const EMPTY_SESSIONS: SessionInfo[] = [];
 const EMPTY_FILES: FileHit[] = [];
 
 interface Props {
@@ -60,9 +60,11 @@ export function CommandPalette({
 	const [activeKey, setActiveKey] = useState<string | null>(null);
 	const listRef = useRef<HTMLDivElement>(null);
 	const skills = useChatCommands(sessionId, true);
-	const { backend } = useWorkspace();
-	const sessionList =
-		useQuery(sessionQueries.list(backend)).data ?? EMPTY_SESSIONS;
+	const fleet = useFleet().sessions;
+	const sessionList = useMemo(
+		() => fleet.filter((session) => !session.archived).sort(newestFirst),
+		[fleet],
+	);
 	const models = settings.models;
 	const currentModel = settings.model;
 	const debouncedQuery = useDebouncedValue(query.trim(), 80);
@@ -138,7 +140,8 @@ export function CommandPalette({
 			out.push({
 				key: `session:${s.id}`,
 				group: "Sessions",
-				label: s.title || "Untitled session",
+				label: s.title,
+				hint: s.activity,
 				icon: <MessageSquare size={12} className="text-fg-dim shrink-0" />,
 				run: () => onSelectSession(s.id),
 			});
