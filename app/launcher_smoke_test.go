@@ -262,7 +262,9 @@ func TestLauncherSmoke(t *testing.T) {
 		t.Fatalf("start page icon: %d", rec.Code)
 	}
 
-	app.shutdown()
+	if rec := serve(app, "GET", "/__wingman/host", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("launcher exposed a private host endpoint: %d", rec.Code)
+	}
 }
 
 func TestLauncherRejectsRebindingAndCrossOriginCommands(t *testing.T) {
@@ -406,17 +408,23 @@ func TestHostWaitsForAWindowThatConnects(t *testing.T) {
 	}
 }
 
-// A window whose host stopped finds or starts another and reopens its folder.
+// Native windows share one App. Each folder must reopen on the replacement
+// host, even if the most recently picked worktree has disappeared.
 func TestWindowReconnectsWhenItsHostStops(t *testing.T) {
 	testenv.UserHome(t)
 	testenv.WingmanHome(t)
 	testGateway(t)
 	hosts := newTestHosts(t, hostsThatStay)
 	app := newTestApp(hosts)
-	dir := t.TempDir()
-	openFolder(t, app, dir)
+	first, second, gone := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, dir := range []string{first, second, gone} {
+		openFolder(t, app, dir)
+	}
 	lost := app.host.Load()
 	hosts.stopAll()
+	if err := os.Rename(gone, filepath.Join(t.TempDir(), "moved")); err != nil {
+		t.Fatal(err)
+	}
 	if rec := serve(app, "GET", "/api/workspace", ""); rec.Code != http.StatusBadGateway {
 		t.Fatalf("a request to the stopped host: %d", rec.Code)
 	}
@@ -425,8 +433,10 @@ func TestWindowReconnectsWhenItsHostStops(t *testing.T) {
 			t.Fatal("the window did not reconnect")
 		}
 	}
-	if got := windowPath(t, app, dir); !strings.HasPrefix(got, canonical(t, dir)+" ") {
-		t.Fatalf("the reconnected window shows %q", got)
+	for _, dir := range []string{first, second} {
+		if got := windowPath(t, app, dir); !strings.HasPrefix(got, canonical(t, dir)+" ") {
+			t.Fatalf("the reconnected window shows %q", got)
+		}
 	}
 }
 

@@ -122,7 +122,6 @@ export class WorkspaceClient {
 	/** Chat URI to the URI of the session that owns it. */
 	private sessions = new Map<string, string>();
 	private providers = new Map<string, string>();
-	private catalogue?: Promise<void>;
 	private redirects = new Map<string, string>();
 	private redirectListeners = new Set<(from: string, to: string) => void>();
 	/** Each chat's latest send, kept after a failure so a retry reuses its request. */
@@ -208,25 +207,11 @@ export class WorkspaceClient {
 			this.providers.set(chat, summary.provider);
 		}
 	}
-	private async listSessions() {
-		const result = await this.ahp.request("listSessions", {
-			channel: "ahp-root://",
-		});
-		for (const summary of result.items) this.remember(summary);
-		return result.items;
-	}
 	async sessionOf(chat: string): Promise<string> {
 		chat = this.redirects.get(chat) ?? chat;
 		const known = this.sessions.get(chat);
 		if (known) return known;
-		if (canonicalBackend(chat) === undefined) {
-			this.catalogue ??= this.listSessions()
-				.then(() => {})
-				.finally(() => {
-					this.catalogue = undefined;
-				});
-			await this.catalogue;
-		}
+		if (canonicalBackend(chat) === undefined) await this.catalog.read();
 		// A default chat shares its session's path.
 		return this.sessions.get(chat) ?? chatToSession(chat);
 	}

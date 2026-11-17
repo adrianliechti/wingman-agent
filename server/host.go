@@ -56,12 +56,12 @@ type Host struct {
 	open        func(dir string) (*Project, error)
 	projectMu   sync.Mutex      // serializes project startup and teardown, outside mu
 	terminalMu  sync.Mutex      // orders terminal creation: a name is claimed in every project at once
-	roots       []string        // directories projects may be opened in; replaced, never changed in place
+	roots       []string        // directories projects may be opened in, protected by mu
 	picked      map[string]bool // folders the user chose to open, which windows may show
 	listed      map[string]bool // folders where an agent keeps sessions, which windows may show
 
 	everywhereMu sync.Mutex
-	everywhere   map[string]everywhereListing // agents' sessions of every folder, by provider
+	everywhere   map[string]*everywhereListing // agents' sessions of every folder, by provider
 }
 
 func NewHost(ctx context.Context, opts *HostOptions) (*Host, error) {
@@ -136,6 +136,7 @@ func newHost(ctx context.Context) *Host {
 		chatAliases: map[string]sessionAlias{},
 		versions:    map[string]clientVersion{},
 		projects:    map[string]*Project{},
+		everywhere:  map[string]*everywhereListing{},
 	}
 }
 

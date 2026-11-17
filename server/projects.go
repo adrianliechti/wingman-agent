@@ -74,16 +74,14 @@ func (h *Host) servesLocked(dir string) bool {
 // as a folder the user picked in the desktop app, and lets windows show it.
 func (h *Host) Allow(dir string) {
 	dir = canonicalPath(dir)
-	serves := h.serves(dir)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.picked == nil {
 		h.picked = map[string]bool{}
 	}
 	h.picked[dir] = true
-	if !serves {
-		// Appending to a copy keeps slices that readers took unchanged.
-		h.roots = append(slices.Clip(h.roots), dir)
+	if !h.servesLocked(dir) {
+		h.roots = append(h.roots, dir)
 	}
 }
 
@@ -284,7 +282,7 @@ func (h *Host) closeIdle(idle time.Duration) {
 		}
 		h.mu.Lock()
 		// Any request that could start work reaches the project first, which counts as use.
-		if h.ctx.Err() != nil || h.projects[p.dir] != p || p == h.web || time.Since(p.used) < idle || h.subscribedLocked(p) {
+		if h.ctx.Err() != nil || h.projects[p.dir] != p || p == h.web || p.windowRequests > 0 || time.Since(p.used) < idle || h.subscribedLocked(p) {
 			h.mu.Unlock()
 			continue
 		}

@@ -117,6 +117,7 @@ test("the list shows what needs the user, then what works, then the rest by day"
 			"2026-11-10T09:00:00Z",
 		),
 		summary("working", IN_PROGRESS, "2026-11-17T11:30:00Z"),
+		summary("archived-working", IN_PROGRESS | ARCHIVED, "2026-11-17T09:00:00Z"),
 		summary("archived", IDLE | READ | ARCHIVED, "2026-11-17T08:00:00Z"),
 		summary("today", IDLE, "2026-11-17T10:00:00Z"),
 		summary("yesterday", ERROR, "2026-11-16T10:00:00Z"),
@@ -140,7 +141,10 @@ test("the list shows what needs the user, then what works, then the rest by day"
 		["Needs you", ["waiting", "archived-waiting"]],
 	]);
 	assert.deepEqual(view("running"), [["Working", ["working"]]]);
-	assert.deepEqual(view("archived"), [["Today", ["archived"]]]);
+	assert.deepEqual(view("archived"), [
+		["Today", ["archived-working", "archived"]],
+		["This week", ["archived-waiting"]],
+	]);
 	assert.deepEqual(view("all", "YESTER"), [["Yesterday", ["yesterday"]]]);
 	assert.deepEqual(fleetCounts(sessions), { needsInput: 2, working: 1 });
 	assert.deepEqual(

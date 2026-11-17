@@ -49,12 +49,20 @@ func (h *Host) ensureSession(channel string) (*Session, *Chat, error) {
 	resource := h.sessionURI(channel)
 	h.mu.Unlock()
 	if a == nil {
-		p, err := h.sessionProject(resource)
-		if err != nil {
-			return nil, nil, err
-		}
-		if _, err := p.loadSession(resource, channel != resource); err != nil {
-			return nil, nil, err
+		// Cold loads and deletion share the same gate as creation. A load
+		// cannot attach a controller after its native session was deleted.
+		defer h.creation(resource)()
+		h.mu.Lock()
+		a, _ = h.channel(channel)
+		h.mu.Unlock()
+		if a == nil {
+			p, err := h.sessionProject(resource)
+			if err != nil {
+				return nil, nil, err
+			}
+			if _, err := p.loadSession(resource, channel != resource); err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 	h.mu.Lock()
@@ -100,9 +108,10 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 			}
 			return nil, moved(canonical)
 		}
-		alias = sessionAlias{Resource: resource, Project: p.dir, Backend: backend, Session: id}
+		alias = sessionAlias{Project: p.dir, Backend: backend, Session: id}
+		key := nativeSessionKey(p.dir, backend, id)
 		p.host.mu.Lock()
-		if other, ok := p.host.savedIndexLocked(p.dir)[alias.native()]; ok {
+		if other, ok := p.host.savedIndexLocked()[key]; ok {
 			p.host.mu.Unlock()
 			if other.Chat != "" && chat {
 				return nil, moved(other.Chat)
@@ -112,11 +121,9 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 	}
 	forks := p.host.forksLocked(resource)
 	p.host.mu.Unlock()
-	c, err := p.loadController(alias.Backend, alias.Session)
+	c, err := p.loadController(alias)
 	if err != nil {
-		// A saved session its agent no longer has, such as one never prompted,
-		// leaves the list instead of failing each time it is opened.
-		if ok && errors.Is(err, errUnknownSession) {
+		if errors.Is(err, errUnknownSession) {
 			p.forgetSavedSession(resource)
 		}
 		return nil, err
@@ -129,7 +136,7 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 	}
 	a := main.session
 	for _, fork := range forks {
-		c, err := p.loadController(fork.Backend, fork.Session)
+		c, err := p.loadController(fork)
 		var rpc *ahp.Error
 		if errors.As(err, &rpc) && rpc.Code == int(types.ErrorCodeSessionNotFound) {
 			p.host.mu.Lock()
@@ -146,11 +153,18 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 	return a, nil
 }
 
-// loadController loads a native session.
-func (p *Project) loadController(backend, id string) (*sessionController, error) {
-	b, err := p.backend(backend)
+// loadController loads a native session. Global agents can resume IDs from
+// another folder, so a session without a saved alias must match their listing.
+func (p *Project) loadController(alias sessionAlias) (*sessionController, error) {
+	id := alias.Session
+	b, err := p.backend(alias.Backend)
 	if err != nil {
 		return nil, err
+	}
+	if _, global := b.agent.(code.AllSessionsLister); global && alias.Resource == "" {
+		if err := p.host.checkListedSession(alias.Backend, id, p.dir); err != nil {
+			return nil, err
+		}
 	}
 	if !b.Project.beginOperation() {
 		return nil, errWorkspaceClosed
@@ -342,6 +356,15 @@ func (h *Host) createChat(raw json.RawMessage) (any, error) {
 			return nil, ahp.InvalidParams("only forks are supported as chat sources")
 		}
 	}
+	// Resolving attachments can open other channels. Finish it before
+	// reserving this chat's URI.
+	project := a.project
+	var initial Command
+	if p.InitialMessage != nil {
+		if initial, err = project.turnCommand(commandID("initial", p.Chat), *p.InitialMessage); err != nil {
+			return nil, err
+		}
+	}
 	// A chat may not take the URI of a session's default chat.
 	defer h.creation(ahp.SessionURI(p.Chat))()
 	var compactions map[string]bool
@@ -402,14 +425,6 @@ func (h *Host) createChat(raw json.RawMessage) (any, error) {
 	if p.Title != nil {
 		command.Title = *p.Title
 	}
-	project := a.project
-	// A creation that fails leaves no chat, so the first message is resolved before it exists.
-	var initial Command
-	if p.InitialMessage != nil {
-		if initial, err = project.turnCommand(commandID("initial", p.Chat), *p.InitialMessage); err != nil {
-			return nil, err
-		}
-	}
 	b, err := project.backend(provider)
 	if err != nil {
 		return nil, err
@@ -426,7 +441,7 @@ func (h *Host) createChat(raw json.RawMessage) (any, error) {
 	if fork != nil {
 		alias.Fork, alias.Turn = fork.Chat, fork.TurnId
 	}
-	c, err := project.loadController(provider, alias.Session)
+	c, err := project.loadController(alias)
 	if err != nil {
 		project.discard(b.session(alias.Session), alias)
 		return nil, err
@@ -468,8 +483,9 @@ func (h *Host) listSessions(raw json.RawMessage) (any, error) {
 	// Agents that list every folder's sessions have them listed by folder,
 	// so the others' are listed by the projects that are open.
 	everywhere := h.listEverywhere(root.Agents)
+	builtinStores := map[string]bool{}
 	for _, project := range h.loaded() {
-		items = append(items, project.nativeSessions(root.Agents, everywhere, seen)...)
+		items = append(items, project.nativeSessions(root.Agents, everywhere, builtinStores, seen)...)
 	}
 	items = append(items, h.everywhereSessions(everywhere, seen)...)
 	h.mu.Lock()
@@ -511,15 +527,22 @@ func (h *Host) chatSummariesLocked(resource, chat string) []types.SessionChatSum
 
 // nativeSessions lists the sessions of this project's started agents, except
 // those of agents that listed every folder's.
-func (p *Project) nativeSessions(agents []types.AgentInfo, everywhere map[string][]code.SessionInfo, seen map[string]bool) []types.SessionSummary {
+func (p *Project) nativeSessions(agents []types.AgentInfo, everywhere map[string][]code.SessionInfo, builtinStores, seen map[string]bool) []types.SessionSummary {
 	type listing struct {
-		backend  string
-		sessions []code.SessionInfo
+		root, backend string
+		sessions      []code.SessionInfo
 	}
 	var listings []listing
 	for _, info := range agents {
 		if _, listed := everywhere[info.Provider]; listed {
 			continue
+		}
+		root := p.dir
+		if info.Provider == code.BuiltinAgentName {
+			root = code.SessionStorageRoot(p.dir)
+			if builtinStores[root] {
+				continue
+			}
 		}
 		// Listing must not launch every installed external CLI. An external
 		// backend becomes available here after first use/config discovery.
@@ -531,17 +554,21 @@ func (p *Project) nativeSessions(agents []types.AgentInfo, everywhere map[string
 		b.Project.operations.Done()
 		// An agent that cannot list its sessions has its saved ones listed.
 		if err == nil {
-			listings = append(listings, listing{b.id, sessions})
+			listings = append(listings, listing{root, b.id, sessions})
+			if b.id == code.BuiltinAgentName {
+				builtinStores[root] = true
+			}
 		}
 	}
 	h := p.host
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	saved := h.savedIndexLocked(p.dir)
+	saved := h.savedIndexLocked()
 	items := []types.SessionSummary{}
 	for _, l := range listings {
 		for _, session := range l.sessions {
-			if summary, ok := h.listedSummaryLocked(p.dir, p.info(), p.directoryURI(), l.backend, session, saved, seen); ok {
+			key := nativeKey{l.root, l.backend, session.ID}
+			if summary, ok := h.listedSummaryLocked(p.dir, p.info(), p.directoryURI(), key, session, saved, seen); ok {
 				items = append(items, summary)
 			}
 		}
@@ -551,9 +578,10 @@ func (p *Project) nativeSessions(agents []types.AgentInfo, everywhere map[string
 
 // listedSummaryLocked describes a session an agent listed in dir: as the host
 // holds it, as it was saved, or as the agent knows it.
-func (h *Host) listedSummaryLocked(dir string, project *types.ProjectInfo, directory, backend string, session code.SessionInfo, saved map[nativeKey]sessionAlias, seen map[string]bool) (types.SessionSummary, bool) {
+func (h *Host) listedSummaryLocked(dir string, project *types.ProjectInfo, directory string, key nativeKey, session code.SessionInfo, saved map[nativeKey]sessionAlias, seen map[string]bool) (types.SessionSummary, bool) {
+	backend := key.backend
 	resource := canonicalSessionURI(backend, session.ID, dir)
-	alias, ok := saved[nativeKey{dir, backend, session.ID}]
+	alias, ok := saved[key]
 	if ok {
 		// Forked chats are listed with their session.
 		if alias.Chat != "" {

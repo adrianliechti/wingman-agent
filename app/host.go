@@ -162,13 +162,19 @@ func serveHost(ctx context.Context, project string, ready func(hostInfo), timing
 	handler.touch()
 	httpServer := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = httpServer.Serve(listener) }()
-	defer httpServer.Close()
-
 	info := hostInfo{PID: os.Getpid(), URL: "http://" + listener.Addr().String(), Token: token, Version: handler.version}
 	if err := writeHostInfo(info); err != nil {
+		_ = httpServer.Close()
 		return err
 	}
-	defer removeHostInfo(info)
+	defer func() {
+		// A replacing window holds the lock until the old listener stops.
+		_ = httpServer.Close()
+		if unlock, err := lockHostState(true); err == nil {
+			defer unlock()
+			removeHostInfo(info)
+		}
+	}()
 	if ready != nil {
 		ready(info)
 	}
@@ -240,13 +246,14 @@ func (h *hostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.touch()
 	if r.URL.Path == "/__wingman/open" {
 		var request struct {
-			Path string `json:"path"`
+			Path     string   `json:"path"`
+			Previous []string `json:"previous,omitempty"`
 		}
 		if r.Method != http.MethodPost || json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&request) != nil || request.Path == "" {
 			http.Error(w, "path is required", http.StatusBadRequest)
 			return
 		}
-		if err := h.srv.Open(request.Path); err != nil {
+		if err := h.srv.Open(request.Path, request.Previous...); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -288,6 +295,11 @@ func newHostClient(info hostInfo, failed func(error)) (*hostClient, error) {
 }
 
 func (c *hostClient) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Control requests originate in the launcher, outside the browser proxy.
+	if strings.HasPrefix(r.URL.Path, "/__wingman/") {
+		http.NotFound(w, r)
+		return
+	}
 	c.proxy.ServeHTTP(w, r)
 }
 
@@ -345,8 +357,8 @@ func (c *hostClient) serving() bool {
 }
 
 // open opens a folder on the host, which a window may then show.
-func (c *hostClient) open(dir string) error {
-	status, data, err := c.call(http.MethodPost, "/__wingman/open", map[string]string{"path": dir}, 2*time.Minute)
+func (c *hostClient) open(dir string, previous []string) error {
+	status, data, err := c.call(http.MethodPost, "/__wingman/open", map[string]any{"path": dir, "previous": previous}, 2*time.Minute)
 	if err != nil {
 		return err
 	}
@@ -410,18 +422,23 @@ func spawnHost(dir string) (hostInfo, error) {
 // the window has none yet or its host stopped. It holds the state lock
 // throughout, so that the host cannot retire in between.
 func (a *App) attach(dir string) (*hostClient, error) {
+	if !filepath.IsAbs(dir) {
+		return nil, errors.New("project must be an absolute directory")
+	}
 	unlock, err := lockHostState(true)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
 	client := a.host.Load()
+	var previous []string
 	if client == nil || !client.serving() {
 		if client, err = a.connect(dir); err != nil {
 			return nil, err
 		}
+		previous = a.projects
 	}
-	if err := client.open(dir); err != nil {
+	if err := client.open(dir, previous); err != nil {
 		return nil, err
 	}
 	return client, nil
@@ -473,15 +490,21 @@ func (a *App) lost(error) {
 		defer a.reconnecting.Store(false)
 		a.openMu.Lock()
 		defer a.openMu.Unlock()
-		current, dir := a.host.Load(), a.project.Load()
-		if current == nil || dir == nil || current.serving() {
+		current := a.host.Load()
+		if current == nil || current.serving() {
 			return // a single failed request, not a stopped host
 		}
-		client, err := a.attach(*dir)
-		if err != nil {
-			log.Printf("reconnect to the Wingman host: %v", err)
+		for _, dir := range a.projects {
+			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+				continue
+			}
+			client, err := a.attach(dir)
+			if err != nil {
+				log.Printf("reconnect to the Wingman host: %v", err)
+				return
+			}
+			a.host.Store(client)
 			return
 		}
-		a.host.Store(client)
 	}()
 }

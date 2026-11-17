@@ -152,11 +152,14 @@ export function useMarkShownRead(
 	const visibleKeys = shown.join("\n");
 	const pending = unread.join("\n");
 	const requested = useRef(new Set<string>());
+	const previousShown = useRef<string[]>([]);
 	useEffect(() => {
 		// Leaving a chat ends the user's wish to keep it unread.
 		const showing = visibleKeys.split("\n");
 		for (const key of keptUnread)
-			if (!showing.includes(key)) keptUnread.delete(key);
+			if (!showing.includes(key) || !previousShown.current.includes(key))
+				keptUnread.delete(key);
+		previousShown.current = showing;
 	}, [visibleKeys]);
 	useEffect(() => {
 		if (!onScreen) return;
@@ -277,7 +280,15 @@ export function useFleetNotifications(
 				});
 				notification.onclick = () => {
 					window.focus();
-					openRef.current(session.id);
+					const chats = [session, ...session.forks];
+					const target = chats.find((chat) =>
+						event.kind === "needs-input"
+							? chat.state === "needs-input"
+							: event.kind === "failed"
+								? chat.state === "failed"
+								: chat.unread,
+					);
+					openRef.current(target?.id ?? session.id);
 					notification.close();
 				};
 			} catch {

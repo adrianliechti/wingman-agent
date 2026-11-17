@@ -825,7 +825,7 @@ func (a *Agent) loadSessionStream(ctx context.Context, id string, snapshots bool
 					a.refreshConfig(sess, resp.ConfigOptions)
 					sess.applyModes(resp.Modes)
 				}
-				loadErrCh <- a.loginError(notFound(err, id))
+				loadErrCh <- notFound(err, id)
 				return
 			}
 			resp, err := withLogin(rpcCtx, a, func() (acpsdk.ResumeSessionResponse, error) {
@@ -839,7 +839,7 @@ func (a *Agent) loadSessionStream(ctx context.Context, id string, snapshots bool
 				a.refreshConfig(sess, resp.ConfigOptions)
 				sess.applyModes(resp.Modes)
 			}
-			loadErrCh <- a.loginError(notFound(err, id))
+			loadErrCh <- notFound(err, id)
 		}()
 
 		for {
@@ -891,6 +891,9 @@ func (a *Agent) DeleteSession(ctx context.Context, id string) error {
 	_, err := a.conn.UnstableDeleteSession(ctx, acpsdk.UnstableDeleteSessionRequest{
 		SessionId: acpsdk.SessionId(id),
 	})
+	if errors.Is(notFound(err, id), code.ErrSessionNotFound) {
+		err = nil // Deletion is idempotent when the agent already removed it.
+	}
 	if err == nil {
 		a.mu.Lock()
 		delete(a.sessions, id)

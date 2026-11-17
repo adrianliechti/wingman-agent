@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,12 +24,12 @@ import (
 //go:embed all:public
 var publicFS embed.FS
 
-// App is one window. Its page comes from the shared host once the window
-// opened a folder, and from the start page until then.
+// App serves the native windows in this process. Each window names its own
+// folder and shares the background host with other windows and processes.
 type App struct {
 	host         atomic.Pointer[hostClient]
-	project      atomic.Pointer[string] // the folder this window opened last
-	openMu       sync.Mutex             // one open or reconnect at a time
+	openMu       sync.Mutex // one open or reconnect at a time
+	projects     []string   // folders picked in this process, guarded by openMu
 	reconnecting atomic.Bool
 
 	launcher http.Handler
@@ -61,8 +62,7 @@ func main() {
 	err := shell.Run(shell.Options{
 		Title: "Wingman Agent",
 
-		Handler:    app,
-		OnShutdown: app.shutdown,
+		Handler: app,
 
 		Width:  1280,
 		Height: 800,
@@ -173,15 +173,8 @@ func (a *App) handleRemoveWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleOpenWorkspace(w http.ResponseWriter, r *http.Request) {
-	var request struct {
-		Path string `json:"path"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil && !errors.Is(err, io.EOF) {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if request.Path == "" {
-		http.Error(w, "path is required", http.StatusBadRequest)
+	path, ok := readPath(w, r)
+	if !ok {
 		return
 	}
 
@@ -189,16 +182,18 @@ func (a *App) handleOpenWorkspace(w http.ResponseWriter, r *http.Request) {
 	// keep running; the window then shows the folder by naming it.
 	a.openMu.Lock()
 	defer a.openMu.Unlock()
-	client, err := a.attach(request.Path)
+	client, err := a.attach(path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	a.host.Store(client)
-	a.project.Store(&request.Path)
+	if !slices.Contains(a.projects, path) {
+		a.projects = append(a.projects, path)
+	}
 
 	_, _ = settings.Update(func(settings *settings.Settings) {
-		settings.AddWorkspace(request.Path)
+		settings.AddWorkspace(path)
 	})
 
 	w.WriteHeader(http.StatusNoContent)
@@ -242,10 +237,6 @@ func (a *App) handleSelectFolder(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, map[string]string{"path": path})
 }
-
-// shutdown closes the window only: the shared host keeps its agents running
-// for the other windows, and stops by itself once none follows it.
-func (a *App) shutdown() {}
 
 func readPath(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var req struct {

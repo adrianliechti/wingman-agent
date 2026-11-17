@@ -153,7 +153,7 @@ export function groupFleet(
 ): FleetGroup[] {
 	const listed = sessions.filter((session) => matches(session, query));
 	listed.sort(newestFirst);
-	// A session that waits for the user is shown even when archived.
+	// Archived sessions that need input also stay visible in the main list.
 	const waiting = listed.filter((s) => s.sessionState === "needs-input");
 	const working = listed.filter(
 		(s) => s.sessionState === "working" && !s.archived,
@@ -162,7 +162,7 @@ export function groupFleet(
 		(s) =>
 			s.sessionState !== "needs-input" &&
 			s.sessionState !== "working" &&
-			s.archived === (query.filter === "archived"),
+			!s.archived,
 	);
 	const section = (id: string, label: string, items: FleetSession[]) =>
 		items.length ? [{ id, label, sessions: items }] : [];
@@ -179,7 +179,7 @@ export function groupFleet(
 		case "running":
 			return section("working", "Working", working);
 		case "archived":
-			return settled(rest);
+			return settled(listed.filter((s) => s.archived));
 		default:
 			return [
 				...section("needs-input", "Needs you", waiting),
@@ -225,8 +225,10 @@ function byProject(
 
 function byDay(sessions: FleetSession[], now: Date): FleetGroup[] {
 	const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-	const yesterday = new Date(today.getTime() - 86400000);
-	const week = new Date(today.getTime() - 7 * 86400000);
+	const yesterday = new Date(today);
+	yesterday.setDate(today.getDate() - 1);
+	const week = new Date(today);
+	week.setDate(today.getDate() - 7);
 	const groups = new Map<string, FleetSession[]>();
 	for (const session of sessions) {
 		const modified = new Date(session.modifiedAt);
@@ -238,7 +240,9 @@ function byDay(sessions: FleetSession[], now: Date): FleetGroup[] {
 					: modified >= week
 						? "This week"
 						: "Older";
-		groups.set(label, [...(groups.get(label) ?? []), session]);
+		const group = groups.get(label);
+		if (group) group.push(session);
+		else groups.set(label, [session]);
 	}
 	return [...groups].map(([label, items]) => ({
 		id: label.toLowerCase().replace(" ", "-"),
@@ -263,19 +267,20 @@ export function attentionQueue(sessions: readonly FleetSession[]): string[] {
 	const ordered = [...sessions].sort(newestFirst);
 	const queue: string[] = [];
 	const chats = (session: FleetSession) => [session, ...session.forks];
-	for (const session of ordered)
-		if (session.sessionState === "needs-input")
-			queue.push(
-				(chats(session).find((chat) => chat.state === "needs-input") ?? session)
-					.id,
-			);
+	for (const session of ordered) {
+		if (session.sessionState !== "needs-input") continue;
+		const waiting = chats(session).filter(
+			(chat) => chat.state === "needs-input",
+		);
+		if (waiting.length) queue.push(...waiting.map((chat) => chat.id));
+		else queue.push(session.id);
+	}
 	for (const session of ordered) {
 		const busy =
 			session.sessionState === "needs-input" ||
 			session.sessionState === "working";
 		if (session.archived || busy) continue;
-		const chat = chats(session).find((candidate) => candidate.unread);
-		if (chat) queue.push(chat.id);
+		for (const chat of chats(session)) if (chat.unread) queue.push(chat.id);
 	}
 	return queue;
 }

@@ -117,8 +117,8 @@ func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Cont
 // webProject makes a test server the project its own host's web UI shows.
 func webProject(s *Server, dir string) *Project {
 	h := newHost(s.Project.ctx)
+	s.Project.dir = canonicalPath(dir)
 	p := h.attach(s.Project)
-	p.dir = canonicalPath(dir)
 	h.show(p)
 	return p
 }

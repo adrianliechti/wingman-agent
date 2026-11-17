@@ -24,6 +24,7 @@ import (
 
 func reviewSessionsAttach(t *testing.T) (*Server, *backendRuntime, *protocolAgent, *sessionController, *Chat) {
 	t.Helper()
+	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, b, a := newProtocolServer(t)
 	c := b.session("saved")
 	c.load()

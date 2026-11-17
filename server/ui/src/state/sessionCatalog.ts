@@ -64,9 +64,11 @@ export class SessionCatalog {
 			this.notify(method, params),
 		);
 		this.ahp.subscribeConnection(() => {
-			if (!this.ahp.getConnected()) return;
-			// A new connection may reach a restarted host whose agents are not started.
-			this.included.clear();
+			if (!this.ahp.getConnected()) {
+				this.included.clear();
+				this.publish({ starting: [] });
+				return;
+			}
 			void this.reload().catch(() => {});
 			for (const provider of this.wanted)
 				void this.include(provider).catch(() => {});
@@ -76,38 +78,41 @@ export class SessionCatalog {
 	/** Lists the sessions again. Callers during a list share the next one, which
 	 * starts after it, so that what they changed before calling is listed. */
 	reload(): Promise<void> {
-		if (!this.loading) {
-			this.loading = this.load().finally(() => {
-				this.loading = undefined;
-			});
-			return this.loading;
-		}
+		if (!this.loading) return this.read();
 		this.queued ??= this.loading
 			.catch(() => {})
 			.then(() => {
 				this.queued = undefined;
-				return this.reload();
+				return this.read();
 			});
 		return this.queued;
 	}
+	/** Readers can share the list already in flight. */
+	read(): Promise<void> {
+		this.loading ??= this.load().finally(() => {
+			this.loading = undefined;
+		});
+		return this.loading;
+	}
 	private async load() {
 		this.buffered = [];
+		const buffered = this.buffered;
+		let change: Partial<CatalogState> = { loaded: true, error: null };
 		try {
 			const result = await this.ahp.request("listSessions", {
 				channel: "ahp-root://",
 			});
-			const buffered = this.buffered;
-			this.buffered = undefined;
 			this.sessions = new Map(
 				result.items.map((summary) => [summary.resource, summary]),
 			);
 			for (const summary of result.items) this.onSummary(summary);
-			for (const { method, params } of buffered) this.apply(method, params);
-			this.publish({ loaded: true, error: null });
 		} catch (error) {
-			this.buffered = undefined;
-			this.publish({ error: String(error) });
+			change = { error: String(error) };
 			throw error;
+		} finally {
+			this.buffered = undefined;
+			for (const { method, params } of buffered) this.apply(method, params);
+			this.publish(change);
 		}
 	}
 	/** Starts a provider so that its own sessions, such as those of its CLI, are listed too. */
@@ -125,16 +130,20 @@ export class SessionCatalog {
 						? { workingDirectory: this.ahp.directory }
 						: {}),
 				})
-				.then(() => this.reload())
-				.catch((error) => {
-					this.included.delete(provider);
-					throw error;
+				.then(() => {
+					if (this.included.get(provider) === started) return this.reload();
 				})
-				.finally(() =>
-					this.publish({
-						starting: this.state.starting.filter((id) => id !== provider),
-					}),
-				);
+				.finally(() => {
+					if (this.included.get(provider) === started)
+						this.publish({
+							starting: this.state.starting.filter((id) => id !== provider),
+						});
+				})
+				.catch((error) => {
+					if (this.included.get(provider) === started)
+						this.included.delete(provider);
+					throw error;
+				});
 			this.included.set(provider, started);
 		}
 		return started;
@@ -168,11 +177,10 @@ export class SessionCatalog {
 		}
 	}
 	private scheduleReload() {
-		clearTimeout(this.reloadTimer);
-		this.reloadTimer = setTimeout(
-			() => void this.reload().catch(() => {}),
-			250,
-		);
+		this.reloadTimer ??= setTimeout(() => {
+			this.reloadTimer = undefined;
+			void this.reload().catch(() => {});
+		}, 250);
 	}
 	/** The summary of a listed session. */
 	summary(session: string): SessionSummary | undefined {

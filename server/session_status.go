@@ -206,7 +206,7 @@ func (a *Chat) refreshChangesLocked() {
 		return
 	}
 	a.changesRunning = true
-	go a.countChanges()
+	a.project.background.Go(a.countChanges)
 }
 
 func (a *Chat) countChanges() {

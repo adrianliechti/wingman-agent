@@ -57,9 +57,7 @@ type Server struct {
 	terminalPosition atomic.Value
 	sidebarPosition  atomic.Value
 
-	front     *Server // the server whose host and preferences a window server shares
-	windowsMu sync.Mutex
-	windows   map[*Project]*Server // window servers of the front's other projects
+	front *Server // the server whose host and preferences a window server shares
 }
 
 // New starts a host with a web UI for the project at workDir. Windows may
@@ -101,6 +99,7 @@ func (s *Server) startWeb(opts *ServerOptions) (err error) {
 	if err := s.startWindow(); err != nil {
 		return err
 	}
+	s.handler = LocalHostOnly(http.NewCrossOriginProtection().Handler(http.HandlerFunc(s.routeWindow)))
 	if opts.RemoteURL != "" {
 		return s.startRemote(remote.ClientOptions{Relay: opts.RemoteURL, Token: opts.RemoteToken})
 	}
@@ -113,10 +112,8 @@ func (s *Server) startWindow() (err error) {
 		return err
 	}
 	s.mux = chi.NewRouter()
+	s.mux.Use(s.checkInstance)
 	s.registerRoutes(s.mux)
-
-	csrf := http.NewCrossOriginProtection()
-	s.handler = LocalHostOnly(csrf.Handler(s.checkInstance(s.mux)))
 	return nil
 }
 
@@ -125,39 +122,34 @@ func (s *Server) window(p *Project) (*Server, error) {
 	if p == s.Project {
 		return s, nil
 	}
-	s.windowsMu.Lock()
-	defer s.windowsMu.Unlock()
-	if w := s.windows[p]; w != nil {
-		return w, nil
+	h := p.host
+	// Serialize with project teardown, including a close between projectAt and window.
+	h.projectMu.Lock()
+	defer h.projectMu.Unlock()
+	if p.ctx.Err() != nil {
+		return nil, errWorkspaceClosed
+	}
+	if p.window != nil {
+		return p.window, nil
 	}
 	w := &Server{Project: p, noBrowser: true, front: s}
 	if err := w.startWindow(); err != nil {
 		return nil, err
 	}
-	if s.windows == nil {
-		s.windows = map[*Project]*Server{}
-	}
-	s.windows[p] = w
-	p.windowed.Store(true)
-	// A project that closes takes its window server along; a window reopens it.
-	p.onClose(func() {
-		s.windowsMu.Lock()
-		if s.windows[p] == w {
-			delete(s.windows, p)
-		}
-		s.windowsMu.Unlock()
-		w.preview.Close()
-	})
+	h.mu.Lock()
+	p.window = w
+	h.mu.Unlock()
 	return w, nil
 }
 
 // windowOf finds the window server whose project has a browser's instance.
 func (s *Server) windowOf(instance string) *Server {
-	s.windowsMu.Lock()
-	defer s.windowsMu.Unlock()
-	for p, w := range s.windows {
+	h := s.Project.host
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, p := range h.projects {
 		if p.scope.InstanceID == instance {
-			return w
+			return p.window
 		}
 	}
 	return nil
@@ -165,8 +157,23 @@ func (s *Server) windowOf(instance string) *Server {
 
 // Open opens the project at dir for a window, allowing its directory even
 // outside the host's roots, as for a folder the user picked.
-func (s *Server) Open(dir string) error {
+func (s *Server) Open(dir string, previous ...string) error {
+	if !filepath.IsAbs(dir) {
+		return ahp.InvalidParams("project must be an absolute directory")
+	}
+	if info, err := os.Stat(dir); err != nil {
+		return err
+	} else if !info.IsDir() {
+		return ahp.InvalidParams("project must be a directory")
+	}
 	s.Project.host.Allow(dir)
+	// Other native windows may reopen their picked folders on demand after
+	// a host restart. Grant those folders without starting their projects.
+	for _, path := range previous {
+		if filepath.IsAbs(path) {
+			s.Project.host.Allow(path)
+		}
+	}
 	p, err := s.Project.host.projectAt(dir)
 	if err != nil {
 		return err
@@ -190,39 +197,32 @@ func (s *Server) Close() {
 	}
 }
 
-// ServeHTTP routes a browser's request to the window server of its project:
-// requests carry the instance of the project they were started with, and a
-// window opens another project by naming it when it asks for its workspace.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.front == nil {
-		query := r.URL.Query()
-		if r.URL.Path == "/api/workspace" && query.Has("project") {
-			window, err := s.openWindow(query.Get("project"))
-			if err != nil {
-				http.Error(w, err.Error(), windowStatus(err))
-				return
-			}
-			// Naming a project is discovery, which no instance scopes.
-			r = r.Clone(r.Context())
-			r.Header.Del(instanceHeader)
-			query.Del("instance")
-			r.URL.RawQuery = query.Encode()
-			window.handler.ServeHTTP(w, r)
+	s.handler.ServeHTTP(w, r)
+}
+
+// routeWindow runs after the host and origin checks. Only initial discovery
+// can open a project. Later requests stay bound to the instance they name.
+func (s *Server) routeWindow(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	instance := r.Header.Get(instanceHeader)
+	if instance == "" {
+		instance = query.Get("instance")
+	}
+	window := s
+	if instance == "" && r.Method == http.MethodGet && r.URL.Path == "/api/workspace" && query.Has("project") {
+		var err error
+		window, err = s.openWindow(query.Get("project"))
+		if err != nil {
+			http.Error(w, err.Error(), windowStatus(err))
 			return
 		}
-		instance := r.Header.Get(instanceHeader)
-		if instance == "" {
-			instance = query.Get("instance")
-		}
-		// An instance no window server knows is answered as a replaced workspace.
-		if instance != "" && instance != s.Project.scope.InstanceID {
-			if window := s.windowOf(instance); window != nil {
-				window.handler.ServeHTTP(w, r)
-				return
-			}
+	} else if instance != "" && instance != s.InstanceID() {
+		if other := s.windowOf(instance); other != nil {
+			window = other
 		}
 	}
-	s.handler.ServeHTTP(w, r)
+	window.mux.ServeHTTP(w, r)
 }
 
 // openWindow opens the project a window names by its directory or file URI.

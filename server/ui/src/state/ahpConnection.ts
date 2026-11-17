@@ -91,17 +91,21 @@ export class AHPConnection {
 		scope: WorkspaceScope,
 		dial: () => Promise<AhpTransport> = () =>
 			WebSocketTransport.connect(
-				`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ahp`,
+				`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ahp?instance=${encodeURIComponent(scope.instanceId)}`,
 			),
 		verify: () => Promise<boolean> = async () => {
 			const response = await fetch("/api/workspace", {
 				headers: { "X-Wingman-Instance": scope.instanceId },
 			});
 			// A project that closed while the window was away opens with a new instance.
-			return response.status !== 409;
+			if (response.status === 409) return false;
+			if (!response.ok)
+				throw new Error(`Could not verify workspace (HTTP ${response.status})`);
+			return true;
 		},
 	) {
 		this.scope = scope;
+		this.directory = scope.directory ?? "";
 		this.dial = dial;
 		this.verify = verify;
 	}
@@ -267,9 +271,9 @@ export class AHPConnection {
 			const replaced = this.scope.host
 				? host?.instanceId !== this.scope.host ||
 					// The root names the start folder's project, which may be this window's.
-					(metadata?.workspaceId === this.scope.workspaceId &&
-						metadata.instanceId !== this.scope.instanceId) ||
-					!(await this.verify())
+					(metadata?.workspaceId === this.scope.workspaceId
+						? metadata.instanceId !== this.scope.instanceId
+						: !(await this.verify()))
 				: metadata?.instanceId !== this.scope.instanceId ||
 					metadata.workspaceId !== this.scope.workspaceId;
 			if (generation !== this.generation || this.stopped) return;

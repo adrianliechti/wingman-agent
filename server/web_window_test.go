@@ -119,9 +119,26 @@ func TestServerShowsOtherProjectsInWindowsOfOneHost(t *testing.T) {
 	}
 
 	// A project that closes takes its window along; naming it opens a new one.
+	web := httptest.NewServer(s)
+	t.Cleanup(web.Close)
+	client := protocolTestClient(t, "ws"+strings.TrimPrefix(web.URL, "http")+"/ahp?instance="+window.InstanceID, "window")
+	s.Project.host.closeIdle(0)
+	secondary := s.windowOf(window.InstanceID)
+	if secondary == nil {
+		t.Fatal("idle cleanup closed the project of a connected window")
+	}
+	_ = client.Shutdown(t.Context())
+	waitProtocol(t, func() bool {
+		s.Project.host.mu.Lock()
+		defer s.Project.host.mu.Unlock()
+		return secondary.Project.windowRequests == 0
+	})
 	s.Project.host.closeIdle(0)
 	if recorder := windowRequest(t, s, http.MethodGet, "/api/workspace", window.InstanceID, ""); recorder.Code != http.StatusConflict {
 		t.Fatalf("a closed project's window still answers: %d", recorder.Code)
+	}
+	if _, err := s.window(secondary.Project); err != errWorkspaceClosed {
+		t.Fatalf("a closed project acquired a window: %v", err)
 	}
 	if reopened := windowOpen(t, s, other); reopened.InstanceID == window.InstanceID {
 		t.Fatal("the reopened project kept the closed one's instance")
@@ -164,6 +181,19 @@ func TestServerWindowsOpenOnlyProjectsTheUserUsed(t *testing.T) {
 	alias.Project = used
 	s.Project.host.rememberAliasLocked(alias)
 	s.Project.host.mu.Unlock()
+	target := "/api/workspace?project=" + url.QueryEscape(used)
+	request := httptest.NewRequest(http.MethodGet, "http://unrecognized.invalid"+target, nil)
+	response := httptest.NewRecorder()
+	s.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || len(s.Project.host.loaded()) != 1 {
+		t.Fatal("project discovery ran before the host check")
+	}
+	if rec := windowRequest(t, s, http.MethodGet, target, "stale", ""); rec.Code != http.StatusConflict || len(s.Project.host.loaded()) != 1 {
+		t.Fatal("a stale discovery request opened a project")
+	}
+	if rec := windowRequest(t, s, http.MethodPost, target, "", ""); rec.Code != http.StatusMethodNotAllowed || len(s.Project.host.loaded()) != 1 {
+		t.Fatal("a method other than GET opened a project")
+	}
 	if window := windowOpen(t, s, used); window.Path != used {
 		t.Fatalf("the used project's window: %+v", window)
 	}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
 	"github.com/adrianliechti/wingman-agent/server/ahp"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
@@ -23,7 +25,8 @@ import (
 // alias names its default chat; a forked chat's alias also names the chat.
 type sessionAlias struct {
 	Resource      string                `json:"resource"`
-	Project       string                `json:"project,omitempty"` // directory
+	Project       string                `json:"project,omitempty"`     // directory
+	StorageRoot   string                `json:"storageRoot,omitempty"` // repository owning a builtin journal, including after a worktree is removed
 	Chat          string                `json:"chat,omitempty"`
 	Title         string                `json:"title,omitempty"`
 	Backend       string                `json:"backend"`
@@ -109,7 +112,7 @@ func (p *Project) flushAlias(key string) error {
 		}
 		var err error
 		if change.remove {
-			err = p.removeAlias(change.alias)
+			err = removeAlias(p.scope, change.alias)
 		} else {
 			err = p.saveAlias(change.alias)
 		}
@@ -149,12 +152,18 @@ func readAliases(dir string) []sessionAlias {
 }
 
 // Caller holds h.mu.
-func (h *Host) rememberAliasLocked(alias sessionAlias) {
+func (h *Host) rememberAliasLocked(alias sessionAlias) sessionAlias {
+	if alias.Backend == code.BuiltinAgentName && alias.StorageRoot == "" && alias.Project != "" {
+		if info, err := os.Stat(alias.Project); err == nil && info.IsDir() {
+			alias.StorageRoot = code.SessionStorageRoot(alias.Project)
+		}
+	}
 	if alias.Chat != "" {
 		h.chatAliases[alias.Chat] = alias
 	} else {
 		h.aliases[alias.Resource] = alias
 	}
+	return alias
 }
 
 func (p *Project) aliasDirectory() (string, error) {
@@ -231,8 +240,8 @@ func (p *Project) forgetAlias(resource string) {
 	p.stageAliasLocked(alias, true)
 }
 
-func (p *Project) removeAlias(alias sessionAlias) error {
-	dir, err := p.aliasDirectory()
+func removeAlias(scope WorkspaceScope, alias sessionAlias) error {
+	dir, err := layout.WingmanPath("ahp", scope.WorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -246,7 +255,16 @@ func (p *Project) removeAlias(alias sessionAlias) error {
 // nativeKey names a native session, whose id is unique only within its project and agent.
 type nativeKey struct{ project, backend, session string }
 
-func (a sessionAlias) native() nativeKey { return nativeKey{a.Project, a.Backend, a.Session} }
+func (a sessionAlias) native() nativeKey {
+	return nativeKey{cmp.Or(a.StorageRoot, a.Project), a.Backend, a.Session}
+}
+
+func nativeSessionKey(dir, backend, id string) nativeKey {
+	if backend == code.BuiltinAgentName {
+		dir = code.SessionStorageRoot(dir)
+	}
+	return nativeKey{dir, backend, id}
+}
 
 // forksLocked returns the saved chats in the same order for loading and listing.
 // Caller holds h.mu.
@@ -261,14 +279,13 @@ func (h *Host) forksLocked(resource string) []sessionAlias {
 	return forks
 }
 
-// savedIndexLocked finds a project's saved sessions and chats by native session; a forked chat's alias wins. Caller holds h.mu.
-func (h *Host) savedIndexLocked(dir string) map[nativeKey]sessionAlias {
+// savedIndexLocked finds aliases by native session. Builtin journals may be
+// shared by several worktrees. A fork's chat alias wins. Caller holds h.mu.
+func (h *Host) savedIndexLocked() map[nativeKey]sessionAlias {
 	index := map[nativeKey]sessionAlias{}
 	for _, aliases := range []map[string]sessionAlias{h.aliases, h.chatAliases} {
 		for _, alias := range aliases {
-			if alias.Project == dir {
-				index[alias.native()] = alias
-			}
+			index[alias.native()] = alias
 		}
 	}
 	return index
@@ -310,7 +327,7 @@ func (h *Host) discardSaved(alias sessionAlias) error {
 func (p *Project) storeAlias(alias sessionAlias) error {
 	alias.Project = p.dir
 	p.host.mu.Lock()
-	p.host.rememberAliasLocked(alias)
+	alias = p.host.rememberAliasLocked(alias)
 	p.stageAliasLocked(alias, false)
 	p.host.mu.Unlock()
 	p.aliases.mu.Lock()

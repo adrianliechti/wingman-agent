@@ -174,11 +174,21 @@ func (a *Session) keep(summary types.SessionSummary) {
 	modified, _ := time.Parse(time.RFC3339Nano, summary.ModifiedAt)
 	own := a.state.Status &^ activityBits
 	unread := !own.Has(types.SessionStatusIsRead)
-	if !ok || alias.Title == a.state.Title && alias.Status == own && alias.Unread == unread && alias.Modified.Equal(modified) && reflect.DeepEqual(alias.Changes, summary.Changes) {
+	if !ok {
+		// A native CLI session can also acquire host-owned metadata, for
+		// example when a user archives it from the session list.
+		main := a.chats[0]
+		if !main.projected || a.resource != a.project.canonicalURI(a.state.Provider, main.controller.ref.SessionID) {
+			return
+		}
+		created, _ := time.Parse(time.RFC3339Nano, a.created)
+		alias = sessionAlias{Resource: a.resource, Project: a.project.dir, Backend: a.state.Provider, Session: main.controller.ref.SessionID, Created: created}
+	}
+	if alias.Title == a.state.Title && alias.Status == own && alias.Unread == unread && alias.Modified.Equal(modified) && reflect.DeepEqual(alias.Changes, summary.Changes) {
 		return
 	}
 	alias.Title, alias.Status, alias.Unread, alias.Modified, alias.Changes = a.state.Title, own, unread, modified, summary.Changes
-	a.project.host.rememberAliasLocked(alias)
+	alias = a.project.host.rememberAliasLocked(alias)
 	a.project.stageAliasLocked(alias, false)
 }
 
@@ -315,6 +325,7 @@ func (a *Chat) inputRequests(wanted map[string]types.SessionInputRequest) {
 // chatDeleted removes a disposed chat. Disposing the default chat's native
 // session disposes the whole session, which clients learn of from the root.
 func (a *Session) chatDeleted(ch *Chat) {
+	a.project.host.forgetEverywhere()
 	if ch != a.chats[0] {
 		previous := a.summary()
 		a.chats = slices.DeleteFunc(a.chats, func(other *Chat) bool { return other == ch })
@@ -343,7 +354,6 @@ func (a *Session) chatDeleted(ch *Chat) {
 		a.project.forgetChatAlias(fork.Chat)
 	}
 	a.project.forgetAlias(a.resource)
-	a.project.host.forgetEverywhere()
 	delete(a.project.host.sessions, a.resource)
 	a.project.host.notifyRoot("root/sessionRemoved", types.SessionRemovedParams{Channel: types.RootResourceURI, Session: a.resource})
 }

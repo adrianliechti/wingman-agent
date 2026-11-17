@@ -18,11 +18,46 @@ type everywhereAgent struct {
 	sessions   []code.SessionInfo
 	everywhere atomic.Int32
 	here       atomic.Int32
+	firstList  chan struct{}
+	started    chan struct{}
 }
 
 func (a *everywhereAgent) ListAllSessions(context.Context) ([]code.SessionInfo, error) {
-	a.everywhere.Add(1)
+	if a.everywhere.Add(1) == 1 && a.firstList != nil {
+		close(a.started)
+		<-a.firstList
+	}
 	return a.sessions, nil
+}
+
+func TestConcurrentWindowsShareAndInvalidateAgentListing(t *testing.T) {
+	s, _, _ := newProtocolServer(t)
+	h := s.Project.host
+	agent := &everywhereAgent{protocolAgent: &protocolAgent{}, firstList: make(chan struct{}), started: make(chan struct{})}
+	b := s.Project.bindBackend("two", agent)
+	s.Project.backends[b.id] = &backendEntry{runtime: b}
+	list := func() bool {
+		_, ok := h.listEverywhere([]types.AgentInfo{{Provider: b.id}})[b.id]
+		return ok
+	}
+	stale := make(chan bool, 1)
+	go func() { stale <- list() }()
+	<-agent.started
+	h.forgetEverywhere()
+	const windows = 8
+	fresh := make(chan bool, windows)
+	for range windows {
+		go func() { fresh <- list() }()
+	}
+	for range windows {
+		if !<-fresh {
+			t.Error("a window missed the fresh listing")
+		}
+	}
+	close(agent.firstList)
+	if <-stale || agent.everywhere.Load() != 2 {
+		t.Fatalf("the old listing survived invalidation or the windows issued duplicate requests: %d calls", agent.everywhere.Load())
+	}
 }
 
 func (a *everywhereAgent) ListSessions(context.Context) ([]code.SessionInfo, error) {

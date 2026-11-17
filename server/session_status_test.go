@@ -139,6 +139,24 @@ func TestLoadingAnUnreadSessionKeepsItUnread(t *testing.T) {
 	}
 }
 
+func TestArchivingNativeSessionSurvivesRestart(t *testing.T) {
+	s, _, _, endpoint := protocolTestServer(t)
+	resource := s.Project.canonicalURI("one", "native")
+	client := protocolTestClient(t, endpoint, "archive")
+	reviewSessionsDispatch(t, client, resource, 1, &types.SessionIsArchivedChangedAction{Type: types.ActionTypeSessionIsArchivedChanged, IsArchived: true})
+	waitProtocol(t, func() bool {
+		h := s.Project.host
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.aliases[resource].Status.Has(types.SessionStatusIsArchived)
+	})
+	s.Close()
+	restarted, _, _ := newProtocolServer(t)
+	if !statusListed(t, restarted.Project.host, resource).Status.Has(types.SessionStatusIsArchived) {
+		t.Fatal("a native session lost its archive flag on restart")
+	}
+}
+
 func TestSessionActivityFollowsTheRunningTurn(t *testing.T) {
 	s, _, _, c, ch := reviewSessionsAttach(t)
 	h := s.Project.host

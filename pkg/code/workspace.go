@@ -1604,11 +1604,17 @@ func isGitRepo(dir string) bool {
 	return err == nil
 }
 
-func projectKey(workingDir string) string {
-	root := findCanonicalGitRoot(workingDir)
-	if root == "" {
-		root = workingDir
+// SessionStorageRoot is the directory used to locate builtin session journals.
+// Linked worktrees and subdirectories share their repository's journals.
+func SessionStorageRoot(workingDir string) string {
+	if root := findCanonicalGitRoot(workingDir); root != "" {
+		return root
 	}
+	return workingDir
+}
+
+func projectKey(workingDir string) string {
+	root := SessionStorageRoot(workingDir)
 	if absolute, err := filepath.Abs(root); err == nil {
 		root = absolute
 	}

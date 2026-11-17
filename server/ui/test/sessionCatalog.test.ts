@@ -22,6 +22,7 @@ function fakeHost(items: SessionSummary[]) {
 	const requests: { method: string; params: any }[] = [];
 	let release = () => {};
 	let hold = false;
+	let listError: Error | undefined;
 	const ahp = {
 		getConnected: () => connected,
 		subscribeConnection: (fn: () => void) => {
@@ -37,6 +38,7 @@ function fakeHost(items: SessionSummary[]) {
 			if (method === "listSessions") {
 				const listed = [...items];
 				if (hold) await new Promise<void>((resolve) => (release = resolve));
+				if (listError) throw listError;
 				return { items: listed };
 			}
 			return {};
@@ -52,6 +54,9 @@ function fakeHost(items: SessionSummary[]) {
 		},
 		hold: () => {
 			hold = true;
+		},
+		fail: () => {
+			listError = new Error("listing failed");
 		},
 		release: () => {
 			hold = false;
@@ -71,6 +76,21 @@ const titles = (catalog: SessionCatalog) =>
 		.getSnapshot()
 		.sessions.map((session) => session.title)
 		.sort();
+
+test("a failed refresh preserves notifications received during the request", async () => {
+	const host = fakeHost([summary("one")]);
+	const catalog = new SessionCatalog(host.ahp);
+	catalog.subscribe(() => {});
+	await settle();
+	host.hold();
+	const refresh = catalog.reload();
+	host.notify("root/sessionRemoved", { session: "ahp-session:/one" });
+	host.notify("root/sessionAdded", { summary: summary("two") });
+	host.fail();
+	host.release();
+	await assert.rejects(refresh, /listing failed/);
+	assert.deepEqual(titles(catalog), ["two"]);
+});
 
 test("the catalogue lists once and then follows the root's notifications", async () => {
 	const host = fakeHost([summary("one"), summary("two")]);
