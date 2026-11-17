@@ -443,6 +443,44 @@ func TestConversationSpeechEndDoesNotRequireCommitEvent(t *testing.T) {
 	x.next(t, "response.create")
 }
 
+func TestConversationSpeechRacesBackgroundResponse(t *testing.T) {
+	for _, backgroundWins := range []bool{false, true} {
+		name := "speech wins"
+		if backgroundWins {
+			name = "background wins"
+		}
+		t.Run(name, func(t *testing.T) {
+			x := newConversationTest(t)
+			x.turns.emit(TurnEvent{SessionID: "session", Executed: true, State: TurnInputCompleted})
+			x.next(t, "conversation.item.create")
+			request := x.next(t, "response.create")
+			x.send(t, map[string]any{"type": "input_audio_buffer.speech_started"})
+			waitValue(t, x.events)
+			x.send(t, map[string]any{"type": "input_audio_buffer.speech_stopped"})
+			if backgroundWins {
+				// Our delayed response is still a background reply, even though
+				// speech arrived before its response.created acknowledgement.
+				metadata := request["response"].(map[string]any)["metadata"]
+				x.send(t, map[string]any{"type": "response.created", "response": map[string]any{"metadata": metadata}})
+				x.send(t, map[string]any{"type": "response.done", "response": map[string]any{"status": "completed", "output": []any{map[string]any{"type": "function_call", "call_id": "background", "name": "task_status", "arguments": `{}`}}}})
+				item := x.next(t, "conversation.item.create")["item"].(map[string]any)
+				if !strings.HasPrefix(item["output"].(string), "Rejected:") {
+					t.Fatalf("background reply executed a tool: %+v", item)
+				}
+			}
+			x.send(t, map[string]any{"type": "response.created", "response": map[string]any{"id": "speech"}})
+			if !backgroundWins {
+				x.send(t, map[string]any{"type": "error", "error": map[string]any{"event_id": request["event_id"], "code": "conversation_already_has_active_response"}})
+			}
+			x.send(t, map[string]any{"type": "response.done", "response": map[string]any{"status": "completed", "output": []any{map[string]any{"type": "function_call", "call_id": "speech", "name": "task_status", "arguments": `{}`}}}})
+			item := x.next(t, "conversation.item.create")["item"].(map[string]any)
+			if strings.HasPrefix(item["output"].(string), "Rejected:") {
+				t.Fatalf("spoken request was mistaken for a background reply: %+v", item)
+			}
+		})
+	}
+}
+
 func TestConversationDelegatesCodeQuestions(t *testing.T) {
 	x := newConversationTest(t)
 	question := "What is the code doing? Explain it without changing files."

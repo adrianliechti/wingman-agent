@@ -6612,6 +6612,39 @@ test("holding Space dictates into the composer", async ({ page }) => {
 	await expect(input).toHaveValue("run dictated by voice");
 });
 
+test("leaving a composer cancels pending Space dictation", async ({ page }) => {
+	await page.addInitScript(() => {
+		(window as any).microphoneRequests = 0;
+		navigator.mediaDevices.getUserMedia = async () => {
+			(window as any).microphoneRequests++;
+			throw new DOMException(
+				"Unexpected microphone request",
+				"NotAllowedError",
+			);
+		};
+	});
+	const input = await composer(page);
+	await expect(page.getByRole("button", { name: "Dictate" })).toBeVisible();
+	await input.fill("keep this draft");
+	const menu = await openNewMenu(page);
+	await page.clock.install();
+	await page.clock.pauseAt(new Date());
+	// Navigation can remove the textarea without a blur or Space keyup event.
+	await input.evaluate((element) => {
+		element.dispatchEvent(
+			new KeyboardEvent("keydown", { key: " ", bubbles: true }),
+		);
+	});
+	await menu
+		.getByRole("menuitem", { name: "Chat", exact: true })
+		.evaluate((element: HTMLElement) => element.click());
+	await expect(
+		page.getByPlaceholder("Message Wingman…").filter({ visible: true }),
+	).toHaveValue("");
+	await page.clock.runFor(500);
+	expect(await page.evaluate(() => (window as any).microphoneRequests)).toBe(0);
+});
+
 test("voice conversation delegates to the coding model and preserves the draft", async ({
 	page,
 	request,

@@ -50,22 +50,20 @@ export async function openConversationAudio(
 	let items: {
 		id: string;
 		index: number;
-		start: number;
+		end: number;
 		duration: number;
 	}[] = [];
 	const interrupt = () => {
-		const played = items
-			.filter((item) => item.start + item.duration > context.currentTime)
-			.map((item) => ({
-				item_id: item.id,
-				content_index: item.index,
-				played_ms: Math.floor(
-					Math.min(
-						item.duration,
-						Math.max(0, context.currentTime - item.start),
-					) * 1000,
-				),
-			}));
+		const played = items.map((item) => ({
+			item_id: item.id,
+			content_index: item.index,
+			played_ms: Math.floor(
+				Math.min(
+					item.duration,
+					Math.max(0, item.duration - (item.end - context.currentTime)),
+				) * 1000,
+			),
+		}));
 		for (const source of sources) source.stop();
 		sources.clear();
 		next = 0;
@@ -136,15 +134,20 @@ export async function openConversationAudio(
 					16 << 20
 				)
 					throw new Error("Voice playback cannot keep up.");
+				// Keep the current content's total even if playback caught up
+				// between chunks. Truncation uses audio time, excluding network gaps.
 				items = items.filter(
-					(item) => item.start + item.duration > context.currentTime,
+					(item) =>
+						item.end > context.currentTime ||
+						(item.id === id && item.index === index),
 				);
 				let item = items.at(-1);
-				if (!item || item.id !== id) {
-					item = { id, index, start, duration: 0 };
+				if (!item || item.id !== id || item.index !== index) {
+					item = { id, index, end: 0, duration: 0 };
 					items.push(item);
 				}
 				item.duration += buffer.duration;
+				item.end = start + buffer.duration;
 				const source = context.createBufferSource();
 				source.buffer = buffer;
 				source.connect(context.destination);

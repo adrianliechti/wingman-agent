@@ -451,6 +451,13 @@ export function ChatPanel({
 		started: boolean;
 		timer?: ReturnType<typeof setTimeout>;
 	} | null>(null);
+	useLayoutEffect(
+		() => () => {
+			clearTimeout(spaceHold.current?.timer);
+			spaceHold.current = null;
+		},
+		[voiceBackend, draftId],
+	);
 	const endSpaceHold = (transcribe: boolean) => {
 		const hold = spaceHold.current;
 		if (!hold) return;

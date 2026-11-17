@@ -187,7 +187,6 @@ func StartConversation(ctx context.Context, model *audio.Realtime, agent Agent, 
 		}()
 		activeResponse, wantResponse, userSpeaking := false, false, false
 		autoResponsePending, responseAllowsTools := false, false
-		bridgeResponsePending := false
 		var responseRequestID string
 		pendingCalls := 0
 		var output strings.Builder
@@ -197,11 +196,12 @@ func StartConversation(ctx context.Context, model *audio.Realtime, agent Agent, 
 				return nil
 			}
 			wantResponse, activeResponse = false, true
-			responseAllowsTools, bridgeResponsePending = false, true
+			responseAllowsTools = false
 			responseRequestID = uuid.NewString()
 			return send(realtime.RealtimeClientEventUnionParam{OfResponseCreate: &realtime.ResponseCreateEventParam{
 				EventID: openai.String(responseRequestID),
 				Response: realtime.RealtimeResponseCreateParams{
+					Metadata:   map[string]string{"wingman_response": responseRequestID},
 					ToolChoice: realtime.RealtimeResponseCreateParamsToolChoiceUnion{OfToolChoiceMode: openai.Opt(responses.ToolChoiceOptionsNone)},
 				},
 			}})
@@ -280,11 +280,10 @@ func StartConversation(ctx context.Context, model *audio.Realtime, agent Agent, 
 				case realtime.ResponseCreatedEvent:
 					activeResponse = true
 					responseID = event.Response.ID
-					if bridgeResponsePending {
-						bridgeResponsePending, responseAllowsTools = false, false
-					} else if autoResponsePending {
+					responseAllowsTools = false
+					if event.Response.Metadata["wingman_response"] == "" && autoResponsePending {
 						// This response was created by VAD for the user's speech,
-						// rather than by a background notification.
+						// even if it raced a pending background response.create.
 						responseAllowsTools = true
 						autoResponsePending, wantResponse = false, false
 					}
@@ -321,19 +320,16 @@ func StartConversation(ctx context.Context, model *audio.Realtime, agent Agent, 
 				case realtime.RealtimeErrorEvent:
 					if event.Error.Code == "conversation_already_has_active_response" {
 						activeResponse, wantResponse = true, true
-						bridgeResponsePending = false
 						break
 					}
 					if event.Error.EventID != "" && event.Error.EventID == responseRequestID {
 						activeResponse, responseAllowsTools = false, false
-						bridgeResponsePending = false
 					}
 					// A rejected event (for example a late truncate) does not
 					// close the upstream socket. Report it without losing voice.
 					runErr = emit(ConversationEvent{Type: "notice", Message: "Realtime: " + event.Error.Message})
 				case realtime.ResponseDoneEvent:
 					activeResponse = false
-					bridgeResponsePending = false
 					allowTools := responseAllowsTools
 					responseAllowsTools = false
 					if event.Response.Status != "completed" {
