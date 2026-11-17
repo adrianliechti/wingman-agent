@@ -65,6 +65,29 @@ tasks:
     cmds:
       - go test -tags=e2e -run TestTUIE2E -count=1 -v ./pkg/tui/code
 
+  lab:windows:
+    desc: Start the Windows 11 Arm64 VM and copy in the current Wingman builds
+    deps: [build:ui]
+    cmds:
+      - python3 scripts/windows-lab/lab.py up
+
+  lab:windows:test:
+    desc: Build Wingman and test the CLI, launcher, ConPTY, and shell sandbox inside Windows
+    deps: [build:ui]
+    cmds:
+      - python3 scripts/windows-lab/lab.py test
+
+  lab:windows:ssh:
+    desc: Open PowerShell in the Windows VM
+    interactive: true
+    cmds:
+      - python3 scripts/windows-lab/lab.py ssh
+
+  lab:windows:stop:
+    desc: Shut down Windows and keep its disk for the next run
+    cmds:
+      - python3 scripts/windows-lab/lab.py stop
+
   test:web:
     desc: Build and run browser end-to-end tests
     deps: [build:ui]
