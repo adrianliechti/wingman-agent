@@ -11,7 +11,7 @@ import {
 } from "./state/workspaceContext.ts";
 import { composerDrafts as getComposerDrafts } from "./state/composerDrafts.ts";
 import { canonicalChatURI, draftKey, isDraft } from "./state/sessionStore.ts";
-import { workspaceClient } from "./state/workspaceClient.ts";
+import { projectHref, workspaceClient } from "./state/workspaceClient.ts";
 import {
 	type QueryClient,
 	useQuery,
@@ -96,7 +96,7 @@ import {
 	startTerminal,
 	terminalQueries,
 } from "./api/terminals";
-import { chooseWorkspaceFolder, replaceWorkspace } from "./api/workspaces";
+import { chooseWorkspaceFolder, openWorkspace } from "./api/workspaces";
 import { SessionChatPanel } from "./components/SessionChatPanel";
 import {
 	PaneDropZones,
@@ -153,6 +153,7 @@ import { SessionsPanel } from "./components/SessionsPanel";
 import {
 	useFleet,
 	useFleetNotifications,
+	useHere,
 	useMarkShownRead,
 	useTitleCount,
 } from "./hooks/useFleet.ts";
@@ -547,6 +548,10 @@ export default function App() {
 	const [filePathRequest, setFilePathRequest] =
 		useState<FilePathRequest | null>(null);
 	const [openFolderRequest, setOpenFolderRequest] = useState(false);
+	const [projectSwitch, setProjectSwitch] = useState<{
+		href: string;
+		name: string;
+	} | null>(null);
 	const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
 	const [debugLauncher, setDebugLauncher] = useState<DebugLauncherSeed | null>(
 		null,
@@ -841,7 +846,8 @@ export default function App() {
 		leftPool[0] ??
 		(activeTab.id ? activeTab : undefined);
 	const fleet = useFleet();
-	useTitleCount(fleet.counts.needsInput);
+	const here = useHere();
+	useTitleCount(fleet.counts.needsInput, workspace?.name);
 	useMarkShownRead(
 		[leftTab, mobile ? undefined : rightTab].flatMap((tab) =>
 			tab?.type === "chat" && tab.sessionId ? [tab.sessionId] : [],
@@ -849,7 +855,7 @@ export default function App() {
 		fleet.sessions,
 	);
 	useFleetNotifications(fleet.sessions, fleet.loaded, (id) =>
-		handleSessionSelect(id, "keep"),
+		openSession(id, "keep"),
 	);
 	const activeDocument =
 		activeTab.type === "file" && activeTab.path
@@ -907,7 +913,9 @@ export default function App() {
 		const path = isDraft(sessionId)
 			? `/${encodeURIComponent(agentId)}`
 			: `/${encodeURIComponent(client.backendOf(sessionId))}/${encodeURIComponent(sessionId)}`;
-		if (location.pathname !== path) window.history.replaceState(null, "", path);
+		// The address keeps naming the window's project.
+		if (location.pathname !== path)
+			window.history.replaceState(null, "", path + location.search);
 		// The provider of a restored chat is known once it loads.
 	}, [client, agentId, sessionId, activeSession?.status]);
 	const observedKeys = JSON.stringify(
@@ -1448,8 +1456,9 @@ export default function App() {
 				return;
 			}
 
-			await replaceWorkspace(path);
-			window.location.replace("/");
+			// The host opens the folder beside the others, whose agents keep running.
+			await openWorkspace(path);
+			window.location.assign(projectHref(path));
 		} catch (error) {
 			setWorkspaceSwitching(false);
 			toast({
@@ -1841,10 +1850,32 @@ export default function App() {
 		selectBackend(client.backendOf(id));
 		openChatTab(id, disposition);
 	};
+	/** Shows another project in this window; its agents and these keep running. */
+	const switchProject = (href: string, name: string) => {
+		if (dirtyPaths.size > 0) setProjectSwitch({ href, name });
+		else window.location.assign(href);
+	};
+	/** Opens a chat here, or moves the window to the project the chat belongs to.
+	 * It reports whether the chat opened in this window. */
+	const openSession = (id: string, disposition: TabDisposition = "keep") => {
+		const session = fleet.sessions.find(
+			(candidate) =>
+				candidate.id === id || candidate.forks.some((fork) => fork.id === id),
+		);
+		if (session?.project && !here(session)) {
+			switchProject(
+				projectHref(session.project.uri, { backend: session.provider, id }),
+				session.project.displayName,
+			);
+			return false;
+		}
+		handleSessionSelect(id, disposition);
+		return true;
+	};
 	/** Opens the next session that waits for the user or finished unseen. */
 	const goToNextAttention = () => {
 		const next = nextAttention(fleet.sessions, sessionId);
-		if (next) handleSessionSelect(next, "keep");
+		if (next) openSession(next, "keep");
 		else toast({ title: "No session needs you right now" });
 	};
 
@@ -2476,11 +2507,12 @@ export default function App() {
 					running={runningSessionIds.has(key)}
 					onSessionSelect={(id, disposition) => {
 						// The list stays beside the chat it opens.
-						setChatAuxiliaryViews({ [chatTabId(id)]: "sessions" });
-						void handleSessionSelect(id, disposition);
+						if (openSession(id, disposition))
+							setChatAuxiliaryViews({ [chatTabId(id)]: "sessions" });
 					}}
 					onSessionDelete={(id, title) => setSessionDelete({ id, title })}
 					onSessionFork={(id) => void handleSessionFork(id)}
+					onOpenProject={(uri, name) => switchProject(projectHref(uri), name)}
 					onOpenTask={openTask}
 				>
 					<SessionChatPanel
@@ -3263,9 +3295,10 @@ export default function App() {
 					currentSessionId={sessionId}
 					needsInput={fleet.counts.needsInput}
 					onSelectBackend={handleBackendSelect}
-					onSelectSession={(id) => void handleSessionSelect(id, "keep")}
+					onSelectSession={(id) => void openSession(id, "keep")}
 					onDeleteSession={(id, title) => setSessionDelete({ id, title })}
 					onForkSession={(id) => void handleSessionFork(id)}
+					onOpenProject={(uri, name) => switchProject(projectHref(uri), name)}
 					onNewSession={() => void handleNewSession()}
 					onBackToChat={activeTab.type === "chat" ? undefined : focusChat}
 				/>
@@ -3397,7 +3430,7 @@ export default function App() {
 					}}
 					actions={paletteActions}
 					onRunSkill={runSkill}
-					onSelectSession={(id) => void handleSessionSelect(id, "keep")}
+					onSelectSession={(id) => void openSession(id, "keep")}
 					onOpenFile={openFile}
 				/>
 			)}
@@ -3537,6 +3570,32 @@ export default function App() {
 					}}
 				>
 					Discard and Open
+				</button>
+			</Dialog>
+
+			<Dialog
+				open={!!projectSwitch}
+				title={`Switch to ${projectSwitch?.name ?? "project"}?`}
+				description={`${dirtyPaths.size} unsaved ${dirtyPaths.size === 1 ? "file" : "files"} will be discarded. Agents keep running in both projects.`}
+				onClose={() => setProjectSwitch(null)}
+			>
+				<button
+					type="button"
+					className={dialogButtonClass}
+					onClick={() => setProjectSwitch(null)}
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					className={`${dialogButtonClass} border-danger/40 text-danger hover:bg-danger/10`}
+					onClick={() => {
+						const href = projectSwitch?.href;
+						setProjectSwitch(null);
+						if (href) window.location.assign(href);
+					}}
+				>
+					Discard and Switch
 				</button>
 			</Dialog>
 
@@ -3779,6 +3838,7 @@ function ChatTabLayout({
 	onSessionSelect,
 	onSessionDelete,
 	onSessionFork,
+	onOpenProject,
 	onOpenTask,
 }: {
 	children: ReactNode;
@@ -3788,6 +3848,7 @@ function ChatTabLayout({
 	onSessionSelect: (id: string, disposition?: TabDisposition) => void;
 	onSessionDelete: (id: string, title: string) => void;
 	onSessionFork: (id: string) => void;
+	onOpenProject: (uri: string, name: string) => void;
 	onOpenTask: (task: TaskEntry) => void;
 }) {
 	return (
@@ -3814,6 +3875,7 @@ function ChatTabLayout({
 							onSessionSelect={onSessionSelect}
 							onSessionDelete={onSessionDelete}
 							onSessionFork={onSessionFork}
+							onOpenProject={onOpenProject}
 						/>
 					)}
 					<div className={view === "agents" ? "h-full" : "hidden"}>

@@ -67,6 +67,22 @@ type Project struct {
 	changesMu        sync.Mutex
 	changesOnce      sync.Once
 	changesets       map[string]*changeset
+	windowed         atomic.Bool // a web window shows the project and hears of its files
+	closeMu          sync.Mutex
+	closed           bool     // close ran its hooks
+	closeHooks       []func() // run once the project closed, such as releasing its window
+}
+
+// onClose runs fn once the project has closed, or at once if it has.
+func (p *Project) onClose(fn func()) {
+	p.closeMu.Lock()
+	if !p.closed {
+		p.closeHooks = append(p.closeHooks, fn)
+		p.closeMu.Unlock()
+		return
+	}
+	p.closeMu.Unlock()
+	fn()
 }
 
 // newProject starts a project's resources under the host's lifetime.
@@ -235,6 +251,14 @@ func (s *Project) close() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = s.telemetry.Shutdown(shutdownCtx)
 		cancel()
+		s.closeMu.Lock()
+		s.closed = true
+		hooks := s.closeHooks
+		s.closeHooks = nil
+		s.closeMu.Unlock()
+		for _, hook := range hooks {
+			hook()
+		}
 	})
 }
 
@@ -268,15 +292,15 @@ func (h *Host) show(p *Project) {
 	h.projects[p.dir] = p
 }
 
-// Only the web UI follows a project's files.
+// Only web windows follow a project's files; each finds its own by the workspace.
 func (p *Project) workspaceChanged(f Frame) {
 	if p == nil || p.host == nil {
 		return
 	}
 	p.host.mu.Lock()
 	defer p.host.mu.Unlock()
-	if p.host.web == p {
-		p.host.notifyRoot("x-wingman/workspaceChanged", map[string]any{"channel": types.RootResourceURI, "event": f})
+	if p.host.web == p || p.windowed.Load() {
+		p.host.notifyRoot("x-wingman/workspaceChanged", map[string]any{"channel": types.RootResourceURI, "event": f, "workspace": p.scope.WorkspaceID})
 	}
 }
 

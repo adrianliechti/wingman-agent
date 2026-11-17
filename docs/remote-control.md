@@ -60,8 +60,9 @@ One browser can be paired with one workspace per relay origin. Pairing another
 workspace changes the selection for that origin. Reload other tabs to use the
 new selection. Clear the relay site's browser data to remove its pairing.
 
-The link grants access to files, terminals, and the other web UI features.
-Keep it and the registration token private. Use a trusted gateway and relay:
+The link grants access to files, terminals, and the other web UI features, for
+every project the server can open: the folder it started in and all projects in
+your home directory. Keep it and the registration token private. Use a trusted gateway and relay:
 both can see the traffic and pairing credentials.
 
 See [sessions and recovery](sessions.md) for saved queues, drafts, and interrupted sends.

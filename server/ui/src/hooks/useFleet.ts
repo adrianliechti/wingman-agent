@@ -26,6 +26,8 @@ export type FleetView = {
 	provider: string;
 	search: string;
 	searching: boolean;
+	/** Project groups the user opened or closed; others' groups start closed. */
+	expanded: Readonly<Record<string, boolean>>;
 };
 // The list moves to each chat it opens; what it shows travels with it.
 let fleetView: FleetView = {
@@ -33,6 +35,7 @@ let fleetView: FleetView = {
 	provider: "",
 	search: "",
 	searching: false,
+	expanded: {},
 };
 const fleetViewListeners = new Set<() => void>();
 function subscribeFleetView(listener: () => void) {
@@ -66,6 +69,17 @@ export function useFleet() {
 		starting: state.starting,
 		counts: useMemo(() => fleetCounts(sessions), [sessions]),
 	};
+}
+
+/** Whether a session belongs to the window's project, whichever way the host spells it. */
+export function useHere(): (session: FleetSession) => boolean {
+	const { directory, project } = workspaceClient().scope;
+	return useMemo(() => {
+		const uris = new Set([directory, project].filter(Boolean));
+		// A host that names no directory shows one project.
+		return (session: FleetSession) =>
+			!uris.size || !session.project || uris.has(session.project.uri);
+	}, [directory, project]);
 }
 
 const NO_REQUESTS: readonly SessionInputRequest[] = [];
@@ -160,12 +174,14 @@ export function useMarkShownRead(
 	}, [client, onScreen, pending]);
 }
 
-/** The page title counts the sessions that wait for the user. */
-export function useTitleCount(count: number) {
+/** The page title names the window's project, since tabs may show several,
+ * and counts the sessions that wait for the user. */
+export function useTitleCount(count: number, project?: string) {
 	const base = useRef(document.title);
 	useEffect(() => {
-		document.title = count > 0 ? `(${count}) ${base.current}` : base.current;
-	}, [count]);
+		const title = project ? `${project} – ${base.current}` : base.current;
+		document.title = count > 0 ? `(${count}) ${title}` : title;
+	}, [count, project]);
 	useEffect(() => {
 		const title = base.current;
 		return () => {

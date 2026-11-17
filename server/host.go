@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/server/ahp"
+	"github.com/google/uuid"
 )
 
 // DefaultHostPort is the preferred port of the standalone protocol host.
@@ -34,6 +35,7 @@ type HostOptions struct {
 type Host struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
+	id                  string // this host process, which a reconnecting window recognizes
 	disableManagedTools bool
 	token               string
 	handler             http.Handler
@@ -52,9 +54,10 @@ type Host struct {
 	web         *Project // the project the host's web UI shows; it stays open and hears of its files
 	projects    map[string]*Project
 	open        func(dir string) (*Project, error)
-	projectMu   sync.Mutex // serializes project startup and teardown, outside mu
-	terminalMu  sync.Mutex // orders terminal creation: a name is claimed in every project at once
-	roots       []string   // directories projects may be opened in
+	projectMu   sync.Mutex      // serializes project startup and teardown, outside mu
+	terminalMu  sync.Mutex      // orders terminal creation: a name is claimed in every project at once
+	roots       []string        // directories projects may be opened in; replaced, never changed in place
+	picked      map[string]bool // folders the user chose to open, which windows may show
 }
 
 func NewHost(ctx context.Context, opts *HostOptions) (*Host, error) {
@@ -120,6 +123,7 @@ func newHost(ctx context.Context) *Host {
 	ctx, cancel := context.WithCancel(ctx)
 	return &Host{
 		ctx: ctx, cancel: cancel,
+		id:          uuid.NewString(),
 		creating:    map[string]chan struct{}{},
 		clients:     map[*connection]struct{}{},
 		sessions:    map[string]*Session{},

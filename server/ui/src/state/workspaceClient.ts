@@ -51,8 +51,27 @@ export type Bootstrap = WorkspaceScope & {
 	protocol: number;
 	namespace: string;
 };
+/** The project a window shows, which its address names; none is the host's start folder. */
+export function windowProject(): string | null {
+	return new URLSearchParams(location.search).get("project");
+}
+/** The address of a project's window, opening a chat there when one is given. */
+export function projectHref(
+	project: string,
+	chat?: { backend: string; id: string },
+): string {
+	const path = chat
+		? `/${encodeURIComponent(chat.backend)}/${encodeURIComponent(chat.id)}`
+		: "/";
+	return `${path}?project=${encodeURIComponent(project)}`;
+}
 export async function fetchWorkspace(): Promise<WorkspaceInfo & Bootstrap> {
-	const response = await fetch("/api/workspace");
+	const project = windowProject();
+	const response = await fetch(
+		project
+			? `/api/workspace?project=${encodeURIComponent(project)}`
+			: "/api/workspace",
+	);
 	if (!response.ok) throw new APIError(await response.text(), response.status);
 	const scope = (await response.json()) as WorkspaceInfo;
 	if (
@@ -629,6 +648,10 @@ export class WorkspaceClient {
 			await this.ahp.request("createSession", {
 				channel: uri,
 				provider: backend,
+				// The host's default project is only the start folder's window.
+				...(this.ahp.directory
+					? { workingDirectories: [this.ahp.directory] }
+					: {}),
 			});
 		} catch (error) {
 			if (!(error instanceof RpcError && error.code === -32003)) throw error;

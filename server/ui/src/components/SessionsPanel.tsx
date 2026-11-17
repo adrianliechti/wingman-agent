@@ -10,10 +10,13 @@ import {
 	Bell,
 	BellOff,
 	Check,
+	ChevronDown,
+	ChevronRight,
 	CircleAlert,
 	CircleHelp,
 	Eye,
 	EyeOff,
+	FolderOpen,
 	GitFork,
 	ListFilter,
 	Loader2,
@@ -29,6 +32,7 @@ import {
 	keepUnread,
 	useFleet,
 	useFleetView,
+	useHere,
 	useNotificationSetting,
 	useNow,
 	useSessionInputNeeded,
@@ -37,6 +41,7 @@ import {
 	type FleetChanges,
 	type FleetChat,
 	type FleetFilter,
+	type FleetGroup,
 	type FleetSession,
 	type FleetState,
 	groupFleet,
@@ -55,6 +60,8 @@ interface Props {
 	onSessionSelect: (id: string, disposition?: TabDisposition) => void;
 	onSessionDelete?: (id: string, title: string) => void;
 	onSessionFork?: (id: string) => void;
+	/** Shows another project in the window, by its URI. */
+	onOpenProject?: (uri: string, name: string) => void;
 	/** Larger targets and a menu button for phones. */
 	touch?: boolean;
 }
@@ -80,6 +87,7 @@ export function SessionsPanel({
 	onSessionSelect,
 	onSessionDelete,
 	onSessionFork,
+	onOpenProject,
 	touch = false,
 }: Props) {
 	const client = workspaceClient();
@@ -89,6 +97,7 @@ export function SessionsPanel({
 	const { sessions, loaded, error, starting, counts } = useFleet();
 	const notifications = useNotificationSetting();
 	const now = useNow();
+	const here = useHere();
 	const [view, setView] = useFleetView();
 	const { filter, provider, search, searching } = view;
 	const setFilter = (next: FleetFilter) => setView({ filter: next });
@@ -121,18 +130,15 @@ export function SessionsPanel({
 				provider,
 				providerName: (id) =>
 					formatAgentName(id, agents.find((agent) => agent.id === id)?.name),
+				here,
 				now,
 			}),
-		[sessions, filter, search, provider, agents, now],
-	);
-	// Names, not URIs: the host may spell the same directory with and without its links.
-	const here = decodeURIComponent(
-		client.ahp.directory.replace(/\/$/, "").split("/").pop() ?? "",
+		[sessions, filter, search, provider, agents, here, now],
 	);
 	const otherProject = (session: FleetSession) =>
-		session.project && session.project.displayName !== here
-			? session.project.displayName
-			: undefined;
+		here(session) ? undefined : session.project?.displayName;
+	const expanded = (group: FleetGroup) =>
+		view.expanded[group.id] ?? group.project?.here ?? true;
 	const act = async (operation: () => Promise<unknown>, failure: string) => {
 		try {
 			await operation();
@@ -305,33 +311,57 @@ export function SessionsPanel({
 				{loaded &&
 					groups.map((group, index) => (
 						<section key={group.id} aria-label={group.label}>
-							<h3
-								className={`flex items-center gap-1.5 pr-3 pb-1 pl-4 text-[10px] font-medium tracking-wider uppercase ${index === 0 ? "pt-1" : "pt-3"} ${group.id === "needs-input" ? "text-warning" : "text-fg-dim"}`}
-							>
-								{group.label}
-								{(group.id === "needs-input" || group.id === "working") && (
-									<span className="font-normal tabular-nums">
-										{group.sessions.length}
-									</span>
-								)}
-							</h3>
-							{group.sessions.map((session) => (
-								<SessionRow
-									key={session.session}
-									session={session}
-									current={currentSessionId}
+							{group.project ? (
+								<ProjectHeading
+									group={group}
+									first={index === 0}
+									expanded={expanded(group)}
 									touch={touch}
-									now={now}
-									agent={
-										agents.length > 1 || session.provider !== "wingman"
-											? agentName(session.provider)
+									onToggle={() =>
+										setView({
+											expanded: {
+												...view.expanded,
+												[group.id]: !expanded(group),
+											},
+										})
+									}
+									onOpen={
+										!group.project.here && onOpenProject
+											? () => onOpenProject(group.project!.uri, group.label)
 											: undefined
 									}
-									project={otherProject(session)}
-									onOpen={onSessionSelect}
-									onMenu={openMenu}
 								/>
-							))}
+							) : (
+								<h3
+									className={`flex items-center gap-1.5 pr-3 pb-1 pl-4 text-[10px] font-medium tracking-wider uppercase ${index === 0 ? "pt-1" : "pt-3"} ${group.id === "needs-input" ? "text-warning" : "text-fg-dim"}`}
+								>
+									{group.label}
+									{(group.id === "needs-input" || group.id === "working") && (
+										<span className="font-normal tabular-nums">
+											{group.sessions.length}
+										</span>
+									)}
+								</h3>
+							)}
+							{expanded(group) &&
+								group.sessions.map((session) => (
+									<SessionRow
+										key={session.session}
+										session={session}
+										current={currentSessionId}
+										touch={touch}
+										now={now}
+										agent={
+											agents.length > 1 || session.provider !== "wingman"
+												? agentName(session.provider)
+												: undefined
+										}
+										// A project's group names it already.
+										project={group.project ? undefined : otherProject(session)}
+										onOpen={onSessionSelect}
+										onMenu={openMenu}
+									/>
+								))}
 						</section>
 					))}
 			</div>
@@ -469,6 +499,66 @@ export function SessionsPanel({
 				</FloatingMenu>
 			)}
 		</nav>
+	);
+}
+
+/** A project's group: it opens and closes, and another project's opens the window there. */
+function ProjectHeading({
+	group,
+	first,
+	expanded,
+	touch,
+	onToggle,
+	onOpen,
+}: {
+	group: FleetGroup;
+	first: boolean;
+	expanded: boolean;
+	touch: boolean;
+	onToggle: () => void;
+	onOpen?: () => void;
+}) {
+	const unread = group.sessions.some(
+		(session) => session.unread || session.forks.some((fork) => fork.unread),
+	);
+	const Chevron = expanded ? ChevronDown : ChevronRight;
+	return (
+		<div
+			className={`flex items-center gap-1 pr-1.5 pl-2 ${first ? "pt-1" : "pt-3"} pb-1`}
+		>
+			<button
+				type="button"
+				className={`flex min-w-0 flex-1 items-center gap-1 rounded text-left text-[10px] font-medium tracking-wider text-fg-dim uppercase hover:text-fg-muted ${touch ? "min-h-11" : ""}`}
+				onClick={onToggle}
+				aria-expanded={expanded}
+				title={group.project?.uri ? decodeURI(group.project.uri) : group.label}
+			>
+				<Chevron size={11} className="shrink-0" aria-hidden="true" />
+				<FolderOpen size={11} className="shrink-0" aria-hidden="true" />
+				<h3 className="min-w-0 truncate">{group.label}</h3>
+				<span className="font-normal tabular-nums">
+					{group.sessions.length}
+				</span>
+				{!expanded && unread && (
+					<span
+						className="size-1.5 shrink-0 rounded-full bg-info"
+						role="img"
+						aria-label="Unread"
+					/>
+				)}
+			</button>
+			{onOpen && (
+				<button
+					type="button"
+					className={`shrink-0 rounded px-1.5 text-[11px] text-fg-dim hover:bg-bg-hover hover:text-fg ${touch ? "min-h-11" : "py-0.5"}`}
+					onClick={onOpen}
+					aria-label={`Open project ${group.label}`}
+					title={`Open ${group.label} in this window`}
+				>
+					Open
+				</button>
+			)}
+		</div>
 	);
 }
 

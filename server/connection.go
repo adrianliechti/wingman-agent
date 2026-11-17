@@ -469,7 +469,9 @@ func (h *Host) root() (types.RootState, error) {
 		platform = "macos"
 	}
 	resources, _ := json.Marshal(map[string]any{"platform": platform, "architecture": runtime.GOARCH, "cpuCount": runtime.NumCPU()})
-	root := types.RootState{Agents: []types.AgentInfo{}, Meta: map[string]json.RawMessage{"vscode.agentHost.resources": resources}}
+	// A window checks that it reconnected to the host process it started with.
+	host, _ := json.Marshal(map[string]string{"instanceId": h.id})
+	root := types.RootState{Agents: []types.AgentInfo{}, Meta: map[string]json.RawMessage{"vscode.agentHost.resources": resources, "wingman.host": host}}
 	if web != nil {
 		scope := web.scope
 		workspace, _ := json.Marshal(map[string]any{"workspaceId": scope.WorkspaceID, "instanceId": scope.InstanceID})

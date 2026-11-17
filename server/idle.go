@@ -16,6 +16,30 @@ func (s *Project) busy() bool {
 	if s.terminals != nil && slices.ContainsFunc(s.terminals.List(), func(session *terminal.Session) bool { return !session.Exited() }) {
 		return true
 	}
+	return s.agentsBusy(true)
+}
+
+// working reports whether the project works right now: what busy counts,
+// except schedules and terminals that wait at their prompt.
+func (s *Project) working() bool {
+	if s.terminals != nil && slices.ContainsFunc(s.terminals.List(), (*terminal.Session).HasForegroundProcess) {
+		return true
+	}
+	return s.agentsBusy(false)
+}
+
+// Idle reports whether the server's host could stop without cutting anyone
+// off: no client follows it and no project works. Schedules wait for the next
+// start, as they do when the host is closed.
+func (s *Server) Idle() bool {
+	h := s.Project.host
+	h.mu.Lock()
+	clients := len(h.clients)
+	h.mu.Unlock()
+	return clients == 0 && !slices.ContainsFunc(h.loaded(), (*Project).working)
+}
+
+func (s *Project) agentsBusy(schedules bool) bool {
 	s.backendsMu.Lock()
 	var runtimes []*backendRuntime
 	starting := false
@@ -27,10 +51,10 @@ func (s *Project) busy() bool {
 		}
 	}
 	s.backendsMu.Unlock()
-	return starting || slices.ContainsFunc(runtimes, (*backendRuntime).busy)
+	return starting || slices.ContainsFunc(runtimes, func(b *backendRuntime) bool { return b.busy(schedules) })
 }
 
-func (b *backendRuntime) busy() bool {
+func (b *backendRuntime) busy(schedules bool) bool {
 	b.mu.Lock()
 	sessions := maps.Clone(b.sessions)
 	b.mu.Unlock()
@@ -53,8 +77,8 @@ func (b *backendRuntime) busy() bool {
 			return true
 		}
 		// A schedule only fires while its session's project is open.
-		if schedules := local.Schedules(id); schedules != nil {
-			if tasks, err := schedules.List(); err != nil || len(tasks) > 0 {
+		if store := local.Schedules(id); schedules && store != nil {
+			if tasks, err := store.List(); err != nil || len(tasks) > 0 {
 				return true
 			}
 		}

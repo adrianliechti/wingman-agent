@@ -85,15 +85,25 @@ export class AHPConnection {
 	root: RootState = { agents: [] };
 	readonly scope: WorkspaceScope;
 	private readonly dial: () => Promise<AhpTransport>;
+	/** Whether the host still shows the window's project instance. */
+	private readonly verify: () => Promise<boolean>;
 	constructor(
 		scope: WorkspaceScope,
 		dial: () => Promise<AhpTransport> = () =>
 			WebSocketTransport.connect(
 				`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ahp`,
 			),
+		verify: () => Promise<boolean> = async () => {
+			const response = await fetch("/api/workspace", {
+				headers: { "X-Wingman-Instance": scope.instanceId },
+			});
+			// A project that closed while the window was away opens with a new instance.
+			return response.status !== 409;
+		},
 	) {
 		this.scope = scope;
 		this.dial = dial;
+		this.verify = verify;
 	}
 	readonly getConnected = () => this.connected;
 	readonly getReplaced = () => this.replaced;
@@ -198,9 +208,12 @@ export class AHPConnection {
 					}
 					if (message.method === "action")
 						this.action(message.params as ActionEnvelope);
-					else if (message.method === "x-wingman/workspaceChanged")
-						this.emit(message.params.event);
-					else if (message.method?.startsWith("root/session"))
+					else if (message.method === "x-wingman/workspaceChanged") {
+						// Each window hears of its own project's files.
+						const workspace = message.params.workspace;
+						if (!workspace || workspace === this.scope.workspaceId)
+							this.emit(message.params.event);
+					} else if (message.method?.startsWith("root/session"))
 						for (const fn of this.rootListeners)
 							fn(message.method, message.params);
 					// Hand the SDK the parsed message so it is not parsed twice.
@@ -242,17 +255,29 @@ export class AHPConnection {
 				(s) => s.resource === "ahp-root://",
 			);
 			if (!snapshot) throw new Error("Host did not provide its root snapshot");
-			const metadata = (snapshot.state as RootState)._meta?.[
-				"wingman.workspace"
-			] as WorkspaceScope | undefined;
-			if (
-				metadata?.instanceId !== this.scope.instanceId ||
-				metadata.workspaceId !== this.scope.workspaceId
-			) {
+			const meta = (snapshot.state as RootState)._meta;
+			const metadata = meta?.["wingman.workspace"] as
+				| WorkspaceScope
+				| undefined;
+			const host = meta?.["wingman.host"] as
+				| { instanceId?: string }
+				| undefined;
+			// A host serves windows of several projects: a window checks that it
+			// reconnected to the same host and that its project is still the one it showed.
+			const replaced = this.scope.host
+				? host?.instanceId !== this.scope.host ||
+					// The root names the start folder's project, which may be this window's.
+					(metadata?.workspaceId === this.scope.workspaceId &&
+						metadata.instanceId !== this.scope.instanceId) ||
+					!(await this.verify())
+				: metadata?.instanceId !== this.scope.instanceId ||
+					metadata.workspaceId !== this.scope.workspaceId;
+			if (generation !== this.generation || this.stopped) return;
+			if (replaced) {
 				this.replaced = true;
 				throw new Error("Workspace changed. Reload to reconnect.");
 			}
-			this.directory = result.defaultDirectory ?? "";
+			this.directory = this.scope.directory ?? result.defaultDirectory ?? "";
 			this.snapshot(snapshot, root);
 			this.status(true);
 			for (const [uri, observer] of this.observers)

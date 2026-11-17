@@ -105,6 +105,11 @@ Opens the web UI at `http://localhost:9000`, or another available port. Use
 editor, changes, and terminals. Select code to chat about it or preview an AI
 edit. Use **Run | Debug** above a supported entry point to launch a debugger.
 
+The session list shows the sessions of every agent and of every project in
+your home directory you used, with what needs you first. Opening a session of
+another project moves the window there while all agents keep running; see
+[sessions and recovery](docs/sessions.md#resume-a-conversation).
+
 Wingman manages language servers and offers to install missing debuggers when
 you launch them. Your project's runtimes and build tools must be installed
 separately. See the [debugging examples](examples/debug/README.md) for supported

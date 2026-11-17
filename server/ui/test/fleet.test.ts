@@ -146,6 +146,56 @@ test("the list shows what needs the user, then what works, then the rest by day"
 	);
 });
 
+test("the sessions of several projects group by project, the window's first", () => {
+	const project = (name: string) => ({
+		uri: `file:///work/${name}`,
+		displayName: name,
+	});
+	const sessions = [
+		summary("api-new", IDLE | READ, "2026-11-17T11:00:00Z", {
+			project: project("api"),
+		}),
+		summary("here-old", IDLE | READ, "2026-11-10T11:00:00Z", {
+			project: project("here"),
+		}),
+		// The host may spell the window's directory without its links resolved.
+		summary("here-linked", IDLE, "2026-11-17T10:00:00Z", {
+			project: { uri: "file:///link/here", displayName: "here" },
+		}),
+		summary("web", IDLE | READ, "2026-11-16T11:00:00Z", {
+			project: project("web"),
+		}),
+		summary("api-waits", INPUT_NEEDED, "2026-11-17T09:00:00Z", {
+			project: project("api"),
+		}),
+	].map(fleetSession);
+	const here = (session: (typeof sessions)[number]) =>
+		["file:///work/here", "file:///link/here"].includes(
+			session.project?.uri ?? "",
+		);
+	const groups = groupFleet(sessions, { filter: "all", here, now });
+	assert.deepEqual(
+		groups.map((group) => [
+			group.label,
+			group.project?.here,
+			group.sessions.map((session) => session.title),
+		]),
+		[
+			["Needs you", undefined, ["api-waits"]],
+			["here", true, ["here-linked", "here-old"]],
+			["api", false, ["api-new"]],
+			["web", false, ["web"]],
+		],
+	);
+	// One project's sessions keep their days.
+	assert.deepEqual(
+		groupFleet(sessions.filter(here), { filter: "all", here, now }).map(
+			(group) => group.label,
+		),
+		["Today", "This week"],
+	);
+});
+
 test("next visits waiting chats, then unseen ones, and wraps around", () => {
 	const sessions = [
 		summary("seen", IDLE | READ, "2026-11-17T11:50:00Z"),

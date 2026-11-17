@@ -687,7 +687,7 @@
         errEl.textContent = "";
         try {
           await OpenWorkspace(path);
-          window.location.replace("/");
+          window.location.replace("/?project=" + encodeURIComponent(path));
         } catch (e) {
           errEl.textContent = String(e);
           setOpenDisabled(false);
@@ -708,7 +708,7 @@
             return;
           }
           await OpenWorkspace(path);
-          window.location.replace("/");
+          window.location.replace("/?project=" + encodeURIComponent(path));
         } catch (e) {
           errEl.textContent = String(e);
           setOpenDisabled(false);

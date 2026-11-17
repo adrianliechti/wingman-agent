@@ -93,6 +93,8 @@ export interface FleetGroup {
 	id: string;
 	label: string;
 	sessions: FleetSession[];
+	/** The project of a group, when the list holds the sessions of several. */
+	project?: { uri: string; here: boolean };
 }
 export type FleetQuery = {
 	filter: FleetFilter;
@@ -100,6 +102,8 @@ export type FleetQuery = {
 	provider?: string;
 	/** The provider names a search also matches. */
 	providerName?: (provider: string) => string;
+	/** Whether a session belongs to the window's project. */
+	here?: (session: FleetSession) => boolean;
 	now?: Date;
 };
 
@@ -144,20 +148,61 @@ export function groupFleet(
 	);
 	const section = (id: string, label: string, items: FleetSession[]) =>
 		items.length ? [{ id, label, sessions: items }] : [];
+	// The sessions of several projects group by project; one project's by day.
+	const here = query.here ?? (() => true);
+	const projects = new Set(listed.map((s) => projectKey(s, here)));
+	const settled = (items: FleetSession[]) =>
+		projects.size > 1
+			? byProject(items, here)
+			: byDay(items, query.now ?? new Date());
 	switch (query.filter) {
 		case "needs-input":
 			return section("needs-input", "Needs you", waiting);
 		case "running":
 			return section("working", "Working", working);
 		case "archived":
-			return byDay(rest, query.now ?? new Date());
+			return settled(rest);
 		default:
 			return [
 				...section("needs-input", "Needs you", waiting),
 				...section("working", "Working", working),
-				...byDay(rest, query.now ?? new Date()),
+				...settled(rest),
 			];
 	}
+}
+
+/** The window's project is one group however the host spells its directory. */
+function projectKey(
+	session: FleetSession,
+	here: (session: FleetSession) => boolean,
+): string {
+	return here(session) ? "" : (session.project?.uri ?? "");
+}
+
+function byProject(
+	sessions: FleetSession[],
+	here: (session: FleetSession) => boolean,
+): FleetGroup[] {
+	const groups = new Map<string, FleetGroup>();
+	// Newest first, so projects follow their latest session.
+	for (const session of sessions) {
+		const key = projectKey(session, here);
+		let group = groups.get(key);
+		if (!group) {
+			group = {
+				id: `project:${key}`,
+				label: session.project?.displayName ?? "Other",
+				sessions: [],
+				project: { uri: session.project?.uri ?? "", here: key === "" },
+			};
+			groups.set(key, group);
+		}
+		group.sessions.push(session);
+	}
+	// The window's project comes first; a stable sort keeps the others' order.
+	return [...groups.values()].sort(
+		(a, b) => Number(b.project?.here) - Number(a.project?.here),
+	);
 }
 
 function byDay(sessions: FleetSession[], now: Date): FleetGroup[] {

@@ -354,6 +354,14 @@ func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app.Close()
+	// A second project the user opened, which a window may switch to.
+	otherProject := filepath.Join(t.TempDir(), "fleet-other")
+	if err := os.Mkdir(otherProject, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Open(otherProject); err != nil {
+		t.Fatal(err)
+	}
 	web := httptest.NewServer(app)
 	defer web.Close()
 	relay := remote.NewRelay("test-token")
@@ -379,6 +387,7 @@ func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
 		"E2E_INSTANCE="+app.InstanceID(),
 		"E2E_CONTROL_URL="+modelServer.URL,
 		"E2E_WORKSPACE="+workDir,
+		"E2E_OTHER_PROJECT="+otherProject,
 		"E2E_RELAY_URL="+relayWeb.URL,
 		"E2E_PAIR_URL="+pairURL,
 	)

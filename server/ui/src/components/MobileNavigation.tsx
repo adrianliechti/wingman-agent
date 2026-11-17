@@ -17,6 +17,7 @@ interface Props {
 	onSelectSession: (id: string) => void;
 	onDeleteSession: (id: string, title: string) => void;
 	onForkSession: (id: string) => void;
+	onOpenProject: (uri: string, name: string) => void;
 	onNewSession: () => void;
 	onBackToChat?: () => void;
 }
@@ -125,6 +126,10 @@ export function MobileNavigation(props: Props) {
 						onSessionFork={(id) => {
 							close();
 							props.onForkSession(id);
+						}}
+						onOpenProject={(uri, name) => {
+							close();
+							props.onOpenProject(uri, name);
 						}}
 					/>
 				</div>

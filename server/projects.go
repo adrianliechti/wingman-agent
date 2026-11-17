@@ -57,10 +57,51 @@ func (h *Host) loaded() []*Project {
 
 // serves reports whether projects may be opened in a directory.
 func (h *Host) serves(dir string) bool {
-	return slices.ContainsFunc(h.roots, func(root string) bool {
+	h.mu.Lock()
+	roots := h.roots
+	h.mu.Unlock()
+	return slices.ContainsFunc(roots, func(root string) bool {
 		_, ok := relative(root, dir)
 		return ok
 	})
+}
+
+// Allow lets projects open in a directory the host's roots do not cover, such
+// as a folder the user picked in the desktop app, and lets windows show it.
+func (h *Host) Allow(dir string) {
+	dir = canonicalPath(dir)
+	serves := h.serves(dir)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.picked == nil {
+		h.picked = map[string]bool{}
+	}
+	h.picked[dir] = true
+	if !serves {
+		// Appending to a copy keeps slices that readers took unchanged.
+		h.roots = append(slices.Clip(h.roots), dir)
+	}
+}
+
+// known reports whether a browser window may open a project by naming it: one
+// that is open, that has saved sessions, or whose folder the user picked. Any
+// website can send a browser to a window's address, and opening a project
+// starts tools, such as language servers, that may run its code.
+func (h *Host) known(dir string) bool {
+	dir = canonicalPath(dir)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.projects[dir] != nil || h.picked[dir] {
+		return true
+	}
+	for _, aliases := range []map[string]sessionAlias{h.aliases, h.chatAliases} {
+		for _, alias := range aliases {
+			if alias.Project == dir {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // projectAt opens the project of a directory unless it is open already.
@@ -138,7 +179,10 @@ func (h *Host) workingProject(uri *string) (*Project, error) {
 		if p := h.webProject(); p != nil {
 			return p, nil
 		}
-		return h.projectAt(h.roots[0])
+		h.mu.Lock()
+		root := h.roots[0]
+		h.mu.Unlock()
+		return h.projectAt(root)
 	}
 	path, err := ahp.FilePath(*uri)
 	if err != nil {

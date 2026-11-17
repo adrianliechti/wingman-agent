@@ -23,6 +23,7 @@ export type FixtureSession = Saved & {
 		status?: number;
 		activity?: string;
 		changes?: { additions: number; deletions: number; files: number };
+		project?: { uri: string; displayName: string };
 	};
 	settings: ReturnType<typeof emptySession>["settings"];
 	prompts: PendingPrompt[];
@@ -111,6 +112,7 @@ export class AHPFixture {
 				? { activity: session.listed.activity }
 				: {}),
 			...(session.listed?.changes ? { changes: session.listed.changes } : {}),
+			...(session.listed?.project ? { project: session.listed.project } : {}),
 			createdAt: session.updated_at,
 			modifiedAt: session.updated_at,
 			defaultChat: chatURI(session.resource),

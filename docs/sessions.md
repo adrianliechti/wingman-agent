@@ -26,6 +26,21 @@ so that it can list them.
 - The rest follow by day. A blue dot marks a session that finished or failed
   since you last looked at it, and `+12 −3` shows the lines its turns changed.
 
+The list holds the sessions of every project too. With more than one, the rest
+group by project: the window's own first, open, and the others closed, with
+**Open** to show that project in the window. Opening a session of another
+project moves the window there, with its files, changes and terminals; the
+agents of both projects keep running, and approvals in the list work for any
+project. A browser window shows one project at a time, named in its address,
+so several tabs can show several projects. A window opens only projects you
+already used: ones with sessions, or folders the desktop app opened. In the
+desktop app, **Open Folder** adds the folder to the same list.
+
+All desktop app windows share one Wingman that runs in the background, so a
+session started in one window shows up in the lists of all, and closing a
+window stops no agent. Once the last window is closed, Wingman lets running
+turns and commands finish and stops a minute later.
+
 Right-click a session to mark it read or unread, archive it, fork it or delete
 it. Archived sessions leave the list until they need you again; the filter
 button shows them, or only one agent's sessions. Opening a session marks it

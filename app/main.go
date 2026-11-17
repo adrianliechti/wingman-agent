@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -11,8 +10,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/adrianliechti/go-shell"
 
@@ -23,21 +22,35 @@ import (
 //go:embed all:public
 var publicFS embed.FS
 
+// App is one window. Its page comes from the shared host once the window
+// opened a folder, and from the start page until then.
 type App struct {
-	server atomic.Pointer[server.Server]
+	host         atomic.Pointer[hostClient]
+	project      atomic.Pointer[string] // the folder this window opened last
+	openMu       sync.Mutex             // one open or reconnect at a time
+	reconnecting atomic.Bool
 
 	launcher http.Handler
+	// start starts the shared host with a first project; tests run it in process.
+	start func(dir string) (hostInfo, error)
 }
 
-const shutdownTimeout = time.Second
-
 func main() {
+	// The background host shares the executable and runs without a window;
+	// it inherits the PATH its window repaired.
+	if len(os.Args) > 1 && os.Args[1] == hostCommand {
+		if err := runHost(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	// Repair PATH before anything detects agents via exec.LookPath: GUI
 	// launches (Finder/Dock) inherit a minimal PATH that hides Homebrew /
 	// ~/.local/bin CLIs like codex and copilot.
 	ensureShellPath()
 
-	app := &App{}
+	app := &App{start: spawnHost}
 	app.launcher = app.newLauncher()
 
 	err := shell.Run(shell.Options{
@@ -78,11 +91,10 @@ func main() {
 	}
 }
 
-// ServeHTTP hands everything to the workspace server once one is open;
-// until then the launcher (start page + its API) answers. Both share the
-// window's origin — go-shell opens any other origin in the default browser,
-// and staying behind its session cookie keeps the workspace server
-// unreachable for other local processes.
+// ServeHTTP hands everything to the shared host once the window opened a
+// folder; until then the launcher (start page + its API) answers. Both share
+// the window's origin — go-shell opens any other origin in the default
+// browser — and the host answers only windows that know its token.
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// App-level commands stay available after a workspace is mounted so the
 	// native menu can select and switch folders without restarting the shell.
@@ -91,8 +103,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if srv := a.server.Load(); srv != nil {
-		srv.ServeHTTP(w, r)
+	if host := a.host.Load(); host != nil {
+		host.ServeHTTP(w, r)
 		return
 	}
 
@@ -150,8 +162,7 @@ func (a *App) handleRemoveWorkspace(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleOpenWorkspace(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Path    string `json:"path"`
-		Replace bool   `json:"replace"`
+		Path string `json:"path"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil && !errors.Is(err, io.EOF) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -162,37 +173,23 @@ func (a *App) handleOpenWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	current := a.server.Load()
-	if current != nil && request.Replace && r.Header.Get("X-Wingman-Instance") != current.InstanceID() {
-		http.Error(w, "workspace instance changed; reload the workspace", http.StatusConflict)
-		return
-	}
-	if current != nil && !request.Replace {
-		http.Error(w, "workspace already open", http.StatusConflict)
-		return
-	}
-	srv, err := server.New(context.Background(), request.Path, nil)
-
+	// One host serves every window and folder, so the agents of the others
+	// keep running; the window then shows the folder by naming it.
+	a.openMu.Lock()
+	defer a.openMu.Unlock()
+	client, err := a.attach(request.Path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	if !a.server.CompareAndSwap(current, srv) {
-		srv.Close()
-		http.Error(w, "workspace changed while opening", http.StatusConflict)
-		return
-	}
+	a.host.Store(client)
+	a.project.Store(&request.Path)
 
 	_, _ = settings.Update(func(settings *settings.Settings) {
 		settings.AddWorkspace(request.Path)
 	})
 
 	w.WriteHeader(http.StatusNoContent)
-
-	if current != nil {
-		go current.Close()
-	}
 }
 
 func (a *App) handleSelectFolder(w http.ResponseWriter, r *http.Request) {
@@ -206,26 +203,9 @@ func (a *App) handleSelectFolder(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"path": path})
 }
 
-// shutdown gives normal cleanup a brief opportunity to finish without making
-// native app termination depend on a slow protocol handshake or installer.
-func (a *App) shutdown() {
-	srv := a.server.Load()
-	if srv == nil {
-		return
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		srv.Close()
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(shutdownTimeout):
-		log.Println("shutdown timed out, exiting anyway")
-	}
-}
+// shutdown closes the window only: the shared host keeps its agents running
+// for the other windows, and stops by itself once none follows it.
+func (a *App) shutdown() {}
 
 func readPath(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var req struct {

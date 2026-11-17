@@ -120,6 +120,10 @@ export class SessionCatalog {
 				.request("resolveSessionConfig", {
 					channel: "ahp-root://",
 					provider,
+					// It starts in the window's project, whose own sessions it then lists.
+					...(this.ahp.directory
+						? { workingDirectory: this.ahp.directory }
+						: {}),
 				})
 				.then(() => this.reload())
 				.catch((error) => {

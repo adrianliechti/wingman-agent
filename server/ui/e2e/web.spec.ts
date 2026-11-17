@@ -28,8 +28,9 @@ import {
 } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 test.use({
 	extraHTTPHeaders: { "X-Wingman-Instance": process.env.E2E_INSTANCE ?? "" },
@@ -6651,7 +6652,7 @@ test.describe("session list", () => {
 		await composer(page);
 		// The history button counts what waits while the list is closed.
 		await expect(page.locator('[data-needs-you="1"]')).toBeVisible();
-		await expect(page).toHaveTitle("(1) Wingman");
+		await expect(page).toHaveTitle(/^\(1\) .+ – Wingman$/);
 		await openSessions(page);
 		await expect(page.locator("[data-needs-you]")).toHaveCount(0);
 		return { fixture, dispatched, commands, waiting, finished, old };
@@ -6769,5 +6770,71 @@ test.describe("session list", () => {
 				name: "Clear filter Archived",
 			}),
 		).toBeVisible();
+	});
+});
+
+test.describe("session list across projects", () => {
+	// Real windows send their own instance; the suite's would name the start folder.
+	test.use({ extraHTTPHeaders: {} });
+	const IDLE = 1,
+		READ = 32;
+	const ago = (minutes: number) =>
+		new Date(Date.now() - minutes * 60_000).toISOString();
+
+	test("switches the window to another project, whose sessions it lists", async ({
+		page,
+	}) => {
+		const fixture = await ahpFixture(page);
+		// The server opened this second project as the user would, and names
+		// projects by their directory with its links resolved.
+		const other = await realpath(process.env.E2E_OTHER_PROJECT ?? "");
+		const elsewhere = fixture.add("wingman", {
+			id: "fleet-elsewhere",
+			title: "Work in another project",
+			updated_at: ago(2),
+		});
+		elsewhere.listed = {
+			status: IDLE | READ,
+			project: { uri: pathToFileURL(other).href, displayName: "fleet-other" },
+		};
+		const start = await realpath(workspacePath("."));
+		fixture.add("wingman", {
+			id: "fleet-here",
+			title: "Work in this project",
+			updated_at: ago(4),
+		}).listed = {
+			status: IDLE | READ,
+			project: {
+				uri: pathToFileURL(start).href,
+				displayName: start.split("/").pop() ?? "start",
+			},
+		};
+		await composer(page);
+		await openSessions(page);
+		// Another project's group starts closed, below the window's own.
+		const group = sessionsPanel(page).getByRole("button", {
+			name: /^fleet-other/,
+		});
+		await expect(group).toHaveAttribute("aria-expanded", "false");
+		await expect(sessionRow(page, "fleet-here")).toBeVisible();
+		await expect(sessionRow(page, "fleet-elsewhere")).toHaveCount(0);
+		await group.click();
+		await sessionRow(page, "fleet-elsewhere").click();
+		// The window moves to that project and opens the session there.
+		await expect(page).toHaveURL(/[?&]project=/);
+		await expect(sessionTab(page, "fleet-elsewhere")).toBeVisible();
+		// Its files are the other project's, not the first one's.
+		await expect(
+			page.getByTitle("fleet-other", { exact: true }).first(),
+		).toBeVisible();
+		await expect(
+			page.getByRole("treeitem", { name: /theme-preview\.html/ }),
+		).toHaveCount(0);
+		await openSessions(page);
+		// Now the first project is the other one, and its group opens the window back.
+		await expect(
+			sessionsPanel(page).getByRole("button", { name: /^Open project / }),
+		).toBeVisible();
+		await expect(sessionRow(page, "fleet-elsewhere")).toBeVisible();
 	});
 });

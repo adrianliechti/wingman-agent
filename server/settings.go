@@ -22,14 +22,15 @@ func (s *Server) handleWindowTerminalSettings(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	s.settingsMu.Lock()
+	prefs := s.preferences()
+	prefs.settingsMu.Lock()
 	updated, err := settings.Update(func(value *settings.Settings) {
 		value.WindowTerminalPosition = *request.Position
 	})
 	if err == nil {
-		s.terminalPosition.Store(updated.WindowTerminalPosition)
+		prefs.terminalPosition.Store(updated.WindowTerminalPosition)
 	}
-	s.settingsMu.Unlock()
+	prefs.settingsMu.Unlock()
 	if err != nil {
 		http.Error(w, "could not save window.terminal.position", http.StatusInternalServerError)
 		return
@@ -56,14 +57,15 @@ func (s *Server) handleWindowSidebarSettings(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	s.settingsMu.Lock()
+	prefs := s.preferences()
+	prefs.settingsMu.Lock()
 	updated, err := settings.Update(func(value *settings.Settings) {
 		value.WindowSidebarPosition = *request.Position
 	})
 	if err == nil {
-		s.sidebarPosition.Store(updated.WindowSidebarPosition)
+		prefs.sidebarPosition.Store(updated.WindowSidebarPosition)
 	}
-	s.settingsMu.Unlock()
+	prefs.settingsMu.Unlock()
 	if err != nil {
 		http.Error(w, "could not save window.sidebar.position", http.StatusInternalServerError)
 		return

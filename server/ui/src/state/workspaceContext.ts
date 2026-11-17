@@ -39,6 +39,7 @@ export function backendSettingsQuery(backend: string, catalogue = "") {
 			const { schema, values } = await ahp.request("resolveSessionConfig", {
 				channel: "ahp-root://",
 				provider: backend,
+				...(ahp.directory ? { workingDirectory: ahp.directory } : {}),
 			});
 			return configSettings(backend, schema.properties, values, ahp.root);
 		},
