@@ -89,6 +89,7 @@ func TestModelSelectionCrossFamilyFallback(t *testing.T) {
 		utility   string
 	}{
 		{[]string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}, "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"},
+		{[]string{"gpt-6.1-sol", "gpt-6-astra", "gpt-6.2-sol", "gpt-6.2-astra", "gpt-6-luna"}, "gpt-6.2-sol", "gpt-6.2-astra", "gpt-6-luna"},
 		{[]string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"}, "gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"},
 		{[]string{"gpt-6-astra", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"}, "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna"},
 		{[]string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}, "gpt-6-sol", "gpt-6-astra", "gpt-6-luna"},
@@ -232,7 +233,7 @@ func TestEffortDefaultsFollowModelAcrossModes(t *testing.T) {
 }
 
 func TestReasoningOnlyGPTEffortDefaultsAndClampsOverrides(t *testing.T) {
-	for _, id := range []string{"gpt-6-astra", "gpt-6.1-sol", "~openai/GPT-6.1-SOL:latest"} {
+	for _, id := range []string{"gpt-6.2-astra", "gpt-6.2-sol", "~openai/GPT-6.2-SOL:latest", "gpt-6-astra", "gpt-6.1-sol", "~openai/GPT-6.1-SOL:latest"} {
 		t.Run(id, func(t *testing.T) {
 			a := upstreamAgent(id)
 			s := &sessionState{}

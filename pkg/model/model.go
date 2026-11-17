@@ -89,8 +89,7 @@ func fullContextWindowEnabled() bool {
 var gptEfforts = []string{"none", "low", "medium", "high", "xhigh"}
 var gpt56Efforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
 var gpt6SolLunaEfforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
-var gpt6AstraEfforts = []string{"low", "medium", "high", "xhigh", "max"}
-var gpt61SolEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+var gptReasoningOnlyEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 var gpt61TerraEfforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
 var claudeAlwaysThinkingEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 var claudeHaiku55Efforts = []string{"none", "low", "medium", "high", "xhigh", "max"}
@@ -368,6 +367,36 @@ var Models = []Model{
 	// OpenAI
 
 	{
+		ID: "gpt-6.2-astra",
+
+		Namespace: "openai",
+		Name:      "GPT 6.2 Astra",
+		Class:     ClassLarge,
+
+		Output:           128_000,
+		Context:          1_050_000,
+		ContextThreshold: 272_000,
+
+		Effort:    "low",
+		Efforts:   gptReasoningOnlyEfforts,
+		Verbosity: "low",
+	},
+	{
+		ID: "gpt-6.2-sol",
+
+		Namespace: "openai",
+		Name:      "GPT 6.2 Sol",
+		Class:     ClassMedium,
+
+		Output:           128_000,
+		Context:          1_050_000,
+		ContextThreshold: 272_000,
+
+		Effort:    "low",
+		Efforts:   gptReasoningOnlyEfforts,
+		Verbosity: "low",
+	},
+	{
 		ID: "gpt-6-astra",
 
 		Namespace: "openai",
@@ -382,7 +411,7 @@ var Models = []Model{
 		ContextThreshold: 272_000,
 
 		Effort:    "low",
-		Efforts:   gpt6AstraEfforts,
+		Efforts:   gptReasoningOnlyEfforts,
 		Verbosity: "low",
 	},
 	{
@@ -398,7 +427,7 @@ var Models = []Model{
 		ContextThreshold: 272_000,
 
 		Effort:    "low",
-		Efforts:   gpt61SolEfforts,
+		Efforts:   gptReasoningOnlyEfforts,
 		Verbosity: "low",
 	},
 	{

@@ -36,6 +36,8 @@ func TestCurrentProviderModels(t *testing.T) {
 		{"claude-fable-5-2", "Claude Fable 5.2", ClassLarge, 1_000_000, 128_000},
 		{"claude-fable-5-1", "Claude Fable 5.1", ClassLarge, 1_000_000, 128_000},
 		{"claude-mythos-5-1", "Claude Mythos 5.1", ClassLarge, 1_000_000, 128_000},
+		{"gpt-6.2-astra", "GPT 6.2 Astra", ClassLarge, 1_050_000, 128_000},
+		{"gpt-6.2-sol", "GPT 6.2 Sol", ClassMedium, 1_050_000, 128_000},
 		{"gpt-6-astra", "GPT 6 Astra", ClassLarge, 1_050_000, 128_000},
 		{"gpt-6.1-sol", "GPT 6.1 Sol", ClassMedium, 1_050_000, 128_000},
 		{"gpt-6.1-terra", "GPT 6.1 Terra", ClassMedium, 1_050_000, 128_000},
