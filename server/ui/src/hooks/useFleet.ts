@@ -191,8 +191,12 @@ export function useTitleCount(count: number, project?: string) {
 }
 
 const NOTIFICATIONS = "wingman.notifications";
+/** System notifications work in browsers; the desktop app's web view exposes
+ * the API but never grants it, and has no settings to allow it in. */
 export function notificationsSupported() {
-	return typeof window !== "undefined" && "Notification" in window;
+	return (
+		typeof window !== "undefined" && "Notification" in window && !window.shell
+	);
 }
 function notificationsWanted() {
 	try {

@@ -60,10 +60,10 @@ test("a session row takes its default chat's flags and lists its forks", () => {
 		}),
 	);
 	assert.equal(session.id, "ahp-chat:/one");
-	// The default chat rests and is unread; another chat keeps the session busy.
+	// The default chat rests and is unread; a fork that waits speaks for the session.
 	assert.equal(session.state, "idle");
 	assert.equal(session.unread, true);
-	assert.equal(session.sessionState, "working");
+	assert.equal(session.sessionState, "needs-input");
 	assert.equal(session.activity, "Run command: go test");
 	assert.deepEqual(session.changes, { additions: 4, deletions: 1, files: 2 });
 	assert.deepEqual(
@@ -78,6 +78,32 @@ test("a session row takes its default chat's flags and lists its forks", () => {
 		fleetSession(summary("plain", IDLE | READ)).unread,
 		false,
 		"without chat flags the session's are used",
+	);
+});
+
+test("a running fork keeps its session working until it finishes", () => {
+	const forkRunning = (status: number) =>
+		fleetSession(
+			summary("one", IDLE | READ, undefined, {
+				chats: [
+					{ resource: "ahp-chat:/one", title: "", status: IDLE | READ },
+					{ resource: "ahp-chat:/fork", title: "", status },
+				],
+			}),
+		);
+	const running = forkRunning(IN_PROGRESS);
+	assert.equal(running.state, "idle");
+	assert.equal(running.sessionState, "working");
+	assert.deepEqual(fleetCounts([running]), { needsInput: 0, working: 1 });
+	assert.deepEqual(attentionQueue([running]), []);
+
+	const finished = forkRunning(IDLE);
+	assert.deepEqual(attentionQueue([finished]), ["ahp-chat:/fork"]);
+	assert.deepEqual(
+		fleetEvents(new Map([[running.session, running.sessionState]]), [
+			finished,
+		]).map((event) => event.kind),
+		["finished"],
 	);
 });
 

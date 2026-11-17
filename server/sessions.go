@@ -114,6 +114,11 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 	p.host.mu.Unlock()
 	c, err := p.loadController(alias.Backend, alias.Session)
 	if err != nil {
+		// A saved session its agent no longer has, such as one never prompted,
+		// leaves the list instead of failing each time it is opened.
+		if ok && errors.Is(err, errUnknownSession) {
+			p.forgetSavedSession(resource)
+		}
 		return nil, err
 	}
 	title, updated := c.backend.listing(alias.Session)
@@ -157,7 +162,7 @@ func (p *Project) loadController(backend, id string) (*sessionController, error)
 	c.opMu.Unlock()
 	if err != nil {
 		b.discard(id, c)
-		if errors.Is(err, os.ErrNotExist) || err.Error() == "session not found" || errors.Is(err, errSessionDeleted) {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, code.ErrSessionNotFound) || err.Error() == "session not found" || errors.Is(err, errSessionDeleted) {
 			return nil, errUnknownSession
 		}
 		return nil, err
@@ -460,9 +465,13 @@ func (h *Host) listSessions(raw json.RawMessage) (any, error) {
 	}
 	items := []types.SessionSummary{}
 	seen := map[string]bool{}
+	// Agents that list every folder's sessions have them listed by folder,
+	// so the others' are listed by the projects that are open.
+	everywhere := h.listEverywhere(root.Agents)
 	for _, project := range h.loaded() {
-		items = append(items, project.nativeSessions(root.Agents, seen)...)
+		items = append(items, project.nativeSessions(root.Agents, everywhere, seen)...)
 	}
+	items = append(items, h.everywhereSessions(everywhere, seen)...)
 	h.mu.Lock()
 	for _, a := range h.sessions {
 		if !seen[a.resource] {
@@ -500,14 +509,18 @@ func (h *Host) chatSummariesLocked(resource, chat string) []types.SessionChatSum
 	return chats
 }
 
-// nativeSessions lists the sessions of this project's started agents.
-func (p *Project) nativeSessions(agents []types.AgentInfo, seen map[string]bool) []types.SessionSummary {
+// nativeSessions lists the sessions of this project's started agents, except
+// those of agents that listed every folder's.
+func (p *Project) nativeSessions(agents []types.AgentInfo, everywhere map[string][]code.SessionInfo, seen map[string]bool) []types.SessionSummary {
 	type listing struct {
 		backend  string
 		sessions []code.SessionInfo
 	}
 	var listings []listing
 	for _, info := range agents {
+		if _, listed := everywhere[info.Provider]; listed {
+			continue
+		}
 		// Listing must not launch every installed external CLI. An external
 		// backend becomes available here after first use/config discovery.
 		b := p.startedBackend(info.Provider)
@@ -528,38 +541,48 @@ func (p *Project) nativeSessions(agents []types.AgentInfo, seen map[string]bool)
 	items := []types.SessionSummary{}
 	for _, l := range listings {
 		for _, session := range l.sessions {
-			resource := p.canonicalURI(l.backend, session.ID)
-			alias, ok := saved[nativeKey{p.dir, l.backend, session.ID}]
-			if ok {
-				// Forked chats are listed with their session.
-				if alias.Chat != "" {
-					continue
-				}
-				resource = alias.Resource
+			if summary, ok := h.listedSummaryLocked(p.dir, p.info(), p.directoryURI(), l.backend, session, saved, seen); ok {
+				items = append(items, summary)
 			}
-			if a := h.sessions[resource]; a != nil {
-				items = append(items, a.summary())
-				seen[a.resource] = true
-				continue
-			}
-			if ok {
-				if alias.CreationError == "" {
-					if session.UpdatedAt.After(alias.Modified) {
-						alias.Modified = session.UpdatedAt
-					}
-					items = append(items, h.savedSummaryLocked(alias))
-					seen[resource] = true
-				}
-				continue
-			}
-			stamp := session.UpdatedAt.UTC().Format(time.RFC3339Nano)
-			chat := ahp.ChatURI(resource)
-			// No client has followed a session the host never saved, so it holds nothing new.
-			items = append(items, types.SessionSummary{Resource: resource, Provider: l.backend, Title: session.Title, Status: types.SessionStatusIdle | types.SessionStatusIsRead, CreatedAt: stamp, ModifiedAt: stamp, Project: p.info(), WorkingDirectories: []string{p.directoryURI()}, DefaultChat: &chat, Chats: h.chatSummariesLocked(resource, chat)})
-			seen[resource] = true
 		}
 	}
 	return items
+}
+
+// listedSummaryLocked describes a session an agent listed in dir: as the host
+// holds it, as it was saved, or as the agent knows it.
+func (h *Host) listedSummaryLocked(dir string, project *types.ProjectInfo, directory, backend string, session code.SessionInfo, saved map[nativeKey]sessionAlias, seen map[string]bool) (types.SessionSummary, bool) {
+	resource := canonicalSessionURI(backend, session.ID, dir)
+	alias, ok := saved[nativeKey{dir, backend, session.ID}]
+	if ok {
+		// Forked chats are listed with their session.
+		if alias.Chat != "" {
+			return types.SessionSummary{}, false
+		}
+		resource = alias.Resource
+	}
+	if seen[resource] {
+		return types.SessionSummary{}, false
+	}
+	if a := h.sessions[resource]; a != nil {
+		seen[a.resource] = true
+		return a.summary(), true
+	}
+	if ok {
+		if alias.CreationError != "" {
+			return types.SessionSummary{}, false
+		}
+		if session.UpdatedAt.After(alias.Modified) {
+			alias.Modified = session.UpdatedAt
+		}
+		seen[resource] = true
+		return h.savedSummaryLocked(alias), true
+	}
+	stamp := session.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	chat := ahp.ChatURI(resource)
+	seen[resource] = true
+	// No client has followed a session the host never saved, so it holds nothing new.
+	return types.SessionSummary{Resource: resource, Provider: backend, Title: session.Title, Status: types.SessionStatusIdle | types.SessionStatusIsRead, CreatedAt: stamp, ModifiedAt: stamp, Project: project, WorkingDirectories: []string{directory}, DefaultChat: &chat, Chats: h.chatSummariesLocked(resource, chat)}, true
 }
 
 func (a *Chat) command(command Command) error {
@@ -573,8 +596,13 @@ func (a *Chat) command(command Command) error {
 
 // canonicalURI names a native session that no client named; the host finds it by its project.
 func (p *Project) canonicalURI(backend, id string) string {
+	return canonicalSessionURI(backend, id, p.dir)
+}
+
+// canonicalSessionURI names a native session of the project in dir.
+func canonicalSessionURI(backend, id, dir string) string {
 	encode := base64.RawURLEncoding.EncodeToString
-	return "ahp-session:/wingman/" + encode([]byte(backend)) + "/" + encode([]byte(id)) + "/" + encode([]byte(p.dir))
+	return "ahp-session:/wingman/" + encode([]byte(backend)) + "/" + encode([]byte(id)) + "/" + encode([]byte(dir))
 }
 
 func parseCanonicalURI(resource string) (backend, id, dir string, err error) {

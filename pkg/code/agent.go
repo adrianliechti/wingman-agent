@@ -2,6 +2,7 @@ package code
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"time"
 
@@ -10,10 +11,22 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
+// ErrSessionNotFound reports a session its agent does not have: never saved,
+// or removed since.
+var ErrSessionNotFound = errors.New("session not found")
+
 type SessionInfo struct {
 	ID        string
 	Title     string
 	UpdatedAt time.Time
+	// Dir is the session's working directory, when its agent tells it.
+	Dir string
+}
+
+// AllSessionsLister lists the sessions of every folder an agent keeps, each
+// with its directory, as its CLI's resume list does.
+type AllSessionsLister interface {
+	ListAllSessions(ctx context.Context) ([]SessionInfo, error)
 }
 
 type Mode struct {

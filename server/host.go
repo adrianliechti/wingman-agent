@@ -58,6 +58,10 @@ type Host struct {
 	terminalMu  sync.Mutex      // orders terminal creation: a name is claimed in every project at once
 	roots       []string        // directories projects may be opened in; replaced, never changed in place
 	picked      map[string]bool // folders the user chose to open, which windows may show
+	listed      map[string]bool // folders where an agent keeps sessions, which windows may show
+
+	everywhereMu sync.Mutex
+	everywhere   map[string]everywhereListing // agents' sessions of every folder, by provider
 }
 
 func NewHost(ctx context.Context, opts *HostOptions) (*Host, error) {

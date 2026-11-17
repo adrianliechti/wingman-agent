@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -94,7 +95,11 @@ func (h *testHosts) start(dir string) (hostInfo, error) {
 }
 
 func newTestApp(hosts *testHosts) *App {
-	app := &App{start: hosts.start}
+	app := &App{
+		start:       hosts.start,
+		openWindow:  func(map[string]string) error { return errors.New("no windows in tests") },
+		startWindow: func() error { return errors.New("no windows in tests") },
+	}
 	app.launcher = app.newLauncher()
 	return app
 }
@@ -243,6 +248,18 @@ func TestLauncherSmoke(t *testing.T) {
 	}
 	if got := windowPath(t, app, other); !strings.HasPrefix(got, canonical(t, other)+" ") {
 		t.Fatalf("the window of the other folder shows %q", got)
+	}
+
+	// A window that names its project shows it; one that names none, as a new
+	// window opens, shows the start page with its icons.
+	if rec := serve(app, "GET", "/?project="+url.QueryEscape(other), ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id="root"`) {
+		t.Fatalf("the window of a project: %d", rec.Code)
+	}
+	if rec := serve(app, "GET", "/", ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<title>Wingman Agent</title>") {
+		t.Fatalf("a window without a project does not show the start page: %d", rec.Code)
+	}
+	if rec := serve(app, "GET", "/app/icon_dark.svg", ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<svg") {
+		t.Fatalf("start page icon: %d", rec.Code)
 	}
 
 	app.shutdown()
@@ -498,5 +515,39 @@ func TestWindowStartsTheHostInTheBackground(t *testing.T) {
 	}
 	if got := windowPath(t, app, dir); !strings.HasPrefix(got, canonical(t, dir)+" ") {
 		t.Fatalf("the new background host shows %q", got)
+	}
+}
+
+// New Window opens another window of the process on the start page; where a
+// process has a single window, it starts another process of the app.
+func TestNewWindowOpensTheStartPage(t *testing.T) {
+	var opened []map[string]string
+	started := 0
+	app := &App{
+		openWindow: func(params map[string]string) error {
+			opened = append(opened, params)
+			return nil
+		},
+		startWindow: func() error {
+			started++
+			return nil
+		},
+	}
+	app.launcher = app.newLauncher()
+	if rec := serve(app, "POST", "/app/window", "{}"); rec.Code != http.StatusNoContent {
+		t.Fatalf("new window: %d %q", rec.Code, rec.Body.String())
+	}
+	if len(opened) != 1 || len(opened[0]) != 0 || started != 0 {
+		t.Fatalf("opened %v, started %d processes", opened, started)
+	}
+
+	app.openWindow = func(map[string]string) error { return fmt.Errorf("shell: %w", errors.ErrUnsupported) }
+	if rec := serve(app, "POST", "/app/window", "{}"); rec.Code != http.StatusNoContent || started != 1 {
+		t.Fatalf("new window without windows in the process: %d, started %d processes", rec.Code, started)
+	}
+
+	app.startWindow = func() error { return errors.New("no executable") }
+	if rec := serve(app, "POST", "/app/window", "{}"); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("a failed new window: %d", rec.Code)
 	}
 }

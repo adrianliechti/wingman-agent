@@ -349,14 +349,16 @@ async function mockACPBackend(
 
 function sessionsPanel(page: Page) {
 	return page
-		.locator('[data-chat-auxiliary-panel][data-view="sessions"]')
+		.locator("[data-sessions-panel]")
 		.getByRole("navigation", { name: "Sessions", exact: true });
 }
 
+/** Opens the window's session list, which a window remembers open. */
 async function openSessions(page: Page) {
-	await page
-		.getByRole("button", { name: "Show sessions", exact: true })
-		.click();
+	const toggle = page.getByRole("button", { name: /^(Show|Hide) sessions$/ });
+	await expect(toggle).toBeVisible();
+	if ((await toggle.getAttribute("aria-pressed")) !== "true")
+		await toggle.click();
 	await expect(sessionsPanel(page)).toBeVisible();
 }
 
@@ -3523,18 +3525,8 @@ test("keeps scheduled-agent actions above inspector clipping", async ({
 		name: "Show agents",
 		exact: true,
 	});
-	const sessionsButton = page.getByRole("button", {
-		name: /^(Show|Hide) sessions$/,
-	});
 	await expect(showAgentsButton).toBeVisible({ timeout: 7000 });
 	await expect(showAgentsButton).toHaveAttribute("aria-pressed", "false");
-	await expect
-		.poll(async () => {
-			const agentsBox = await showAgentsButton.boundingBox();
-			const sessionsBox = await sessionsButton.boundingBox();
-			return !!(agentsBox && sessionsBox && agentsBox.x < sessionsBox.x);
-		})
-		.toBe(true);
 	await expect(showAgentsButton.locator("svg.animate-pulse")).toHaveCount(1);
 	await showAgentsButton.click();
 	await expect(
@@ -3544,9 +3536,8 @@ test("keeps scheduled-agent actions above inspector clipping", async ({
 		'[data-chat-auxiliary-panel][data-view="agents"]',
 	);
 	await expect(agents).toBeVisible();
-	await expect(
-		page.locator('[data-chat-auxiliary-panel][data-view="sessions"]'),
-	).toHaveCount(0);
+	// The session list belongs to the window and stays open beside them.
+	await expect(sessionsPanel(page)).toBeVisible();
 	await expect
 		.poll(async () => {
 			const agentsBox = await agents.boundingBox();
@@ -3575,6 +3566,99 @@ test("keeps scheduled-agent actions above inspector clipping", async ({
 	await expect(
 		page.getByRole("dialog", { name: "Delete scheduled task?" }),
 	).toBeVisible();
+});
+
+test("deletes a session of the host from the list", async ({ page }) => {
+	const input = await composer(page);
+	await input.fill("render markdown before deleting");
+	await input.press("Enter");
+	await expect(
+		page.getByRole("heading", { name: "Migration result" }),
+	).toBeVisible();
+	await openSessions(page);
+	const rows = () =>
+		sessionsPanel(page)
+			.locator("[data-session-id]")
+			.filter({ hasText: /render markdown before deleting|Migration result/i });
+	await expect(rows()).toHaveCount(1);
+	await rows().click({ button: "right" });
+	await page.getByRole("menuitem", { name: "Delete session" }).click();
+	const dialog = page.getByRole("dialog", { name: "Delete session?" });
+	await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+	await expect(dialog).toBeHidden();
+	await expect(rows()).toHaveCount(0);
+	// The host forgot it too.
+	await page.reload();
+	await openSessions(page);
+	await expect(sessionsPanel(page)).toBeVisible();
+	await expect(rows()).toHaveCount(0);
+});
+
+test("keeps the session list at the left whatever the center shows", async ({
+	page,
+}) => {
+	await composer(page);
+	await openSessions(page);
+	const toolbar = page.getByLabel("Window toolbar");
+	const list = page.locator('[data-layout-panel="sessions"]');
+	await expect(list).toHaveCSS("width", "240px");
+	await expect
+		.poll(async () => (await list.boundingBox())?.x ?? -1)
+		.toBeLessThanOrEqual(1);
+	// It resizes like the side panel, and its titlebar follows.
+	const handle = page.getByRole("separator", { name: "Resize Session List" });
+	const handleBox = await handle.boundingBox();
+	expect(handleBox).not.toBeNull();
+	await page.mouse.move(
+		handleBox!.x + handleBox!.width / 2,
+		handleBox!.y + handleBox!.height / 2,
+	);
+	await page.mouse.down();
+	await page.mouse.move(handleBox!.x + 80, handleBox!.y + 20, { steps: 5 });
+	await page.mouse.up();
+	await expect
+		.poll(async () => (await list.boundingBox())?.width ?? 0)
+		.toBeGreaterThan(300);
+	await expect
+		.poll(async () => {
+			const listBox = await list.boundingBox();
+			const titleBox = await toolbar
+				.locator("[data-titlebar-sessions]")
+				.boundingBox();
+			return !!(
+				listBox &&
+				titleBox &&
+				Math.abs(listBox.width - titleBox.width) < 1
+			);
+		})
+		.toBe(true);
+	const width = (await list.boundingBox())!.width;
+	// A file in the center leaves the list where it is.
+	await page.getByRole("treeitem", { name: /editable\.txt/ }).click();
+	await expect(
+		page.locator('[data-center-tab="file:editable.txt"]'),
+	).toBeVisible();
+	await expect(sessionsPanel(page)).toBeVisible();
+	// The window remembers it open, and as wide.
+	await page.reload();
+	await expect(sessionsPanel(page)).toBeVisible();
+	await expect
+		.poll(async () => Math.round((await list.boundingBox())?.width ?? 0))
+		.toBe(Math.round(width));
+	await page
+		.getByRole("button", { name: "Hide sessions", exact: true })
+		.click();
+	await expect(page.locator("[data-sessions-panel]")).toHaveCount(0);
+	await page.reload();
+	await expect(
+		page.getByRole("button", { name: "Show sessions", exact: true }),
+	).toBeVisible();
+	await expect(page.locator("[data-sessions-panel]")).toHaveCount(0);
+	// Opened again, it takes the width it had.
+	await openSessions(page);
+	await expect
+		.poll(async () => Math.round((await list.boundingBox())?.width ?? 0))
+		.toBe(Math.round(width));
 });
 
 test("uses one compact right side panel with stable tab order", async ({
@@ -3614,11 +3698,15 @@ test("uses one compact right side panel with stable tab order", async ({
 			const panel = await sidePanel.boundingBox();
 			const frameBox = await frame.boundingBox();
 			const firstTab = await openTabs.getByRole("tab").first().boundingBox();
-			if (!panel || !frameBox || !firstTab) return false;
+			const sessions = await toolbar
+				.locator("[data-titlebar-sessions]")
+				.boundingBox();
+			if (!panel || !frameBox || !firstTab || !sessions) return false;
 			return (
 				Math.abs(panel.x + panel.width - page.viewportSize()!.width) <= 1 &&
 				Math.abs(frameBox.x - panel.x) <= 1 &&
-				Math.abs(firstTab.x) <= 1
+				Math.abs(sessions.x) <= 1 &&
+				Math.abs(firstTab.x - sessions.x - sessions.width) <= 1
 			);
 		})
 		.toBe(true);
@@ -3895,7 +3983,7 @@ test("composer hides mode then model as session history narrows the chat", async
 	for (const [width, showMode, showModel] of [
 		[1280, true, true],
 		[900, false, true],
-		[740, false, false],
+		// The session list and the side panel keep their minimums; the chat narrows.
 		[680, false, false],
 		[1280, true, true],
 	] as const) {
@@ -4474,17 +4562,6 @@ test("docks only terminals at the bottom with tabs on the right", async ({
 	const wingmanLogo = page.getByRole("img", { name: "Wingman" });
 	await expect(chatComposer).toBeVisible();
 	await openSessions(page);
-	await expect
-		.poll(async () => {
-			const sessions = await page
-				.locator('[data-chat-auxiliary-panel][data-view="sessions"]')
-				.boundingBox();
-			const divider = await page
-				.locator("[data-terminal-tabs-separator]")
-				.boundingBox();
-			return sessions && divider ? Math.abs(sessions.x - divider.x) : Infinity;
-		})
-		.toBeLessThan(1);
 	await expect
 		.poll(async () => {
 			const surface = await originalSurface.boundingBox();
@@ -6703,6 +6780,19 @@ test.describe("session list", () => {
 			});
 		await page.keyboard.press("Control+Alt+n");
 		await expect(sessionTab(page, "fleet-waiting")).toBeVisible();
+	});
+
+	test("deletes a session from the list", async ({ page }) => {
+		await fleet(page);
+		const old = sessionRow(page, "fleet-old");
+		await expect(old).toBeVisible();
+		await old.click({ button: "right" });
+		await page.getByRole("menuitem", { name: "Delete session" }).click();
+		const dialog = page.getByRole("dialog", { name: "Delete session?" });
+		await expect(dialog).toBeVisible();
+		await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+		await expect(dialog).toBeHidden();
+		await expect(old).toHaveCount(0);
 	});
 
 	test("lists the sessions of agents that were never picked", async ({

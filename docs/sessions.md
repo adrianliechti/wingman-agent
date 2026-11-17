@@ -13,10 +13,18 @@ wingman --resume <session-id>
 wingman --agent codex --continue
 ```
 
-In the browser, open the session list with the history button beside a chat and
-select a conversation. The list holds the sessions of every agent, including
+In the browser, open the session list with the panel button at the left of the
+title bar, or **Show sessions** in the command palette, and select a
+conversation. The list stays at the left whatever the window shows, resizes
+like the side panel, and the window remembers it open and how wide. It holds
+the sessions of every agent, including
 those made in an agent's own CLI: opening the list starts each installed agent
-so that it can list them.
+so that it can list them. Agents that know the sessions of every folder, such
+as Claude and Codex, list all of them, each under its folder, as their CLIs'
+resume lists do. A session its agent no longer has, such as one that never got
+a message, leaves the list when you open it. Deleting a session does not open
+it, so it works for a folder that is gone too. An agent you have not logged in to
+says how to log in, such as Copilot's `copilot login`.
 
 - **Needs you** comes first: sessions that wait for an approval or an answer.
   An approval can be allowed or denied right in the list; a question opens its
@@ -40,18 +48,20 @@ All desktop app windows share one Wingman that runs in the background, so a
 session started in one window shows up in the lists of all, and closing a
 window stops no agent. Once the last window is closed, Wingman lets running
 turns and commands finish and stops a minute later.
+**File › New Window** (`⇧⌘N`, `Ctrl+Shift+N` on Windows) opens another window
+on the start page.
 
 Right-click a session to mark it read or unread, archive it, fork it or delete
 it. Archived sessions leave the list until they need you again; the filter
 button shows them, or only one agent's sessions. Opening a session marks it
 read for every browser and for VS Code.
 
-The history button and the page title count the sessions that need you. Press
+The list's button and the page title count the sessions that need you. Press
 `Ctrl+Alt+N` (`⌃⌥N` on macOS), or search for **Go to next session that needs
 you** in the command palette, to open the next one; after those it visits
-sessions that finished unseen. The bell in the list turns on system
-notifications for when a session needs you, finishes or fails while the page
-is in the background.
+sessions that finished unseen. In a browser, the bell in the list turns on
+system notifications for when a session needs you, finishes or fails while the
+page is in the background; the desktop app's window cannot show them.
 
 The agent picker chooses which agent a new chat uses. Existing sessions keep
 their agent and continue running.

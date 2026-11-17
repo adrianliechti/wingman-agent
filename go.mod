@@ -103,3 +103,5 @@ require (
 )
 
 tool github.com/adrianliechti/go-shell/cmd/appbundle
+
+replace github.com/adrianliechti/go-shell => ../go-shell-new-window

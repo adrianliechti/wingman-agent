@@ -20,12 +20,18 @@ func (s *Project) busy() bool {
 }
 
 // working reports whether the project works right now: what busy counts,
-// except schedules and terminals that wait at their prompt.
+// except schedules and shells that wait at their prompt.
 func (s *Project) working() bool {
-	if s.terminals != nil && slices.ContainsFunc(s.terminals.List(), (*terminal.Session).HasForegroundProcess) {
+	if s.terminals != nil && slices.ContainsFunc(s.terminals.List(), runsCommand) {
 		return true
 	}
 	return s.agentsBusy(false)
+}
+
+// runsCommand reports a terminal that runs a command: one started with its
+// command, or a shell with a command in the foreground.
+func runsCommand(session *terminal.Session) bool {
+	return !session.Exited() && (session.IsCommand() || session.HasForegroundProcess())
 }
 
 // Idle reports whether the server's host could stop without cutting anyone

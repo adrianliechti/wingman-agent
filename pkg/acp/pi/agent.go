@@ -388,7 +388,7 @@ func (a *Agent) loadSession(ctx context.Context, params acpsdk.LoadSessionReques
 	}
 	file, ok := findSessionFile(a.opts.SessionsDir, string(params.SessionId))
 	if !ok {
-		return acpsdk.LoadSessionResponse{}, fmt.Errorf("unknown session %s", params.SessionId)
+		return acpsdk.LoadSessionResponse{}, acp.SessionNotFound(params.SessionId)
 	}
 
 	proc, bridge, err := a.spawnSessionProcess(ctx, cwd, []string{"--session", file.Path}, params.McpServers)

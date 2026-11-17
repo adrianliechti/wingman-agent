@@ -10,6 +10,11 @@ export async function chooseWorkspaceFolder(): Promise<string | undefined> {
 }
 
 /** Opens a folder in the desktop app's host, beside the folders already open. */
+/** Opens another window of the desktop app, on its start page. */
+export async function openNewWindow(): Promise<void> {
+	await fetchOK("/app/window", { method: "POST" });
+}
+
 export async function openWorkspace(path: string): Promise<void> {
 	await fetchOK("/app/workspaces/open", {
 		method: "POST",

@@ -174,6 +174,10 @@ export class SessionCatalog {
 			250,
 		);
 	}
+	/** The summary of a listed session. */
+	summary(session: string): SessionSummary | undefined {
+		return this.sessions.get(session);
+	}
 	/** Removes a session the client disposed before the host confirms it. */
 	forget(session: string) {
 		if (!this.sessions.delete(session)) return;

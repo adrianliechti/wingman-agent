@@ -56,6 +56,17 @@ type inProcessAgent interface {
 	Close() error
 }
 
+// newExternal starts an external ACP agent. A start that fails returns no
+// agent: a nil *acp.Agent in a code.Agent is not nil, and closing it would
+// panic the host.
+func newExternal(ctx context.Context, ws *code.Workspace, def code.AgentDef) (code.Agent, error) {
+	a, err := acp.New(ctx, ws, def)
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
 func wrapInProcess(ctx context.Context, ws *code.Workspace, name string, srv inProcessAgent) (code.Agent, error) {
 	a, err := acp.NewInProcess(ctx, ws, name, srv, srv.SetAgentConnection, srv.Close)
 	if err != nil {
@@ -104,7 +115,7 @@ func detected() []Registration {
 		out = append(out, Registration{
 			ID: ID(name), Name: name,
 			Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
-				return acp.New(ctx, ws, def)
+				return newExternal(ctx, ws, def)
 			},
 		})
 	}
@@ -138,7 +149,7 @@ func configured() ([]Registration, error) {
 		out = append(out, Registration{
 			ID: id, Name: name,
 			Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
-				return acp.New(ctx, ws, def)
+				return newExternal(ctx, ws, def)
 			},
 		})
 	}

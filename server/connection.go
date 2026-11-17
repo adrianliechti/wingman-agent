@@ -650,6 +650,10 @@ func (c *connection) request(req ahp.Request) (any, error) {
 		_, _, err := h.ensureSession(base.Channel)
 		return struct{}{}, err
 	case "disposeSession":
+		// A session no client has open is deleted without loading it.
+		if done, err := h.disposeUnopened(base.Channel); done {
+			return nil, err
+		}
 		a, ch, err := h.ensureSession(base.Channel)
 		if err != nil {
 			return nil, err

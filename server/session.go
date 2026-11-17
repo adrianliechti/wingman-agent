@@ -343,6 +343,7 @@ func (a *Session) chatDeleted(ch *Chat) {
 		a.project.forgetChatAlias(fork.Chat)
 	}
 	a.project.forgetAlias(a.resource)
+	a.project.host.forgetEverywhere()
 	delete(a.project.host.sessions, a.resource)
 	a.project.host.notifyRoot("root/sessionRemoved", types.SessionRemovedParams{Channel: types.RootResourceURI, Session: a.resource})
 }

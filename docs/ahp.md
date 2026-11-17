@@ -106,6 +106,23 @@ the start directory stays open; others open when a window or a session names
 them and close like any project once idle. A window's REST routes refuse the
 chats of other projects.
 
+### Sessions of every folder
+
+`listSessions` asks each started ACP agent once for the sessions of every
+folder (`session/list` without `cwd`) and lists each in its own folder, with
+the canonical URI of that folder's project; other agents list the sessions of
+the open projects. Folders outside the host's roots are left out. The host
+reuses an agent's list for 30 seconds and forgets it when it deletes a
+session. An agent answers a session it does not have with ACP's "resource not
+found" (`-32002`); the host then forgets the saved session, tells clients with
+`root/sessionRemoved`, and answers `SessionNotFound`. "Authentication
+required" (`-32000`) on creating or loading a session makes the host call
+`authenticate` with the login method the agent offered in `initialize`, so it
+takes up a login the user made since, and try once more; otherwise the error
+says how to log in. `disposeSession` of a session no client has open deletes it
+without loading it: an ACP agent deletes it by its id from any folder, and
+Wingman's own agent from where it kept it when the folder is gone.
+
 ### Windows for every project
 
 The web server keeps one window server per project a window shows, on the same
@@ -115,8 +132,8 @@ URI>` opens the project, within the host's roots, and answers its scope.
 Without `project` the answer is the start directory's. Any website can send a
 browser to a window's address, and opening a project starts tools such as
 language servers that may run its code, so a window opens only a project the
-user used: one that is open, has saved sessions, or that the desktop app
-opened; others are refused with 403. Every later request carries the
+user used: one that is open, has saved sessions, holds sessions an agent
+listed, or that the desktop app opened; others are refused with 403. Every later request carries the
 project's instance (`X-Wingman-Instance`, or `instance` on WebSockets, content
 and preview URLs), and the server routes it to that project's window server;
 an instance it does not know is answered with 409, as for a replaced
@@ -144,7 +161,9 @@ wait for the next start, as they do when the app is closed. Before it stops it
 removes its state under the same lock, so it never stops while a window
 connects. A window of another build stops an unused host and starts its own,
 and uses a host in use as it is. A window whose host died starts another, and
-its page reloads its project there.
+its page reloads its project there. **New Window** opens another window of the same
+process on macOS (go-shell's `NewWindow`) and starts another process of the
+app on Windows. A window whose address names no `project` shows the start page.
 
 In the server package, `Host` owns connections, ordered publication, saved
 session identities, and the project registry. `Project` owns the workspace,

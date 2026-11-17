@@ -203,6 +203,24 @@ func (p *Project) forgetChatAlias(chat string) {
 	p.stageAliasLocked(alias, true)
 }
 
+// forgetSavedSession drops a saved session, with its forks, whose agent no
+// longer has it, and tells the clients that list sessions.
+func (p *Project) forgetSavedSession(resource string) {
+	p.host.mu.Lock()
+	if _, live := p.host.sessions[resource]; live {
+		p.host.mu.Unlock()
+		return
+	}
+	for _, fork := range p.host.forksLocked(resource) {
+		p.forgetChatAlias(fork.Chat)
+	}
+	p.forgetAlias(resource)
+	p.host.forgetEverywhere()
+	p.host.notifyRoot("root/sessionRemoved", types.SessionRemovedParams{Channel: types.RootResourceURI, Session: resource})
+	p.host.mu.Unlock()
+	p.saveAliases()
+}
+
 // Caller holds host.mu and flushes persistence after releasing it.
 func (p *Project) forgetAlias(resource string) {
 	alias, ok := p.host.aliases[resource]

@@ -439,9 +439,10 @@ func (a *Agent) resumeSourceFor(cwd string, id acpsdk.SessionId) (resumeSource, 
 		}
 		live.mu.Unlock()
 	}
-	// Claude Code writes a session's own transcript only at its first prompt.
+	// Claude Code writes a session's own transcript only at its first prompt,
+	// so a session never prompted has none to resume.
 	if src.from == string(id) && !sessionExists(cwd, id, a.env) {
-		return resumeSource{}, fmt.Errorf("no on-disk session %s for cwd %s", id, cwd)
+		return resumeSource{}, acp.SessionNotFound(id)
 	}
 	return src, nil
 }

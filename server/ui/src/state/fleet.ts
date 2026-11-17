@@ -25,7 +25,7 @@ export interface FleetChat {
 	changes?: FleetChanges;
 }
 export interface FleetSession extends FleetChat {
-	/** The state of the whole session: a chat that waits or fails speaks for it. */
+	/** The state of the whole session: a chat that waits, works or fails speaks for it. */
 	sessionState: FleetState;
 	session: string;
 	provider: string;
@@ -41,6 +41,17 @@ export function fleetState(status = 1): FleetState {
 	if (status & IN_PROGRESS) return "working";
 	if (status & ERROR) return "failed";
 	return "idle";
+}
+
+const urgency: readonly FleetState[] = [
+	"needs-input",
+	"working",
+	"failed",
+	"idle",
+];
+
+function mostUrgent(states: readonly FleetState[]): FleetState {
+	return urgency.find((state) => states.includes(state)) ?? "idle";
 }
 
 function changesOf(summary?: {
@@ -63,28 +74,35 @@ export function fleetSession(summary: SessionSummary): FleetSession {
 	// The default chat's own flags, when the host listed them, else the session's.
 	const status = own?.status ?? summary.status;
 	const title = summary.title || "Untitled session";
+	const forks = chats
+		.filter((chat) => chat.resource !== defaultChat)
+		.map((chat) => ({
+			id: chat.resource,
+			title: chat.title || `Fork of ${title}`,
+			state: fleetState(chat.status),
+			unread: chat.status !== undefined && (chat.status & IS_READ) === 0,
+			changes: changesOf(chat.changes),
+		}));
 	return {
 		id: defaultChat,
 		session: summary.resource,
 		title,
 		provider: summary.provider,
 		state: fleetState(status),
-		sessionState: fleetState(summary.status),
+		// The host reports the default chat's work only; a running fork keeps
+		// the session working, so it finishes, and notifies, with its last chat.
+		sessionState: mostUrgent([
+			fleetState(summary.status),
+			fleetState(status),
+			...forks.map((fork) => fork.state),
+		]),
 		unread: (status & IS_READ) === 0,
 		archived: (summary.status & IS_ARCHIVED) !== 0,
 		activity: summary.activity || undefined,
 		modifiedAt: summary.modifiedAt,
 		project: summary.project,
 		changes: changesOf(summary.changes ?? own?.changes),
-		forks: chats
-			.filter((chat) => chat.resource !== defaultChat)
-			.map((chat) => ({
-				id: chat.resource,
-				title: chat.title || `Fork of ${title}`,
-				state: fleetState(chat.status),
-				unread: chat.status !== undefined && (chat.status & IS_READ) === 0,
-				changes: changesOf(chat.changes),
-			})),
+		forks,
 	};
 }
 

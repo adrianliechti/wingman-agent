@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,10 @@ type App struct {
 	launcher http.Handler
 	// start starts the shared host with a first project; tests run it in process.
 	start func(dir string) (hostInfo, error)
+	// openWindow opens another window of this process, and startWindow
+	// another process of the app where a process has a single window.
+	openWindow  func(params map[string]string) error
+	startWindow func() error
 }
 
 func main() {
@@ -50,7 +55,7 @@ func main() {
 	// ~/.local/bin CLIs like codex and copilot.
 	ensureShellPath()
 
-	app := &App{start: spawnHost}
+	app := &App{start: spawnHost, openWindow: shell.NewWindow, startWindow: startWindowProcess}
 	app.launcher = app.newLauncher()
 
 	err := shell.Run(shell.Options{
@@ -76,6 +81,7 @@ func main() {
 		// renders the same commands in the web UI and owns their Ctrl shortcuts.
 		FileMenu: []shell.MenuItem{
 			{Title: "New File...", Command: "new-file", Key: "n", Disabled: true},
+			{Title: "New Window", Command: "new-window", Key: "n", Shift: true},
 			{Title: "Open Folder...", Command: "open-folder", Key: "o"},
 			{Separator: true},
 			{Title: "Save", Command: "save", Key: "s", Disabled: true},
@@ -98,7 +104,9 @@ func main() {
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// App-level commands stay available after a workspace is mounted so the
 	// native menu can select and switch folders without restarting the shell.
-	if strings.HasPrefix(r.URL.Path, "/app/") {
+	// A window shows its project by naming it; without one, as a new window
+	// opens, it shows the start page.
+	if strings.HasPrefix(r.URL.Path, "/app/") || r.URL.Path == "/" && !r.URL.Query().Has("project") {
 		a.launcher.ServeHTTP(w, r)
 		return
 	}
@@ -113,14 +121,18 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) newLauncher() http.Handler {
 	public, _ := fs.Sub(publicFS, "public")
+	files := http.FileServer(http.FS(public))
 
 	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.FS(public)))
+	mux.Handle("/", files)
+	// The start page's own files, which stay its once a folder opened.
+	mux.Handle("GET /app/", http.StripPrefix("/app", files))
 
 	mux.HandleFunc("GET /app/workspaces", a.handleWorkspaces)
 	mux.HandleFunc("POST /app/workspaces/remove", a.handleRemoveWorkspace)
 	mux.HandleFunc("POST /app/workspaces/open", a.handleOpenWorkspace)
 	mux.HandleFunc("POST /app/folder", a.handleSelectFolder)
+	mux.HandleFunc("POST /app/window", a.handleNewWindow)
 
 	return server.LocalHostOnly(http.NewCrossOriginProtection().Handler(mux))
 }
@@ -190,6 +202,34 @@ func (a *App) handleOpenWorkspace(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleNewWindow opens another window on the start page. Where a process has
+// a single window, it starts another process of the app, which shares the
+// host all the same.
+func (a *App) handleNewWindow(w http.ResponseWriter, r *http.Request) {
+	err := a.openWindow(nil)
+	if errors.Is(err, errors.ErrUnsupported) {
+		err = a.startWindow()
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// startWindowProcess starts another process of the app, with its own window.
+func startWindowProcess() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(exe)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
 }
 
 func (a *App) handleSelectFolder(w http.ResponseWriter, r *http.Request) {

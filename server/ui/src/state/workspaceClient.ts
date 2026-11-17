@@ -21,6 +21,7 @@ import {
 	ToolCallConfirmationReason,
 } from "./ahpValues.ts";
 import { RpcError } from "@microsoft/agent-host-protocol/client";
+import { errorText } from "../utils/errorText.ts";
 import { AHPConnection } from "./ahpConnection.ts";
 import {
 	AHPSessionProjection,
@@ -270,7 +271,7 @@ export class WorkspaceClient {
 					this.store.set(key, {
 						...emptySession(key),
 						status: "error",
-						error: String(error),
+						error: errorText(error),
 					});
 			};
 			const deleted = () => {
@@ -528,13 +529,21 @@ export class WorkspaceClient {
 	async dispose(key: string) {
 		this.sends.delete(key);
 		const uri = await this.sessionOf(key);
-		const session = await this.ahp.read<SessionState>(uri);
-		if (session.defaultChat && session.defaultChat !== key)
-			await this.ahp.request("disposeChat", { channel: key });
+		// The list tells a session's own chat from a fork, so a listed session
+		// is deleted without loading it: its folder may be gone.
+		const listed = this.catalog.summary(uri);
+		let own: boolean;
+		if (listed) own = (listed.defaultChat ?? sessionToChat(uri)) === key;
 		else {
-			await this.ahp.request("disposeSession", { channel: uri });
-			this.catalog.forget(uri);
+			const session = await this.ahp.read<SessionState>(uri);
+			own = !session.defaultChat || session.defaultChat === key;
 		}
+		if (!own) {
+			await this.ahp.request("disposeChat", { channel: key });
+			return;
+		}
+		await this.ahp.request("disposeSession", { channel: uri });
+		this.catalog.forget(uri);
 	}
 	/** Marks a chat read or unread, or a session with all its chats. */
 	markRead(uri: string, read: boolean): Promise<void> {

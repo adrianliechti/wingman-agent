@@ -58,9 +58,13 @@ func (h *Host) loaded() []*Project {
 // serves reports whether projects may be opened in a directory.
 func (h *Host) serves(dir string) bool {
 	h.mu.Lock()
-	roots := h.roots
-	h.mu.Unlock()
-	return slices.ContainsFunc(roots, func(root string) bool {
+	defer h.mu.Unlock()
+	return h.servesLocked(dir)
+}
+
+// servesLocked is serves for a caller that holds mu.
+func (h *Host) servesLocked(dir string) bool {
+	return slices.ContainsFunc(h.roots, func(root string) bool {
 		_, ok := relative(root, dir)
 		return ok
 	})
@@ -91,7 +95,7 @@ func (h *Host) known(dir string) bool {
 	dir = canonicalPath(dir)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.projects[dir] != nil || h.picked[dir] {
+	if h.projects[dir] != nil || h.picked[dir] || h.listed[dir] {
 		return true
 	}
 	for _, aliases := range []map[string]sessionAlias{h.aliases, h.chatAliases} {
