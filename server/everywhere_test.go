@@ -39,7 +39,7 @@ func (a *everywhereAgent) ListAllSessions(context.Context) ([]code.SessionInfo, 
 
 func TestConcurrentWindowsShareAndInvalidateAgentListing(t *testing.T) {
 	s, _, _ := newProtocolServer(t)
-	h := s.Project.host
+	h := everyProject(s)
 	agent := &everywhereAgent{protocolAgent: &protocolAgent{}, firstList: make(chan struct{}), started: make(chan struct{})}
 	b := s.Project.bindBackend("two", agent)
 	s.Project.backends[b.id] = &backendEntry{runtime: b}
@@ -81,7 +81,7 @@ func (a *everywhereAgent) ListSessions(context.Context) ([]code.SessionInfo, err
 func TestAgentThatListsItsOwnFolderIsListedByProject(t *testing.T) {
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, _, _ := newProtocolServer(t)
-	h := s.Project.host
+	h := everyProject(s)
 	agent := &everywhereAgent{protocolAgent: &protocolAgent{}, ownFolderOnly: true, sessions: []code.SessionInfo{{ID: "here", Title: "In this project"}}}
 	b := s.Project.bindBackend("two", agent)
 	s.Project.backends[b.id] = &backendEntry{runtime: b}
@@ -100,16 +100,21 @@ func TestAgentThatListsItsOwnFolderIsListedByProject(t *testing.T) {
 
 // An agent's sessions of every folder are listed, each in its own folder, so
 // the list holds what the agent's CLI would resume; a window may show their
-// folders. A session that names no folder is left out.
+// folders. A session that names no folder, or one that is gone, is left out:
+// it could not be opened.
 func TestAgentSessionsOfEveryFolderAreListedByFolder(t *testing.T) {
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, _, _ := newProtocolServer(t)
-	h := s.Project.host
+	h := everyProject(s)
 	root := canonicalPath(t.TempDir())
 	other := filepath.Join(root, "other")
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	agent := &everywhereAgent{protocolAgent: &protocolAgent{}, sessions: []code.SessionInfo{
 		{ID: "here", Title: "In this project", Dir: s.Project.dir},
 		{ID: "there", Title: "In another folder", Dir: other},
+		{ID: "removed", Title: "In a folder that is gone", Dir: filepath.Join(root, "removed")},
 		{ID: "nowhere", Title: "Without a folder"},
 	}}
 	b := s.Project.bindBackend("two", agent)
@@ -134,8 +139,10 @@ func TestAgentSessionsOfEveryFolderAreListedByFolder(t *testing.T) {
 	if !ok || there.Resource != canonicalSessionURI("two", "there", other) || there.Project == nil || there.Project.Uri != fileuri.FromPath(other) {
 		t.Fatalf("a session of another folder: %+v", there)
 	}
-	if _, ok := items["Without a folder"]; ok {
-		t.Fatal("a session without a folder is listed")
+	for _, title := range []string{"In a folder that is gone", "Without a folder"} {
+		if _, ok := items[title]; ok {
+			t.Fatalf("%q is listed", title)
+		}
 	}
 	if agent.here.Load() != 0 {
 		t.Fatal("the agent's sessions were listed by project as well")
@@ -157,7 +164,7 @@ func TestAgentSessionsOfEveryFolderAreListedByFolder(t *testing.T) {
 // open: every window starting its own would leave an idle agent per window.
 func TestListingStartsAnAgentOfEveryFolderOnce(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
-	h := s.Project.host
+	h := everyProject(s)
 	root := canonicalPath(t.TempDir())
 	other := filepath.Join(root, "other")
 	if err := os.Mkdir(other, 0o755); err != nil {

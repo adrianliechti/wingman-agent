@@ -168,11 +168,6 @@ func TestHostServesSeveralProjects(t *testing.T) {
 		t.Fatalf("browse outside the home directory: %v", err)
 	}
 
-	// The protocol makes the directory optional; the host's default one is used.
-	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: "ahp-session:/default", Provider: new("wingman")}, nil); err != nil {
-		t.Fatal(err)
-	}
-
 	var config types.ResolveSessionConfigResult
 	if err := client.Request(ctx, "resolveSessionConfig", types.ResolveSessionConfigParams{Channel: types.RootResourceURI, Provider: new("wingman"), WorkingDirectory: &uriA}, &config); err != nil {
 		t.Fatal(err)
@@ -223,7 +218,7 @@ func TestHostServesSeveralProjects(t *testing.T) {
 			t.Fatalf("listed session without its project: %+v", session)
 		}
 	}
-	if len(directories) != 4 || directories["ahp-session:/in-a"] != uriA || directories["ahp-session:/in-b"] != uriB || directories["ahp-session:/through-link"] != uriB || directories["ahp-session:/default"] != fileuri.FromPath(root) {
+	if len(directories) != 3 || directories["ahp-session:/in-a"] != uriA || directories["ahp-session:/in-b"] != uriB || directories["ahp-session:/through-link"] != uriB {
 		t.Fatalf("session list: %v", directories)
 	}
 

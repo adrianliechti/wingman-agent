@@ -69,11 +69,15 @@ export function projectHref(
 	return `${path}?project=${encodeURIComponent(project)}`;
 }
 /** Asks the host for a project's window, which opens the project there. */
-async function requestWorkspace(project: string | null): Promise<Response> {
+async function requestWorkspace(
+	project: string | null,
+	signal?: AbortSignal,
+): Promise<Response> {
 	const response = await fetch(
 		project
 			? `/api/workspace?project=${encodeURIComponent(project)}`
 			: "/api/workspace",
+		{ signal },
 	);
 	if (response.ok) return response;
 	const text = (await response.text()).trim();
@@ -87,8 +91,11 @@ async function requestWorkspace(project: string | null): Promise<Response> {
 }
 /** Opens a project on the host before a window moves there: one that cannot
  * open, such as a folder that is gone, leaves the window where it is. */
-export async function openProject(project: string): Promise<void> {
-	await requestWorkspace(project);
+export async function openProject(
+	project: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	await requestWorkspace(project, signal);
 }
 export async function fetchWorkspace(): Promise<WorkspaceInfo & Bootstrap> {
 	const response = await requestWorkspace(windowProject());

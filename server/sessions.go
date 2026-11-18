@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -501,11 +502,31 @@ func (h *Host) listSessions(raw json.RawMessage) (any, error) {
 			listed = append(listed, listedNative{info.Dir, nativeKey{info.Dir, provider, info.ID}, info})
 		}
 	}
+	// A session whose folder is gone cannot be opened, so it is not listed,
+	// unless its project is open still. The folders are looked at without the
+	// host's lock.
+	gone := map[string]bool{}
+	h.mu.Lock()
+	for _, alias := range h.aliases {
+		if h.projects[alias.Project] == nil {
+			gone[alias.Project] = false
+		}
+	}
+	for _, native := range listed {
+		if h.projects[native.dir] == nil {
+			gone[native.dir] = false
+		}
+	}
+	h.mu.Unlock()
+	findGoneFolders(gone)
 	items := []types.SessionSummary{}
 	seen := map[string]bool{}
 	h.mu.Lock()
 	saved := h.savedIndexLocked()
 	for _, native := range listed {
+		if gone[native.dir] {
+			continue
+		}
 		if summary, ok := h.listedSummaryLocked(native, saved, seen); ok {
 			items = append(items, summary)
 		}
@@ -518,7 +539,7 @@ func (h *Host) listSessions(raw json.RawMessage) (any, error) {
 	}
 	// Saved sessions no agent listed, such as those of projects that are not open, are listed as saved.
 	for resource, alias := range h.aliases {
-		if !seen[resource] && alias.Project != "" && alias.CreationError == "" {
+		if !seen[resource] && alias.Project != "" && alias.CreationError == "" && !gone[alias.Project] {
 			items = append(items, h.savedSummaryLocked(alias))
 		}
 	}
@@ -526,6 +547,32 @@ func (h *Host) listSessions(raw json.RawMessage) (any, error) {
 	slices.SortFunc(items, func(a, b types.SessionSummary) int { return strings.Compare(b.ModifiedAt, a.ModifiedAt) })
 	// Full retained catalog is returned without a cursor; pagination is optional.
 	return types.ListSessionsResult{Items: items}, nil
+}
+
+// findGoneFolders marks the folders that no longer exist. One that cannot be
+// told apart from a missing one, or does not answer in time, such as on a
+// drive that is not connected, counts as there.
+func findGoneFolders(folders map[string]bool) {
+	type answer struct {
+		dir  string
+		gone bool
+	}
+	answers := make(chan answer, len(folders))
+	for dir := range folders {
+		go func() {
+			_, err := os.Stat(dir)
+			answers <- answer{dir, errors.Is(err, os.ErrNotExist)}
+		}()
+	}
+	deadline := time.After(2 * time.Second)
+	for range len(folders) {
+		select {
+		case a := <-answers:
+			folders[a.dir] = a.gone
+		case <-deadline:
+			return
+		}
+	}
 }
 
 // savedSummaryLocked describes a saved session without loading its project.

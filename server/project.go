@@ -46,8 +46,8 @@ type Project struct {
 	fileMonitor     *watch.Monitor
 	skillFiles      *watch.Monitor
 	prevGit         bool
-	prevLSP         bool
-	prevDebug       bool
+	hasLSP          atomic.Bool // language servers and debuggers, as last found:
+	hasDebug        atomic.Bool // finding them looks through the whole folder
 	prevFingerprint uint64
 	workspaceFiles  filewatch.Source // feeds language-server file watchers
 	fileScanning    atomic.Bool
@@ -118,8 +118,6 @@ func (h *Host) newProject(workDir string) (_ *Project, err error) {
 	}
 
 	s.prevGit = ws.IsGitRepo()
-	s.prevLSP = ws.HasLSP()
-	s.prevDebug = s.debugAvailable(serverCtx)
 	s.fileMonitor = watch.New(watch.Options{Active: s.hasClients}, s.checkWorkspace)
 	s.workspaceFiles = filewatch.NewScanner(ws.Root.FS(), ".", filewatch.Options{
 		Recursive: true,
@@ -128,6 +126,15 @@ func (h *Host) newProject(workDir string) (_ *Project, err error) {
 		Limit:     100000,
 	})
 	s.background.Go(func() {
+		// Whether the project has language servers and debuggers is found by
+		// looking through its folder, which takes a while in a large one. The
+		// project opens without waiting, and other projects behind it; a window
+		// that showed it meanwhile hears of what was found.
+		s.hasLSP.Store(ws.HasLSP())
+		s.hasDebug.Store(s.debugAvailable(serverCtx))
+		if (s.hasLSP.Load() || s.hasDebug.Load()) && serverCtx.Err() == nil {
+			s.workspaceChanged(Frame{Type: EvtWorkspaceChanged})
+		}
 		s.fileMonitor.Run(serverCtx)
 	})
 	if !h.disableManagedTools {
@@ -328,11 +335,13 @@ func (p *Project) detach() {
 }
 
 // info is the spec's description of the project, which its sessions carry.
+// It names the project by its directory with the links resolved, as saved
+// sessions do, so that a project started through a link is one project.
 func (p *Project) info() *types.ProjectInfo {
 	if p.workspace == nil {
 		return nil
 	}
-	return projectInfo(p.workspace.RootPath)
+	return projectInfo(p.dir)
 }
 
 func (p *Project) directoryURI() string { return p.fileURI(".") }

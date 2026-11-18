@@ -25,8 +25,9 @@ their CLIs' resume lists do, and run once for that however many windows are
 open. Any other agent is asked in each open project; set `"allFolders": true`
 on its entry in `agents.json` if it lists every folder's sessions when asked
 without one. A session its agent no longer has, such as one that never got
-a message, leaves the list when you open it. Deleting, archiving or marking a
-session does not open it, so it works for a folder that is gone too. An agent
+a message, leaves the list when you open it. A session whose folder no longer
+exists is not listed, since it could not be opened. Deleting, archiving or
+marking a session does not open it. An agent
 you have not logged in to says how to log in, such as Copilot's `copilot login`.
 
 - **Needs you** comes first: sessions that wait for an approval or an answer.

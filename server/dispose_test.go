@@ -40,7 +40,7 @@ func (a *deletingFleetAgent) ListAllSessions(context.Context) ([]code.SessionInf
 func TestDisposeUsesListedProjectAndSessionIdentity(t *testing.T) {
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, _, _ := newProtocolServer(t)
-	h := s.Project.host
+	h := everyProject(s)
 	dir := filepath.Join(canonicalPath(t.TempDir()), "listed")
 	agent := &deletingFleetAgent{&deletingAgent{protocolAgent: &protocolAgent{}}, []code.SessionInfo{{ID: "saved", Dir: dir}}}
 	b := s.Project.bindBackend("two", agent)
@@ -100,10 +100,20 @@ func TestDeletingASessionNoWindowOpenedLoadsNothing(t *testing.T) {
 	b := s.Project.bindBackend("two", agent)
 	s.Project.backends[b.id] = &backendEntry{runtime: b}
 	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(gone, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	alias := sessionAlias{Resource: "ahp-session:/elsewhere", Project: gone, Backend: "two", Session: "native", Created: time.Now()}
 	file := saveTestAlias(t, s, alias)
 	if !listed(t, s.Project.host, alias.Resource) {
 		t.Fatal("the saved session is not listed")
+	}
+	// A session whose folder is gone leaves the list, and is deleted all the same.
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	if listed(t, s.Project.host, alias.Resource) {
+		t.Fatal("a session whose folder is gone is listed")
 	}
 
 	client := protocolTestClient(t, endpoint, "probe")

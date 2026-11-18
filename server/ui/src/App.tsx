@@ -599,6 +599,8 @@ export default function App() {
 		useState<FilePathRequest | null>(null);
 	const [discardRequest, setDiscardRequest] = useState<DiscardRequest>(null);
 	const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
+	/** The move to another project that is still opening it. */
+	const projectSwitch = useRef<AbortController | null>(null);
 	const [debugLauncher, setDebugLauncher] = useState<DebugLauncherSeed | null>(
 		null,
 	);
@@ -1905,27 +1907,30 @@ export default function App() {
 		name: string,
 		chat?: { backend: string; id: string },
 	) => {
-		if (workspaceSwitching) return;
-		setWorkspaceSwitching(true);
+		// A newer choice takes the place of one that is still opening: a project
+		// that is slow to open must not leave the list deaf to the next click.
+		projectSwitch.current?.abort();
+		const attempt = new AbortController();
+		projectSwitch.current = attempt;
 		// A project that takes a moment to open says so.
 		const slow = setTimeout(() => toast({ title: `Opening ${name}…` }), 400);
 		try {
-			await openProject(project);
+			await openProject(project, attempt.signal);
 		} catch (error) {
-			setWorkspaceSwitching(false);
-			toast({
-				title: `Could not open ${name}`,
-				description: errorText(error),
-				tone: "error",
-			});
+			if (!attempt.signal.aborted)
+				toast({
+					title: `Could not open ${name}`,
+					description: errorText(error),
+					tone: "error",
+				});
 			return;
 		} finally {
 			clearTimeout(slow);
 		}
+		if (attempt.signal.aborted) return;
 		client.fleetView.keep();
 		const href = projectHref(project, chat);
 		if (dirtyPaths.size > 0) {
-			setWorkspaceSwitching(false);
 			setDiscardRequest({
 				title: `Switch to ${name}?`,
 				description: "Agents keep running in both projects.",

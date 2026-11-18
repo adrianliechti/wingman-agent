@@ -316,6 +316,36 @@ func TestWindowsShareOneHost(t *testing.T) {
 	}
 }
 
+// A folder that is gone, such as that of a session a list still shows, does
+// not open, and the window opens other folders as before.
+func TestWindowOpensFoldersAfterOneThatIsGone(t *testing.T) {
+	testenv.UserHome(t)
+	testenv.WingmanHome(t)
+	testGateway(t)
+	hosts := newTestHosts(t, hostsThatStay)
+	app := newTestApp(hosts)
+	first, second := t.TempDir(), t.TempDir()
+	gone := filepath.Join(t.TempDir(), "removed")
+	openFolder(t, app, first)
+
+	for _, target := range []string{gone, "file://" + filepath.ToSlash(gone)} {
+		if rec := serve(app, "GET", "/api/workspace?project="+url.QueryEscape(target), ""); rec.Code != http.StatusNotFound {
+			t.Fatalf("the folder that is gone, as %s: %d %s", target, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := serve(app, "POST", "/app/workspaces/open", `{"path":`+jsonString(t, gone)+`}`); rec.Code == http.StatusNoContent {
+		t.Fatal("the launcher opened a folder that is gone")
+	}
+	// The window's own folder, and another one, open after that.
+	if windowPath(t, app, first) == "" || windowPath(t, app, second) == "" {
+		t.Fatal("a folder did not open after one that is gone")
+	}
+	openFolder(t, app, second)
+	if started := hosts.started.Load(); started != 1 {
+		t.Fatalf("%d hosts started", started)
+	}
+}
+
 func TestHostAnswersOnlyItsWindows(t *testing.T) {
 	testenv.UserHome(t)
 	testenv.WingmanHome(t)

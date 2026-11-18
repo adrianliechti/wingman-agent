@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -162,12 +161,12 @@ func TestArchivingNativeSessionSurvivesRestart(t *testing.T) {
 
 // Archiving or marking a session no window has open changes what the host
 // saved of it. Loading it would open its project and resume its agent's
-// thread for every session a user tidies away, and its folder may be gone.
+// thread for every session a user tidies away.
 func TestMarkingASessionNoWindowOpenedLoadsNothing(t *testing.T) {
 	s, _, agent, endpoint := protocolTestServer(t)
 	h := s.Project.host
-	gone := filepath.Join(t.TempDir(), "gone")
-	alias := sessionAlias{Resource: "ahp-session:/elsewhere", Project: gone, Backend: "one", Session: "native", Title: "Elsewhere", Created: time.Now()}
+	elsewhere := canonicalPath(t.TempDir())
+	alias := sessionAlias{Resource: "ahp-session:/elsewhere", Project: elsewhere, Backend: "one", Session: "native", Title: "Elsewhere", Created: time.Now()}
 	file := saveTestAlias(t, s, alias)
 	client := protocolTestClient(t, endpoint, "tidy")
 	saved := func() sessionAlias {
@@ -197,7 +196,7 @@ func TestMarkingASessionNoWindowOpenedLoadsNothing(t *testing.T) {
 	}
 	h.mu.Lock()
 	_, open := h.sessions[alias.Resource]
-	_, project := h.projects[gone]
+	_, project := h.projects[elsewhere]
 	h.mu.Unlock()
 	if open || project {
 		t.Fatalf("marking opened the session (%v) or its project (%v)", open, project)
@@ -208,8 +207,8 @@ func TestMarkingASessionNoWindowOpenedLoadsNothing(t *testing.T) {
 // by the host once it is archived, under the title its agent lists.
 func TestArchivingAListedSessionOfAnotherFolderLoadsNothing(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
-	h := s.Project.host
-	dir := filepath.Join(canonicalPath(t.TempDir()), "other")
+	h := everyProject(s)
+	dir := canonicalPath(t.TempDir())
 	updated := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
 	fleet := &deletingFleetAgent{&deletingAgent{protocolAgent: &protocolAgent{}}, []code.SessionInfo{{ID: "cli", Title: "Made in the CLI", Dir: dir, UpdatedAt: updated}}}
 	b := s.Project.bindBackend("two", fleet)

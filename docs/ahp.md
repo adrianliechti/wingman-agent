@@ -113,8 +113,8 @@ chats of other projects.
 `agents.json`) once for the sessions of every folder (`session/list` without
 `cwd`) and lists each in its own folder, with the canonical URI of that
 folder's project; other agents list the sessions of the open projects.
-Folders the host does not serve are left out, and a `wingman server` asks
-only for its own folder. A client that starts an agent just to have its
+A session whose folder no longer exists is left out unless its project is
+open, and a `wingman server` asks only for its own folder. A client that starts an agent just to have its
 sessions listed says so with `_meta["wingman.listing"]` on
 `resolveSessionConfig`; an agent that lists every folder then runs once, in
 the host's start project, however many windows ask. The host

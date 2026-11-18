@@ -6782,6 +6782,25 @@ test.describe("session list", () => {
 		await expect(sessionTab(page, "fleet-waiting")).toBeVisible();
 	});
 
+	test("opens each session that is clicked, one after another", async ({
+		page,
+	}) => {
+		await fleet(page);
+		for (const id of [
+			"fleet-finished",
+			"fleet-old",
+			"fleet-finished",
+			"fleet-waiting",
+			"fleet-old",
+		]) {
+			await sessionRow(page, id).click();
+			await expect(sessionTab(page, id)).toBeVisible();
+			await expect(
+				sessionRow(page, id).locator('[aria-current="page"]'),
+			).toBeVisible();
+		}
+	});
+
 	test("deletes a session from the list", async ({ page }) => {
 		await fleet(page);
 		const old = sessionRow(page, "fleet-old");
@@ -6966,6 +6985,46 @@ test.describe("session list across projects", () => {
 		await expect(
 			page.getByPlaceholder("Message Wingman…").filter({ visible: true }),
 		).toBeVisible();
+		// The window still moves to a project that opens.
+		const other = await realpath(process.env.E2E_OTHER_PROJECT ?? "");
+		fixture.add("wingman", {
+			id: "fleet-elsewhere",
+			title: "Work in another project",
+			updated_at: ago(2),
+		}).listed = {
+			status: IN_PROGRESS | READ,
+			project: { uri: pathToFileURL(other).href, displayName: "fleet-other" },
+		};
+		// A project that is slow to open does not hold up the next choice.
+		fixture.add("wingman", {
+			id: "fleet-slow",
+			title: "Work in a slow folder",
+			updated_at: ago(3),
+		}).listed = {
+			status: IN_PROGRESS | READ,
+			project: {
+				uri: pathToFileURL("/wingman-e2e/slow-project").href,
+				displayName: "slow-project",
+			},
+		};
+		await page.route(/\/api\/workspace\?project=.*slow-project/, () => {
+			// Never answered: the host is still opening the project.
+		});
+		await page.reload();
+		await openSessions(page);
+		await sessionRow(page, "fleet-gone").click();
+		await expect(
+			page
+				.getByRole("alert")
+				.filter({ hasText: "Could not open removed-project" }),
+		).toBeVisible();
+		await sessionRow(page, "fleet-slow").click();
+		await expect(
+			page.getByRole("status").filter({ hasText: "Opening slow-project" }),
+		).toBeVisible();
+		await sessionRow(page, "fleet-elsewhere").click();
+		await expect(page).toHaveURL(/[?&]project=/);
+		await expect(sessionTab(page, "fleet-elsewhere")).toBeVisible();
 	});
 
 	test("a link to a project that cannot open offers the way back", async ({
@@ -6982,5 +7041,81 @@ test.describe("session list across projects", () => {
 		await expect(
 			page.getByPlaceholder("Message Wingman…").filter({ visible: true }),
 		).toBeVisible();
+	});
+});
+
+test.describe("session list on the host", () => {
+	// Real windows send their own instance; the suite's would name the start folder.
+	test.use({ extraHTTPHeaders: {} });
+
+	/** Sends a first message in a new chat of the window's project and
+	 * returns the chat's id in the list. */
+	async function startSession(
+		page: Page,
+		project: string | null,
+		text: string,
+	) {
+		await page.goto(project ? `/?project=${encodeURIComponent(project)}` : "/");
+		const input = page
+			.getByPlaceholder("Message Wingman…")
+			.filter({ visible: true });
+		await input.fill(text);
+		await input.press("Enter");
+		await expect(
+			page.getByRole("heading", { name: "Migration result" }),
+		).toBeVisible();
+		await expect(page).toHaveURL(/\/wingman\/[^/?]+/);
+		const id = decodeURIComponent(
+			new URL(page.url()).pathname.split("/").filter(Boolean)[1],
+		);
+		return id;
+	}
+	const row = (page: Page, id: string) =>
+		page.locator(`[data-session-id=${JSON.stringify(id)}]`).filter({
+			visible: true,
+		});
+	async function expectOpen(page: Page, id: string, text: string) {
+		await expect(
+			page.locator(`[data-center-tab=${JSON.stringify(`chat:${id}`)}]`),
+		).toBeVisible();
+		await expect(
+			page.getByText(text).filter({ visible: true }).first(),
+		).toBeVisible();
+	}
+
+	test("opens sessions again and again, in the window's project and another", async ({
+		page,
+	}) => {
+		const other = await realpath(process.env.E2E_OTHER_PROJECT ?? "");
+		const first = await startSession(page, null, "render markdown first");
+		const second = await startSession(page, null, "render markdown second");
+		const third = await startSession(page, other, "render markdown third");
+		// Back in the start folder, its sessions open one after another.
+		await page.goto("/");
+		await openSessions(page);
+		for (const [id, text] of [
+			[first, "render markdown first"],
+			[second, "render markdown second"],
+			[first, "render markdown first"],
+			[second, "render markdown second"],
+		]) {
+			await row(page, id).click();
+			await expectOpen(page, id, text);
+		}
+		// A session of the other project moves the window there, and back.
+		const group = (name: RegExp) =>
+			sessionsPanel(page).getByRole("button", { name });
+		for (let round = 0; round < 2; round++) {
+			if ((await row(page, third).count()) === 0)
+				await group(/^fleet-other/).click();
+			await row(page, third).click();
+			await expect(page).toHaveURL(/[?&]project=/);
+			await expectOpen(page, third, "render markdown third");
+			await openSessions(page);
+			await expect(row(page, first)).toBeVisible();
+			await row(page, first).click();
+			await expectOpen(page, first, "render markdown first");
+			await openSessions(page);
+		}
 	});
 });

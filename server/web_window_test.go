@@ -175,6 +175,17 @@ func TestServerOfEveryProjectOpensAnyFolderAfterItsChecks(t *testing.T) {
 	if window := windowOpen(t, s, outside); window.Path != outside {
 		t.Fatalf("the other folder's window: %+v", window)
 	}
+	// Once its folder is removed it shows in no window, though its project
+	// is open still, and other folders open as before.
+	if err := os.RemoveAll(outside); err != nil {
+		t.Fatal(err)
+	}
+	if rec := windowRequest(t, s, http.MethodGet, target, "", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("a removed folder's window: %d %s", rec.Code, rec.Body.String())
+	}
+	if window := windowOpen(t, s, dir); window.InstanceID != s.InstanceID() {
+		t.Fatalf("the start folder's window: %+v", window)
+	}
 }
 
 // A server started for one folder, as `wingman server` is, shows that folder

@@ -220,6 +220,11 @@ func (s *Server) openWindow(project string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A project that is open still after its folder was removed shows in no
+	// window.
+	if _, err := os.Stat(p.dir); err != nil {
+		return nil, err
+	}
 	return s.window(p)
 }
 
@@ -338,16 +343,17 @@ type workspaceResponse struct {
 func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	ws := s.Project.workspace
 	info := workspaceResponse{
-		WorkspaceScope:         s.Project.scope,
-		Namespace:              s.Project.namespace,
-		Protocol:               2,
-		Directory:              s.Project.directoryURI(),
-		ProjectURI:             projectInfo(s.Project.dir).Uri,
-		Name:                   filepath.Base(ws.RootPath),
-		Path:                   ws.RootPath,
-		Shells:                 append([]terminal.Shell{}, terminal.Shells()...),
-		LSP:                    ws.HasLSP(),
-		Debug:                  s.Project.debugAvailable(r.Context()),
+		WorkspaceScope: s.Project.scope,
+		Namespace:      s.Project.namespace,
+		Protocol:       2,
+		Directory:      s.Project.directoryURI(),
+		ProjectURI:     projectInfo(s.Project.dir).Uri,
+		Name:           filepath.Base(ws.RootPath),
+		Path:           ws.RootPath,
+		Shells:         append([]terminal.Shell{}, terminal.Shells()...),
+		// As last found: a window does not wait for a look through the folder.
+		LSP:                    s.Project.hasLSP.Load(),
+		Debug:                  s.Project.hasDebug.Load(),
 		WindowTerminalPosition: s.windowTerminalPosition(),
 		WindowSidebarPosition:  s.windowSidebarPosition(),
 		Platform:               runtime.GOOS,
