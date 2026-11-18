@@ -15,6 +15,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 
 	"github.com/adrianliechti/wingman-agent/internal/provider"
+	"github.com/adrianliechti/wingman-agent/pkg/audio"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
@@ -261,6 +262,16 @@ func (c *Config) Models(ctx context.Context) ([]ModelInfo, error) {
 	return models, nil
 }
 
+// Transcriber returns a speech-to-text client for model on the configured endpoint.
+func (c *Config) Transcriber(model string) *audio.Transcriber {
+	return &audio.Transcriber{Client: *c.client, Model: model}
+}
+
+// Realtime uses the same provider and credentials as the coding agent.
+func (c *Config) Realtime(model string) *audio.Realtime {
+	return &audio.Realtime{Client: *c.client, Model: model}
+}
+
 // ConfigFromEnvironment builds a config from the environment; the caller owns its Telemetry.
 func ConfigFromEnvironment() (*Config, error) {
 	client := createClient()
@@ -353,6 +364,18 @@ func DefaultComplexModel() string {
 // compaction summaries); empty selects the smallest available automatically.
 func DefaultUtilityModel() string {
 	return os.Getenv("WINGMAN_MODEL_UTILITY")
+}
+
+// DefaultTranscribeModel returns the speech-to-text model pinned via
+// WINGMAN_MODEL_TRANSCRIBE; empty selects one from the available models.
+func DefaultTranscribeModel() string {
+	return os.Getenv("WINGMAN_MODEL_TRANSCRIBE")
+}
+
+// DefaultRealtimeModel pins voice conversation to a deployment when discovery
+// is unavailable or a particular speech model is preferred.
+func DefaultRealtimeModel() string {
+	return os.Getenv("WINGMAN_MODEL_REALTIME")
 }
 
 // DefaultEffort returns the reasoning effort requested via WINGMAN_EFFORT.

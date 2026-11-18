@@ -133,6 +133,9 @@ type App struct {
 	clipboardRead  func() ([]clipboard.Content, error)
 	clipboardWrite func(string) error
 
+	voice        voiceState
+	conversation *tuiConversation
+
 	turns           *code.TurnManager
 	queuePaused     bool
 	queueCount      int
@@ -280,6 +283,9 @@ func (a *App) WithTerminal(t *inline.Terminal) {
 // the previous turn. The epoch prevents already-queued UI callbacks from an
 // older activation of the same session from rendering later.
 func (a *App) activateSession(id string) {
+	a.resolveVoicePending()
+	a.endVoice()
+	a.endConversation()
 	if a.dismissPrompt != nil {
 		a.dismissPrompt()
 	}
@@ -822,6 +828,8 @@ func (a *App) Run() error {
 func (a *App) shutdown() {
 	a.stop()
 	a.term.Stop()
+	a.endVoice()
+	a.endConversation()
 	if a.operationCancel != nil {
 		a.operationCancel()
 	}
@@ -1163,13 +1171,16 @@ func (a *App) terminalTitle() string {
 	return "Wingman — " + project
 }
 
+// A voice conversation announces the result itself, and its open microphone
+// would hear the bell as speech and cut that announcement off.
 func (a *App) bellIfUnfocused() {
-	if !a.termFocused {
+	if !a.termFocused && a.conversation == nil {
 		a.term.Bell()
 	}
 }
 
 func (a *App) handlePaste(text string) {
+	a.resolveVoicePending()
 	text = normalizePastedText(text)
 	if text == "" {
 		return
@@ -1212,6 +1223,9 @@ func (a *App) handlePaste(text string) {
 
 func (a *App) handleKey(ev inline.KeyEvent) {
 	defer a.markDraftChanged()
+	if a.handleVoiceKey(ev) {
+		return
+	}
 	if ev.Key != inline.KeyCtrl || ev.Rune != 'c' {
 		a.disarmQuitGate()
 	}

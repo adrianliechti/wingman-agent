@@ -26,10 +26,13 @@ type Options struct {
 	SandboxCredentials bool
 	DisableWebSearch   bool
 	DisableWebFetch    bool
+	DisableVoice       bool
 
 	// Empty role models are selected automatically from available models.
-	ComplexModel string
-	UtilityModel string
+	ComplexModel    string
+	UtilityModel    string
+	TranscribeModel string
+	RealtimeModel   string
 }
 
 // optionsFromEnvironment reads startup settings for DefaultConfig.
@@ -43,8 +46,11 @@ func optionsFromEnvironment() Options {
 		SandboxCredentials:     environmentSwitch("WINGMAN_SANDBOX_CREDENTIALS") != "off",
 		DisableWebSearch:       environmentEnabled("WINGMAN_DISABLE_WEBSEARCH"),
 		DisableWebFetch:        environmentEnabled("WINGMAN_DISABLE_WEBFETCH"),
+		DisableVoice:           environmentEnabled("WINGMAN_DISABLE_VOICE"),
 		ComplexModel:           harness.DefaultComplexModel(),
 		UtilityModel:           harness.DefaultUtilityModel(),
+		TranscribeModel:        harness.DefaultTranscribeModel(),
+		RealtimeModel:          harness.DefaultRealtimeModel(),
 	}
 }
 

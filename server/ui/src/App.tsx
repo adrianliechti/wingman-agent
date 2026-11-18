@@ -2653,6 +2653,11 @@ export default function App() {
 				>
 					<SessionChatPanel
 						key={tab.id}
+						onConversationSession={() =>
+							isDraft(key)
+								? createSessionForDraft(key, tab.id)
+								: Promise.resolve(key)
+						}
 						draftId={tab.id}
 						draft={composerDraft}
 						available={connected && (isDraft(key) || !!sess?.synchronized)}

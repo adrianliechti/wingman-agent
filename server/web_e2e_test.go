@@ -4,6 +4,7 @@ package server
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,12 +21,15 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/remote"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
 type webE2EModel struct {
 	filePath string
 
 	requests      atomic.Int32
+	voiceActive   atomic.Int32
 	toolRequests  atomic.Int32
 	steerRequests atomic.Int32
 
@@ -166,7 +170,20 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/v1/models":
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"object":"list","data":[{"id":"gpt-5.4","object":"model"}]}`)
+		fmt.Fprint(w, `{"object":"list","data":[{"id":"gpt-5.4","object":"model"},{"id":"gpt-transcribe","object":"model"},{"id":"gpt-realtime-test","object":"model"}]}`)
+	case "/v1/realtime":
+		m.handleRealtime(w, r)
+	case "/voice-stats":
+		writeJSON(w, map[string]int32{"active": m.voiceActive.Load()})
+	case "/v1/audio/transcriptions":
+		file, header, err := r.FormFile("file")
+		if err != nil || r.FormValue("model") != "gpt-transcribe" || header.Size <= 44 {
+			http.Error(w, "unexpected transcription request", http.StatusBadRequest)
+			return
+		}
+		file.Close()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"text":"dictated by voice"}`)
 	case "/v1/responses":
 		m.requests.Add(1)
 		body, _ := io.ReadAll(r.Body)
@@ -175,6 +192,13 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch {
+		case strings.Contains(string(body), "voice conversation fixture"):
+			var request struct{ Model string }
+			if json.Unmarshal(body, &request) != nil || request.Model != "gpt-5.4" {
+				http.Error(w, "voice replaced the coding model", http.StatusBadRequest)
+				return
+			}
+			emitE2ETextResponse(w, "msg_voice", "Voice coding task complete.")
 		case strings.Contains(string(body), "progress-only fixture"):
 			if strings.Contains(string(body), "Continue the unfinished task from the saved conversation.") {
 				emitE2ETextResponse(w, "msg_resumed", "Resumed and completed the fixture.")
@@ -239,6 +263,83 @@ func (m *webE2EModel) handler(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+func (m *webE2EModel) handleRealtime(w http.ResponseWriter, r *http.Request) {
+	conn, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.CloseNow()
+	m.voiceActive.Add(1)
+	defer m.voiceActive.Add(-1)
+	input, delegated, result := false, false, false
+	for {
+		var event struct {
+			Type     string `json:"type"`
+			Response struct {
+				ToolChoice string `json:"tool_choice"`
+			} `json:"response"`
+			Item struct {
+				Type    string
+				Content []struct{ Text string }
+			} `json:"item"`
+		}
+		if err := wsjson.Read(r.Context(), conn, &event); err != nil {
+			return
+		}
+		send := func(value any) bool { return wsjson.Write(r.Context(), conn, value) == nil }
+		switch event.Type {
+		case "session.update":
+			if !send(map[string]any{"type": "session.updated"}) {
+				return
+			}
+		case "input_audio_buffer.append":
+			if input {
+				continue
+			}
+			input = true
+			if !send(map[string]any{"type": "input_audio_buffer.speech_started"}) {
+				return
+			}
+			if !send(map[string]any{"type": "input_audio_buffer.speech_stopped"}) || !send(map[string]any{"type": "input_audio_buffer.committed"}) {
+				return
+			}
+		case "conversation.item.create":
+			for _, part := range event.Item.Content {
+				if strings.HasPrefix(part.Text, "[Coding agent]") {
+					result = true
+				}
+			}
+		case "response.create":
+			if !send(map[string]any{"type": "response.created"}) {
+				return
+			}
+			// The reply to the spoken request delegates it to the coding agent.
+			if event.Response.ToolChoice == "auto" && !delegated {
+				delegated = true
+				if !send(map[string]any{"type": "response.done", "response": map[string]any{"status": "completed", "output": []any{map[string]any{"type": "function_call", "name": "coding_agent", "call_id": "voice_task", "arguments": `{"text":"voice conversation fixture"}`}}}}) {
+					return
+				}
+				continue
+			}
+			if result {
+				pcm := make([]byte, 24000*2)
+				for i := 0; i < len(pcm); i += 2 {
+					binary.LittleEndian.PutUint16(pcm[i:], 2000)
+				}
+				if !send(map[string]any{"type": "response.output_audio.delta", "item_id": "voice_reply", "delta": base64.StdEncoding.EncodeToString(pcm)}) {
+					return
+				}
+				if !send(map[string]any{"type": "response.output_audio.done", "item_id": "voice_reply"}) {
+					return
+				}
+			}
+			if !send(map[string]any{"type": "response.done", "response": map[string]any{"status": "completed"}}) {
+				return
+			}
+		}
 	}
 }
 

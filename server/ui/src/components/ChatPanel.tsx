@@ -1,6 +1,16 @@
 import type { MessageAttachment } from "@microsoft/agent-host-protocol";
 import { VirtualTurns } from "./chat/VirtualTurns";
-import { ArrowUp, ListEnd, Loader2, Plus, Square, X } from "lucide-react";
+import {
+	ArrowUp,
+	Headphones,
+	ListEnd,
+	Loader2,
+	MicOff,
+	PhoneOff,
+	Plus,
+	Square,
+	X,
+} from "lucide-react";
 import {
 	useEffect,
 	useEffectEvent,
@@ -19,6 +29,9 @@ import { useToast } from "./ui/Feedback.tsx";
 import { atTextareaEdge } from "../utils/textareaNavigation";
 import { useColorScheme } from "../hooks/useColorScheme";
 import { useCanCompact, useChatCommands } from "../hooks/useChatCommands";
+import { useVoiceAvailable, useVoiceInput } from "../hooks/useVoiceInput";
+import { useConversation } from "../hooks/useConversation";
+import { VoiceMeter } from "./chat/VoiceMeter";
 import {
 	type ChatCommand,
 	sentAttachments,
@@ -50,6 +63,7 @@ import { TurnQueue } from "./TurnQueue";
 import { IncompleteTurnNotice } from "./chat/IncompleteTurnNotice";
 
 export interface ChatPanelProps {
+	onConversationSession?: () => Promise<string>;
 	draft: ComposerDraft;
 	draftId: string;
 	sessionId?: string;
@@ -137,10 +151,14 @@ function wordEndAt(text: string, caret: number): number {
 	return end;
 }
 
+// A Space held this long dictates; a shorter press types a space.
+const SPACE_HOLD_MS = 300;
+
 const composerIconButton =
 	"flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40";
 
 export function ChatPanel({
+	onConversationSession,
 	draft,
 	draftId,
 	sessionId,
@@ -364,6 +382,140 @@ export function ChatPanel({
 		!!skillToken && skillToken.start > 0,
 	);
 	const canCompact = useCanCompact(sessionId);
+
+	const voiceBackend = workspaceClient().backendOf(sessionId ?? "");
+	const catalogue = settings.models.map((m) => m.id).join();
+	const voiceAvailable = useVoiceAvailable(
+		voiceBackend,
+		catalogue,
+		"transcription",
+	);
+	const setTextAndCaret = (text: string, pos: number) => {
+		draft.update({ text });
+		setCaret(pos);
+		requestAnimationFrame(() => {
+			const ta = textareaRef.current;
+			ta?.focus();
+			ta?.setSelectionRange(pos, pos);
+		});
+	};
+	const insertTranscript = (text: string) => {
+		const value = draft.getSnapshot().text;
+		const at = textareaRef.current?.selectionStart ?? value.length;
+		const before = at > 0 && !/\s/.test(value[at - 1]) ? " " : "";
+		const after = at < value.length && !/\s/.test(value[at]) ? " " : "";
+		const insert = before + text + after;
+		setTextAndCaret(
+			value.slice(0, at) + insert + value.slice(at),
+			at + insert.length,
+		);
+	};
+	const voice = useVoiceInput({
+		backend: voiceBackend,
+		onText: insertTranscript,
+		onError: (error) =>
+			toast({
+				title: "Voice input failed",
+				description: error.message,
+				tone: "error",
+			}),
+	});
+	const conversationAvailable = useVoiceAvailable(
+		voiceBackend,
+		catalogue,
+		"conversation",
+	);
+	const conversation = useConversation({
+		backend: voiceBackend,
+		owner: draftId ?? sessionId ?? "",
+		getSession:
+			onConversationSession ??
+			(async () => {
+				if (!sessionId || isDraft(sessionId))
+					throw new Error("Open a chat before starting a voice conversation.");
+				return sessionId;
+			}),
+		onError: (error) =>
+			toast({
+				title: "Voice conversation ended",
+				description: error.message,
+				tone: "error",
+			}),
+		onNotice: (message) =>
+			toast({ title: "Voice conversation", description: message }),
+	});
+	const conversationActive = conversation.phase !== "idle";
+	// With nothing to send, the send button starts a voice conversation instead.
+	const startsVoice =
+		conversationAvailable &&
+		!conversationActive &&
+		!hasDraft &&
+		!editingQueueId;
+	const spaceHold = useRef<{
+		at: number;
+		started: boolean;
+		timer?: ReturnType<typeof setTimeout>;
+	} | null>(null);
+	useLayoutEffect(
+		() => () => {
+			clearTimeout(spaceHold.current?.timer);
+			spaceHold.current = null;
+		},
+		[voiceBackend, draftId],
+	);
+	const endSpaceHold = (transcribe: boolean) => {
+		const hold = spaceHold.current;
+		if (!hold) return;
+		spaceHold.current = null;
+		clearTimeout(hold.timer);
+		if (!hold.started) return;
+		if (transcribe && Date.now() - hold.at >= SPACE_HOLD_MS) void voice.stop();
+		else voice.cancel();
+	};
+	const handleVoiceKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+		if (conversationActive) return false;
+		if (voice.phase === "recording") {
+			e.preventDefault();
+			// Another key ends a dictation, like releasing Space.
+			if (!(e.key === " " && e.repeat)) {
+				spaceHold.current = null;
+				void voice.stop();
+			}
+			return true;
+		}
+		const plainSpace =
+			e.key === " " && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey;
+		if (!plainSpace || !voiceAvailable || showSkills || voice.phase !== "idle")
+			return false;
+		if (e.repeat) {
+			if (spaceHold.current) e.preventDefault();
+			return true;
+		}
+		const ta = e.currentTarget;
+		const atStart = ta.selectionStart === 0 && ta.selectionEnd === 0;
+		const hold: NonNullable<typeof spaceHold.current> = {
+			at: Date.now(),
+			started: atStart,
+		};
+		spaceHold.current = hold;
+		// Leading spaces do nothing, so at the start Space only dictates.
+		if (atStart) {
+			e.preventDefault();
+			voice.start();
+			return true;
+		}
+		hold.timer = setTimeout(() => {
+			if (spaceHold.current !== hold) return;
+			hold.started = true;
+			const value = draft.getSnapshot().text;
+			const c = ta.selectionStart;
+			// The typed space separates the transcript unless it doubles one.
+			if (c >= 2 && value[c - 1] === " " && value[c - 2] === " ")
+				setTextAndCaret(value.slice(0, c - 1) + value.slice(c), c - 1);
+			voice.start();
+		}, SPACE_HOLD_MS);
+		return false;
+	};
 
 	const skillQuery = skillToken ? skillToken.query.toLowerCase() : null;
 	const skillMatches = useMemo(() => {
@@ -653,8 +805,9 @@ export function ChatPanel({
 		});
 	};
 
-	const handleKeyDown = (e: React.KeyboardEvent) => {
+	const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
 		if (e.nativeEvent.isComposing) return;
+		if (handleVoiceKey(e)) return;
 		if (showSkills) {
 			switch (e.key) {
 				case "ArrowDown":
@@ -681,6 +834,12 @@ export function ChatPanel({
 		if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
 			void handleSubmit(e.altKey ? "follow_up" : undefined);
+		}
+		if (e.key === "Escape" && conversationActive) {
+			e.preventDefault();
+			e.stopPropagation();
+			conversation.stop();
+			return;
 		}
 		if (e.key === "Escape" && isActive) {
 			onCancel();
@@ -1005,6 +1164,18 @@ export function ChatPanel({
 						<div
 							ref={setComposer}
 							data-chat-composer
+							onKeyDown={(event) => {
+								if (
+									event.key === "Escape" &&
+									!event.defaultPrevented &&
+									conversationActive &&
+									event.currentTarget.contains(event.target as Node)
+								) {
+									event.preventDefault();
+									event.stopPropagation();
+									conversation.stop();
+								}
+							}}
 							className="relative rounded-xl"
 						>
 							{editingQueueId && (
@@ -1110,7 +1281,12 @@ export function ChatPanel({
 										setCaret((e.target as HTMLTextAreaElement).selectionStart)
 									}
 									onKeyDown={handleKeyDown}
+									onKeyUp={(e) => {
+										if (e.key === " ") endSpaceHold(true);
+									}}
+									onBlur={() => endSpaceHold(true)}
 									onPaste={handlePaste}
+									data-dictation={voiceAvailable ? voice.phase : undefined}
 									placeholder={placeholder}
 									rows={1}
 								/>
@@ -1221,20 +1397,114 @@ export function ChatPanel({
 											<Square size={11} fill="currentColor" />
 										</button>
 									)}
+									{conversationActive && (
+										// Read out for screen readers; the meter and icons show it.
+										<span role="status" className="sr-only">
+											{conversation.phase === "connecting"
+												? "Connecting…"
+												: conversation.muted
+													? "Muted"
+													: conversation.phase === "speaking"
+														? "Speaking…"
+														: "Listening…"}
+										</span>
+									)}
+									{conversation.phase === "connecting" && (
+										<span className="flex h-7 w-7 items-center justify-center text-fg-muted">
+											<Loader2 size={14} className="animate-spin" />
+										</span>
+									)}
+									{conversationActive &&
+										conversation.phase !== "connecting" && (
+											// The level meter is the mute button; hovering shows what a click does.
+											<button
+												type="button"
+												className={`group ${composerIconButton}`}
+												onClick={conversation.toggleMuted}
+												aria-label={
+													conversation.muted
+														? "Unmute microphone"
+														: "Mute microphone"
+												}
+												title={
+													conversation.muted
+														? "Unmute microphone"
+														: "Mute microphone"
+												}
+											>
+												{!conversation.muted && (
+													<span className="group-hover:hidden group-focus-visible:hidden">
+														<VoiceMeter level={conversation.level} />
+													</span>
+												)}
+												<MicOff
+													size={14}
+													className={
+														conversation.muted
+															? undefined
+															: "hidden group-hover:block group-focus-visible:block"
+													}
+												/>
+											</button>
+										)}
+									{conversationActive && (
+										<button
+											type="button"
+											className={composerIconButton}
+											onMouseDown={(e) => e.preventDefault()}
+											onClick={conversation.stop}
+											aria-label="End voice conversation"
+											title="End voice conversation · Esc"
+										>
+											<PhoneOff size={14} />
+										</button>
+									)}
+									{voice.phase !== "idle" && (
+										<span
+											role="status"
+											className="flex h-7 w-7 items-center justify-center text-fg-muted"
+										>
+											<span className="sr-only">
+												{voice.phase === "recording"
+													? "Listening…"
+													: "Transcribing…"}
+											</span>
+											{voice.phase === "recording" ? (
+												<VoiceMeter level={voice.level} />
+											) : (
+												<Loader2 size={14} className="animate-spin" />
+											)}
+										</span>
+									)}
 									<button
 										type="button"
 										className="flex h-7 w-7 items-center justify-center rounded-full bg-fg text-bg transition-colors hover:bg-fg-muted disabled:bg-bg-active disabled:text-fg-dim"
-										onClick={() => void handleSubmit()}
-										disabled={blocked || !hasDraft}
+										// Starting voice keeps focus in the composer so Esc can end it.
+										onMouseDown={
+											startsVoice ? (e) => e.preventDefault() : undefined
+										}
+										onClick={() => {
+											if (!startsVoice) return void handleSubmit();
+											endSpaceHold(false);
+											voice.cancel();
+											void conversation.start();
+										}}
+										disabled={startsVoice ? !available : blocked || !hasDraft}
 										title={
-											editingQueueId
-												? "Update queued message (Enter)"
-												: isActive
-													? "Steer current turn (Enter) · Queue with Alt+Enter"
-													: "Send (Enter)"
+											startsVoice
+												? "Start voice conversation"
+												: editingQueueId
+													? "Update queued message (Enter)"
+													: isActive
+														? "Steer current turn (Enter) · Queue with Alt+Enter"
+														: "Send (Enter)"
 										}
 									>
-										<ArrowUp size={14} />
+										{startsVoice ? (
+											<Headphones size={14} />
+										) : (
+											<ArrowUp size={14} />
+										)}
 									</button>
 								</div>
 							</div>

@@ -12,7 +12,7 @@ func builtinGroup(name string) string {
 	switch name {
 	case "/diff", "/problems", "/context":
 		return "Workspace"
-	case "/resume", "/fork", "/recap", "/clear", "/copy", "/export", "/queue", "/discard":
+	case "/resume", "/fork", "/recap", "/clear", "/copy", "/export", "/queue", "/discard", "/voice":
 		return "Session"
 	case "/model", "/agent", "/plan", "/unattended", "/agents":
 		return "Agent"

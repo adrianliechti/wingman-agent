@@ -70,6 +70,8 @@ func main() {
 		MinWidth:  640,
 		MinHeight: 400,
 
+		Microphone: true,
+
 		TitleBar: shell.TitleBarOptions{
 			Overlay:         true,
 			ControlsOffsetX: 6,

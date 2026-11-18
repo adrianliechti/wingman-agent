@@ -23,8 +23,8 @@ require (
 	github.com/openai/openai-go/v3 v3.98.0
 	github.com/rivo/uniseg v0.4.7
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/sahilm/fuzzy v0.1.3
 	github.com/rogpeppe/go-internal v1.14.1
+	github.com/sahilm/fuzzy v0.1.3
 	github.com/sergi/go-diff v1.4.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/yuin/goldmark v1.8.7

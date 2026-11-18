@@ -41,7 +41,12 @@ func (c slashCommand) Label() string {
 }
 
 func (a *App) builtinCommands() []slashCommand {
-	cmds := []slashCommand{
+	var cmds []slashCommand
+	// /voice is listed only where a conversation can start, or to end one.
+	if _, ok := a.realtimeModel(); ok || a.conversation != nil {
+		cmds = append(cmds, slashCommand{Name: "/voice", Hint: "[headphone]", Desc: "Start or end voice; headphone allows spoken interruptions", Busy: true, Run: (*App).toggleConversation, RunArgs: (*App).runVoiceCommand})
+	}
+	cmds = append(cmds, []slashCommand{
 		{Name: "/queue", Desc: "Resume, edit or remove queued inputs", Busy: true, Run: (*App).showTurnQueue, RunArgs: (*App).runQueueCommand},
 		{Name: "/discard", Desc: "Discard the current draft", Busy: true, Run: func(a *App) {
 			a.editor.SetText("")
@@ -54,7 +59,7 @@ func (a *App) builtinCommands() []slashCommand {
 		{Name: "/model", Desc: "Select AI model and effort", Run: (*App).showModelPicker},
 		{Name: "/copy", Desc: "Copy a response, code block, or blockquote", Busy: true, Run: (*App).showCopyPicker},
 		{Name: "/export", Desc: "Export conversation as Markdown (optional file path)", Busy: true, Run: (*App).showExportPicker, RunArgs: (*App).exportTranscript},
-	}
+	}...)
 	modes, _ := a.agent.Modes(a.sessionID)
 	for _, mode := range modes {
 		description := fmt.Sprintf("Switch to %s mode", mode.Name)

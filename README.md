@@ -188,10 +188,36 @@ The built-in Wingman agent reads provider settings from environment variables:
 | `WINGMAN_TOKEN` | Gateway authentication token, if required |
 | `WINGMAN_MODEL` | Default model; also selectable with `/model` |
 | `WINGMAN_EFFORT` | Reasoning effort; also selectable with `/model` |
+| `WINGMAN_MODEL_TRANSCRIBE` | Optional model for microphone dictation |
+| `WINGMAN_MODEL_REALTIME` | Optional Realtime API model for voice conversations |
+| `WINGMAN_DISABLE_VOICE` | Disable dictation and voice conversations |
 
 Provider priority is `WINGMAN_URL`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, then
 Ollama. With none set, Wingman uses `http://localhost:4242/v1`. A gateway must run
 separately; `wingman server` starts the web UI.
+
+Voice conversations use a separate speech model while the selected coding model
+continues handling files and tools. With an empty message, the send button in
+the web or desktop composer starts voice; in a local terminal, run `/voice`.
+Speak requests and corrections normally; corrections steer running work. Escape
+ends voice, and coding work continues unless you ask to cancel the task.
+Status questions use a read-only tool and do not add a coding-chat turn or steer work.
+While voice is connected, completed coding turns trigger a spoken summary,
+including work started in chat.
+
+The provider must support the OpenAI Realtime API over WebSockets, including
+server VAD with `create_response: false` and per-response `tool_choice` and
+`instructions` overrides. Wingman
+discovers models with `realtime` in their name, or you can set
+`WINGMAN_MODEL_REALTIME=gpt-realtime-2.1`. GPT-Live uses a different protocol.
+The web UI streams audio and supports speech interruptions and microphone mute.
+Terminal playback buffers and queues spoken answers. It pauses microphone
+forwarding during playback and briefly afterward to prevent speaker audio from
+being treated as user input; listening resumes automatically. Use `/voice headphone`
+with headphones to keep listening during playback and allow spoken interruptions.
+Playback uses `afplay` on macOS, PowerShell on
+Windows, or `pw-play`, `paplay`, or `aplay` on Linux. Microphone access is required;
+remote SSH terminals do not capture the remote machine's microphone.
 
 To route another coding CLI through your Wingman gateway, use
 `wingman run claude`, `wingman run codex`, or another supported target.
