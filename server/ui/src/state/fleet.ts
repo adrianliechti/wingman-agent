@@ -317,6 +317,49 @@ export function groupFleet(
 	}
 }
 
+/** The sessions that wait or work: a list shows every one of them. */
+export const LIVE_GROUPS: ReadonlySet<string> = new Set([
+	"needs-input",
+	"working",
+]);
+
+/** The sessions a group shows: its latest ones, and the session of the chat
+ * on screen wherever it stands, so that a list never hides where the user
+ * is. A project's latest sessions are the ones that are opened, and a list of
+ * thousands stays light. */
+export function shownSessions(
+	group: FleetGroup,
+	limit: number,
+	current: string,
+): readonly FleetSession[] {
+	if (LIVE_GROUPS.has(group.id) || group.sessions.length <= limit)
+		return group.sessions;
+	const rows = group.sessions.slice(0, limit);
+	const index = group.sessions.findIndex(
+		(session) =>
+			session.id === current ||
+			session.forks.some((fork) => fork.id === current),
+	);
+	return index >= limit ? [...rows, group.sessions[index]] : rows;
+}
+
+/** The groups a list shows: of the other projects the ones used last, as
+ * many as `limit`. It also says how many wait behind them. */
+export function shownGroups(
+	groups: readonly FleetGroup[],
+	limit: number,
+): { groups: readonly FleetGroup[]; hidden: number } {
+	const others = groups.filter((group) => group.project?.here === false);
+	if (others.length <= limit) return { groups, hidden: 0 };
+	const kept = new Set(others.slice(0, limit));
+	return {
+		groups: groups.filter(
+			(group) => group.project?.here !== false || kept.has(group),
+		),
+		hidden: others.length - limit,
+	};
+}
+
 /** The window's project is one group however the host spells its directory. */
 function projectKey(
 	session: FleetSession,

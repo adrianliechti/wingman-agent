@@ -38,13 +38,20 @@ you have not logged in to says how to log in, such as Copilot's `copilot login`.
   beside it, so an approval is given knowing where it applies.
 - The rest follow by day. A blue dot marks a session that finished or failed
   since you last looked at it, and `+12 −3` shows the lines its turns changed.
+  A session at rest takes one line, with its agent's icon when you use several.
+
+A group shows its eight latest sessions; **Show more** lists the rest, and the
+session you have open always shows. Headings stay in view while you scroll
+through their group.
 
 `wingman server` shows the folder it started in: its list holds that folder's
 sessions and its window opens no other folder. The desktop app shows every
 project. Its list holds the sessions of all of them, in any folder on any
 drive. With more than one, the rest
 group by project: the window's own first, open, and the others closed, with
-**Open** to show that project in the window. Opening a session of another
+a folder icon, which appears on its heading, to show that project in the window.
+The eight projects used last are listed; **Show more projects** lists the
+others, and a search looks through all of them. Opening a session of another
 project moves the window there, with its files, changes and terminals; the
 agents of both projects keep running, and approvals in the list work for any
 project. The list keeps its filter, search and open groups through the move,

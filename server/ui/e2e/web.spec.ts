@@ -6801,6 +6801,32 @@ test.describe("session list", () => {
 		}
 	});
 
+	test("shows a long group's latest sessions and the rest on request", async ({
+		page,
+	}) => {
+		const fixture = await ahpFixture(page);
+		for (let index = 0; index < 12; index++)
+			fixture.add("wingman", {
+				id: `fleet-long-${index}`,
+				title: `Long list ${index}`,
+				updated_at: new Date(Date.UTC(2020, 0, 28 - index)).toISOString(),
+			});
+		await composer(page);
+		await openSessions(page);
+		const rows = sessionsPanel(page)
+			.locator("[data-session-id]")
+			.filter({ hasText: /^Long list / });
+		await expect(rows).toHaveCount(8);
+		await expect(rows.first()).toContainText("Long list 0");
+		await sessionsPanel(page)
+			.getByRole("button", { name: "Show 4 more" })
+			.click();
+		await expect(rows).toHaveCount(12);
+		await expect(
+			sessionsPanel(page).getByRole("button", { name: /^Show \d+ more/ }),
+		).toHaveCount(0);
+	});
+
 	test("deletes a session from the list", async ({ page }) => {
 		await fleet(page);
 		const old = sessionRow(page, "fleet-old");

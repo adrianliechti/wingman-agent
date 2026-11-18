@@ -15,6 +15,8 @@ import {
 	nextAttention,
 	relativeTime,
 	restoreFleetView,
+	shownGroups,
+	shownSessions,
 	storeFleetView,
 	DEFAULT_FLEET_VIEW,
 	type FleetState,
@@ -468,4 +470,58 @@ test("a window that leaves its project keeps it open in the list, with or withou
 		new FleetViewStore(none, a).getSnapshot(),
 		DEFAULT_FLEET_VIEW,
 	);
+});
+
+test("a group shows its latest sessions, and the one on screen wherever it stands", () => {
+	const sessions = Array.from({ length: 12 }, (_, index) =>
+		fleetSession(
+			summary(`s${index}`, IDLE | READ, `2026-11-${17 - index}T10:00:00Z`),
+		),
+	);
+	const [group] = groupFleet(sessions, { filter: "all", now });
+	const titles = (current = "") =>
+		shownSessions({ ...group, id: "older", sessions }, 3, current).map(
+			(session) => session.title,
+		);
+	assert.deepEqual(titles(), ["s0", "s1", "s2"]);
+	assert.deepEqual(titles("ahp-chat:/s1"), ["s0", "s1", "s2"]);
+	assert.deepEqual(titles("ahp-chat:/s9"), ["s0", "s1", "s2", "s9"]);
+	// Those that wait or work are all shown.
+	assert.equal(
+		shownSessions({ ...group, id: "working", sessions }, 3, "").length,
+		12,
+	);
+	assert.equal(shownSessions({ ...group, sessions }, 20, "").length, 12);
+});
+
+test("the projects used last are listed, the others wait behind one line", () => {
+	const project = (name: string) => ({
+		uri: `file:///work/${name}`,
+		displayName: name,
+	});
+	const sessions = ["here", "a", "b", "c", "d"].map((name, index) =>
+		fleetSession(
+			summary(name, IDLE | READ, `2026-11-${17 - index}T10:00:00Z`, {
+				project: project(name),
+			}),
+		),
+	);
+	const waiting = fleetSession(
+		summary("waiting", INPUT_NEEDED | READ, "2026-11-01T10:00:00Z", {
+			project: project("d"),
+		}),
+	);
+	const groups = groupFleet([...sessions, waiting], {
+		filter: "all",
+		here: (session) => session.project?.displayName === "here",
+		ownProject: "file:///work/here",
+		now,
+	});
+	const shown = shownGroups(groups, 2);
+	assert.equal(shown.hidden, 2);
+	assert.deepEqual(
+		shown.groups.map((group) => group.label),
+		["Needs you", "here", "a", "b"],
+	);
+	assert.deepEqual(shownGroups(groups, 4), { groups, hidden: 0 });
 });

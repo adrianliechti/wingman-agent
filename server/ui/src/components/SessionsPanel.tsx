@@ -54,12 +54,16 @@ import {
 	type FleetSession,
 	type FleetState,
 	groupFleet,
+	LIVE_GROUPS,
 	relativeTime,
+	shownGroups,
+	shownSessions,
 } from "../state/fleet.ts";
 import { useWorkspace } from "../state/workspaceContext.ts";
 import { workspaceClient } from "../state/workspaceClient.ts";
 import type { TabDisposition } from "../types/tabs";
 import { formatAgentName } from "../utils/agents";
+import { AgentIcon } from "./AgentIcon";
 import { useToast } from "./ui/Feedback";
 import { FloatingMenu } from "./ui/Floating";
 
@@ -81,6 +85,19 @@ const FILTERS: { id: FleetFilter; label: string; empty: string }[] = [
 	{ id: "running", label: "Running", empty: "Nothing is running" },
 	{ id: "archived", label: "Archived", empty: "No archived sessions" },
 ];
+
+/** How many sessions a group shows before it asks, and how many more each time. */
+const GROUP_ROWS = 8;
+const MORE_ROWS = 25;
+/** How many other projects the list shows before it asks. */
+const PROJECT_GROUPS = 8;
+/** A heading stays in view while the list scrolls through its group. It
+ * covers the rows that pass under it with the colour the side panels show:
+ * the surface that lies, part see-through, on the window's background. */
+const stickyHeading =
+	"sticky top-0 z-[1] bg-[color-mix(in_srgb,var(--color-bg-surface)_40%,var(--color-bg))]";
+const moreButton =
+	"block rounded px-2 py-1 text-left text-[11px] text-fg-muted hover:bg-bg-hover hover:text-fg";
 
 type Menu = {
 	chat: FleetChat;
@@ -117,6 +134,9 @@ export function SessionsPanel({
 	);
 	const [filterOpen, setFilterOpen] = useState(false);
 	const [menu, setMenu] = useState<Menu | null>(null);
+	/** The sessions each group shows beyond its first ones. */
+	const [more, setMore] = useState<Readonly<Record<string, number>>>({});
+	const [allProjects, setAllProjects] = useState(false);
 	const searchInput = useRef<HTMLInputElement>(null);
 	useEffect(() => {
 		if (searching) searchInput.current?.focus();
@@ -174,6 +194,12 @@ export function SessionsPanel({
 		[],
 	);
 	const menuFork = !!menu && menu.chat.id !== menu.session.id;
+	// The projects used last come first; the others wait behind one line. A
+	// search shows every project that holds what it found.
+	const { groups: listedGroups, hidden: hiddenProjects } = shownGroups(
+		groups,
+		allProjects || search.trim() ? Infinity : PROJECT_GROUPS,
+	);
 	const filtered = filter !== "all" || !!provider || !!search.trim();
 	const emptyText = search.trim()
 		? "No matching sessions"
@@ -182,30 +208,54 @@ export function SessionsPanel({
 
 	return (
 		<nav className="flex h-full w-full flex-col" aria-label="Sessions">
-			<div className="flex h-9 shrink-0 items-center gap-0.5 pr-1.5 pl-3">
-				<span className="text-[10px] font-medium tracking-wide text-fg-dim uppercase">
-					Sessions
-				</span>
-				{loaded && starting.length > 0 && (
-					<Loader2
-						size={11}
-						className="ml-1.5 animate-spin text-fg-dim"
-						role="status"
-						aria-label={`Listing sessions of ${starting.map(agentName).join(", ")}`}
+			<div
+				className={`flex h-9 shrink-0 items-center gap-0.5 pr-1.5 ${searching ? "pl-1.5" : "pl-3"}`}
+			>
+				{/* The search takes the place of the title while it is open. */}
+				{searching ? (
+					<input
+						ref={searchInput}
+						value={search}
+						onChange={(event) => setSearch(event.target.value)}
+						onKeyDown={(event) => {
+							if (event.key !== "Escape") return;
+							event.stopPropagation();
+							setView({ searching: false, search: "" });
+						}}
+						placeholder="Search sessions"
+						aria-label="Search sessions"
+						className={`mr-1 min-w-0 flex-1 rounded-md border border-border bg-bg-input px-2 text-[12px] text-fg outline-none placeholder:text-fg-dim focus:border-border-strong ${touch ? "h-9" : "h-6"}`}
 					/>
+				) : (
+					<>
+						<span className="text-[10px] font-medium tracking-wide text-fg-dim uppercase">
+							Sessions
+						</span>
+						{loaded && starting.length > 0 && (
+							<Loader2
+								size={11}
+								className="ml-1.5 animate-spin text-fg-dim"
+								role="status"
+								aria-label={`Listing sessions of ${starting.map(agentName).join(", ")}`}
+							/>
+						)}
+						<div className="flex-1" />
+					</>
 				)}
-				<div className="flex-1" />
 				<button
 					type="button"
-					className={`${iconButton} ${searching ? "bg-bg-active text-fg" : ""}`}
+					className={iconButton}
 					onClick={() => {
 						setView({ searching: !searching, search: "" });
 					}}
-					title="Search sessions"
-					aria-label="Search sessions"
-					aria-pressed={searching}
+					title={searching ? "Close search" : "Search sessions"}
+					aria-label={searching ? "Close search" : "Search sessions"}
 				>
-					<Search size={touch ? 18 : 12} />
+					{searching ? (
+						<X size={touch ? 18 : 12} />
+					) : (
+						<Search size={touch ? 18 : 12} />
+					)}
 				</button>
 				<button
 					ref={setFilterButton}
@@ -254,23 +304,6 @@ export function SessionsPanel({
 					</button>
 				)}
 			</div>
-			{searching && (
-				<div className="shrink-0 px-2 pb-1.5">
-					<input
-						ref={searchInput}
-						value={search}
-						onChange={(event) => setSearch(event.target.value)}
-						onKeyDown={(event) => {
-							if (event.key !== "Escape") return;
-							event.stopPropagation();
-							setView({ searching: false, search: "" });
-						}}
-						placeholder="Search sessions"
-						aria-label="Search sessions"
-						className="w-full rounded-md border border-border bg-bg-input px-2 py-1 text-[12px] text-fg outline-none placeholder:text-fg-dim focus:border-border-strong"
-					/>
-				</div>
-			)}
 			{(filter !== "all" || provider) && (
 				<div className="flex shrink-0 flex-wrap items-center gap-1 px-2 pb-1.5">
 					{filter !== "all" && (
@@ -325,42 +358,48 @@ export function SessionsPanel({
 					</div>
 				)}
 				{loaded &&
-					groups.map((group, index) => (
-						<section key={group.id} aria-label={group.label}>
-							{group.project ? (
-								<ProjectHeading
-									group={group}
-									first={index === 0}
-									expanded={expanded(group)}
-									touch={touch}
-									onToggle={() =>
-										setView({
-											expanded: {
-												...view.expanded,
-												[group.id]: !expanded(group),
-											},
-										})
-									}
-									onOpen={
-										!group.project.here && onOpenProject
-											? () => onOpenProject(group.project!.uri, group.label)
-											: undefined
-									}
-								/>
-							) : (
-								<h3
-									className={`flex items-center gap-1.5 pr-3 pb-1 pl-4 text-[10px] font-medium tracking-wider uppercase ${index === 0 ? "pt-1" : "pt-3"} ${group.id === "needs-input" ? "text-warning" : "text-fg-dim"}`}
-								>
-									{group.label}
-									{(group.id === "needs-input" || group.id === "working") && (
-										<span className="font-normal tabular-nums">
-											{group.sessions.length}
-										</span>
-									)}
-								</h3>
-							)}
-							{expanded(group) &&
-								group.sessions.map((session) => (
+					listedGroups.map((group, index) => {
+						const open = expanded(group);
+						const rows = open
+							? shownSessions(
+									group,
+									GROUP_ROWS + (more[group.id] ?? 0),
+									currentSessionId,
+								)
+							: [];
+						const hidden = group.sessions.length - rows.length;
+						return (
+							<section key={group.id} aria-label={group.label}>
+								{group.project ? (
+									<ProjectHeading
+										group={group}
+										first={index === 0}
+										expanded={open}
+										touch={touch}
+										onToggle={() =>
+											setView({
+												expanded: { ...view.expanded, [group.id]: !open },
+											})
+										}
+										onOpen={
+											!group.project.here && onOpenProject
+												? () => onOpenProject(group.project!.uri, group.label)
+												: undefined
+										}
+									/>
+								) : (
+									<h3
+										className={`${stickyHeading} flex items-center gap-1.5 pr-3 pb-1 pl-4 text-[10px] font-medium tracking-wider uppercase ${index === 0 ? "pt-1" : "pt-3"} ${group.id === "needs-input" ? "text-warning" : "text-fg-dim"}`}
+									>
+										{group.label}
+										{LIVE_GROUPS.has(group.id) && (
+											<span className="font-normal tabular-nums">
+												{group.sessions.length}
+											</span>
+										)}
+									</h3>
+								)}
+								{rows.map((session) => (
 									<SessionRow
 										key={session.session}
 										session={session}
@@ -378,8 +417,36 @@ export function SessionsPanel({
 										onMenu={openMenu}
 									/>
 								))}
-						</section>
-					))}
+								{open && hidden > 0 && (
+									<button
+										type="button"
+										className={`${moreButton} ml-7`}
+										onClick={() =>
+											setMore({
+												...more,
+												[group.id]: (more[group.id] ?? 0) + MORE_ROWS,
+											})
+										}
+									>
+										Show {Math.min(hidden, MORE_ROWS)} more
+										{hidden > MORE_ROWS && (
+											<span className="text-fg-dim"> of {hidden}</span>
+										)}
+									</button>
+								)}
+							</section>
+						);
+					})}
+				{loaded && hiddenProjects > 0 && (
+					<button
+						type="button"
+						className={`${moreButton} mt-2 ml-2`}
+						onClick={() => setAllProjects(true)}
+					>
+						Show {hiddenProjects} more{" "}
+						{hiddenProjects === 1 ? "project" : "projects"}
+					</button>
+				)}
 			</div>
 			<FloatingMenu
 				open={filterOpen}
@@ -537,19 +604,22 @@ function ProjectHeading({
 	const Chevron = expanded ? ChevronDown : ChevronRight;
 	return (
 		<div
-			className={`flex items-center gap-1 pr-1.5 pl-2 ${first ? "pt-1" : "pt-3"} pb-1`}
+			className={`${stickyHeading} group/project flex items-center gap-1 pr-1.5 pl-2 ${first ? "" : "mt-0.5"}`}
 		>
 			<button
 				type="button"
-				className={`flex min-w-0 flex-1 items-center gap-1 rounded text-left text-[10px] font-medium tracking-wider text-fg-dim uppercase hover:text-fg-muted ${touch ? "min-h-11" : ""}`}
+				className={`flex min-w-0 flex-1 items-center gap-1.5 rounded py-1 text-left text-[12px] hover:text-fg ${group.project?.here ? "font-medium text-fg" : "text-fg-muted"} ${touch ? "min-h-11" : ""}`}
 				onClick={onToggle}
 				aria-expanded={expanded}
 				title={group.project?.uri ? decodeURI(group.project.uri) : group.label}
 			>
-				<Chevron size={11} className="shrink-0" aria-hidden="true" />
-				<FolderOpen size={11} className="shrink-0" aria-hidden="true" />
+				<Chevron
+					size={12}
+					className="shrink-0 text-fg-dim"
+					aria-hidden="true"
+				/>
 				<h3 className="min-w-0 truncate">{group.label}</h3>
-				<span className="font-normal tabular-nums">
+				<span className="text-[10px] text-fg-dim tabular-nums">
 					{group.sessions.length}
 				</span>
 				{!expanded && unread && (
@@ -563,12 +633,14 @@ function ProjectHeading({
 			{onOpen && (
 				<button
 					type="button"
-					className={`shrink-0 rounded px-1.5 text-[11px] text-fg-dim hover:bg-bg-hover hover:text-fg ${touch ? "min-h-11" : "py-0.5"}`}
+					// A quiet icon, which shows with the pointer or the keyboard on its
+					// project, and always where there is neither.
+					className={`flex shrink-0 items-center justify-center rounded text-fg-dim hover:bg-bg-hover hover:text-fg focus-visible:opacity-100 ${touch ? "size-11" : "size-6 opacity-0 group-focus-within/project:opacity-100 group-hover/project:opacity-100"}`}
 					onClick={onOpen}
 					aria-label={`Open project ${group.label}`}
 					title={`Open ${group.label} in this window`}
 				>
-					Open
+					<FolderOpen size={touch ? 18 : 12} aria-hidden="true" />
 				</button>
 			)}
 		</div>
@@ -651,10 +723,13 @@ function StatusIcon({
 	state,
 	unread,
 	fork,
+	agent,
 }: {
 	state: FleetState;
 	unread: boolean;
 	fork?: boolean;
+	/** The agent of a session, when the list holds those of several. */
+	agent?: { id: string; name: string };
 }) {
 	switch (state) {
 		case "needs-input":
@@ -690,6 +765,17 @@ function StatusIcon({
 				aria-label="Unread"
 			>
 				<span className="size-1.5 rounded-full bg-info" />
+			</span>
+		);
+	// A session at rest shows whose it is, which a second line used to say.
+	// The row names the agent in words after its title.
+	if (agent && !fork)
+		return (
+			<span
+				className="flex size-3 shrink-0 items-center justify-center opacity-70"
+				aria-hidden="true"
+			>
+				<AgentIcon id={agent.id} size={12} />
 			</span>
 		);
 	const Icon = fork ? GitFork : MessageSquare;
@@ -751,6 +837,7 @@ const SessionRow = memo(function SessionRow({
 			<ChatRow
 				chat={session}
 				session={session}
+				agent={agent ? { id: session.provider, name: agent } : undefined}
 				active={session.id === current}
 				touch={touch}
 				onOpen={onOpen}
@@ -762,35 +849,38 @@ const SessionRow = memo(function SessionRow({
 					>
 						{session.title}
 					</span>
+					{agent && <span className="sr-only">, {agent}</span>}
+					{!busy && (
+						<span className="shrink-0 text-[10px]">
+							<ChangeCount changes={session.changes} />
+						</span>
+					)}
 					<span className="shrink-0 text-[10px] text-fg-dim tabular-nums">
 						{relativeTime(session.modifiedAt, now)}
 					</span>
 				</div>
-				<div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-fg-dim">
-					{detail ? (
+				{detail && (
+					<div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-fg-dim">
 						<span
 							className={`min-w-0 truncate ${session.state === "needs-input" ? "text-warning" : session.state === "failed" ? "text-danger" : ""}`}
 							title={detail}
 						>
 							{detail}
 						</span>
-					) : (
-						<span className="min-w-0 truncate">{origin}</span>
-					)}
-					<span className="flex-1" />
-					{/* What a session does must not hide where it does it: an
-					    approval in the list is given for a project. */}
-					{detail && origin && (
-						<span
-							className="max-w-[45%] shrink-0 truncate"
-							title={origin}
-							data-session-origin
-						>
-							{project ?? agent}
-						</span>
-					)}
-					{!busy && <ChangeCount changes={session.changes} />}
-				</div>
+						<span className="flex-1" />
+						{/* What a session does must not hide where it does it: an
+						    approval in the list is given for a project. */}
+						{origin && (
+							<span
+								className="max-w-[45%] shrink-0 truncate"
+								title={origin}
+								data-session-origin
+							>
+								{project ?? agent}
+							</span>
+						)}
+					</div>
+				)}
 			</ChatRow>
 			{session.sessionState === "needs-input" && (
 				<SessionRequests session={session} onOpen={onOpen} />
@@ -826,6 +916,7 @@ function ChatRow({
 	chat,
 	session,
 	fork,
+	agent,
 	active,
 	touch,
 	onOpen,
@@ -835,6 +926,7 @@ function ChatRow({
 	chat: FleetChat;
 	session: FleetSession;
 	fork?: boolean;
+	agent?: { id: string; name: string };
 	active: boolean;
 	touch: boolean;
 	onOpen: (id: string, disposition?: TabDisposition) => void;
@@ -857,7 +949,7 @@ function ChatRow({
 		>
 			<button
 				type="button"
-				className={`flex min-w-0 flex-1 items-start gap-2 rounded-md px-2 text-left ${touch ? "min-h-11 py-2" : "py-1.5"}`}
+				className={`flex min-w-0 flex-1 items-start gap-2 rounded-md px-2 text-left ${touch ? "min-h-11 py-2" : "py-1"}`}
 				onClick={() => onOpen(chat.id, touch ? "keep" : "preview")}
 				onDoubleClick={() => onOpen(chat.id, "keep")}
 				onKeyDown={(event) => {
@@ -877,11 +969,16 @@ function ChatRow({
 						);
 					}
 				}}
-				title={chat.title}
+				title={agent ? `${chat.title} · ${agent.name}` : chat.title}
 				aria-current={active ? "page" : undefined}
 			>
 				<span className="mt-[3px] flex">
-					<StatusIcon state={chat.state} unread={chat.unread} fork={fork} />
+					<StatusIcon
+						state={chat.state}
+						unread={chat.unread}
+						fork={fork}
+						agent={agent}
+					/>
 				</span>
 				<div className="min-w-0 flex-1">{children}</div>
 			</button>
