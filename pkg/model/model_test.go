@@ -60,16 +60,20 @@ func TestCurrentProviderModels(t *testing.T) {
 
 func TestCurrentProviderModelAvailability(t *testing.T) {
 	available := Available(map[string]bool{
-		"gpt-6-astra":   true,
-		"gpt-6.1-sol":   true,
-		"gpt-6.1-terra": true,
-		"gpt-6-sol":     true,
-		"gpt-6-luna":    true,
-		"gpt-5.4-nano":  true,
-		"kimi-k3":       true,
-		"glm-5.3":       true,
-		"MiniMax-M3":    true,
-		"grok-4.6":      true,
+		"openai/gpt-6.2-sol": true,
+		"claude-sonnet-5-5":  true,
+		"gpt-6.2-astra":      true,
+		"gpt-6-astra":        true,
+		"gpt-6.1-sol":        true,
+		"gpt-6.1-terra":      true,
+		"gpt-6-sol":          true,
+		"gpt-6-luna":         true,
+		"gpt-5-mini":         true,
+		"gpt-5.4-nano":       true,
+		"kimi-k3":            true,
+		"glm-5.3":            true,
+		"MiniMax-M3":         true,
+		"grok-4.6":           true,
 	})
 
 	ids := make([]string, 0, len(available))
@@ -77,7 +81,12 @@ func TestCurrentProviderModelAvailability(t *testing.T) {
 		ids = append(ids, m.ID)
 	}
 
-	if want := []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "glm-5.3", "kimi-k3", "MiniMax-M3", "grok-4.6"}; !slices.Equal(ids, want) {
+	want := []string{
+		"gpt-6.2-astra", "openai/gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.1-terra",
+		"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5-mini",
+		"claude-sonnet-5-5", "glm-5.3", "kimi-k3", "MiniMax-M3", "grok-4.6",
+	}
+	if !slices.Equal(ids, want) {
 		t.Fatalf("Available() ids = %v, want %v", ids, want)
 	}
 }
@@ -184,7 +193,7 @@ func TestGemini4ModelAvailability(t *testing.T) {
 	for _, m := range available {
 		ids = append(ids, m.ID)
 	}
-	want := []string{"google/gemini-4-hydrogen", "gemini-3.8-flash", "google/gemini-4-carbon", "gemini-4-argon"}
+	want := []string{"google/gemini-4-carbon", "gemini-4-argon", "google/gemini-4-hydrogen", "gemini-3.8-flash"}
 	if !slices.Equal(ids, want) {
 		t.Fatalf("Available() ids = %v, want %v", ids, want)
 	}

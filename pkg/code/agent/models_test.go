@@ -28,6 +28,22 @@ func roleModelID(t *testing.T, a *Agent, s *sessionState, role string) string {
 	return option.ID
 }
 
+func TestModelPickerOrdersByGenerationThenTierAndSelectsMediumDefault(t *testing.T) {
+	want := []string{
+		"openai/gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna",
+		"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5",
+	}
+	a := upstreamAgent(want...)
+	options, current := a.Models("")
+	var ids []string
+	for _, option := range options {
+		ids = append(ids, option.ID)
+	}
+	if !slices.Equal(ids, want) || current != "gpt-6.2-sol" {
+		t.Fatalf("picker models = %v, selected = %q; want %v, selected GPT 6.2 Sol", ids, current, want)
+	}
+}
+
 func TestModelSelectionByRole(t *testing.T) {
 	a := upstreamAgent("claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5")
 	s := &sessionState{}
@@ -39,7 +55,7 @@ func TestModelSelectionByRole(t *testing.T) {
 			}
 		}
 		for role, want := range map[string]string{
-			"complex": "claude-opus-4-8", "plan": "claude-opus-4-8", "utility": "claude-haiku-4-5",
+			"complex": "claude-fable-5", "plan": "claude-fable-5", "utility": "claude-haiku-4-5",
 		} {
 			if got := roleModelID(t, a, s, role); got != want {
 				t.Fatalf("%s/%s model = %q, want %q", mode, role, got, want)
@@ -114,7 +130,7 @@ func TestRoleModelPreservesUtilityDiscoveryAndAvailabilityRules(t *testing.T) {
 	if _, ok := a.RoleModel("utility"); ok {
 		t.Fatal("utility role guessed a model before discovery")
 	}
-	if got := roleModelID(t, a, nil, ""); got != "claude-sonnet-5-5" {
+	if got := roleModelID(t, a, nil, ""); got != "gpt-6.2-sol" {
 		t.Fatalf("main model before discovery = %q", got)
 	}
 
@@ -432,6 +448,7 @@ func TestModelAndEffortSelectionSurviveModeSwitches(t *testing.T) {
 
 func TestSetModelResetsEffort(t *testing.T) {
 	a := upstreamAgent("claude-sonnet-5", "gpt-5.6-terra", "claude-opus-4-8")
+	a.modelID = "claude-sonnet-5"
 	s := &sessionState{}
 	a.sessions["sid"] = s
 	ctx := context.Background()

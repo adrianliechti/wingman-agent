@@ -21,25 +21,20 @@ const (
 )
 
 type Model struct {
-	ID string
-
-	Aliases   []string
-	Namespace string
-
+	ID          string
+	Aliases     []string
+	Namespace   string
 	Name        string
 	Description string
+	Class       Class
 
-	Class Class
-
-	Input  int
-	Output int
-
+	Input            int
+	Output           int
 	Context          int
 	ContextThreshold int
 
-	Effort  string
-	Efforts []string
-
+	Effort    string
+	Efforts   []string
 	Verbosity string
 }
 
@@ -100,275 +95,13 @@ var nemotronThinkingEfforts = []string{"none", "high"}
 var gemini4Efforts = []string{"low", "medium", "high"}
 var gemini4HydrogenEfforts = []string{"low", "medium", "high", "xhigh"}
 
-// Models lists every known model in preference order: the first entry of a
-// family, filter or class is the one picked automatically.
+// Models is the picker order. Each provider lists the newest numbered
+// generation first, then large, medium, and small models within each generation.
 var Models = []Model{
-	// Anthropic
-
-	{
-		ID: "claude-sonnet-5-5",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Sonnet 5.5",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
-		Context: 1000000,
-
-		// Thinking cannot be disabled on Sonnet 5.5, so "none" is not offered.
-		Efforts: claudeAlwaysThinkingEfforts,
-	},
-	{
-		ID: "claude-haiku-5-5",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Haiku 5.5",
-
-		Class: ClassSmall,
-
-		Output: 128000,
-
-		Context: 1000000,
-
-		// Adaptive thinking is the default; disabling it is also supported.
-		Efforts: claudeHaiku55Efforts,
-	},
-	{
-		ID: "claude-sonnet-5",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Sonnet 5",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
-		Context: 1000000,
-	},
-	{
-		ID: "claude-opus-5-5",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Opus 5.5",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
-		Context: 1000000,
-
-		// Thinking cannot be disabled on Opus 5.5, so "none" is not offered.
-		Efforts: claudeAlwaysThinkingEfforts,
-	},
-	{
-		ID: "claude-opus-5",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Opus 5",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
-		Context: 1000000,
-	},
-
-	{
-		ID: "claude-opus-4-8",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Opus 4.8",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
-		Context: 1000000,
-	},
-
-	{
-		ID: "claude-opus-4-7",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Opus 4.7",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
-		Context: 1000000,
-	},
-
-	{
-		ID: "claude-sonnet-4-6",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Sonnet 4.6",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
-		Context: 1000000,
-	},
-	{
-		ID: "claude-opus-4-6",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Opus 4.6",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
-		Context: 1000000,
-	},
-	{
-		ID: "claude-haiku-4-6",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Haiku 4.6",
-
-		Class: ClassSmall,
-
-		Output: 64000,
-
-		Context: 200000,
-	},
-
-	{
-		ID: "claude-sonnet-4-5",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Sonnet 4.5",
-
-		Class: ClassMedium,
-
-		Output: 64000,
-
-		Context: 200000,
-	},
-	{
-		ID: "claude-opus-4-5",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Opus 4.5",
-
-		Class: ClassLarge,
-
-		Output: 64000,
-
-		Context: 200000,
-	},
-	{
-		ID: "claude-haiku-4-5",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Haiku 4.5",
-
-		Class: ClassSmall,
-
-		Output: 64000,
-
-		Context: 200000,
-	},
-
-	{
-		ID: "claude-fable-5-2",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Fable 5.2",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
-		Context: 1000000,
-
-		Efforts: claudeAlwaysThinkingEfforts,
-	},
-	{
-		ID: "claude-fable-5-1",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Fable 5.1",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
-		Context: 1000000,
-
-		Efforts: claudeAlwaysThinkingEfforts,
-	},
-	{
-		ID: "claude-fable-5",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Fable 5",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
-		Context: 1000000,
-
-		Efforts: claudeAlwaysThinkingEfforts,
-	},
-	{
-		ID: "claude-mythos-5-1",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Mythos 5.1",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
-		Context: 1000000,
-
-		Efforts: claudeAlwaysThinkingEfforts,
-	},
-	{
-		ID: "claude-mythos-5",
-
-		Namespace: "anthropic",
-
-		Name: "Claude Mythos 5",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
-		Context: 1000000,
-
-		Efforts: claudeAlwaysThinkingEfforts,
-	},
-
 	// OpenAI
 
 	{
-		ID: "gpt-6.2-astra",
-
+		ID:        "gpt-6.2-astra",
 		Namespace: "openai",
 		Name:      "GPT 6.2 Astra",
 		Class:     ClassLarge,
@@ -382,8 +115,7 @@ var Models = []Model{
 		Verbosity: "low",
 	},
 	{
-		ID: "gpt-6.2-sol",
-
+		ID:        "gpt-6.2-sol",
 		Namespace: "openai",
 		Name:      "GPT 6.2 Sol",
 		Class:     ClassMedium,
@@ -396,33 +128,14 @@ var Models = []Model{
 		Efforts:   gptReasoningOnlyEfforts,
 		Verbosity: "low",
 	},
+
 	{
-		ID: "gpt-6-astra",
-
-		Namespace: "openai",
-
-		Name: "GPT 6 Astra",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
-		Context:          1050000,
-		ContextThreshold: 272_000,
-
-		Effort:    "low",
-		Efforts:   gptReasoningOnlyEfforts,
-		Verbosity: "low",
-	},
-	{
-		ID: "gpt-6.1-sol",
-
+		ID:        "gpt-6.1-sol",
 		Namespace: "openai",
 		Name:      "GPT 6.1 Sol",
 		Class:     ClassMedium,
 
-		Output: 128000,
-
+		Output:           128000,
 		Context:          1050000,
 		ContextThreshold: 272_000,
 
@@ -431,29 +144,40 @@ var Models = []Model{
 		Verbosity: "low",
 	},
 	{
-		ID: "gpt-6.1-terra",
-
+		ID:        "gpt-6.1-terra",
 		Namespace: "openai",
 		Name:      "GPT 6.1 Terra",
 		Class:     ClassMedium,
 
-		Output: 128000,
-
+		Output:           128000,
 		Context:          1050000,
 		ContextThreshold: 272_000,
 
 		Efforts:   gpt61TerraEfforts,
 		Verbosity: "low",
 	},
-	{
-		ID: "gpt-6-sol",
 
+	{
+		ID:        "gpt-6-astra",
+		Namespace: "openai",
+		Name:      "GPT 6 Astra",
+		Class:     ClassLarge,
+
+		Output:           128000,
+		Context:          1050000,
+		ContextThreshold: 272_000,
+
+		Effort:    "low",
+		Efforts:   gptReasoningOnlyEfforts,
+		Verbosity: "low",
+	},
+	{
+		ID:        "gpt-6-sol",
 		Namespace: "openai",
 		Name:      "GPT 6 Sol",
 		Class:     ClassMedium,
 
-		Output: 128000,
-
+		Output:           128000,
 		Context:          1050000,
 		ContextThreshold: 272_000,
 
@@ -461,64 +185,51 @@ var Models = []Model{
 		Verbosity: "low",
 	},
 	{
-		ID: "gpt-6-luna",
-
+		ID:        "gpt-6-luna",
 		Namespace: "openai",
 		Name:      "GPT 6 Luna",
 		Class:     ClassSmall,
 
-		Output: 128000,
-
+		Output:           128000,
 		Context:          1050000,
 		ContextThreshold: 272_000,
 
 		Efforts:   gpt6SolLunaEfforts,
 		Verbosity: "low",
 	},
-	{
-		ID: "gpt-5.6-sol",
 
+	{
+		ID:        "gpt-5.6-sol",
 		Aliases:   []string{"gpt-5.6"},
 		Namespace: "openai",
+		Name:      "GPT 5.6 Sol",
+		Class:     ClassLarge,
 
-		Name: "GPT 5.6 Sol",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
+		Output:           128000,
 		Context:          1050000,
 		ContextThreshold: 272_000,
 
 		Efforts: gpt56Efforts,
 	},
 	{
-		ID: "gpt-5.6-terra",
-
+		ID:        "gpt-5.6-terra",
 		Namespace: "openai",
+		Name:      "GPT 5.6 Terra",
+		Class:     ClassMedium,
 
-		Name: "GPT 5.6 Terra",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
+		Output:           128000,
 		Context:          1050000,
 		ContextThreshold: 272_000,
 
 		Efforts: gpt56Efforts,
 	},
 	{
-		ID: "gpt-5.6-luna",
-
+		ID:        "gpt-5.6-luna",
 		Namespace: "openai",
+		Name:      "GPT 5.6 Luna",
+		Class:     ClassSmall,
 
-		Name: "GPT 5.6 Luna",
-
-		Class: ClassSmall,
-
-		Output: 128000,
-
+		Output:           128000,
 		Context:          1050000,
 		ContextThreshold: 272_000,
 
@@ -526,16 +237,12 @@ var Models = []Model{
 	},
 
 	{
-		ID: "gpt-5.5",
-
+		ID:        "gpt-5.5",
 		Namespace: "openai",
+		Name:      "GPT 5.5",
+		Class:     ClassMedium,
 
-		Name: "GPT 5.5",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
+		Output:           128000,
 		Context:          1050000,
 		ContextThreshold: 272_000,
 
@@ -543,208 +250,373 @@ var Models = []Model{
 	},
 
 	{
-		ID: "gpt-5.4",
-
+		ID:        "gpt-5.4",
 		Namespace: "openai",
+		Name:      "GPT 5.4",
+		Class:     ClassMedium,
 
-		Name: "GPT 5.4",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
+		Output:           128000,
 		Context:          1050000,
 		ContextThreshold: 272_000,
 
 		Efforts: gptEfforts,
 	},
 	{
-		ID: "gpt-5.4-mini",
-
+		ID:        "gpt-5.4-mini",
 		Namespace: "openai",
+		Name:      "GPT 5.4 Mini",
+		Class:     ClassSmall,
 
-		Name: "GPT 5.4 Mini",
-
-		Class: ClassSmall,
-
-		Output: 128000,
-
+		Output:  128000,
 		Context: 400000,
 
 		Efforts: gptEfforts,
 	},
 
 	{
-		ID: "gpt-5.3-codex",
-
+		ID:        "gpt-5.3-codex",
 		Namespace: "openai",
+		Name:      "GPT 5.3 Codex",
+		Class:     ClassMedium,
 
-		Name: "GPT 5.3 Codex",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
+		Output:  128000,
 		Context: 400000,
 
 		Efforts: gptEfforts,
 	},
 	{
-		ID: "gpt-5.3-codex-spark",
-
+		ID:        "gpt-5.3-codex-spark",
 		Namespace: "openai",
+		Name:      "GPT 5.3 Codex Spark",
+		Class:     ClassSmall,
 
-		Name: "GPT 5.3 Codex Spark",
-
-		Class: ClassSmall,
-
-		Output: 32000,
-
+		Output:  32000,
 		Context: 128000,
 
 		Efforts: gptEfforts,
 	},
 
 	{
-		ID: "gpt-5.2-codex",
-
+		ID:        "gpt-5.2-codex",
 		Namespace: "openai",
+		Name:      "GPT 5.2 Codex",
+		Class:     ClassMedium,
 
-		Name: "GPT 5.2 Codex",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
+		Output:  128000,
 		Context: 400000,
 
 		Efforts: gptEfforts,
 	},
 	{
-		ID: "gpt-5.2",
-
+		ID:        "gpt-5.2",
 		Namespace: "openai",
+		Name:      "GPT 5.2",
+		Class:     ClassMedium,
 
-		Name: "GPT 5.2",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
+		Output:  128000,
 		Context: 400000,
 
 		Efforts: gptEfforts,
 	},
 
 	{
-		ID: "gpt-5.1-codex-max",
-
+		ID:        "gpt-5.1-codex-max",
 		Namespace: "openai",
+		Name:      "GPT 5.1 Codex Max",
+		Class:     ClassMedium,
 
-		Name: "GPT 5.1 Codex Max",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
+		Output:  128000,
 		Context: 400000,
 
 		Efforts: gptEfforts,
 	},
 	{
-		ID: "gpt-5.1-codex",
-
+		ID:        "gpt-5.1-codex",
 		Namespace: "openai",
+		Name:      "GPT 5.1 Codex",
+		Class:     ClassMedium,
 
-		Name: "GPT 5.1 Codex",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
+		Output:  128000,
 		Context: 400000,
 
 		Efforts: gptEfforts,
 	},
 	{
-		ID: "gpt-5.1-codex-mini",
-
+		ID:        "gpt-5.1",
 		Namespace: "openai",
+		Name:      "GPT 5.1",
+		Class:     ClassMedium,
 
-		Name: "GPT 5.1 Codex Mini",
-
-		Class: ClassSmall,
-
-		Output: 128000,
-
+		Output:  128000,
 		Context: 400000,
 
 		Efforts: gptEfforts,
 	},
 	{
-		ID: "gpt-5.1",
-
+		ID:        "gpt-5.1-codex-mini",
 		Namespace: "openai",
+		Name:      "GPT 5.1 Codex Mini",
+		Class:     ClassSmall,
 
-		Name: "GPT 5.1",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
+		Output:  128000,
 		Context: 400000,
 
 		Efforts: gptEfforts,
 	},
 
 	{
-		ID: "gpt-5-codex",
-
+		ID:        "gpt-5-codex",
 		Namespace: "openai",
+		Name:      "GPT 5 Codex",
+		Class:     ClassMedium,
 
-		Name: "GPT 5 Codex",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
+		Output:  128000,
 		Context: 400000,
 
 		Efforts: gptEfforts,
 	},
 	{
-		ID: "gpt-5",
-
+		ID:        "gpt-5",
 		Namespace: "openai",
+		Name:      "GPT 5",
+		Class:     ClassMedium,
 
-		Name: "GPT 5",
-
-		Class: ClassMedium,
-
-		Output: 128000,
-
+		Output:  128000,
 		Context: 400000,
 
 		Efforts: gptEfforts,
 	},
 	{
-		ID: "gpt-5-mini",
-
+		ID:        "gpt-5-mini",
 		Namespace: "openai",
+		Name:      "GPT 5 Mini",
+		Class:     ClassSmall,
 
-		Name: "GPT 5 Mini",
-
-		Class: ClassSmall,
-
-		Output: 128000,
-
+		Output:  128000,
 		Context: 400000,
 
 		Efforts: gptEfforts,
+	},
+
+	// Anthropic
+
+	{
+		ID:        "claude-opus-5-5",
+		Namespace: "anthropic",
+		Name:      "Claude Opus 5.5",
+		Class:     ClassLarge,
+
+		Output:  128000,
+		Context: 1000000,
+
+		// Thinking cannot be disabled on Opus 5.5, so "none" is not offered.
+		Efforts: claudeAlwaysThinkingEfforts,
+	},
+	{
+		ID:        "claude-sonnet-5-5",
+		Namespace: "anthropic",
+		Name:      "Claude Sonnet 5.5",
+		Class:     ClassMedium,
+
+		Output:  128000,
+		Context: 1000000,
+
+		// Thinking cannot be disabled on Sonnet 5.5, so "none" is not offered.
+		Efforts: claudeAlwaysThinkingEfforts,
+	},
+	{
+		ID:        "claude-haiku-5-5",
+		Namespace: "anthropic",
+		Name:      "Claude Haiku 5.5",
+		Class:     ClassSmall,
+
+		Output:  128000,
+		Context: 1000000,
+
+		// Adaptive thinking is the default; disabling it is also supported.
+		Efforts: claudeHaiku55Efforts,
+	},
+
+	{
+		ID:        "claude-fable-5-2",
+		Namespace: "anthropic",
+		Name:      "Claude Fable 5.2",
+		Class:     ClassLarge,
+
+		Output:  128000,
+		Context: 1000000,
+
+		Efforts: claudeAlwaysThinkingEfforts,
+	},
+
+	{
+		ID:        "claude-fable-5-1",
+		Namespace: "anthropic",
+		Name:      "Claude Fable 5.1",
+		Class:     ClassLarge,
+
+		Output:  128000,
+		Context: 1000000,
+
+		Efforts: claudeAlwaysThinkingEfforts,
+	},
+	{
+		ID:        "claude-mythos-5-1",
+		Namespace: "anthropic",
+		Name:      "Claude Mythos 5.1",
+		Class:     ClassLarge,
+
+		Output:  128000,
+		Context: 1000000,
+
+		Efforts: claudeAlwaysThinkingEfforts,
+	},
+
+	{
+		ID:        "claude-opus-5",
+		Namespace: "anthropic",
+		Name:      "Claude Opus 5",
+		Class:     ClassLarge,
+
+		Output:  128000,
+		Context: 1000000,
+	},
+	{
+		ID:        "claude-fable-5",
+		Namespace: "anthropic",
+		Name:      "Claude Fable 5",
+		Class:     ClassLarge,
+
+		Output:  128000,
+		Context: 1000000,
+
+		Efforts: claudeAlwaysThinkingEfforts,
+	},
+	{
+		ID:        "claude-mythos-5",
+		Namespace: "anthropic",
+		Name:      "Claude Mythos 5",
+		Class:     ClassLarge,
+
+		Output:  128000,
+		Context: 1000000,
+
+		Efforts: claudeAlwaysThinkingEfforts,
+	},
+	{
+		ID:        "claude-sonnet-5",
+		Namespace: "anthropic",
+		Name:      "Claude Sonnet 5",
+		Class:     ClassMedium,
+
+		Output:  128000,
+		Context: 1000000,
+	},
+
+	{
+		ID:        "claude-opus-4-8",
+		Namespace: "anthropic",
+		Name:      "Claude Opus 4.8",
+		Class:     ClassLarge,
+
+		Output:  128000,
+		Context: 1000000,
+	},
+
+	{
+		ID:        "claude-opus-4-7",
+		Namespace: "anthropic",
+		Name:      "Claude Opus 4.7",
+		Class:     ClassLarge,
+
+		Output:  128000,
+		Context: 1000000,
+	},
+
+	{
+		ID:        "claude-opus-4-6",
+		Namespace: "anthropic",
+		Name:      "Claude Opus 4.6",
+		Class:     ClassLarge,
+
+		Output:  128000,
+		Context: 1000000,
+	},
+	{
+		ID:        "claude-sonnet-4-6",
+		Namespace: "anthropic",
+		Name:      "Claude Sonnet 4.6",
+		Class:     ClassMedium,
+
+		Output:  128000,
+		Context: 1000000,
+	},
+	{
+		ID:        "claude-haiku-4-6",
+		Namespace: "anthropic",
+		Name:      "Claude Haiku 4.6",
+		Class:     ClassSmall,
+
+		Output:  64000,
+		Context: 200000,
+	},
+
+	{
+		ID:        "claude-opus-4-5",
+		Namespace: "anthropic",
+		Name:      "Claude Opus 4.5",
+		Class:     ClassLarge,
+
+		Output:  64000,
+		Context: 200000,
+	},
+	{
+		ID:        "claude-sonnet-4-5",
+		Namespace: "anthropic",
+		Name:      "Claude Sonnet 4.5",
+		Class:     ClassMedium,
+
+		Output:  64000,
+		Context: 200000,
+	},
+	{
+		ID:        "claude-haiku-4-5",
+		Namespace: "anthropic",
+		Name:      "Claude Haiku 4.5",
+		Class:     ClassSmall,
+
+		Output:  64000,
+		Context: 200000,
 	},
 
 	// Google
 
+	{
+		ID:        "gemini-4-carbon",
+		Namespace: "google",
+		Name:      "Gemini 4 Carbon",
+		Class:     ClassLarge,
+
+		// Input, thinking, and output share one window.
+		Context:          1048576,
+		Output:           65536,
+		ContextThreshold: 200_000,
+
+		Efforts: gemini4Efforts,
+	},
+	{
+		ID:        "gemini-4-argon",
+		Namespace: "google",
+		Name:      "Gemini 4 Argon",
+		Class:     ClassLarge,
+
+		// Input, thinking, and output share one window.
+		Context:          1048576,
+		Output:           65536,
+		ContextThreshold: 200_000,
+
+		Efforts: gemini4Efforts,
+	},
 	{
 		ID:        "gemini-4-hydrogen",
 		Namespace: "google",
@@ -752,325 +624,218 @@ var Models = []Model{
 		Class:     ClassMedium,
 
 		// Input, thinking, and output share one window.
-		Context: 1048576,
-		Output:  65536,
-
+		Context:          1048576,
+		Output:           65536,
 		ContextThreshold: 200_000,
-		Efforts:          gemini4HydrogenEfforts,
+
+		Efforts: gemini4HydrogenEfforts,
 	},
 
 	{
-		ID: "gemini-3.8-flash",
-
+		ID:        "gemini-3.8-flash",
 		Namespace: "google",
+		Name:      "Gemini 3.8 Flash",
+		Class:     ClassMedium,
 
-		Name: "Gemini 3.8 Flash",
-
-		Class: ClassMedium,
-
-		Input:  1048576,
-		Output: 65536,
-
+		Input:            1048576,
+		Output:           65536,
 		ContextThreshold: 200_000,
 	},
 
 	{
-		ID: "gemini-3.7-flash",
-
+		ID:        "gemini-3.7-flash",
 		Namespace: "google",
+		Name:      "Gemini 3.7 Flash",
+		Class:     ClassMedium,
 
-		Name: "Gemini 3.7 Flash",
-
-		Class: ClassMedium,
-
-		Input:  1048576,
-		Output: 65536,
-
+		Input:            1048576,
+		Output:           65536,
 		ContextThreshold: 200_000,
 	},
 
 	{
-		ID: "gemini-3.6-flash",
-
+		ID:        "gemini-3.6-flash",
 		Namespace: "google",
+		Name:      "Gemini 3.6 Flash",
+		Class:     ClassMedium,
 
-		Name: "Gemini 3.6 Flash",
-
-		Class: ClassMedium,
-
-		Input:  1048576,
-		Output: 65536,
-
+		Input:            1048576,
+		Output:           65536,
 		ContextThreshold: 200_000,
 	},
 
 	{
-		ID: "gemini-3.5-flash",
-
+		ID:        "gemini-3.5-flash",
 		Aliases:   []string{"gemini-3-flash-preview"},
 		Namespace: "google",
+		Name:      "Gemini 3.5 Flash",
+		Class:     ClassMedium,
 
-		Name: "Gemini 3.5 Flash",
-
-		Class: ClassMedium,
-
-		Input:  1048576,
-		Output: 65536,
-
+		Input:            1048576,
+		Output:           65536,
 		ContextThreshold: 200_000,
 	},
 	{
-		ID: "gemini-3.5-flash-lite",
-
+		ID:        "gemini-3.5-flash-lite",
 		Namespace: "google",
+		Name:      "Gemini 3.5 Flash Lite",
+		Class:     ClassSmall,
 
-		Name: "Gemini 3.5 Flash Lite",
-
-		Class: ClassSmall,
-
-		Input:  1048576,
-		Output: 65536,
-
+		Input:            1048576,
+		Output:           65536,
 		ContextThreshold: 200_000,
 	},
 
 	{
-		ID: "gemini-3.1-pro",
-
+		ID:        "gemini-3.1-pro",
 		Aliases:   []string{"gemini-3.1-pro-preview"},
 		Namespace: "google",
+		Name:      "Gemini 3.1 Pro",
+		Class:     ClassLarge,
 
-		Name: "Gemini 3.1 Pro",
-
-		Class: ClassLarge,
-
-		Input:  1048576,
-		Output: 65536,
-
+		Input:            1048576,
+		Output:           65536,
 		ContextThreshold: 200_000,
 	},
 	{
-		ID: "gemini-4-carbon",
-
+		ID:        "gemini-3.1-flash-lite",
 		Namespace: "google",
+		Name:      "Gemini 3.1 Flash Lite",
+		Class:     ClassSmall,
 
-		Name: "Gemini 4 Carbon",
-
-		Class: ClassLarge,
-
-		// Input, thinking, and output share one window.
-		Context: 1048576,
-		Output:  65536,
-
-		ContextThreshold: 200_000,
-
-		Efforts: gemini4Efforts,
-	},
-	{
-		ID: "gemini-4-argon",
-
-		Namespace: "google",
-
-		Name: "Gemini 4 Argon",
-
-		Class: ClassLarge,
-
-		// Input, thinking, and output share one window.
-		Context: 1048576,
-		Output:  65536,
-
-		ContextThreshold: 200_000,
-
-		Efforts: gemini4Efforts,
-	},
-	{
-		ID: "gemini-3.1-flash-lite",
-
-		Namespace: "google",
-
-		Name: "Gemini 3.1 Flash Lite",
-
-		Class: ClassSmall,
-
-		Input:  1048576,
-		Output: 65536,
-
+		Input:            1048576,
+		Output:           65536,
 		ContextThreshold: 200_000,
 	},
 
 	// Z.ai
 
 	{
-		ID: "glm-5.3",
-
+		ID:        "glm-5.3",
 		Namespace: "z-ai",
+		Name:      "GLM 5.3",
+		Class:     ClassMedium,
 
-		Name: "GLM 5.3",
-
-		Class: ClassMedium,
-
-		Output: 131072,
-
+		Output:  131072,
 		Context: 1000000,
 	},
 	{
-		ID: "glm-5.3-flash",
-
+		ID:        "glm-5.3-flash",
 		Namespace: "z-ai",
+		Name:      "GLM 5.3 Flash",
+		Class:     ClassSmall,
 
-		Name: "GLM 5.3 Flash",
-
-		Class: ClassSmall,
-
-		Output: 131072,
-
+		Output:  131072,
 		Context: 1000000,
 	},
+
 	{
-		ID: "glm-5.2",
-
+		ID:        "glm-5.2",
 		Namespace: "z-ai",
+		Name:      "GLM 5.2",
+		Class:     ClassMedium,
 
-		Name: "GLM 5.2",
-
-		Class: ClassMedium,
-
-		Output: 131072,
-
+		Output:  131072,
 		Context: 1000000,
 	},
 
 	// DeepSeek
 
 	{
-		ID: "deepseek-v4-pro",
-
-		Aliases:   []string{"deepseek-v4-pro-0813"},
-		Namespace: "deepseek",
-
-		Name: "DeepSeek V4 Pro",
-
-		Class: ClassLarge,
-
-		Output: 384000,
-
-		Context: 1000000,
-	},
-	{
-		ID: "deepseek-v4.1-flash",
-
+		ID:        "deepseek-v4.1-flash",
 		Aliases:   []string{"deepseek-flash", "deepseek-v4.1-flash-1017"},
 		Namespace: "deepseek",
+		Name:      "DeepSeek V4.1 Flash",
+		Class:     ClassSmall,
 
-		Name: "DeepSeek V4.1 Flash",
+		Output:  384000,
+		Context: 1000000,
+	},
 
-		Class: ClassSmall,
+	{
+		ID:        "deepseek-v4-pro",
+		Aliases:   []string{"deepseek-v4-pro-0813"},
+		Namespace: "deepseek",
+		Name:      "DeepSeek V4 Pro",
+		Class:     ClassLarge,
 
-		Output: 384000,
-
+		Output:  384000,
 		Context: 1000000,
 	},
 	{
-		ID: "deepseek-v4-flash-0731",
-
+		ID:        "deepseek-v4-flash-0731",
 		Namespace: "deepseek",
+		Name:      "DeepSeek V4 Flash 0731",
+		Class:     ClassSmall,
 
-		Name: "DeepSeek V4 Flash 0731",
-
-		Class: ClassSmall,
-
-		Output: 384000,
-
+		Output:  384000,
 		Context: 1000000,
 	},
 	{
-		ID: "deepseek-v4-flash",
-
+		ID:        "deepseek-v4-flash",
 		Namespace: "deepseek",
+		Name:      "DeepSeek V4 Flash",
+		Class:     ClassSmall,
 
-		Name: "DeepSeek V4 Flash",
-
-		Class: ClassSmall,
-
-		Output: 384000,
-
+		Output:  384000,
 		Context: 1000000,
 	},
 
 	// Mistral
 
 	{
-		ID: "mistral-large-4",
-
+		ID:        "mistral-large-4",
 		Aliases:   []string{"mistral-large-4-0"},
 		Namespace: "mistralai",
+		Name:      "Mistral Large 4",
+		Class:     ClassLarge,
 
-		Name: "Mistral Large 4",
-
-		Class: ClassLarge,
-
-		Output: 262144,
-
+		Output:  262144,
 		Context: 1048576,
 	},
 	{
-		ID: "mistral-medium",
-
-		Aliases:   []string{"mistral-medium-latest", "mistral-medium-2604"},
-		Namespace: "mistralai",
-
-		Name: "Mistral Medium 3.5",
-
-		Class: ClassMedium,
-
-		Output: 262144,
-
-		Context: 262144,
-	},
-	{
-		ID: "mistral-small",
-
+		ID:        "mistral-small",
 		Aliases:   []string{"mistral-small-latest", "mistral-small-2603"},
 		Namespace: "mistralai",
+		Name:      "Mistral Small 4",
+		Class:     ClassSmall,
 
-		Name: "Mistral Small 4",
-
-		Class: ClassSmall,
-
-		Output: 256000,
-
+		Output:  256000,
 		Context: 256000,
+	},
+
+	{
+		ID:        "mistral-medium",
+		Aliases:   []string{"mistral-medium-latest", "mistral-medium-2604"},
+		Namespace: "mistralai",
+		Name:      "Mistral Medium 3.5",
+		Class:     ClassMedium,
+
+		Output:  262144,
+		Context: 262144,
 	},
 
 	// Moonshot
 
 	{
-		ID: "kimi-k3",
-
+		ID:        "kimi-k3",
 		Namespace: "moonshotai",
+		Name:      "Kimi K3",
+		Class:     ClassLarge,
 
-		Name: "Kimi K3",
-
-		Class: ClassLarge,
-
-		Output: 131072,
-
+		Output:  131072,
 		Context: 1048576,
 	},
 
 	// MiniMax
 
 	{
-		ID: "minimax-m3",
-
+		ID:        "minimax-m3",
 		Namespace: "minimax",
+		Name:      "MiniMax M3",
+		Class:     ClassLarge,
 
-		Name: "MiniMax M3",
-
-		Class: ClassLarge,
-
-		Output: 128000,
-
+		Output:           128000,
 		Context:          1000000,
 		ContextThreshold: 512_000,
 	},
@@ -1078,30 +843,23 @@ var Models = []Model{
 	// xAI
 
 	{
-		ID: "grok-4.7",
-
+		ID:        "grok-4.7",
 		Namespace: "x-ai",
+		Name:      "Grok 4.7",
+		Class:     ClassLarge,
 
-		Name: "Grok 4.7",
-
-		Class: ClassLarge,
-
-		Output: 500000,
-
+		Output:           500000,
 		Context:          500000,
 		ContextThreshold: 200_000,
 	},
+
 	{
-		ID: "grok-4.6",
-
+		ID:        "grok-4.6",
 		Namespace: "x-ai",
+		Name:      "Grok 4.6",
+		Class:     ClassLarge,
 
-		Name: "Grok 4.6",
-
-		Class: ClassLarge,
-
-		Output: 500000,
-
+		Output:           500000,
 		Context:          500000,
 		ContextThreshold: 200_000,
 	},
@@ -1109,106 +867,115 @@ var Models = []Model{
 	// Alibaba
 
 	{
-		ID: "qwen3.8-max",
-
+		ID:        "qwen3.8-max",
 		Aliases:   []string{"qwen3.8-2.4t-a95b", "qwen3.8-max-0902"},
 		Namespace: "qwen",
+		Name:      "Qwen 3.8 Max",
+		Class:     ClassLarge,
 
-		Name: "Qwen 3.8 Max",
-
-		Class: ClassLarge,
-
-		Output: 131072,
-
+		Output:  131072,
 		Context: 1000000,
 	},
 	{
-		ID: "qwen3.8",
-
+		ID:        "qwen3.8",
 		Aliases:   []string{"qwen3.8-27b"},
 		Namespace: "qwen",
+		Name:      "Qwen 3.8",
+		Class:     ClassMedium,
 
-		Name: "Qwen 3.8",
-
-		Class: ClassMedium,
-
-		Output: 65536,
-
+		Output:  65536,
 		Context: 262144,
 
 		Efforts: qwen38Efforts,
 	},
 	{
-		ID: "qwen3.8-flash",
-
+		ID:        "qwen3.8-flash",
 		Namespace: "qwen",
+		Name:      "Qwen 3.8 Flash",
+		Class:     ClassSmall,
 
-		Name: "Qwen 3.8 Flash",
-
-		Class: ClassSmall,
-
-		Output: 131072,
-
+		Output:  131072,
 		Context: 1000000,
 	},
 
 	{
-		ID: "qwen3.7-max",
-
+		ID:        "qwen3.7-max",
 		Namespace: "qwen",
+		Name:      "Qwen 3.7 Max",
+		Class:     ClassLarge,
 
-		Name: "Qwen 3.7 Max",
-
-		Class: ClassLarge,
-
-		Output: 65536,
-
+		Output:  65536,
 		Context: 1000000,
 	},
 	{
-		ID: "qwen3.7-plus",
-
+		ID:        "qwen3.7-plus",
 		Aliases:   []string{"qwen3.7"},
 		Namespace: "qwen",
+		Name:      "Qwen 3.7 Plus",
+		Class:     ClassMedium,
 
-		Name: "Qwen 3.7 Plus",
-
-		Class: ClassMedium,
-
-		Output: 65536,
-
+		Output:  65536,
 		Context: 1000000,
 	},
 
 	{
-		ID: "qwen3.5-plus",
-
+		ID:        "qwen3.5-plus",
 		Aliases:   []string{"qwen3.5"},
 		Namespace: "qwen",
+		Name:      "Qwen 3.5",
+		Class:     ClassMedium,
 
-		Name: "Qwen 3.5",
-
-		Class: ClassMedium,
-
-		Output: 65536,
-
+		Output:  65536,
 		Context: 1000000,
 	},
 
 	// NVIDIA
 
 	{
-		ID: "nemotron-3-ultra",
+		ID:        "nemotron-3.5-super",
+		Aliases:   []string{"nemotron-3.5-super-vl", "nemotron-3.5-super-vl-120b-a12b", "nvidia-nemotron-3.5-super-vl-120b-a12b-nvfp4", "nvidia-nemotron-3.5-super-vl-120b-a12b-bf16"},
+		Namespace: "nvidia",
+		Name:      "Nemotron 3.5 Super",
+		Class:     ClassMedium,
 
+		Output:  65536,
+		Context: 262144,
+
+		Efforts: nemotronEfforts,
+	},
+	{
+		ID:        "nemotron-3.5-bolt",
+		Aliases:   []string{"nemotron-3.5-bolt-74b-a9b", "nvidia-nemotron-3.5-bolt-74b-a9b-24gb", "nvidia-nemotron-3.5-bolt-74b-a9b-bf16"},
+		Namespace: "nvidia",
+		Name:      "Nemotron 3.5 Bolt",
+		Class:     ClassMedium,
+
+		Output:  65536,
+		Context: 262144,
+
+		Efforts: nemotronEfforts,
+	},
+	{
+		ID:        "nemotron-3.5-lightning",
+		Aliases:   []string{"nemotron-3.5-lightning-30b-a3b", "nvidia-nemotron-3.5-lightning-30b-a3b-nvfp4", "nvidia-nemotron-3.5-lightning-30b-a3b-bf16"},
+		Namespace: "nvidia",
+		Name:      "Nemotron 3.5 Lightning",
+		Class:     ClassSmall,
+
+		Output:  65536,
+		Context: 262144,
+
+		Efforts: nemotronThinkingEfforts,
+	},
+
+	{
+		ID:        "nemotron-3-ultra",
 		Aliases:   []string{"nemotron-3-ultra-550b-a55b", "nvidia-nemotron-3-ultra-550b-a55b-nvfp4", "nvidia-nemotron-3-ultra-550b-a55b-bf16"},
 		Namespace: "nvidia",
-
-		Name: "Nemotron 3 Ultra",
-
-		Class: ClassLarge,
+		Name:      "Nemotron 3 Ultra",
+		Class:     ClassLarge,
 
 		Output: 65536,
-
 		// The weights support 1M, but NVIDIA's recipes and OpenRouter serve
 		// 256K; WINGMAN_CONTEXT_WINDOW covers larger deployments.
 		Context: 262144,
@@ -1216,83 +983,26 @@ var Models = []Model{
 		Efforts: nemotronEfforts,
 	},
 	{
-		ID: "nemotron-3.5-super",
-
-		Aliases:   []string{"nemotron-3.5-super-vl", "nemotron-3.5-super-vl-120b-a12b", "nvidia-nemotron-3.5-super-vl-120b-a12b-nvfp4", "nvidia-nemotron-3.5-super-vl-120b-a12b-bf16"},
-		Namespace: "nvidia",
-
-		Name: "Nemotron 3.5 Super",
-
-		Class: ClassMedium,
-
-		Output: 65536,
-
-		Context: 262144,
-
-		Efforts: nemotronEfforts,
-	},
-	{
-		ID: "nemotron-3.5-bolt",
-
-		Aliases:   []string{"nemotron-3.5-bolt-74b-a9b", "nvidia-nemotron-3.5-bolt-74b-a9b-24gb", "nvidia-nemotron-3.5-bolt-74b-a9b-bf16"},
-		Namespace: "nvidia",
-
-		Name: "Nemotron 3.5 Bolt",
-
-		Class: ClassMedium,
-
-		Output: 65536,
-
-		Context: 262144,
-
-		Efforts: nemotronEfforts,
-	},
-	{
-		ID: "nemotron-3.5-lightning",
-
-		Aliases:   []string{"nemotron-3.5-lightning-30b-a3b", "nvidia-nemotron-3.5-lightning-30b-a3b-nvfp4", "nvidia-nemotron-3.5-lightning-30b-a3b-bf16"},
-		Namespace: "nvidia",
-
-		Name: "Nemotron 3.5 Lightning",
-
-		Class: ClassSmall,
-
-		Output: 65536,
-
-		Context: 262144,
-
-		Efforts: nemotronThinkingEfforts,
-	},
-
-	{
-		ID: "nemotron-3-super",
-
+		ID:        "nemotron-3-super",
 		Aliases:   []string{"nemotron-3-super-120b-a12b", "nvidia-nemotron-3-super-120b-a12b-fp8", "nvidia-nemotron-3-super-120b-a12b-nvfp4", "nvidia-nemotron-3-super-120b-a12b-bf16"},
 		Namespace: "nvidia",
+		Name:      "Nemotron 3 Super",
+		Class:     ClassMedium,
 
-		Name: "Nemotron 3 Super",
-
-		Class: ClassMedium,
-
-		Output: 65536,
-
+		Output:  65536,
 		Context: 262144,
 
 		Efforts: nemotron3SuperEfforts,
 	},
 	{
 		ID: "nemotron-3-nano",
-
 		// Ollama serves both sizes under this name (`:30b`, `:4b`).
 		Aliases:   []string{"nemotron-3-nano-30b-a3b", "nemotron-3-nano-4b", "nvidia-nemotron-3-nano-30b-a3b-fp8", "nvidia-nemotron-3-nano-30b-a3b-nvfp4", "nvidia-nemotron-3-nano-30b-a3b-bf16", "nvidia-nemotron-3-nano-4b-fp8", "nvidia-nemotron-3-nano-4b-bf16"},
 		Namespace: "nvidia",
+		Name:      "Nemotron 3 Nano",
+		Class:     ClassSmall,
 
-		Name: "Nemotron 3 Nano",
-
-		Class: ClassSmall,
-
-		Output: 65536,
-
+		Output:  65536,
 		Context: 262144,
 
 		Efforts: nemotronThinkingEfforts,
