@@ -16,9 +16,24 @@ export const ActionType = {
 		"chat/inputCompleted" as Protocol.ActionType.ChatInputCompleted,
 	ChatConfigChanged:
 		"chat/configChanged" as Protocol.ActionType.ChatConfigChanged,
+	ChatIsReadChanged:
+		"chat/isReadChanged" as Protocol.ActionType.ChatIsReadChanged,
+	SessionIsReadChanged:
+		"session/isReadChanged" as Protocol.ActionType.SessionIsReadChanged,
+	SessionIsArchivedChanged:
+		"session/isArchivedChanged" as Protocol.ActionType.SessionIsArchivedChanged,
 	TerminalInput: "terminal/input" as Protocol.ActionType.TerminalInput,
 	TerminalResized: "terminal/resized" as Protocol.ActionType.TerminalResized,
 	TerminalClaimed: "terminal/claimed" as Protocol.ActionType.TerminalClaimed,
+};
+export const SessionStatus = {
+	Idle: 1 as Protocol.SessionStatus.Idle,
+	Error: 2 as Protocol.SessionStatus.Error,
+	InProgress: 8 as Protocol.SessionStatus.InProgress,
+	// A turn that waits for the user is also in progress.
+	InputNeeded: 24 as Protocol.SessionStatus.InputNeeded,
+	IsRead: 32 as Protocol.SessionStatus.IsRead,
+	IsArchived: 64 as Protocol.SessionStatus.IsArchived,
 };
 export const ToolCallConfirmationReason = {
 	UserAction: "user-action" as Protocol.ToolCallConfirmationReason.UserAction,

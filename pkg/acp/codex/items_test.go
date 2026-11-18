@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
+	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 )
 
 func TestWebSearchTitle(t *testing.T) {
@@ -71,18 +74,18 @@ func TestCompactionToolCalls(t *testing.T) {
 	if start.ToolCall.Title != "Compact conversation" || start.ToolCall.Kind != acp.ToolKindThink || start.ToolCall.Status != acp.ToolCallStatusInProgress {
 		t.Errorf("start = %#v", start.ToolCall)
 	}
-	if meta, ok := start.ToolCall.Meta["contextCompaction"].(map[string]any); !ok || meta["version"] != 1 {
+	if meta, ok := acpjson.Object(start.ToolCall.Meta)["contextCompaction"].(map[string]any); !ok || meta["version"] != json.Number("1") {
 		t.Errorf("start meta = %#v", start.ToolCall.Meta)
 	}
 
 	complete := compactionCompleteToolCall("compact-1")
-	if complete.ToolCallUpdate == nil || complete.ToolCallUpdate.Title == nil || *complete.ToolCallUpdate.Title != "Compact conversation" {
+	if complete.ToolCallUpdate == nil || complete.ToolCallUpdate.Title.Ptr() == nil || *complete.ToolCallUpdate.Title.Ptr() != "Compact conversation" {
 		t.Fatalf("complete = %#v", complete.ToolCallUpdate)
 	}
-	if complete.ToolCallUpdate.Status == nil || *complete.ToolCallUpdate.Status != acp.ToolCallStatusCompleted {
+	if complete.ToolCallUpdate.Status.Ptr() == nil || *complete.ToolCallUpdate.Status.Ptr() != acp.ToolCallStatusCompleted {
 		t.Errorf("complete status = %#v", complete.ToolCallUpdate.Status)
 	}
-	if meta, ok := complete.ToolCallUpdate.Meta["contextCompaction"].(map[string]any); !ok || meta["version"] != 1 {
+	if meta, ok := acpjson.Object(complete.ToolCallUpdate.Meta)["contextCompaction"].(map[string]any); !ok || meta["version"] != json.Number("1") {
 		t.Errorf("complete meta = %#v", complete.ToolCallUpdate.Meta)
 	}
 
@@ -202,7 +205,7 @@ func TestSubAgentToolCalls(t *testing.T) {
 	if !ok || complete.ToolCallUpdate == nil {
 		t.Fatalf("complete = %#v, ok=%v", complete, ok)
 	}
-	if *complete.ToolCallUpdate.Status != acp.ToolCallStatusCompleted {
+	if *complete.ToolCallUpdate.Status.Ptr() != acp.ToolCallStatusCompleted {
 		t.Errorf("complete status = %#v", complete.ToolCallUpdate.Status)
 	}
 
@@ -217,7 +220,7 @@ func TestCollabToolCallShowsPromptWithoutInternalState(t *testing.T) {
 	if !ok || update.ToolCall == nil {
 		t.Fatalf("update = %#v, ok=%v", update, ok)
 	}
-	input, _ := update.ToolCall.RawInput.(map[string]any)
+	input := acpjson.Object(update.ToolCall.RawInput)
 	if len(input) != 1 || input["prompt"] != "Review tools" {
 		t.Fatalf("raw input = %#v", update.ToolCall.RawInput)
 	}
@@ -251,7 +254,7 @@ func TestGuardianUsesFormattedContentOnly(t *testing.T) {
 		t.Fatalf("start = %#v", start)
 	}
 	update := guardianUpdateToolCall(g)
-	if update.ToolCallUpdate == nil || update.ToolCallUpdate.RawOutput != nil || len(update.ToolCallUpdate.Content) != 1 {
+	if update.ToolCallUpdate == nil || update.ToolCallUpdate.RawOutput.Ptr() != nil || len(acptest.Value(update.ToolCallUpdate.Content)) != 1 {
 		t.Fatalf("update = %#v", update)
 	}
 }

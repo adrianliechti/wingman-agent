@@ -172,12 +172,12 @@ func TestCancelledQueuedPromptDoesNotWaitForActivePrompt(t *testing.T) {
 	cancel()
 	done := make(chan acp.PromptResponse, 1)
 	go func() {
-		response, _ := a.Prompt(ctx, acp.PromptRequest{SessionId: s.id, MessageId: new("queued")})
+		response, _ := a.Prompt(ctx, acp.PromptRequest{SessionId: s.id})
 		done <- response
 	}()
 	select {
 	case response := <-done:
-		if response.StopReason != acp.StopReasonCancelled || response.UserMessageId == nil || *response.UserMessageId != "queued" {
+		if response.StopReason != acp.StopReasonCancelled {
 			t.Fatalf("queued prompt = %+v", response)
 		}
 	case <-time.After(time.Second):

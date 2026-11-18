@@ -99,6 +99,9 @@ func TestCatalogPreservesUpstreamConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for id, upstreamID := range map[string]string{
+		"openai/gpt-6.2-astra":       "gpt-6.2-astra",
+		"~openai/GPT-6.2-SOL:latest": "gpt-6.2-sol",
+		"gpt-6.1-terra":              "gpt-6.1-terra",
 		"gpt-6-astra":                "gpt-6-astra",
 		"gpt-6.1-sol":                "gpt-6.1-sol",
 		"~openai/GPT-6.1-SOL:latest": "gpt-6.1-sol",

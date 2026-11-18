@@ -5,11 +5,14 @@ import (
 	"reflect"
 	"testing"
 
+	sdk "github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 func TestElicitationSchemaPreservesEnumDescriptions(t *testing.T) {
-	schema := elicitationSchema(tool.ElicitRequest{Fields: []tool.ElicitField{{
+	schema := testElicitationSchema(t, tool.ElicitRequest{Fields: []tool.ElicitField{{
 		Name:             "strategy",
 		Type:             "string",
 		Title:            "Strategy",
@@ -21,15 +24,15 @@ func TestElicitationSchemaPreservesEnumDescriptions(t *testing.T) {
 		Default:          "safe",
 	}}})
 
-	property, ok := schema.Properties["strategy"].(map[string]any)
-	if !ok {
+	property := acpjson.Object(schema.Properties["strategy"])
+	if property == nil {
 		t.Fatalf("property = %#v", schema.Properties["strategy"])
 	}
-	choices, ok := property["oneOf"].([]map[string]any)
+	choices, ok := property["oneOf"].([]any)
 	if !ok || len(choices) != 2 {
 		t.Fatalf("oneOf = %#v", property["oneOf"])
 	}
-	if choices[0]["const"] != "safe" || choices[0]["description"] != "Minimal changes" {
+	if choices[0].(map[string]any)["const"] != "safe" || choices[0].(map[string]any)["description"] != "Minimal changes" {
 		t.Fatalf("first choice = %#v", choices[0])
 	}
 	if !reflect.DeepEqual(schema.Required, []string{"strategy"}) {
@@ -38,7 +41,7 @@ func TestElicitationSchemaPreservesEnumDescriptions(t *testing.T) {
 }
 
 func TestElicitationSchemaUsesAnyOfForMultiSelect(t *testing.T) {
-	schema := elicitationSchema(tool.ElicitRequest{Fields: []tool.ElicitField{{
+	schema := testElicitationSchema(t, tool.ElicitRequest{Fields: []tool.ElicitField{{
 		Name:             "targets",
 		Type:             "string",
 		Multiple:         true,
@@ -46,23 +49,23 @@ func TestElicitationSchemaUsesAnyOfForMultiSelect(t *testing.T) {
 		EnumDescriptions: []string{"Run tests", "Update docs"},
 	}}})
 
-	property := schema.Properties["targets"].(map[string]any)
+	property := acpjson.Object(schema.Properties["targets"])
 	if property["type"] != "array" {
 		t.Fatalf("type = %v", property["type"])
 	}
 	items := property["items"].(map[string]any)
-	if _, ok := items["anyOf"].([]map[string]any); !ok {
+	if _, ok := items["anyOf"].([]any); !ok {
 		t.Fatalf("items = %#v", items)
 	}
 }
 
 func TestElicitationSchemaPreservesCustomAnswerCompanion(t *testing.T) {
-	schema := elicitationSchema(tool.ElicitRequest{Fields: []tool.ElicitField{
+	schema := testElicitationSchema(t, tool.ElicitRequest{Fields: []tool.ElicitField{
 		{Name: "question_0", Enum: []string{"Red", "Blue"}, Strict: true},
 		{Name: "question_0_custom", CustomAnswerFor: "question_0"},
 	}})
 
-	property := schema.Properties["question_0_custom"].(map[string]any)
+	property := acpjson.Object(schema.Properties["question_0_custom"])
 	meta := property["_meta"].(map[string]any)
 	marker := meta["wingman"].(map[string]any)
 	if marker["customAnswerFor"] != "question_0" {
@@ -127,4 +130,13 @@ func TestElicitationAcceptModeDoesNotInventRequiredText(t *testing.T) {
 	if result.Action != tool.ElicitCancel {
 		t.Fatalf("elicitation action = %q, want cancel", result.Action)
 	}
+}
+
+func testElicitationSchema(t *testing.T, req tool.ElicitRequest) sdk.ElicitationSchema {
+	t.Helper()
+	schema, err := elicitationSchema(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return schema
 }

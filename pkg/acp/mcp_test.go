@@ -18,7 +18,7 @@ func TestValidateMCPServers(t *testing.T) {
 		return acpsdk.McpServer{Sse: &acpsdk.McpServerSseInline{Name: name, Url: url, Headers: headers}}
 	}
 	proxied := func(name, id string) acpsdk.McpServer {
-		return acpsdk.McpServer{Acp: &acpsdk.McpServerAcpInline{Name: name, Id: acpsdk.McpServerAcpId(id)}}
+		return acpsdk.McpServer{Acp: &acpsdk.McpServerAcpInline{Name: name, ServerId: acpsdk.McpServerAcpId(id)}}
 	}
 	local := stdio("local", "server", acpsdk.EnvVariable{Name: "TOKEN", Value: "secret"})
 
@@ -76,26 +76,5 @@ func TestValidateMCPServers(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, tc.want)
 			}
 		})
-	}
-}
-
-func TestStableMCPServers(t *testing.T) {
-	servers, err := StableMCPServers([]acpsdk.UnstableMcpServer{
-		{Http: &acpsdk.UnstableMcpServerHttp{
-			Name: "remote", Type: "http", Url: "https://example.test/mcp",
-			Headers: []acpsdk.HttpHeader{{Name: "Authorization", Value: "secret"}},
-		}},
-	}, acpsdk.McpCapabilities{Http: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(servers) != 1 || servers[0].Http == nil || servers[0].Http.Url != "https://example.test/mcp" || len(servers[0].Http.Headers) != 1 {
-		t.Fatalf("converted servers = %#v", servers)
-	}
-
-	if _, err := StableMCPServers([]acpsdk.UnstableMcpServer{{
-		Sse: &acpsdk.UnstableMcpServerSse{Name: "events", Url: "https://example.test/sse"},
-	}}, acpsdk.McpCapabilities{}); err == nil {
-		t.Fatal("unadvertised SSE transport was accepted")
 	}
 }

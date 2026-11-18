@@ -34,6 +34,9 @@ func (c *connection) dispatch(raw json.RawMessage) {
 	var err error
 	if t := h.terminal(p.Channel); t != nil {
 		err = c.executeTerminalAction(t, p)
+	} else if h.flagUnopened(p, pending.origin) {
+		// A session nobody has open is marked without loading it.
+		return
 	} else if a, ch, err = h.ensureSession(p.Channel); err == nil {
 		h.mu.Lock()
 		if ack, ok := a.acks[pending.origin]; ok && ack.key == key {
@@ -97,7 +100,7 @@ func (c *connection) executeAction(a *Session, ch *Chat, p types.DispatchActionP
 	h.mu.Lock()
 	run, err := c.applyAction(a, ch, p)
 	h.mu.Unlock()
-	defer a.project.saveAliases()
+	defer h.saveAliases()
 	if err != nil {
 		return err
 	}
@@ -320,12 +323,29 @@ func (c *connection) applyAction(a *Session, ch *Chat, p types.DispatchActionPar
 			return nil, ahp.InvalidParams("nonempty session title required")
 		}
 		a.sessionAction(p.Action)
-	case *types.SessionIsReadChangedAction, *types.SessionIsArchivedChangedAction:
+	case *types.SessionIsReadChangedAction:
 		if !session {
 			return nil, ahp.InvalidParams("session channel required")
 		}
 		a.sessionAction(p.Action)
-	case *types.ChatDraftChangedAction, *types.ChatIsReadChangedAction, *types.ChatIsArchivedChangedAction:
+		// A session is read when each of its chats is.
+		for _, ch := range a.chats {
+			ch.markRead(action.IsRead)
+		}
+	case *types.SessionIsArchivedChangedAction:
+		if !session {
+			return nil, ahp.InvalidParams("session channel required")
+		}
+		a.sessionAction(p.Action)
+	case *types.ChatIsReadChangedAction:
+		if !chat {
+			return nil, ahp.InvalidParams("chat channel required")
+		}
+		ch.chatAction(p.Action)
+		if action.IsRead && !a.state.Status.Has(types.SessionStatusIsRead) && a.chatsRead() {
+			a.sessionAction(types.StateAction{Value: &types.SessionIsReadChangedAction{Type: types.ActionTypeSessionIsReadChanged, IsRead: true}})
+		}
+	case *types.ChatDraftChangedAction, *types.ChatIsArchivedChangedAction:
 		if !chat {
 			return nil, ahp.InvalidParams("chat channel required")
 		}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 )
 
@@ -142,7 +143,7 @@ func TestLiveCodexMCPStartupSessionIsolation(t *testing.T) {
 	go func() {
 		resp, err := cc.NewSession(ctx, acp.NewSessionRequest{
 			Cwd: cwd, McpServers: secondServers,
-			Meta: map[string]any{"mcpStartupAwaitTimeoutMs": 20000},
+			Meta: acpjson.Metadata(map[string]any{"mcpStartupAwaitTimeoutMs": 20000}),
 		})
 		secondDone <- sessionResult{resp, err}
 	}()

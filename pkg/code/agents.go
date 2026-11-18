@@ -19,6 +19,11 @@ type AgentDef struct {
 	Args []string `json:"args,omitempty"`
 
 	Env map[string]string `json:"env,omitempty"`
+
+	// AllFolders says that the agent, asked for its sessions without a folder,
+	// lists those of every folder. Its sessions are then listed from one
+	// running agent instead of one in each open project.
+	AllFolders bool `json:"allFolders,omitempty"`
 }
 
 func agentsConfigPath() (string, error) {

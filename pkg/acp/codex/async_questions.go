@@ -8,6 +8,9 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
+	bridge "github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 type asyncQuestion struct {
@@ -39,17 +42,16 @@ func (a *approver) askAsyncQuestions(cc *codexClient, turnID, itemID string, que
 	}
 	schema := userInputSchema(form)
 	schema.Required = nil // Each question can be answered independently.
-	meta := a.elicitationMeta(nil)
-	meta["codex"] = map[string]any{"delivery": "async"}
-	response, err := callClient(a.ctx, a.conn, func() (acp.UnstableCreateElicitationResponse, error) {
-		return a.conn.UnstableCreateElicitation(a.ctx, acp.UnstableCreateElicitationRequest{Form: &acp.UnstableCreateElicitationForm{
-			Mode: "form", Meta: meta, Message: "Codex keeps working while you answer. Answers are delivered only while this turn is running.", RequestedSchema: schema,
+	ctx := bridge.WithBackgroundInteraction(a.ctx)
+	response, err := callClient(ctx, a.conn, func() (acp.CreateElicitationResponse, error) {
+		return a.conn.CreateElicitation(ctx, acp.CreateElicitationRequest{Form: &acp.CreateElicitationForm{
+			Mode: "form", Session: &acp.ElicitationSessionScope{SessionId: a.sessionID, ToolCallId: new(acp.ToolCallId(itemID))}, Message: "Codex keeps working while you answer. Answers are delivered only while this turn is running.", RequestedSchema: schema,
 		}})
 	})
 	if err != nil || a.ctx.Err() != nil || response.Accept == nil {
 		return
 	}
-	answers := userInputAnswers(form, response.Accept.Content)
+	answers := userInputAnswers(form, acpjson.Object(response.Accept.Content))
 	var replies []asyncQuestionReply
 	for i, q := range form {
 		var parts []string

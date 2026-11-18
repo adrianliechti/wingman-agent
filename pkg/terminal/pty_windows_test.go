@@ -63,3 +63,40 @@ func TestWindowsConPTYRunsCommand(t *testing.T) {
 		t.Fatal("session did not exit after command completed")
 	}
 }
+
+// TestWindowsShellReportsTheCommandItRuns checks that an interactive shell is
+// busy while it runs a command and not while it waits at its prompt.
+func TestWindowsShellReportsTheCommandItRuns(t *testing.T) {
+	if !Supported() {
+		t.Skip("pty not supported")
+	}
+
+	root := t.TempDir()
+	manager := NewManager(root)
+	defer manager.Close()
+
+	session, err := manager.CreateCommand(CommandSpec{
+		Path:  os.Getenv("ComSpec"),
+		Dir:   root,
+		Title: "ConPTY shell",
+	}, 100, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	time.Sleep(500 * time.Millisecond)
+	if session.HasForegroundProcess() {
+		t.Fatal("a shell at its prompt reports a command")
+	}
+	if err := session.Write([]byte("ping -n 30 127.0.0.1\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !session.HasForegroundProcess() {
+		if time.Now().After(deadline) {
+			t.Fatal("a shell that runs a command does not report it")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

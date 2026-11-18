@@ -13,9 +13,75 @@ wingman --resume <session-id>
 wingman --agent codex --continue
 ```
 
-In the browser, open the session list and select a saved conversation. Switching
-the agent picker changes which sessions you browse and which agent a new chat
-uses. Existing sessions keep their agent and continue running.
+In the browser, open the session list with the panel button at the left of the
+title bar, or **Show sessions** in the command palette, and select a
+conversation. The list stays at the left whatever the window shows, resizes
+like the side panel, and the window remembers it open and how wide. It holds
+the sessions of every agent, including
+those made in an agent's own CLI: opening the list starts each installed agent
+so that it can list them. Agents that know the sessions of every folder
+(Claude, Codex, Copilot and Pi) list all of them, each under its folder, as
+their CLIs' resume lists do, and run once for that however many windows are
+open. Any other agent is asked in each open project; set `"allFolders": true`
+on its entry in `agents.json` if it lists every folder's sessions when asked
+without one. A session its agent no longer has, such as one that never got
+a message, leaves the list when you open it. A session whose folder no longer
+exists is not listed, since it could not be opened. Deleting, archiving or
+marking a session does not open it. An agent
+you have not logged in to says how to log in, such as Copilot's `copilot login`.
+
+- **Needs you** comes first: sessions that wait for an approval or an answer.
+  An approval can be allowed or denied right in the list; a question opens its
+  session.
+- **Working** lists the sessions that run a turn, with what each does now, such
+  as the command it runs. A session of another project names that project
+  beside it, so an approval is given knowing where it applies.
+- The rest follow by day. A blue dot marks a session that finished or failed
+  since you last looked at it, and `+12 −3` shows the lines its turns changed.
+  A session at rest takes one line, with its agent's icon when you use several.
+
+A group shows its eight latest sessions; **Show more** lists the rest, and the
+session you have open always shows. Headings stay in view while you scroll
+through their group.
+
+`wingman server` shows the folder it started in: its list holds that folder's
+sessions and its window opens no other folder. The desktop app shows every
+project. Its list holds the sessions of all of them, in any folder on any
+drive. With more than one, the rest
+group by project: the window's own first, open, and the others closed, with
+a folder icon, which appears on its heading, to show that project in the window.
+The eight projects used last are listed; **Show more projects** lists the
+others, and a search looks through all of them. Opening a session of another
+project moves the window there, with its files, changes and terminals; the
+agents of both projects keep running, and approvals in the list work for any
+project. The list keeps its filter, search and open groups through the move,
+and the project you left stays open in it. A project that cannot open, such as
+a folder that is gone, leaves the window where it is and says why. Searching
+the list opens the groups that hold what it found.
+A window shows one project at a time, named in its address; **Open Folder**
+moves it to any folder.
+
+All desktop app windows share one Wingman that runs in the background, so a
+session started in one window shows up in the lists of all, and closing a
+window stops no agent. Once the last window is closed, Wingman lets running
+turns and commands finish and stops a minute later.
+**File › New Window** (`⇧⌘N`, `Ctrl+Shift+N` on Windows) opens another window
+on the start page.
+
+Right-click a session to mark it read or unread, archive it, fork it or delete
+it. Archived sessions leave the list until they need you again; the filter
+button shows them, or only one agent's sessions. Opening a session marks it
+read for every browser and for VS Code.
+
+The list's button and the page title count the sessions that need you. Press
+`Ctrl+Alt+N` (`⌃⌥N` on macOS), or search for **Go to next session that needs
+you** in the command palette, to open the next one; after those it visits
+sessions that finished unseen. In a browser, the bell in the list turns on
+system notifications for when a session needs you, finishes or fails while the
+page is in the background; the desktop app's window cannot show them.
+
+The agent picker chooses which agent a new chat uses. Existing sessions keep
+their agent and continue running.
 
 Closing a browser tab leaves its running work on the workspace server. Stopping
 the workspace server ends that running work. Deleting a session cancels its

@@ -92,7 +92,7 @@ func TestPlanThenBuildAndBugReviewFixtures(t *testing.T) {
 
 func TestReportTokenAndCacheHitRatioNormalization(t *testing.T) {
 	dir := t.TempDir()
-	cached := 8000
+	cached := int64(8000)
 	writeReportFixture(t, dir, "wingman-plan", benchResult{
 		Agent:    "wingman",
 		Model:    "gpt-test",

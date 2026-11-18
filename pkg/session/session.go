@@ -469,6 +469,24 @@ func List(sessionsDir string) ([]Session, error) {
 	return sessions, nil
 }
 
+// Exists reports whether a sessions directory holds anything of a session: its
+// journal, in the current or the earlier format, or its sidecar directory.
+func Exists(sessionsDir, id string) (bool, error) {
+	if err := validateSessionID(id); err != nil {
+		return false, err
+	}
+	for _, suffix := range []string{".jsonl", ".json", ".data"} {
+		_, err := os.Lstat(filepath.Join(sessionsDir, id+suffix))
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
 func Delete(sessionsDir, id string) error {
 	if sessionsDir == "" {
 		return nil

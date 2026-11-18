@@ -2,6 +2,7 @@ import type * as monaco from "monaco-editor";
 import {
 	initializeWorkspace,
 	fetchWorkspace,
+	windowProject,
 } from "./state/workspaceClient.ts";
 import { WorkspaceProvider } from "./state/WorkspaceProvider.tsx";
 import { initializeComposerDrafts } from "./state/composerDrafts.ts";
@@ -12,7 +13,8 @@ import "./devicon-slim.css";
 import "./index.css";
 import App from "./App.tsx";
 import { createServerQueryClient, queryKeys } from "./api/query.ts";
-import { AppCrashed } from "./AppCrashed.tsx";
+import { APIError } from "./api/http.ts";
+import { AppCrashed, ProjectUnavailable } from "./AppCrashed.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary.tsx";
 import { ToastProvider } from "./components/ui/Feedback.tsx";
 
@@ -58,4 +60,19 @@ fetchWorkspace()
 			</StrictMode>,
 		);
 	})
-	.catch((error) => root.render(<AppCrashed error={error} errorInfo={null} />));
+	.catch((error) => {
+		const project = windowProject();
+		// The host refused the project the address names; the app itself is fine.
+		const refused =
+			project &&
+			error instanceof APIError &&
+			error.status >= 400 &&
+			error.status < 500;
+		root.render(
+			refused ? (
+				<ProjectUnavailable project={project} error={error} />
+			) : (
+				<AppCrashed error={error} errorInfo={null} />
+			),
+		);
+	});

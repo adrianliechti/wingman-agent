@@ -469,7 +469,9 @@ func (h *Host) root() (types.RootState, error) {
 		platform = "macos"
 	}
 	resources, _ := json.Marshal(map[string]any{"platform": platform, "architecture": runtime.GOARCH, "cpuCount": runtime.NumCPU()})
-	root := types.RootState{Agents: []types.AgentInfo{}, Meta: map[string]json.RawMessage{"vscode.agentHost.resources": resources}}
+	// A window checks that it reconnected to the host process it started with.
+	host, _ := json.Marshal(map[string]string{"instanceId": h.id})
+	root := types.RootState{Agents: []types.AgentInfo{}, Meta: map[string]json.RawMessage{"vscode.agentHost.resources": resources, "wingman.host": host}}
 	if web != nil {
 		scope := web.scope
 		workspace, _ := json.Marshal(map[string]any{"workspaceId": scope.WorkspaceID, "instanceId": scope.InstanceID})
@@ -510,7 +512,7 @@ func (h *Host) defaultDirectoryLocked() string {
 	if h.web != nil {
 		return h.web.directoryURI()
 	}
-	return fileuri.FromPath(h.roots[0])
+	return fileuri.FromPath(h.home)
 }
 
 func modelInfo(provider string, m model.Model) types.SessionModelInfo {
@@ -539,6 +541,14 @@ func modelInfo(provider string, m model.Model) types.SessionModelInfo {
 	}
 	return info
 }
+
+// listingMeta marks a resolveSessionConfig request of a client that wants the
+// provider's sessions listed, not a session configured.
+const listingMeta = "wingman.listing"
+
+// listsAllFolders reports whether one running agent of a provider lists the
+// sessions of every folder; tests replace it.
+var listsAllFolders = agents.ListsAllFolders
 
 func (c *connection) request(req ahp.Request) (any, error) {
 	if req.Method == "ping" {
@@ -617,7 +627,14 @@ func (c *connection) request(req ahp.Request) (any, error) {
 		if p.Provider != nil {
 			provider = *p.Provider
 		}
-		project, err := h.workingProject(p.WorkingDirectory)
+		directory := p.WorkingDirectory
+		// A session list starts each agent so that it lists its sessions. One
+		// that lists every folder's runs once for that, in the project that
+		// stays open, not in the project of every window.
+		if _, listing := p.Meta[listingMeta]; listing && listsAllFolders(provider) {
+			directory = nil
+		}
+		project, err := h.workingProject(directory)
 		if err != nil {
 			return nil, err
 		}
@@ -648,6 +665,10 @@ func (c *connection) request(req ahp.Request) (any, error) {
 		_, _, err := h.ensureSession(base.Channel)
 		return struct{}{}, err
 	case "disposeSession":
+		// A session no client has open is deleted without loading it.
+		if done, err := h.disposeUnopened(base.Channel); done {
+			return nil, err
+		}
 		a, ch, err := h.ensureSession(base.Channel)
 		if err != nil {
 			return nil, err

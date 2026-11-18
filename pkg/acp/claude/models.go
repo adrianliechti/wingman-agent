@@ -146,13 +146,7 @@ func modelConfigOption(models []ModelEntry, currentID string) acpsdk.SessionConf
 			{Value: acpsdk.SessionConfigValueId(currentID), Name: currentID},
 		}, ungrouped...)
 	}
-	opt := acpsdk.NewSessionConfigOptionSelect(
-		acpsdk.SessionConfigValueId(currentID),
-		acpsdk.SessionConfigSelectOptions{Ungrouped: &ungrouped},
-	)
-	opt.Select.Id = modelConfigID
-	opt.Select.Name = "Model"
-	return opt
+	return acp.SelectConfigOption(modelConfigID, "Model", currentID, ungrouped)
 }
 
 func effortConfigOption(models []ModelEntry, currentModelID, currentEffort string) *acpsdk.SessionConfigOption {

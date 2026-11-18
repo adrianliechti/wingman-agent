@@ -45,9 +45,13 @@ type SessionRef struct {
 }
 
 func workspaceScope(root string) WorkspaceScope {
-	// Connection identity is for the opened root, independent of legacy disk layout.
+	return WorkspaceScope{WorkspaceID: workspaceID(root), InstanceID: uuid.NewString()}
+}
+
+// workspaceID identifies a project by its opened root, independent of legacy disk layout.
+func workspaceID(root string) string {
 	sum := sha256.Sum256([]byte(canonicalPath(root)))
-	return WorkspaceScope{WorkspaceID: hex.EncodeToString(sum[:]), InstanceID: uuid.NewString()}
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Project) InstanceID() string { return s.scope.InstanceID }

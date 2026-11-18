@@ -48,6 +48,8 @@ func (a *Session) addChat(c *sessionController, resource, title string, origin *
 		stamp = created.UTC().Format(time.RFC3339Nano)
 	}
 	ch := newChat(a, c, resource, title, stamp)
+	// A chat starts as read as its session: the session's clients saw its history.
+	ch.chat.Status = withRead(ch.chat.Status, a.state.Status.Has(types.SessionStatusIsRead))
 	ch.chat.Origin = origin
 	if origin != nil {
 		if fork, ok := origin.Value.(*types.ChatForkOrigin); ok {
@@ -68,6 +70,7 @@ func (a *Session) addChat(c *sessionController, resource, title string, origin *
 		a.sessionAction(types.StateAction{Value: &types.SessionChatAddedAction{Type: types.ActionTypeSessionChatAdded, Summary: ch.summary()}})
 	}
 	ch.syncProjection(c, nil)
+	ch.refreshChangesLocked()
 	return ch
 }
 
@@ -109,15 +112,19 @@ func (a *Session) chat(resource string) *Chat {
 }
 
 func (a *Chat) summary() types.ChatSummary {
-	return types.ChatSummary{Resource: a.chat.Resource, Title: a.chat.Title, Status: a.chat.Status, ModifiedAt: a.chat.ModifiedAt, Origin: a.chat.Origin}
+	return types.ChatSummary{Resource: a.chat.Resource, Title: a.chat.Title, Status: a.chat.Status, ModifiedAt: a.chat.ModifiedAt, Changes: a.chat.Changes, Origin: a.chat.Origin}
 }
 
 func (a *Session) summary() types.SessionSummary {
-	summary := types.SessionSummary{Resource: a.resource, Provider: a.state.Provider, Title: a.state.Title, Status: a.state.Status, CreatedAt: a.created, ModifiedAt: a.modified, Project: a.state.Project, WorkingDirectories: a.state.WorkingDirectories, DefaultChat: a.state.DefaultChat, Chats: []types.SessionChatSummary{}}
-	for _, ch := range a.chats {
+	summary := types.SessionSummary{Resource: a.resource, Provider: a.state.Provider, Title: a.state.Title, Status: a.state.Status, Activity: a.state.Activity, CreatedAt: a.created, ModifiedAt: a.modified, Project: a.state.Project, WorkingDirectories: a.state.WorkingDirectories, DefaultChat: a.state.DefaultChat, Chats: []types.SessionChatSummary{}}
+	for i, ch := range a.chats {
 		status := ch.chat.Status
-		summary.Chats = append(summary.Chats, types.SessionChatSummary{Resource: ch.chat.Resource, Title: ch.chat.Title, Status: &status})
+		summary.Chats = append(summary.Chats, types.SessionChatSummary{Resource: ch.chat.Resource, Title: ch.chat.Title, Status: &status, Changes: ch.chat.Changes})
 		summary.ModifiedAt = max(summary.ModifiedAt, ch.chat.ModifiedAt)
+		// The session's footprint is its default chat's; a fork's copied history would count twice.
+		if i == 0 {
+			summary.Changes = ch.chat.Changes
+		}
 	}
 	return summary
 }
@@ -160,18 +167,32 @@ func (a *Session) sessionAction(action types.StateAction) {
 }
 
 // keep holds in the session's alias what a host lists before it opens the
-// session's project: its title, read and archived flags and last change.
-// Caller holds host.mu.
+// session's project: its title, read and archived flags, last change and the
+// files it changed. Caller holds host.mu.
 func (a *Session) keep(summary types.SessionSummary) {
 	alias, ok := a.project.host.aliases[a.resource]
 	modified, _ := time.Parse(time.RFC3339Nano, summary.ModifiedAt)
-	own := a.state.Status &^ activityBits
-	if !ok || alias.Title == a.state.Title && alias.Status == own && alias.Modified.Equal(modified) {
+	archived := a.state.Status & types.SessionStatusIsArchived
+	unread := !a.state.Status.Has(types.SessionStatusIsRead)
+	if !ok {
+		// A native CLI session can also acquire host-owned metadata, for
+		// example when a user archives it from the session list.
+		main := a.chats[0]
+		if !main.projected || a.resource != a.project.canonicalURI(a.state.Provider, main.controller.ref.SessionID) {
+			return
+		}
+		created, _ := time.Parse(time.RFC3339Nano, a.created)
+		alias = sessionAlias{Resource: a.resource, Project: a.project.dir, Backend: a.state.Provider, Session: main.controller.ref.SessionID, Created: created}
+		if alias.Backend == code.BuiltinAgentName {
+			alias.StorageRoot = a.project.storageRoot
+		}
+	}
+	if alias.Title == a.state.Title && alias.Status == archived && alias.Unread == unread && alias.Modified.Equal(modified) && reflect.DeepEqual(alias.Changes, summary.Changes) {
 		return
 	}
-	alias.Title, alias.Status, alias.Modified = a.state.Title, own, modified
+	alias.Title, alias.Status, alias.Unread, alias.Modified, alias.Changes = a.state.Title, archived, unread, modified, summary.Changes
 	a.project.host.rememberAliasLocked(alias)
-	a.project.stageAliasLocked(alias, false)
+	a.project.host.stageAliasLocked(alias, false)
 }
 
 func (a *Session) removeClient(id string) {
@@ -228,14 +249,21 @@ func (a *Session) syncChats(previous types.SessionSummary) {
 	for _, ch := range a.chats {
 		next := ch.summary()
 		if i := slices.IndexFunc(a.state.Chats, func(s types.ChatSummary) bool { return s.Resource == next.Resource }); i >= 0 && !reflect.DeepEqual(a.state.Chats[i], next) {
-			a.sessionAction(types.StateAction{Value: &types.SessionChatUpdatedAction{Type: types.ActionTypeSessionChatUpdated, Chat: next.Resource, Changes: types.PartialChatSummary{Title: &next.Title, Status: &next.Status, ModifiedAt: &next.ModifiedAt}}})
+			a.sessionAction(types.StateAction{Value: &types.SessionChatUpdatedAction{Type: types.ActionTypeSessionChatUpdated, Chat: next.Resource, Changes: types.PartialChatSummary{Title: &next.Title, Status: &next.Status, ModifiedAt: &next.ModifiedAt, Changes: next.Changes}}})
 		}
 	}
 	a.state.Status = a.activity() | a.state.Status&^activityBits
 	a.syncInputNeeded()
+	a.syncUnread()
+	a.syncActivity()
 	next := a.summary()
 	if !reflect.DeepEqual(previous, next) {
-		a.project.host.notifyRoot("root/sessionSummaryChanged", types.SessionSummaryChangedParams{Channel: types.RootResourceURI, Session: a.resource, Changes: types.PartialSessionSummary{Title: &next.Title, Status: &next.Status, ModifiedAt: &next.ModifiedAt, Chats: next.Chats}})
+		// An empty activity clears the one a client shows; a nil one would leave it.
+		activity := ""
+		if next.Activity != nil {
+			activity = *next.Activity
+		}
+		a.project.host.notifyRoot("root/sessionSummaryChanged", types.SessionSummaryChangedParams{Channel: types.RootResourceURI, Session: a.resource, Changes: types.PartialSessionSummary{Title: &next.Title, Status: &next.Status, Activity: &activity, ModifiedAt: &next.ModifiedAt, Chats: next.Chats, Changes: next.Changes}})
 	}
 	a.keep(next)
 }
@@ -301,6 +329,7 @@ func (a *Chat) inputRequests(wanted map[string]types.SessionInputRequest) {
 // session disposes the whole session, which clients learn of from the root.
 func (a *Session) chatDeleted(ch *Chat) {
 	if ch != a.chats[0] {
+		a.project.host.forgetEverywhere()
 		previous := a.summary()
 		a.chats = slices.DeleteFunc(a.chats, func(other *Chat) bool { return other == ch })
 		delete(a.project.host.chats, ch.chat.Resource)
@@ -309,7 +338,7 @@ func (a *Session) chatDeleted(ch *Chat) {
 		}
 		a.sessionAction(types.StateAction{Value: &types.SessionChatRemovedAction{Type: types.ActionTypeSessionChatRemoved, Chat: ch.chat.Resource}})
 		a.syncChats(previous)
-		a.project.forgetChatAlias(ch.chat.Resource)
+		a.project.host.forgetChatAliasLocked(ch.chat.Resource)
 		return
 	}
 	for _, other := range a.chats {
@@ -323,11 +352,7 @@ func (a *Session) chatDeleted(ch *Chat) {
 	for client := range a.project.host.clients {
 		delete(client.subscriptions, a.resource)
 	}
-	// A chat created while the session was disposed goes with it.
-	for _, fork := range a.project.host.forksLocked(a.resource) {
-		a.project.forgetChatAlias(fork.Chat)
-	}
-	a.project.forgetAlias(a.resource)
 	delete(a.project.host.sessions, a.resource)
-	a.project.host.notifyRoot("root/sessionRemoved", types.SessionRemovedParams{Channel: types.RootResourceURI, Session: a.resource})
+	// A chat created while the session was disposed goes with it.
+	a.project.host.forgetSessionLocked(a.resource)
 }

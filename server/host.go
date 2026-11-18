@@ -14,26 +14,28 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/server/ahp"
+	"github.com/google/uuid"
 )
 
 // DefaultHostPort is the preferred port of the standalone protocol host.
 const DefaultHostPort = 9100
 
 type HostOptions struct {
-	// Roots are the directories projects may be opened in: the home directory when empty.
-	Roots []string
 	// Token must accompany every connection when set.
 	Token string
 	// Idle is how long a project stays open without clients or work: 15 minutes when zero.
 	Idle time.Duration
 
 	disableManagedTools bool
+	// folder is the one folder the host of a server started in it shows.
+	folder string
 }
 
 // Host serves AHP for any project, opening one when a session names its directory.
 type Host struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
+	id                  string // this host process, which a reconnecting window recognizes
 	disableManagedTools bool
 	token               string
 	handler             http.Handler
@@ -54,33 +56,38 @@ type Host struct {
 	open        func(dir string) (*Project, error)
 	projectMu   sync.Mutex // serializes project startup and teardown, outside mu
 	terminalMu  sync.Mutex // orders terminal creation: a name is claimed in every project at once
-	roots       []string   // directories projects may be opened in
+	aliasWrites aliasStore // pending writes of aliases, of open and closed projects
+	home        string     // where clients start choosing a folder, and sessions that name none work
+	folder      string     // the only folder a server started in it shows; a host without one opens every folder
+
+	everywhereMu sync.Mutex
+	everywhere   map[string]*everywhereListing // agents' sessions of every folder, by provider
 }
 
 func NewHost(ctx context.Context, opts *HostOptions) (*Host, error) {
 	if opts == nil {
 		opts = new(HostOptions)
 	}
-	roots := opts.Roots
-	if len(roots) == 0 {
-		home, err := os.UserHomeDir()
-		if err != nil {
+	// A host opens every folder, and clients start choosing one in the home
+	// directory; the host of a server started in one folder shows no other.
+	home := opts.folder
+	if home == "" {
+		var err error
+		if home, err = os.UserHomeDir(); err != nil {
 			return nil, err
 		}
-		roots = []string{home}
 	}
-	for _, root := range roots {
-		if info, err := os.Stat(root); err != nil {
-			return nil, err
-		} else if !info.IsDir() {
-			return nil, fmt.Errorf("%s is not a directory", root)
-		}
+	if info, err := os.Stat(home); err != nil {
+		return nil, err
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", home)
 	}
 	h := newHost(ctx)
 	h.token = opts.Token
 	h.disableManagedTools = opts.disableManagedTools
-	for _, root := range roots {
-		h.roots = append(h.roots, canonicalPath(root))
+	h.home = canonicalPath(home)
+	if opts.folder != "" {
+		h.folder = h.home
 	}
 	h.open = func(dir string) (*Project, error) {
 		if info, err := os.Stat(dir); err != nil {
@@ -120,6 +127,7 @@ func newHost(ctx context.Context) *Host {
 	ctx, cancel := context.WithCancel(ctx)
 	return &Host{
 		ctx: ctx, cancel: cancel,
+		id:          uuid.NewString(),
 		creating:    map[string]chan struct{}{},
 		clients:     map[*connection]struct{}{},
 		sessions:    map[string]*Session{},
@@ -128,6 +136,7 @@ func newHost(ctx context.Context) *Host {
 		chatAliases: map[string]sessionAlias{},
 		versions:    map[string]clientVersion{},
 		projects:    map[string]*Project{},
+		everywhere:  map[string]*everywhereListing{},
 	}
 }
 

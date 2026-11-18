@@ -541,12 +541,23 @@ func (a *App) SetBackgroundStatus(message string, warning bool) {
 // Warn shows a non-fatal agent warning, such as truncated project
 // instructions, as a transcript notice that survives chat rebuilds.
 func (a *App) Warn(sessionID, message string) {
+	a.Notice(sessionID, code.Notice{Severity: "warning", Message: message})
+}
+
+func (a *App) Notice(sessionID string, notice code.Notice) {
 	a.post(func() {
 		if a.sessionID != sessionID {
 			return
 		}
 		a.appendAnnotation(func(width int) []string {
-			return cellNotice("Warning: "+message, theme.Default.Yellow, width)
+			color := theme.Default.Foreground
+			switch notice.Severity {
+			case "warning":
+				color = theme.Default.Yellow
+			case "error":
+				color = theme.Default.Red
+			}
+			return cellNotice(notice.String(), color, width)
 		})
 	})
 }

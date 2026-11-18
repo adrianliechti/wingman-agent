@@ -42,12 +42,16 @@ export const terminalQueries = {
 	list: () =>
 		queryOptions({
 			queryKey: queryKeys.terminals.list,
-			queryFn: async () => {
+			queryFn: async ({ signal }) => {
 				const ahp = workspaceClient().ahp;
 				await ahp.ready();
-				return (ahp.root.terminals ?? []).map((item) =>
-					terminalEntry(item.resource, item),
+				// The root lists the terminals of every project the host runs.
+				const own = new Set(
+					await fetchJSON<string[]>("/api/workspace/terminals", { signal }),
 				);
+				return (ahp.root.terminals ?? [])
+					.filter((item) => own.has(item.resource))
+					.map((item) => terminalEntry(item.resource, item));
 			},
 		}),
 };
@@ -57,6 +61,7 @@ export async function startTerminal(shell?: string): Promise<TerminalEntry> {
 	await ahp.request("createTerminal", {
 		channel: uri,
 		claim: ownTerminalClaim(),
+		...(ahp.directory ? { cwd: ahp.directory } : {}),
 		...(shell ? { _meta: { "wingman.shell": shell } } : {}),
 	});
 	return terminalEntry(uri, await ahp.read<TerminalState>(uri));

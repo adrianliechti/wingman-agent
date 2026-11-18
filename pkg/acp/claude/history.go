@@ -1,15 +1,18 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
@@ -161,7 +164,7 @@ func listProjectSessions(cwd string, env []string) ([]acpsdk.SessionInfo, error)
 				continue
 			}
 			id := strings.TrimSuffix(name, ".jsonl")
-			title, recordedCwd := scanSessionMetadata(filepath.Join(dir, name))
+			title, recordedCwd := cachedSessionMetadata(filepath.Join(dir, name), info)
 			if !matchesProjectCwd(cwd, recordedCwd) {
 				continue
 			}
@@ -255,6 +258,35 @@ func scanSessionCwd(path string) string {
 	return ""
 }
 
+var aiTitle = []byte(`"ai-title"`)
+
+// transcripts keeps what listing read of each transcript until the file
+// changes, so that listing again reads only the transcripts that grew.
+var transcripts = struct {
+	sync.Mutex
+	read map[string]transcriptMetadata
+}{read: map[string]transcriptMetadata{}}
+
+type transcriptMetadata struct {
+	size       int64
+	modified   time.Time
+	title, cwd string
+}
+
+func cachedSessionMetadata(path string, info fs.FileInfo) (title, cwd string) {
+	transcripts.Lock()
+	known, ok := transcripts.read[path]
+	transcripts.Unlock()
+	if ok && known.size == info.Size() && known.modified.Equal(info.ModTime()) {
+		return known.title, known.cwd
+	}
+	title, cwd = scanSessionMetadata(path)
+	transcripts.Lock()
+	transcripts.read[path] = transcriptMetadata{size: info.Size(), modified: info.ModTime(), title: title, cwd: cwd}
+	transcripts.Unlock()
+	return title, cwd
+}
+
 func scanSessionMetadata(path string) (title, cwd string) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -267,6 +299,11 @@ func scanSessionMetadata(path string) (title, cwd string) {
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
+			continue
+		}
+		// Once the cwd and the first message are known, only a later title
+		// matters: parsing the rest of a long transcript is most of the work.
+		if cwd != "" && firstUserText != "" && !bytes.Contains(line, aiTitle) {
 			continue
 		}
 		var h historyHeader
@@ -435,7 +472,7 @@ func replayUserMessage(ctx context.Context, conn acp.ClientConnection, sid acpsd
 	userText := func(text string) acpsdk.SessionUpdate {
 		update := acpsdk.UpdateUserMessageText(text)
 		if messageID != "" {
-			update.UserMessageChunk.MessageId = new(messageID)
+			update.UserMessageChunk.MessageId = new(acpsdk.MessageId(messageID))
 		}
 		return update
 	}

@@ -47,7 +47,9 @@ func TestWebServerHostsOtherProjects(t *testing.T) {
 	if err := os.Mkdir(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	app, err := New(t.Context(), root, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	// Only a server that shows every project, as the desktop app's does, opens
+	// a second one.
+	app, err := New(t.Context(), root, &ServerOptions{NoBrowser: true, Projects: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -160,7 +160,7 @@ func TestConfigOptionIDsRemainSessionScoped(t *testing.T) {
 
 func newAdapterForTest(t *testing.T, remote acpsdk.Agent) *Agent {
 	t.Helper()
-	a, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, "test", remote, nil, nil)
+	a, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, code.AgentDef{Name: "test"}, remote, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestLoadSessionStreamReplaysAndCachesHistory(t *testing.T) {
 		return acpsdk.LoadSessionResponse{}, nil
 	}
 	a, err := NewInProcess(
-		context.Background(), &code.Workspace{RootPath: t.TempDir()}, "test", remote,
+		context.Background(), &code.Workspace{RootPath: t.TempDir()}, code.AgentDef{Name: "test"}, remote,
 		func(conn *acpsdk.AgentSideConnection) { serverConn = conn }, nil,
 	)
 	if err != nil {
@@ -273,9 +273,9 @@ func TestLongReplayDoesNotOverflowNotificationQueue(t *testing.T) {
 			remote.loadFn = func(ctx context.Context, req acpsdk.LoadSessionRequest) (acpsdk.LoadSessionResponse, error) {
 				for i := range messages {
 					id := fmt.Sprint(i)
-					update := acpsdk.SessionUpdate{UserMessageChunk: &acpsdk.SessionUpdateUserMessageChunk{Content: acpsdk.TextBlock("question"), MessageId: &id}}
+					update := acpsdk.SessionUpdate{UserMessageChunk: &acpsdk.SessionUpdateUserMessageChunk{Content: acpsdk.TextBlock("question"), MessageId: new(acpsdk.MessageId(id))}}
 					if i%2 == 1 {
-						update = acpsdk.SessionUpdate{AgentMessageChunk: &acpsdk.SessionUpdateAgentMessageChunk{Content: acpsdk.TextBlock("answer"), MessageId: &id}}
+						update = acpsdk.SessionUpdate{AgentMessageChunk: &acpsdk.SessionUpdateAgentMessageChunk{Content: acpsdk.TextBlock("answer"), MessageId: new(acpsdk.MessageId(id))}}
 					}
 					if err := serverConn.SessionUpdate(ctx, acpsdk.SessionNotification{SessionId: req.SessionId, Update: update}); err != nil {
 						return acpsdk.LoadSessionResponse{}, err
@@ -284,7 +284,7 @@ func TestLongReplayDoesNotOverflowNotificationQueue(t *testing.T) {
 				return acpsdk.LoadSessionResponse{}, nil
 			}
 			a, err := NewInProcess(
-				context.Background(), &code.Workspace{RootPath: t.TempDir()}, "test", remote,
+				context.Background(), &code.Workspace{RootPath: t.TempDir()}, code.AgentDef{Name: "test"}, remote,
 				func(conn *acpsdk.AgentSideConnection) { serverConn = conn }, nil,
 			)
 			if err != nil {
@@ -327,7 +327,7 @@ func TestFailedLoadDoesNotRegisterSession(t *testing.T) {
 }
 
 func TestInitializationRejectsUnsupportedProtocolVersion(t *testing.T) {
-	_, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, "future", &adapterProtocolAgent{protocol: 2}, nil, nil)
+	_, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, code.AgentDef{Name: "future"}, &adapterProtocolAgent{protocol: 2}, nil, nil)
 	if err == nil {
 		t.Fatal("unsupported protocol version was accepted")
 	}
@@ -431,7 +431,7 @@ func TestSessionUpdatesPreserveCommandsMetadataUsageAndProgress(t *testing.T) {
 	updatedText := updated.Format(time.RFC3339)
 	title := "Updated title"
 	a.SessionUpdate(context.Background(), acpsdk.SessionNotification{SessionId: "session", Update: acpsdk.SessionUpdate{
-		SessionInfoUpdate: &acpsdk.SessionSessionInfoUpdate{Title: &title, UpdatedAt: &updatedText},
+		SessionInfoUpdate: &acpsdk.SessionSessionInfoUpdate{Title: acpsdk.PatchSet(title), UpdatedAt: acpsdk.PatchSet(updatedText)},
 	}})
 	a.SessionUpdate(context.Background(), acpsdk.SessionNotification{SessionId: "session", Update: acpsdk.SessionUpdate{
 		UsageUpdate: &acpsdk.SessionUsageUpdate{Used: 123, Size: 456},
@@ -504,13 +504,13 @@ func TestSendPreservesMixedInputAndACPStreamState(t *testing.T) {
 		return acpsdk.PromptResponse{
 			StopReason: acpsdk.StopReasonEndTurn,
 			Usage: &acpsdk.Usage{
-				InputTokens: 7, CachedReadTokens: &cached, OutputTokens: 3, TotalTokens: 12,
+				InputTokens: 7, CachedReadTokens: new(int64(cached)), OutputTokens: 3, TotalTokens: 12,
 			},
 		}, nil
 	}
 
 	a, err := NewInProcess(
-		context.Background(), &code.Workspace{RootPath: t.TempDir()}, "test", remote,
+		context.Background(), &code.Workspace{RootPath: t.TempDir()}, code.AgentDef{Name: "test"}, remote,
 		func(conn *acpsdk.AgentSideConnection) { serverConn = conn }, nil,
 	)
 	if err != nil {
@@ -559,9 +559,9 @@ func TestUsageFromACPNormalizesSeparateTokenTypes(t *testing.T) {
 	usage := usageFromACP(&acpsdk.Usage{
 		InputTokens:       15,
 		OutputTokens:      4,
-		CachedReadTokens:  &cacheRead,
-		CachedWriteTokens: &cacheWrite,
-		ThoughtTokens:     &reasoning,
+		CachedReadTokens:  new(int64(cacheRead)),
+		CachedWriteTokens: new(int64(cacheWrite)),
+		ThoughtTokens:     new(int64(reasoning)),
 		TotalTokens:       32,
 	})
 	if usage.InputTokens != 24 ||

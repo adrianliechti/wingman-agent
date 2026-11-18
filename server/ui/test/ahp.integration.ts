@@ -14,6 +14,7 @@ import {
 	changesetReducer,
 } from "@microsoft/agent-host-protocol";
 import { AHPConnection } from "../src/state/ahpConnection.ts";
+import { SessionStatus } from "../src/state/ahpValues.ts";
 import { WorkspaceClient } from "../src/state/workspaceClient.ts";
 import { setWorkspaceHTTP } from "../src/api/http.ts";
 import { streamWorkspaceSearch } from "../src/api/search.ts";
@@ -199,14 +200,18 @@ test(
 					session.chats.map((c: any) => c.resource),
 					[key],
 				);
-				const list = await browser.list("one");
-				const listed = list.filter((s) => s.id === key);
+				await browser.catalog.include("one");
+				const listed = browser.catalog
+					.getSnapshot()
+					.sessions.filter((s) => s.resource === uri);
 				assert.equal(listed.length, 1);
-				assert.equal(listed[0].session, uri);
+				assert.equal(listed[0].defaultChat, key);
 				assert.deepEqual(
-					listed[0].chats.map((c) => c.id),
+					listed[0].chats?.map((c) => c.resource),
 					[key],
 				);
+				// A session no client has left unread lists as read.
+				assert.ok(listed[0].status & SessionStatus.IsRead);
 				assert.equal(browser.backendOf(key), "one");
 			},
 		);

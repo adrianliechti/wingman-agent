@@ -12,6 +12,7 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
@@ -125,7 +126,7 @@ func permissionOptions(req controlRequestBody) []acpsdk.PermissionOption {
 	if !req.SuppressAlwaysAllowRule && !hasJSONValue(req.MatchedAskRule) {
 		options = append(options, acpsdk.PermissionOption{
 			OptionId: optionAllowAlways, Name: "Always Allow", Kind: acpsdk.PermissionOptionKindAllowAlways,
-			Meta: map[string]any{"permission": permissionMetadataForAlwaysAllow(req)},
+			Meta: acpjson.Metadata(map[string]any{"permission": permissionMetadataForAlwaysAllow(req)}),
 		})
 	}
 	// ACP has no pre-selected option, so order is the only way to honor default_to_no.
@@ -171,7 +172,7 @@ type approver struct {
 
 func pendingToolCall(id string, kind acpsdk.ToolKind) acpsdk.ToolCallUpdate {
 	status := acpsdk.ToolCallStatusPending
-	return acpsdk.ToolCallUpdate{ToolCallId: acpsdk.ToolCallId(id), Kind: &kind, Status: &status}
+	return acpsdk.ToolCallUpdate{ToolCallId: acpsdk.ToolCallId(id), Kind: acpsdk.PatchSet(kind), Status: acpsdk.PatchSet(status)}
 }
 
 func (a *approver) handle(req controlRequest) {
@@ -222,12 +223,12 @@ func (a *approver) handle(req controlRequest) {
 	if server := req.Request.MCPServer; server != nil && server.Name != "" {
 		claudeMeta["mcpServer"] = map[string]any{"name": server.Name, "source": server.Source}
 	}
-	tc.Meta = map[string]any{"claudeCode": claudeMeta}
-	tc.Title = &info.title
-	tc.RawInput = info.rawInput
-	tc.Locations = info.locations
+	tc.Meta = acpsdk.PatchSet(acpjson.Metadata(map[string]any{"claudeCode": claudeMeta}))
+	tc.Title = acpsdk.PatchSet(info.title)
+	tc.RawInput = acpsdk.PatchSet(acpjson.Raw(info.rawInput))
+	tc.Locations = acpsdk.PatchSet(info.locations)
 	if req.Request.Description != "" {
-		tc.Content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(req.Request.Description))}
+		tc.Content = acpsdk.PatchSet([]acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(req.Request.Description))})
 	}
 
 	var options []acpsdk.PermissionOption
@@ -484,49 +485,35 @@ func askMessage(questions []askQuestion) string {
 	return "Please answer the following questions."
 }
 
-func askElicitationSchema(questions []askQuestion) acpsdk.UnstableElicitationSchema {
+func askElicitationSchema(questions []askQuestion) acpsdk.ElicitationSchema {
 	single := len(questions) == 1
-	props := map[string]any{}
+	props := map[string]acpsdk.ElicitationPropertySchema{}
 	for i, q := range questions {
-		options := make([]map[string]any, 0, len(q.Options))
-		for _, o := range q.Options {
-			opt := map[string]any{"const": o.Label, "title": o.Label}
-			if o.Description != "" {
-				opt["description"] = o.Description
-			}
-			options = append(options, opt)
-		}
-		field := map[string]any{}
+		var title, desc *string
 		if q.Header != "" {
-			field["title"] = q.Header
+			title = &q.Header
 		}
 		if !single {
-			field["description"] = q.Question
+			desc = &q.Question
 		}
+		options := make([]acpsdk.EnumOption, 0, len(q.Options))
+		for _, value := range q.Options {
+			option := acpsdk.EnumOption{Const: value.Label, Title: value.Label}
+			if value.Description != "" {
+				option.Description = &value.Description
+			}
+			options = append(options, option)
+		}
+		custom := "Type your own answer, or add a note to the option you chose above (optional)."
 		if q.MultiSelect {
-			field["type"] = "array"
-			field["items"] = map[string]any{"anyOf": options}
+			props[askFieldKey(i)] = acpsdk.ElicitationPropertySchema{Array: &acpsdk.ElicitationPropertySchemaArray{Title: title, Description: desc, Items: acpsdk.MultiSelectItems{Titled: &acpsdk.TitledMultiSelectItems{AnyOf: options}}}}
+			custom = "Type your own answer to add to your selection above (optional)."
 		} else {
-			field["type"] = "string"
-			field["oneOf"] = options
+			props[askFieldKey(i)] = acpsdk.ElicitationPropertySchema{String: &acpsdk.ElicitationPropertySchemaString{Title: title, Description: desc, OneOf: options}}
 		}
-		props[askFieldKey(i)] = field
-		customDescription := "Type your own answer, or add a note to the option you chose above (optional)."
-		if q.MultiSelect {
-			customDescription = "Type your own answer to add to your selection above (optional)."
-		}
-		props[askCustomKey(i)] = map[string]any{
-			"type":        "string",
-			"title":       "Other",
-			"description": customDescription,
-			"_meta": map[string]any{
-				"wingman": map[string]any{
-					"customAnswerFor": askFieldKey(i),
-				},
-			},
-		}
+		props[askCustomKey(i)] = acpsdk.ElicitationPropertySchema{String: &acpsdk.ElicitationPropertySchemaString{Title: new("Other"), Description: &custom, Meta: acpjson.Metadata(map[string]any{"wingman": map[string]any{"customAnswerFor": askFieldKey(i)}})}}
 	}
-	return acpsdk.UnstableElicitationSchema{Type: acpsdk.UnstableElicitationSchemaTypeObject, Properties: props}
+	return acpsdk.ElicitationSchema{Type: acpsdk.ElicitationSchemaTypeObject, Properties: props}
 }
 
 // A single-select's custom text rides along as notes when an option was also picked.
@@ -607,12 +594,12 @@ func (a *approver) handleAskUserQuestion(req controlRequest, parentToolUseID str
 	for _, q := range questions {
 		tc := pendingToolCall(req.Request.ToolUseID, acpsdk.ToolKindOther)
 		title := q.Question
-		tc.Title = &title
+		tc.Title = acpsdk.PatchSet(title)
 		claudeMeta := map[string]any{"toolName": req.Request.ToolName}
 		if parentToolUseID != "" {
 			claudeMeta["parentToolUseId"] = parentToolUseID
 		}
-		tc.Meta = map[string]any{"claudeCode": claudeMeta}
+		tc.Meta = acpsdk.PatchSet(acpjson.Metadata(map[string]any{"claudeCode": claudeMeta}))
 
 		opts := make([]acpsdk.PermissionOption, 0, len(q.Options)+1)
 		for i, o := range q.Options {
@@ -651,13 +638,13 @@ func (a *approver) handleAskUserQuestion(req controlRequest, parentToolUseID str
 // return means the client failed the elicitation call despite advertising it,
 // and the caller should fall back to the permission flow.
 func (a *approver) askViaElicitation(req controlRequest, questions []askQuestion) bool {
-	resp, err := acp.Call(a.ctx, func() (acpsdk.UnstableCreateElicitationResponse, error) {
-		return a.conn.UnstableCreateElicitation(a.ctx, acpsdk.UnstableCreateElicitationRequest{
-			Form: &acpsdk.UnstableCreateElicitationForm{
+	resp, err := acp.Call(a.ctx, func() (acpsdk.CreateElicitationResponse, error) {
+		return a.conn.CreateElicitation(a.ctx, acpsdk.CreateElicitationRequest{
+			Form: &acpsdk.CreateElicitationForm{
 				Message:         askMessage(questions),
 				Mode:            "form",
 				RequestedSchema: askElicitationSchema(questions),
-				Meta:            map[string]any{"sessionId": string(a.sid)},
+				Session:         &acpsdk.ElicitationSessionScope{SessionId: a.sid},
 			},
 		})
 	})
@@ -670,7 +657,7 @@ func (a *approver) askViaElicitation(req controlRequest, questions []askQuestion
 	}
 	switch {
 	case resp.Accept != nil:
-		answers, annotations := askAnswersFromContent(questions, resp.Accept.Content)
+		answers, annotations := askAnswersFromContent(questions, acpjson.Object(resp.Accept.Content))
 		a.respondAskAnswers(req, answers, annotations)
 	case resp.Decline != nil:
 		a.respondAskAnswers(req, map[string]any{}, nil)

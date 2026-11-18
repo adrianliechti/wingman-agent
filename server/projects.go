@@ -55,12 +55,14 @@ func (h *Host) loaded() []*Project {
 	return h.projectsLocked()
 }
 
-// serves reports whether projects may be opened in a directory.
+// serves reports whether projects may be opened in a directory: any, except
+// for the host of a server started in one folder, which shows no other.
 func (h *Host) serves(dir string) bool {
-	return slices.ContainsFunc(h.roots, func(root string) bool {
-		_, ok := relative(root, dir)
-		return ok
-	})
+	if h.folder == "" {
+		return true
+	}
+	rel, ok := relative(h.folder, dir)
+	return ok && rel == "."
 }
 
 // projectAt opens the project of a directory unless it is open already.
@@ -138,7 +140,7 @@ func (h *Host) workingProject(uri *string) (*Project, error) {
 		if p := h.webProject(); p != nil {
 			return p, nil
 		}
-		return h.projectAt(h.roots[0])
+		return h.projectAt(h.home)
 	}
 	path, err := ahp.FilePath(*uri)
 	if err != nil {
@@ -236,7 +238,7 @@ func (h *Host) closeIdle(idle time.Duration) {
 		}
 		h.mu.Lock()
 		// Any request that could start work reaches the project first, which counts as use.
-		if h.ctx.Err() != nil || h.projects[p.dir] != p || p == h.web || time.Since(p.used) < idle || h.subscribedLocked(p) {
+		if h.ctx.Err() != nil || h.projects[p.dir] != p || p == h.web || p.windowRequests > 0 || time.Since(p.used) < idle || h.subscribedLocked(p) {
 			h.mu.Unlock()
 			continue
 		}

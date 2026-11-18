@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
@@ -46,7 +47,7 @@ func TestReadTextFileClampsHugeLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	line, limit := 2, math.MaxInt
-	resp, err := (&Agent{}).ReadTextFile(context.Background(), acp.ReadTextFileRequest{Path: path, Line: &line, Limit: &limit})
+	resp, err := (&Agent{}).ReadTextFile(context.Background(), acp.ReadTextFileRequest{Path: path, Line: new(int64(line)), Limit: new(int64(limit))})
 	if err != nil || resp.Content != "b\nc" {
 		t.Fatalf("read = %q, %v", resp.Content, err)
 	}
@@ -202,7 +203,7 @@ func TestTranslateUpdateKeepsDistinctACPMessageIDsSeparate(t *testing.T) {
 
 	for _, item := range []struct{ id, text string }{{"message-1", "First"}, {"message-2", "Second"}} {
 		update := acp.UpdateAgentMessageText(item.text)
-		update.AgentMessageChunk.MessageId = &item.id
+		update.AgentMessageChunk.MessageId = new(acp.MessageId(item.id))
 		a.translateUpdate(sess, turn, update)
 	}
 	if len(turn.emitted) != 1 || len(turn.emitted[0].Content) != 2 {
@@ -222,7 +223,7 @@ func TestTranslateUpdateCoalescesReasoningChunksByID(t *testing.T) {
 	id := "reasoning-1"
 	for _, chunk := range []string{"first", " second"} {
 		update := acp.UpdateAgentThoughtText(chunk)
-		update.AgentThoughtChunk.MessageId = &id
+		update.AgentThoughtChunk.MessageId = new(acp.MessageId(id))
 		if _, ok := a.translateUpdate(sess, turn, update); !ok {
 			t.Fatalf("reasoning chunk %q was dropped", chunk)
 		}
@@ -350,7 +351,7 @@ func TestTranslateUpdatePreservesToolLocations(t *testing.T) {
 		id,
 		"Read main.go",
 		acp.WithStartKind(acp.ToolKindRead),
-		acp.WithStartLocations([]acp.ToolCallLocation{{Path: path, Line: &line}}),
+		acp.WithStartLocations([]acp.ToolCallLocation{{Path: path, Line: new(int64(line))}}),
 	))
 	if !ok || start.Content[0].ToolCall == nil {
 		t.Fatalf("translated start = %+v, ok=%v", start, ok)
@@ -363,7 +364,7 @@ func TestTranslateUpdatePreservesToolLocations(t *testing.T) {
 	updatedLine := 24
 	result, ok := a.translateUpdate(sess, turn, acp.UpdateToolCall(
 		id,
-		acp.WithUpdateLocations([]acp.ToolCallLocation{{Path: path, Line: &updatedLine}}),
+		acp.WithUpdateLocations([]acp.ToolCallLocation{{Path: path, Line: new(int64(updatedLine))}}),
 		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
 		acp.WithUpdateContent([]acp.ToolCallContent{acp.ToolContent(acp.TextBlock("contents"))}),
 	))
@@ -532,9 +533,9 @@ func (u *fakeUI) Confirm(_ context.Context, message string) (bool, error) {
 }
 
 func TestElicitFieldsFromSchema(t *testing.T) {
-	schema := acp.UnstableElicitationSchema{
-		Type: acp.UnstableElicitationSchemaTypeObject,
-		Properties: map[string]any{
+	schema := acp.ElicitationSchema{
+		Type: acp.ElicitationSchemaTypeObject,
+		Properties: testProperties(t, map[string]any{
 			"question_0": map[string]any{
 				"type":  "string",
 				"title": "Color",
@@ -554,7 +555,7 @@ func TestElicitFieldsFromSchema(t *testing.T) {
 				"description": "Pick letters",
 				"items":       map[string]any{"anyOf": []any{map[string]any{"const": "a"}, map[string]any{"const": "b"}}},
 			},
-		},
+		}),
 		Required: []string{"question_0"},
 	}
 
@@ -574,18 +575,18 @@ func TestElicitFieldsFromSchema(t *testing.T) {
 	}
 }
 
-func TestUnstableCreateElicitationFlow(t *testing.T) {
-	form := &acp.UnstableCreateElicitationForm{
+func TestCreateElicitationFlow(t *testing.T) {
+	form := &acp.CreateElicitationForm{
 		Mode:    "form",
 		Message: "Which color?",
-		RequestedSchema: acp.UnstableElicitationSchema{
-			Type:       acp.UnstableElicitationSchemaTypeObject,
-			Properties: map[string]any{"question_0": map[string]any{"type": "string"}},
+		RequestedSchema: acp.ElicitationSchema{
+			Type:       acp.ElicitationSchemaTypeObject,
+			Properties: testProperties(t, map[string]any{"question_0": map[string]any{"type": "string"}}),
 		},
 	}
 
 	a := &Agent{}
-	resp, err := a.UnstableCreateElicitation(context.Background(), acp.UnstableCreateElicitationRequest{Form: form})
+	resp, err := a.CreateElicitation(context.Background(), acp.CreateElicitationRequest{Form: form})
 	if err != nil || resp.Decline == nil {
 		t.Fatalf("headless should decline, got %#v err=%v", resp, err)
 	}
@@ -596,20 +597,20 @@ func TestUnstableCreateElicitationFlow(t *testing.T) {
 		}
 		return tool.ElicitResult{Action: tool.ElicitAccept, Content: map[string]any{"question_0": "Blue"}}, nil
 	}})
-	resp, err = a.UnstableCreateElicitation(context.Background(), acp.UnstableCreateElicitationRequest{Form: form})
-	if err != nil || resp.Accept == nil || resp.Accept.Content["question_0"] != "Blue" {
+	resp, err = a.CreateElicitation(context.Background(), acp.CreateElicitationRequest{Form: form})
+	if err != nil || resp.Accept == nil || (resp.Accept.Content["question_0"].String == nil || *resp.Accept.Content["question_0"].String != "Blue") {
 		t.Fatalf("accept = %#v err=%v", resp, err)
 	}
 
 	a.SetUI(&fakeUI{elicit: func(tool.ElicitRequest) (tool.ElicitResult, error) {
 		return tool.ElicitResult{Action: tool.ElicitDecline}, nil
 	}})
-	if resp, _ = a.UnstableCreateElicitation(context.Background(), acp.UnstableCreateElicitationRequest{Form: form}); resp.Decline == nil {
+	if resp, _ = a.CreateElicitation(context.Background(), acp.CreateElicitationRequest{Form: form}); resp.Decline == nil {
 		t.Fatalf("decline = %#v", resp)
 	}
 
 	a.SetUI(&fakeUI{})
-	if resp, _ = a.UnstableCreateElicitation(context.Background(), acp.UnstableCreateElicitationRequest{Form: form}); resp.Cancel == nil {
+	if resp, _ = a.CreateElicitation(context.Background(), acp.CreateElicitationRequest{Form: form}); resp.Cancel == nil {
 		t.Fatalf("elicit error should cancel, got %#v", resp)
 	}
 }
@@ -625,16 +626,16 @@ func TestFormElicitationUsesMetadataSessionWithConcurrentTurns(t *testing.T) {
 		return tool.ElicitResult{Action: tool.ElicitDecline}, nil
 	}})
 
-	form := &acp.UnstableCreateElicitationForm{
-		Meta:    map[string]any{"sessionId": "session-2"},
+	form := &acp.CreateElicitationForm{
+		Session: &acp.ElicitationSessionScope{SessionId: "session-2"},
 		Mode:    "form",
 		Message: "Choose",
-		RequestedSchema: acp.UnstableElicitationSchema{
-			Type:       acp.UnstableElicitationSchemaTypeObject,
-			Properties: map[string]any{},
+		RequestedSchema: acp.ElicitationSchema{
+			Type:       acp.ElicitationSchemaTypeObject,
+			Properties: map[string]acp.ElicitationPropertySchema{},
 		},
 	}
-	if _, err := a.UnstableCreateElicitation(context.Background(), acp.UnstableCreateElicitationRequest{Form: form}); err != nil {
+	if _, err := a.CreateElicitation(context.Background(), acp.CreateElicitationRequest{Form: form}); err != nil {
 		t.Fatal(err)
 	}
 	if seen != "session-2" {
@@ -647,11 +648,11 @@ func TestRequestPermissionChoice(t *testing.T) {
 		SessionId: "s1",
 		Options: []acp.PermissionOption{
 			{OptionId: "ask-0", Name: "Red", Kind: acp.PermissionOptionKindAllowOnce},
-			{OptionId: "ask-1", Name: "Blue", Kind: acp.PermissionOptionKindAllowOnce, Meta: map[string]any{
+			{OptionId: "ask-1", Name: "Blue", Kind: acp.PermissionOptionKindAllowOnce, Meta: acpjson.Metadata(map[string]any{
 				"permission": map[string]any{"version": 1, "changes": []any{
 					map[string]any{"description": "Allow blue for this session"},
 				}},
-			}},
+			})},
 			{OptionId: "ask-skip", Name: "Skip", Kind: acp.PermissionOptionKindRejectOnce},
 		},
 	}
@@ -723,19 +724,28 @@ func TestUnattendedResolvesFormWithoutUI(t *testing.T) {
 	a := &Agent{sessions: map[string]*sessionState{
 		"s1": {id: "s1", modeID: code.UnattendedModeID},
 	}}
-	resp, err := a.UnstableCreateElicitation(context.Background(), acp.UnstableCreateElicitationRequest{Form: &acp.UnstableCreateElicitationForm{
-		Meta:    map[string]any{"sessionId": "s1"},
+	resp, err := a.CreateElicitation(context.Background(), acp.CreateElicitationRequest{Form: &acp.CreateElicitationForm{
+		Session: &acp.ElicitationSessionScope{SessionId: "s1"},
 		Mode:    "form",
 		Message: "Choose a color",
-		RequestedSchema: acp.UnstableElicitationSchema{
-			Type: acp.UnstableElicitationSchemaTypeObject,
-			Properties: map[string]any{
+		RequestedSchema: acp.ElicitationSchema{
+			Type: acp.ElicitationSchemaTypeObject,
+			Properties: testProperties(t, map[string]any{
 				"color": map[string]any{"type": "string", "enum": []any{"Blue", "Red"}},
-			},
+			}),
 			Required: []string{"color"},
 		},
 	}})
-	if err != nil || resp.Accept == nil || resp.Accept.Content["color"] != "Blue" {
+	if err != nil || resp.Accept == nil || (resp.Accept.Content["color"].String == nil || *resp.Accept.Content["color"].String != "Blue") {
 		t.Fatalf("unattended elicitation = %#v, err=%v", resp, err)
 	}
+}
+
+func testProperties(t *testing.T, fields map[string]any) map[string]acp.ElicitationPropertySchema {
+	t.Helper()
+	properties, err := acpjson.Properties(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return properties
 }

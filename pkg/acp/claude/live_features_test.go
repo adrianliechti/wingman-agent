@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
+	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 )
 
 type liveClient struct {
@@ -170,7 +173,7 @@ func TestLiveExitPlanModeSwitchesMode(t *testing.T) {
 func TestLiveBypassOptOutRemovesMode(t *testing.T) {
 	cc, ctx, cwd := startLiveConn(t, &liveClient{})
 	ns, err := cc.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{},
-		Meta: map[string]any{"claudeCode": map[string]any{"options": map[string]any{"allowDangerouslySkipPermissions": false}}}})
+		Meta: acpjson.Metadata(map[string]any{"claudeCode": map[string]any{"options": map[string]any{"allowDangerouslySkipPermissions": false}}})})
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -245,20 +248,20 @@ type formClient struct {
 	requests int
 }
 
-func (c *formClient) UnstableCreateElicitation(_ context.Context, req acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+func (c *formClient) CreateElicitation(_ context.Context, req acp.CreateElicitationRequest) (acp.CreateElicitationResponse, error) {
 	c.mu.Lock()
 	c.requests++
 	c.mu.Unlock()
 	if req.Form == nil {
-		return acp.UnstableCreateElicitationResponse{Cancel: &acp.UnstableCreateElicitationCancel{Action: "cancel"}}, nil
+		return acp.CreateElicitationResponse{Cancel: &acp.CreateElicitationCancel{Action: "cancel"}}, nil
 	}
-	return acp.UnstableCreateElicitationResponse{Accept: &acp.UnstableCreateElicitationAccept{
+	return acp.CreateElicitationResponse{Accept: &acp.CreateElicitationAccept{
 		Action:  "accept",
-		Content: map[string]any{"question_0": "Blue"},
+		Content: acptest.Answers(map[string]any{"question_0": "Blue"}),
 	}}, nil
 }
 
-func (c *formClient) UnstableCompleteElicitation(context.Context, acp.UnstableCompleteElicitationNotification) error {
+func (c *formClient) CompleteElicitation(context.Context, acp.CompleteElicitationNotification) error {
 	return nil
 }
 

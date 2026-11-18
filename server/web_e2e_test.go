@@ -358,11 +358,18 @@ func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
 	t.Setenv("WINGMAN_MODEL", "gpt-5.4")
 
 	ctx := t.Context()
-	app, err := New(ctx, workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	// The browser tests cover the desktop app's server, whose windows may
+	// move between projects.
+	app, err := New(ctx, workDir, &ServerOptions{NoBrowser: true, Projects: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer app.Close()
+	// A second project, which a window may switch to.
+	otherProject := filepath.Join(t.TempDir(), "fleet-other")
+	if err := os.Mkdir(otherProject, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	web := httptest.NewServer(app)
 	defer web.Close()
 	relay := remote.NewRelay("test-token")
@@ -388,6 +395,7 @@ func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
 		"E2E_INSTANCE="+app.InstanceID(),
 		"E2E_CONTROL_URL="+modelServer.URL,
 		"E2E_WORKSPACE="+workDir,
+		"E2E_OTHER_PROJECT="+otherProject,
 		"E2E_RELAY_URL="+relayWeb.URL,
 		"E2E_PAIR_URL="+pairURL,
 	)

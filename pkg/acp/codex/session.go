@@ -13,6 +13,7 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
@@ -189,6 +190,7 @@ func (s *session) runTurn(ctx context.Context, conn acp.ClientConnection, cc *co
 		}
 		stream := newTurnStream(runCtx)
 		disp = newEventDispatcher(runCtx, conn, s.id)
+		disp.supportsNotices = clientCapabilities.Session != nil && clientCapabilities.Session.Notices != nil
 		disp.messageID = messageID
 		disp.tokens = tokens
 		disp.cwd = s.cwd
@@ -487,10 +489,10 @@ func requestPlanImplementation(ctx context.Context, conn acp.ClientConnection, s
 			SessionId: sid,
 			ToolCall: acpsdk.ToolCallUpdate{
 				ToolCallId: id,
-				Title:      new("Implement this plan?"),
-				Kind:       acpsdk.Ptr(acpsdk.ToolKindSwitchMode),
-				Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
-				RawInput:   map[string]any{"plan": plan.text},
+				Title:      acpsdk.PatchSet("Implement this plan?"),
+				Kind:       acpsdk.PatchSet(acpsdk.ToolKindSwitchMode),
+				Status:     acpsdk.PatchSet(acpsdk.ToolCallStatusPending),
+				RawInput:   acpsdk.PatchSet(acpjson.Raw(map[string]any{"plan": plan.text})),
 			},
 			Options: []acpsdk.PermissionOption{
 				{OptionId: implement, Name: "Yes, implement this plan", Kind: acpsdk.PermissionOptionKindAllowOnce},
@@ -742,7 +744,7 @@ func userInputToBlock(raw json.RawMessage) (acpsdk.ContentBlock, bool) {
 			if it.Detail != "" {
 				metadata["detail"] = it.Detail
 			}
-			block.Text.Meta = map[string]any{"codex": metadata}
+			block.Text.Meta = acpjson.Metadata(map[string]any{"codex": metadata})
 			return block, true
 		}
 		if it.URL != "" {

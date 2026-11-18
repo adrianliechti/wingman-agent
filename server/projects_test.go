@@ -15,7 +15,7 @@ import (
 func projectLifecycleHost(t *testing.T, root string) *Host {
 	t.Helper()
 	h := newHost(t.Context())
-	h.roots = []string{root}
+	h.home = root
 	h.open = func(dir string) (*Project, error) {
 		ctx, cancel := context.WithCancel(h.ctx)
 		s := &Project{ctx: ctx, cancel: cancel, workspace: &code.Workspace{RootPath: dir}, scope: workspaceScope(dir), backends: map[string]*backendEntry{}}

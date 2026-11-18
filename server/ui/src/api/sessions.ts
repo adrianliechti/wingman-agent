@@ -1,15 +1,5 @@
-import { queryOptions } from "@tanstack/react-query";
-import { queryKeys } from "./query.ts";
 import { workspaceClient } from "../state/workspaceClient.ts";
-/** A session in the catalogue, opened through its default chat `id`. */
-export interface SessionInfo {
-	id: string;
-	session: string;
-	title?: string;
-	updated_at: string;
-	/** The default chat first, then forks; running as the host last reported. */
-	chats: { id: string; title?: string; running?: boolean }[];
-}
+
 export interface ModeOption {
 	id: string;
 	name: string;
@@ -25,10 +15,3 @@ export function forkSession(
 ): Promise<string> {
 	return workspaceClient().fork(key, title, turnId);
 }
-export const sessionQueries = {
-	list: (backend: string) =>
-		queryOptions({
-			queryKey: queryKeys.sessions.list(backend),
-			queryFn: () => workspaceClient().list(backend),
-		}),
-};

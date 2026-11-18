@@ -33,8 +33,8 @@ func TestAsyncQuestionSteersIntoItsOriginalTurn(t *testing.T) {
 	for {
 		frame := peer.next(t)
 		if frame.Method == "elicitation/create" {
-			var form acp.UnstableCreateElicitationForm
-			if json.Unmarshal(frame.Params, &form) != nil || len(form.RequestedSchema.Required) != 0 || form.Meta["sessionId"] != "thread-1" {
+			var form acp.CreateElicitationForm
+			if json.Unmarshal(frame.Params, &form) != nil || len(form.RequestedSchema.Required) != 0 || form.Session == nil || form.Session.SessionId != "thread-1" {
 				t.Fatalf("async form = %s", frame.Params)
 			}
 			peer.reply(t, frame.ID, `{"action":"accept","content":{"question_0":"Staging"}}`)

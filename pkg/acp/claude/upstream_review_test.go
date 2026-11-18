@@ -9,6 +9,9 @@ import (
 	"testing/synctest"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
+	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 )
 
 func TestTaskUpdatesDoNotReferenceUnseenOrCompletedToolCalls(t *testing.T) {
@@ -33,7 +36,7 @@ func TestTaskUpdatesDoNotReferenceUnseenOrCompletedToolCalls(t *testing.T) {
 					if !seen || completed {
 						t.Fatalf("task updated an unseen or completed tool: %+v", u)
 					}
-					if u.Status != nil && *u.Status == acp.ToolCallStatusCompleted {
+					if u.Status.Ptr() != nil && *u.Status.Ptr() == acp.ToolCallStatusCompleted {
 						completed = true
 					} else {
 						progress++
@@ -142,11 +145,11 @@ func TestCancelClosesToolCallsWithoutResults(t *testing.T) {
 					if _, dup := closed[string(u.ToolCallId)]; dup {
 						t.Fatalf("tool call %s updated twice after cancel", u.ToolCallId)
 					}
-					if u.Status == nil || *u.Status != acp.ToolCallStatusFailed {
+					if u.Status.Ptr() == nil || *u.Status.Ptr() != acp.ToolCallStatusFailed {
 						t.Fatalf("tool call %s status = %v, want failed", u.ToolCallId, u.Status)
 					}
 					parent := ""
-					if meta, ok := u.Meta["claudeCode"].(map[string]any); ok {
+					if meta, ok := acpjson.Object(u.Meta)["claudeCode"].(map[string]any); ok {
 						parent, _ = meta["parentToolUseId"].(string)
 					}
 					closed[string(u.ToolCallId)] = parent
@@ -184,7 +187,7 @@ func TestCancelDoesNotFinalizePermissionDeniedCallAgain(t *testing.T) {
 			t.Fatalf("updates = %+v, want one start and one denial", updates)
 		}
 		u := updates[1].ToolCallUpdate
-		if u.Status == nil || *u.Status != acp.ToolCallStatusFailed || len(u.Content) != 1 || u.Content[0].Content == nil || u.Content[0].Content.Content.Text == nil || u.Content[0].Content.Content.Text.Text != "Permission denied: blocked by policy" {
+		if u.Status.Ptr() == nil || *u.Status.Ptr() != acp.ToolCallStatusFailed || len(acptest.Value(u.Content)) != 1 || acptest.Value(u.Content)[0].Content == nil || acptest.Value(u.Content)[0].Content.Content.Text == nil || acptest.Value(u.Content)[0].Content.Content.Text.Text != "Permission denied: blocked by policy" {
 			t.Fatalf("denial was replaced: %+v", u)
 		}
 	})

@@ -9,10 +9,16 @@ export async function chooseWorkspaceFolder(): Promise<string | undefined> {
 	return result.path;
 }
 
-export async function replaceWorkspace(path: string): Promise<void> {
+/** Opens another window of the desktop app, on its start page. */
+export async function openNewWindow(): Promise<void> {
+	await fetchOK("/app/window", { method: "POST" });
+}
+
+/** Opens a folder in the desktop app's host, beside the folders already open. */
+export async function openWorkspace(path: string): Promise<void> {
 	await fetchOK("/app/workspaces/open", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ path, replace: true }),
+		body: JSON.stringify({ path }),
 	});
 }

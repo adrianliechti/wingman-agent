@@ -32,6 +32,8 @@ var catalogRouting = map[string]string{
 	"claude-mythos-5-1": "claude-mythos-5-1",
 	"claude-mythos-5":   "claude-mythos-5",
 
+	"gpt-6.2-astra":       "gpt-6-2",
+	"gpt-6.2-sol":         "gpt-6-2",
 	"gpt-6-astra":         "gpt-6-astra",
 	"gpt-6.1-sol":         "gpt-6-1-sol",
 	"gpt-6.1-terra":       "gpt-6-1-terra",

@@ -25,7 +25,7 @@ func NewConfig(ctx context.Context, options *Options) (string, error) {
 
 	models := make(map[string]any)
 
-	for _, m := range model.Available(available) {
+	for _, m := range external.LauncherModels(available) {
 		models[m.ID] = map[string]any{
 			"name": m.Name,
 
