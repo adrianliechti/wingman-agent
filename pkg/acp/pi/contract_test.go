@@ -205,7 +205,7 @@ func TestLiveForkSessionWithInstalledPi(t *testing.T) {
 	resp, err := agent.UnstableForkSession(ctx, acp.UnstableForkSessionRequest{
 		SessionId: contractSessionID,
 		Cwd:       cwd,
-		McpServers: []acp.UnstableMcpServer{{Stdio: &acp.McpServerStdio{
+		McpServers: []acp.McpServer{{Stdio: &acp.McpServerStdio{
 			Name: "fork-live", Command: serverPath, Args: []string{},
 			Env: []acp.EnvVariable{{Name: "ACP_LIVE_MCP_SERVER", Value: "1"}},
 		}}},

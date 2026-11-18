@@ -39,6 +39,10 @@ func (b *backendRuntime) Confirm(ctx context.Context, message string) (bool, err
 // Warn shows a non-fatal agent warning, such as truncated project
 // instructions, as a notice in the session's transcript.
 func (b *backendRuntime) Warn(sessionID, message string) {
+	b.Notice(sessionID, code.Notice{Severity: "warning", Message: message})
+}
+
+func (b *backendRuntime) Notice(sessionID string, notice code.Notice) {
 	if sessionID == "" {
 		return
 	}
@@ -46,7 +50,7 @@ func (b *backendRuntime) Warn(sessionID, message string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state.Status != sessionDeleted {
-		c.warnLocked(message)
+		c.noticeLocked(notice.String())
 	}
 }
 

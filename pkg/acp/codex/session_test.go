@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
+	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 )
 
 func TestCancelInterruptsTurnThatStartsAfterCancellation(t *testing.T) {
@@ -205,7 +208,7 @@ func TestReplayToolRepresentationsAreCompact(t *testing.T) {
 				}
 				return
 			}
-			input, _ := call.RawInput.(map[string]any)
+			input := acpjson.Object(call.RawInput)
 			if len(input) != len(tc.inputKeys) {
 				t.Fatalf("raw input = %#v, want keys %v", call.RawInput, tc.inputKeys)
 			}
@@ -243,7 +246,7 @@ func TestReplayCommandOutputFallsBackToHistoryItem(t *testing.T) {
 				t.Fatalf("updates = %#v", updates)
 			}
 			content := updates[1].ToolCallUpdate.Content
-			if len(content) != 1 || content[0].Content == nil || content[0].Content.Content.Text == nil || content[0].Content.Content.Text.Text == "" {
+			if len(acptest.Value(content)) != 1 || acptest.Value(content)[0].Content == nil || acptest.Value(content)[0].Content.Content.Text == nil || acptest.Value(content)[0].Content.Content.Text.Text == "" {
 				t.Fatalf("replayed content = %#v", content)
 			}
 		})

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 func TestResultToTurn(t *testing.T) {
@@ -77,8 +79,8 @@ func TestResolveModelCanonicalizesContextHints(t *testing.T) {
 func TestClaudeToolMetadataIncludesParent(t *testing.T) {
 	u := toolCallStartUpdate("tool", "Bash", json.RawMessage(`{"command":"pwd"}`), "/tmp", acp.ToolCallStatusInProgress)
 	withClaudeToolMeta(&u, "Bash", "parent-tool")
-	claudeMeta, ok := u.ToolCall.Meta["claudeCode"].(map[string]any)
-	if !ok || claudeMeta["toolName"] != "Bash" || claudeMeta["parentToolUseId"] != "parent-tool" {
+	claudeMeta := acpjson.Object(u.ToolCall.Meta)["claudeCode"].(map[string]any)
+	if claudeMeta == nil || claudeMeta["toolName"] != "Bash" || claudeMeta["parentToolUseId"] != "parent-tool" {
 		t.Fatalf("meta = %#v", u.ToolCall.Meta)
 	}
 }
@@ -422,7 +424,7 @@ func TestLiveSubagentResultCompletesTrackedToolCall(t *testing.T) {
 	if updates[0].ToolCall == nil || updates[0].ToolCall.ToolCallId != "task-1" {
 		t.Fatalf("start update = %#v", updates[0])
 	}
-	if updates[1].ToolCallUpdate == nil || updates[1].ToolCallUpdate.Status == nil || *updates[1].ToolCallUpdate.Status != acp.ToolCallStatusCompleted {
+	if updates[1].ToolCallUpdate == nil || updates[1].ToolCallUpdate.Status.Ptr() == nil || *updates[1].ToolCallUpdate.Status.Ptr() != acp.ToolCallStatusCompleted {
 		t.Fatalf("completion update = %#v", updates[1])
 	}
 	if tracker.has("task-1") {
@@ -567,15 +569,15 @@ func TestAskElicitationSchema(t *testing.T) {
 		Question: "Which color?", Header: "Color",
 		Options: []askOption{{Label: "Red", Description: "warm"}, {Label: "Blue"}},
 	}})
-	field, _ := single.Properties["question_0"].(map[string]any)
+	field := acpjson.Object(single.Properties["question_0"])
 	if field["type"] != "string" || field["title"] != "Color" || field["description"] != nil {
 		t.Errorf("single field = %#v", field)
 	}
-	oneOf, _ := field["oneOf"].([]map[string]any)
-	if len(oneOf) != 2 || oneOf[0]["const"] != "Red" || oneOf[0]["description"] != "warm" {
+	oneOf, _ := field["oneOf"].([]any)
+	if len(oneOf) != 2 || oneOf[0].(map[string]any)["const"] != "Red" || oneOf[0].(map[string]any)["description"] != "warm" {
 		t.Errorf("oneOf = %#v", oneOf)
 	}
-	if custom, _ := single.Properties["question_0_custom"].(map[string]any); custom["type"] != "string" {
+	if custom := acpjson.Object(single.Properties["question_0_custom"]); custom["type"] != "string" {
 		t.Errorf("custom field = %#v", custom)
 	} else {
 		meta, _ := custom["_meta"].(map[string]any)
@@ -589,7 +591,7 @@ func TestAskElicitationSchema(t *testing.T) {
 		{Question: "Q1", MultiSelect: true, Options: []askOption{{Label: "a"}}},
 		{Question: "Q2", Options: []askOption{{Label: "x"}}},
 	})
-	f0, _ := multi.Properties["question_0"].(map[string]any)
+	f0 := acpjson.Object(multi.Properties["question_0"])
 	if f0["type"] != "array" || f0["description"] != "Q1" {
 		t.Errorf("multiSelect field = %#v", f0)
 	}

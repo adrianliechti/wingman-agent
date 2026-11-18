@@ -10,6 +10,7 @@ import (
 	"iter"
 	"log/slog"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sergi/go-diff/diffmatchpatch"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/internal/process"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -42,7 +44,7 @@ type Agent struct {
 	cmd           *exec.Cmd
 	stdin         io.WriteCloser
 	stdout        io.Closer
-	conn          *acpsdk.ClientSideConnection
+	conn          agentConnection
 	closeOnce     sync.Once
 	transportOnce sync.Once
 	processDone   chan struct{}
@@ -82,18 +84,22 @@ var (
 
 type sessionState struct {
 	id acpsdk.SessionId
+	// Installed before publication when notices arrived during session setup.
+	initialNotices func()
 
-	mu       sync.Mutex
-	messages []harness.Message
-	usage    harness.Usage
-	inflight *turn
-	loaded   bool
+	mu         sync.Mutex
+	messages   []harness.Message
+	v2Messages map[string]int
+	usage      harness.Usage
+	inflight   *turn
+	loaded     bool
 
 	toolCallsMu sync.Mutex
 	toolCalls   map[string]toolCall
 
-	modes  []code.Mode
-	modeID string
+	modeOptID string
+	modes     []code.Mode
+	modeID    string
 
 	models      []model.Model
 	modelID     string
@@ -127,6 +133,7 @@ type turn struct {
 
 	mu                sync.Mutex
 	emitted           []harness.Message
+	v2Messages        map[string]int
 	lastContentKey    string
 	ignoreUserUpdates bool
 	streamErr         error
@@ -159,6 +166,11 @@ func (t *turn) send(msg harness.Message) {
 // messages holds t.mu only for the last message, the one emit mutates, so long histories don't stall SessionUpdate.
 func (t *turn) messages() []harness.Message {
 	t.mu.Lock()
+	if t.v2Messages != nil {
+		messages := harness.CloneMessages(t.emitted)
+		t.mu.Unlock()
+		return messages
+	}
 	n := len(t.emitted)
 	if n == 0 {
 		t.mu.Unlock()
@@ -204,13 +216,27 @@ func (s *sessionState) cancelOutstandingToolCalls(t *turn) []harness.Message {
 func (s *sessionState) finalizeTurn(t *turn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	emitted := t.messages()
 	if s.inflight == t {
 		s.inflight = nil
 	}
-	if len(emitted) > 0 {
-		s.messages = append(s.messages, emitted...)
+	s.retainTurn(t)
+}
+
+// Caller holds s.mu. Keep entity indexes when a replay or foreground response
+// becomes retained history so later v2 updates can still address its messages.
+func (s *sessionState) retainTurn(t *turn) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.v2Messages) > 0 {
+		if s.v2Messages == nil {
+			s.v2Messages = map[string]int{}
+		}
+		for key, idx := range t.v2Messages {
+			s.v2Messages[key] = len(s.messages) + idx
+		}
 	}
+	s.messages = append(s.messages, harness.CloneMessages(t.emitted)...)
+
 }
 
 type event struct {
@@ -273,31 +299,35 @@ func New(ctx context.Context, ws *code.Workspace, def code.AgentDef) (*Agent, er
 		sessions:  map[string]*sessionState{},
 		pending:   map[string][]acpsdk.SessionUpdate{},
 	}
-	a.conn = acpsdk.NewClientSideConnection(a, a.stdin, stdout)
-	a.watchWriter(a.stdin.(*acp.ConnectionWriter))
 	a.processDone = make(chan struct{})
+	connected := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
 		close(a.processDone)
+		timer := time.NewTimer(100 * time.Millisecond)
+		defer timer.Stop()
 		select {
-		case <-a.conn.Done():
-		case <-time.After(100 * time.Millisecond):
-			a.abortTransport()
+		case <-connected:
+			if a.conn == nil {
+				return
+			}
+			select {
+			case <-a.conn.Done():
+				return
+			case <-timer.C:
+			}
+		case <-timer.C:
 		}
+		a.abortTransport()
 	}()
-
-	a.conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
-		Level: slog.LevelWarn,
-	})))
-
-	resp, err := a.initialize(ctx)
+	err = a.connectExternal(ctx, stdout)
+	close(connected)
 	if err != nil {
 		a.shutdown()
 		return nil, fmt.Errorf("agent %q: initialize: %w", def.Name, err)
 	}
-	a.caps = resp.AgentCapabilities
-	a.login, a.loginMethod = loginHint(resp.AuthMethods)
-	a.title = agentTitle(resp.AgentInfo)
+	a.watchWriter(a.stdin.(*acp.ConnectionWriter))
+	a.conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	return a, nil
 }
 
@@ -335,14 +365,15 @@ func NewInProcess(
 	a.serverDone = srvConn.Done()
 	a.serverW = serverWriter
 
-	a.conn = acpsdk.NewClientSideConnection(a, a.stdin, clientR)
+	v1 := acpsdk.NewClientSideConnection(a, a.stdin, clientR)
+	a.conn = v1
 	a.watchWriter(a.stdin.(*acp.ConnectionWriter))
 	a.watchWriter(serverWriter)
 	a.conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
 	})))
 
-	resp, err := a.initialize(ctx)
+	resp, err := a.initialize(ctx, v1)
 	if err != nil {
 		a.shutdown()
 		return nil, fmt.Errorf("agent %q: initialize: %w", def.Name, err)
@@ -353,30 +384,13 @@ func NewInProcess(
 	return a, nil
 }
 
-func (a *Agent) initialize(ctx context.Context) (acpsdk.InitializeResponse, error) {
+func (a *Agent) initialize(ctx context.Context, conn *acpsdk.ClientSideConnection) (acpsdk.InitializeResponse, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	initCtx, cancel := context.WithTimeout(ctx, initTimeout)
 	defer cancel()
-	title := "Wingman"
-	resp, err := acp.Call(initCtx, func() (acpsdk.InitializeResponse, error) {
-		return a.conn.Initialize(initCtx, acpsdk.InitializeRequest{
-			ProtocolVersion: acpsdk.ProtocolVersionNumber,
-			ClientInfo: &acpsdk.Implementation{
-				Name: "wingman", Title: &title, Version: "0.1.0",
-			},
-			ClientCapabilities: acpsdk.ClientCapabilities{
-				Fs: acpsdk.FileSystemCapabilities{
-					ReadTextFile:  true,
-					WriteTextFile: true,
-				},
-				Elicitation: &acpsdk.ElicitationCapabilities{
-					Form: &acpsdk.ElicitationFormCapabilities{},
-				},
-			},
-		})
-	})
+	resp, err := acp.Call(initCtx, func() (acpsdk.InitializeResponse, error) { return conn.Initialize(initCtx, hostInitialize()) })
 	if err != nil {
 		return acpsdk.InitializeResponse{}, err
 	}
@@ -635,6 +649,9 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 	a.applyPendingLocked(id, sess)
 	a.sessions[id] = sess
 	a.mu.Unlock()
+	if sess.initialNotices != nil {
+		sess.initialNotices()
+	}
 	if err := a.applySessionDefaults(ctx, sess); err != nil {
 		a.mu.Lock()
 		delete(a.sessions, id)
@@ -653,18 +670,18 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 const authRequired = -32000
 
 // loginHint is what an agent asks of a user who has not logged in, from the
-// first login method it offers: its description, else its name, and its id.
+// first login method it offers: its description, else its name. It has an id
+// when the agent takes the login up itself through `authenticate`; one the
+// user makes in a terminal is not passed to it.
 func loginHint(methods []acpsdk.AuthMethod) (hint, id string) {
 	for _, method := range methods {
 		var name string
 		var description *string
 		switch {
 		case method.Agent != nil:
-			id, name, description = method.Agent.Id, method.Agent.Name, method.Agent.Description
+			id, name, description = string(method.Agent.Id), method.Agent.Name, method.Agent.Description
 		case method.Terminal != nil:
-			id, name, description = method.Terminal.Id, method.Terminal.Name, method.Terminal.Description
-		case method.EnvVar != nil:
-			id, name, description = method.EnvVar.Id, method.EnvVar.Name, method.EnvVar.Description
+			name, description = method.Terminal.Name, method.Terminal.Description
 		default:
 			continue
 		}
@@ -686,7 +703,14 @@ func withLogin[T any](ctx context.Context, a *Agent, call func() (T, error)) (T,
 	if !errors.As(err, &request) || request.Code != authRequired || a.loginMethod == "" {
 		return result, a.loginError(err)
 	}
-	if _, authErr := a.conn.Authenticate(ctx, acpsdk.AuthenticateRequest{MethodId: a.loginMethod}); authErr != nil {
+	// Only a connection of the first protocol version takes a login up.
+	login, ok := a.conn.(interface {
+		Authenticate(context.Context, acpsdk.AuthenticateRequest) (acpsdk.AuthenticateResponse, error)
+	})
+	if !ok {
+		return result, a.loginError(err)
+	}
+	if _, authErr := login.Authenticate(ctx, acpsdk.AuthenticateRequest{MethodId: acpsdk.AuthMethodId(a.loginMethod)}); authErr != nil {
 		return result, a.loginError(err)
 	}
 	result, err = call()
@@ -762,6 +786,9 @@ func (a *Agent) loadSessionStream(ctx context.Context, id string, snapshots bool
 		}
 		a.mu.Unlock()
 
+		if sess.initialNotices != nil {
+			sess.initialNotices()
+		}
 		loadCtx, cancel := context.WithCancel(ctx)
 		t := &turn{
 			ctx:    loadCtx,
@@ -801,9 +828,7 @@ func (a *Agent) loadSessionStream(ctx context.Context, id string, snapshots bool
 			sess.mu.Lock()
 			sess.inflight = nil
 			if ok {
-				if emitted := t.messages(); len(emitted) > 0 {
-					sess.messages = append(sess.messages, emitted...)
-				}
+				sess.retainTurn(t)
 				sess.loaded = true
 			}
 			sess.mu.Unlock()
@@ -895,7 +920,7 @@ func (a *Agent) DeleteSession(ctx context.Context, id string) error {
 	if !a.SupportsDelete() {
 		return errors.ErrUnsupported
 	}
-	_, err := a.conn.UnstableDeleteSession(ctx, acpsdk.UnstableDeleteSessionRequest{
+	_, err := a.conn.DeleteSession(ctx, acpsdk.DeleteSessionRequest{
 		SessionId: acpsdk.SessionId(id),
 	})
 	if errors.Is(notFound(err, id), code.ErrSessionNotFound) {
@@ -1120,14 +1145,14 @@ func usageFromACP(usage *acpsdk.Usage) harness.Usage {
 	}
 }
 
-func optionalACPTokenCount(value *int) int64 {
+func optionalACPTokenCount(value *int64) int64 {
 	if value == nil {
 		return 0
 	}
 	return tokenCount64(*value)
 }
 
-func tokenCount64(value int) int64 {
+func tokenCount64(value int64) int64 {
 	return int64(max(value, 0))
 }
 
@@ -1257,6 +1282,13 @@ func (a *Agent) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) e
 	if sess == nil {
 		return nil
 	}
+	if notice := n.Update.Notice; notice != nil {
+		if sess.initialNotices != nil {
+			sess.initialNotices()
+		}
+		a.showNotice(string(n.SessionId), notice)
+		return nil
+	}
 	if a.applySessionStateUpdate(sess, n.Update) {
 		a.notifySessionChange(string(n.SessionId))
 		return nil
@@ -1284,6 +1316,19 @@ func (a *Agent) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) e
 	return nil
 }
 
+func (a *Agent) showNotice(id string, notice *acpsdk.SessionUpdateNotice) {
+	text := notice.Title
+	if notice.Description != nil && *notice.Description != "" {
+		text += "\n" + *notice.Description
+	}
+	advisory := code.Notice{Severity: string(notice.Severity), Message: text}
+	if ui, ok := a.currentUI().(interface{ Notice(string, code.Notice) }); ok {
+		ui.Notice(id, advisory)
+	} else {
+		fmt.Fprintln(os.Stderr, advisory)
+	}
+}
+
 func isSessionStateUpdate(update acpsdk.SessionUpdate) bool {
 	return update.ConfigOptionUpdate != nil || update.CurrentModeUpdate != nil ||
 		update.AvailableCommandsUpdate != nil || update.SessionInfoUpdate != nil || update.UsageUpdate != nil
@@ -1296,7 +1341,7 @@ func (a *Agent) sessionOrDefer(id string, update acpsdk.SessionUpdate) *sessionS
 	if sess := a.sessions[id]; sess != nil {
 		return sess
 	}
-	if id == "" || !isSessionStateUpdate(update) {
+	if id == "" || (!isSessionStateUpdate(update) && update.Notice == nil) {
 		return nil
 	}
 	updates, exists := a.pending[id]
@@ -1314,8 +1359,22 @@ func (a *Agent) sessionOrDefer(id string, update acpsdk.SessionUpdate) *sessionS
 
 // applyPendingLocked must run before sess is published so deferred updates cannot overwrite newer direct ones.
 func (a *Agent) applyPendingLocked(id string, sess *sessionState) {
+	var notices []*acpsdk.SessionUpdateNotice
 	for _, update := range a.pending[id] {
-		a.applySessionStateUpdate(sess, update)
+		if update.Notice != nil {
+			notices = append(notices, update.Notice)
+		} else {
+			a.applySessionStateUpdate(sess, update)
+		}
+	}
+	if len(notices) != 0 {
+		// UI callbacks run outside the agent lock. A live notice racing
+		// registration must wait for the earlier notices to be delivered.
+		sess.initialNotices = sync.OnceFunc(func() {
+			for _, notice := range notices {
+				a.showNotice(id, notice)
+			}
+		})
 	}
 	delete(a.pending, id)
 }
@@ -1347,11 +1406,13 @@ func (a *Agent) applySessionStateUpdate(sess *sessionState, update acpsdk.Sessio
 	}
 	if info := update.SessionInfoUpdate; info != nil {
 		sess.mu.Lock()
-		if info.Title != nil {
-			sess.title = *info.Title
+		if !info.Title.IsUnset() {
+			sess.title, _ = info.Title.Value()
 		}
-		if info.UpdatedAt != nil {
-			if parsed, err := time.Parse(time.RFC3339, *info.UpdatedAt); err == nil {
+		if info.UpdatedAt.IsNull() {
+			sess.updatedAt = time.Time{}
+		} else if info.UpdatedAt.Ptr() != nil {
+			if parsed, err := time.Parse(time.RFC3339, *info.UpdatedAt.Ptr()); err == nil {
 				sess.updatedAt = parsed
 			}
 		}
@@ -1394,7 +1455,7 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 				c.Reasoning.ID = uuid.NewString()
 			}
 		}
-		if n := len(t.emitted); n > 0 && t.emitted[n-1].Role == role {
+		if n := len(t.emitted); n > 0 && t.emitted[n-1].Role == role && t.lastContentKey != "v2-message" {
 			contents := t.emitted[n-1].Content
 			if len(contents) == 0 || t.lastContentKey != contentKey || !mergeACPContent(&contents[len(contents)-1], c) {
 				t.emitted[n-1].Content = append(contents, c)
@@ -1421,7 +1482,7 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		}
 		id := ""
 		if u.UserMessageChunk.MessageId != nil {
-			id = *u.UserMessageChunk.MessageId
+			id = string(*u.UserMessageChunk.MessageId)
 		}
 		return emit(harness.RoleUser, content, "user:"+id), true
 
@@ -1432,7 +1493,7 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		}
 		id := ""
 		if u.AgentMessageChunk.MessageId != nil {
-			id = *u.AgentMessageChunk.MessageId
+			id = string(*u.AgentMessageChunk.MessageId)
 		}
 		if content.Text != "" {
 			content.TextID = id
@@ -1446,7 +1507,7 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 		}
 		id := ""
 		if u.AgentThoughtChunk.MessageId != nil {
-			id = *u.AgentThoughtChunk.MessageId
+			id = string(*u.AgentThoughtChunk.MessageId)
 		}
 		return emit(harness.RoleAssistant, harness.Content{Reasoning: &harness.Reasoning{ID: id, Summary: text}}, "thought:"+id), true
 
@@ -1506,37 +1567,38 @@ func (a *Agent) translateUpdate(sess *sessionState, t *turn, u acpsdk.SessionUpd
 
 	case u.ToolCallUpdate != nil:
 		tu := u.ToolCallUpdate
+		content, hasContent := tu.Content.Value()
 		sess.toolCallsMu.Lock()
 		prior := sess.toolCalls[string(tu.ToolCallId)]
-		if prior.name == "" && tu.Title != nil && *tu.Title != "" {
-			prior.name = *tu.Title
+		if prior.name == "" && tu.Title.Ptr() != nil && *tu.Title.Ptr() != "" {
+			prior.name = *tu.Title.Ptr()
 		}
-		if tu.RawInput != nil {
-			prior.args = rawValueToString(tu.RawInput)
+		if raw, ok := tu.RawInput.Value(); ok {
+			prior.args = rawValueToString(raw)
 		}
-		if tu.Kind != nil {
-			prior.kind = semanticToolKind(*tu.Kind, tu.Content)
+		if tu.Kind.Ptr() != nil {
+			prior.kind = semanticToolKind(*tu.Kind.Ptr(), content)
 		} else if prior.kind == "" {
-			prior.kind = semanticToolKind("", tu.Content)
+			prior.kind = semanticToolKind("", content)
 		}
-		if tu.Locations != nil {
-			prior.locations = agentToolLocations(a.workspaceRoot(), tu.Locations)
+		if locations, ok := tu.Locations.Value(); ok {
+			prior.locations = agentToolLocations(a.workspaceRoot(), locations)
 		}
-		if tu.Content != nil {
+		if hasContent {
 			// Updates replace content when present; omitted content retains the
 			// latest snapshot, including on a status-only completion.
-			prior.content = toolCallContentBlocks(tu.Content)
+			prior.content = toolCallContentBlocks(content)
 		}
-		if tu.RawOutput != nil {
-			prior.rawOutput = rawValueToString(tu.RawOutput)
+		if raw, ok := tu.RawOutput.Value(); ok {
+			prior.rawOutput = rawValueToString(raw)
 		}
 		sess.toolCalls[string(tu.ToolCallId)] = prior
 		sess.toolCallsMu.Unlock()
-		if tu.Status == nil {
+		if tu.Status.Ptr() == nil {
 			a.reportToolProgress(t, tu)
 			return harness.Message{}, false
 		}
-		status := *tu.Status
+		status := *tu.Status.Ptr()
 		if status != acpsdk.ToolCallStatusCompleted && status != acpsdk.ToolCallStatusFailed {
 			a.reportToolProgress(t, tu)
 			return harness.Message{}, false
@@ -1582,14 +1644,15 @@ func (a *Agent) reportToolProgress(t *turn, update *acpsdk.SessionToolCallUpdate
 		return
 	}
 	text := ""
-	if update.Title != nil {
-		text = *update.Title
+	if update.Title.Ptr() != nil {
+		text = *update.Title.Ptr()
 	}
 	if text == "" {
-		text = toolCallContentText(update.Content)
+		content, _ := update.Content.Value()
+		text = toolCallContentText(content)
 	}
-	if text == "" && update.RawOutput != nil {
-		text = rawValueToString(update.RawOutput)
+	if raw, ok := update.RawOutput.Value(); text == "" && ok {
+		text = rawValueToString(raw)
 	}
 	if text == "" {
 		return
@@ -1676,7 +1739,7 @@ func (a *Agent) RequestPermission(ctx context.Context, p acpsdk.RequestPermissio
 	hasDescription := false
 	for i, o := range p.Options {
 		names[i] = o.Name
-		descriptions[i] = permissionOptionDescription(o.Meta)
+		descriptions[i] = permissionOptionDescription(acpjson.Object(o.Meta))
 		hasDescription = hasDescription || descriptions[i] != ""
 	}
 	if !hasDescription {
@@ -1737,19 +1800,24 @@ func (a *Agent) RequestPermission(ctx context.Context, p acpsdk.RequestPermissio
 	return cancelled, nil
 }
 
-func (a *Agent) UnstableCreateElicitation(ctx context.Context, p acpsdk.UnstableCreateElicitationRequest) (acpsdk.UnstableCreateElicitationResponse, error) {
-	cancel := acpsdk.UnstableCreateElicitationResponse{Cancel: &acpsdk.UnstableCreateElicitationCancel{Action: "cancel"}}
+// Wingman advertises form elicitations only. Completion applies to URL mode.
+func (a *Agent) CompleteElicitation(context.Context, acpsdk.CompleteElicitationNotification) error {
+	return nil
+}
+
+func (a *Agent) CreateElicitation(ctx context.Context, p acpsdk.CreateElicitationRequest) (acpsdk.CreateElicitationResponse, error) {
+	cancel := acpsdk.CreateElicitationResponse{Cancel: &acpsdk.CreateElicitationCancel{Action: "cancel"}}
 	if p.Form == nil {
 		return cancel, nil
 	}
-	// acp-go-sdk v0.13.5 does not expose top-level session scope for form
-	// elicitations. Native adapters preserve it as metadata; use that exact
-	// scope before falling back to the only active turn.
-	sid := elicitationSessionID(p.Form.Meta)
+	var sid string
+	if p.Form.Session != nil {
+		sid = string(p.Form.Session.SessionId)
+	}
 	if sid != "" && a.session(sid) == nil {
 		return cancel, nil
 	}
-	if sid == "" {
+	if sid == "" && p.Form.Request == nil {
 		sid = a.activeSessionID()
 	}
 	ctx, release := a.interactionContext(ctx, sid)
@@ -1775,7 +1843,7 @@ func (a *Agent) UnstableCreateElicitation(ctx context.Context, p acpsdk.Unstable
 
 	ui := a.currentUI()
 	if ui == nil {
-		return acpsdk.UnstableCreateElicitationResponse{Decline: &acpsdk.UnstableCreateElicitationDecline{Action: "decline"}}, nil
+		return acpsdk.CreateElicitationResponse{Decline: &acpsdk.CreateElicitationDecline{Action: "decline"}}, nil
 	}
 	res, err := acp.Call(ctx, func() (tool.ElicitResult, error) {
 		return ui.Elicit(ctx, req)
@@ -1786,23 +1854,21 @@ func (a *Agent) UnstableCreateElicitation(ctx context.Context, p acpsdk.Unstable
 	return elicitationResponse(res), nil
 }
 
-func elicitationResponse(res tool.ElicitResult) acpsdk.UnstableCreateElicitationResponse {
+func elicitationResponse(res tool.ElicitResult) acpsdk.CreateElicitationResponse {
 	switch res.Action {
 	case tool.ElicitAccept:
-		content := res.Content
-		if content == nil {
-			content = map[string]any{}
+		var content map[string]acpsdk.ElicitationContentValue
+		if err := json.Unmarshal(acpjson.Raw(res.Content), &content); err != nil && res.Content != nil {
+			return acpsdk.CreateElicitationResponse{Cancel: &acpsdk.CreateElicitationCancel{Action: "cancel"}}
 		}
-		return acpsdk.UnstableCreateElicitationResponse{Accept: &acpsdk.UnstableCreateElicitationAccept{Action: "accept", Content: content}}
+		if content == nil {
+			content = map[string]acpsdk.ElicitationContentValue{}
+		}
+		return acpsdk.CreateElicitationResponse{Accept: &acpsdk.CreateElicitationAccept{Action: "accept", Content: content}}
 	case tool.ElicitDecline:
-		return acpsdk.UnstableCreateElicitationResponse{Decline: &acpsdk.UnstableCreateElicitationDecline{Action: "decline"}}
+		return acpsdk.CreateElicitationResponse{Decline: &acpsdk.CreateElicitationDecline{Action: "decline"}}
 	}
-	return acpsdk.UnstableCreateElicitationResponse{Cancel: &acpsdk.UnstableCreateElicitationCancel{Action: "cancel"}}
-}
-
-func elicitationSessionID(meta map[string]any) string {
-	sid, _ := meta["sessionId"].(string)
-	return sid
+	return acpsdk.CreateElicitationResponse{Cancel: &acpsdk.CreateElicitationCancel{Action: "cancel"}}
 }
 
 func (a *Agent) activeSessionID() string {
@@ -1830,7 +1896,7 @@ func (a *Agent) activeSessionID() string {
 	return active
 }
 
-func elicitFieldsFromSchema(schema acpsdk.UnstableElicitationSchema) []tool.ElicitField {
+func elicitFieldsFromSchema(schema acpsdk.ElicitationSchema) []tool.ElicitField {
 	required := map[string]bool{}
 	for _, r := range schema.Required {
 		required[r] = true
@@ -1838,7 +1904,7 @@ func elicitFieldsFromSchema(schema acpsdk.UnstableElicitationSchema) []tool.Elic
 
 	fields := make([]tool.ElicitField, 0, len(schema.Properties))
 	for _, name := range slices.Sorted(maps.Keys(schema.Properties)) {
-		prop, _ := schema.Properties[name].(map[string]any)
+		prop := acpjson.Object(schema.Properties[name])
 		f := tool.ElicitField{Name: name, Required: required[name]}
 		f.Title, _ = prop["title"].(string)
 		f.Description, _ = prop["description"].(string)
@@ -1958,15 +2024,17 @@ func permissionOptionDescription(meta map[string]any) string {
 
 func permissionMessage(p acpsdk.RequestPermissionRequest) string {
 	var parts []string
-	if p.ToolCall.Title != nil && *p.ToolCall.Title != "" {
-		parts = append(parts, *p.ToolCall.Title)
+	if p.ToolCall.Title.Ptr() != nil && *p.ToolCall.Title.Ptr() != "" {
+		parts = append(parts, *p.ToolCall.Title.Ptr())
 	}
-	if m, ok := p.ToolCall.RawInput.(map[string]any); ok {
+	if raw, ok := p.ToolCall.RawInput.Value(); ok {
+		m := acpjson.Object(raw)
 		if cmd, ok := m["command"].(string); ok && cmd != "" {
 			parts = append(parts, "$ "+cmd)
 		}
 	}
-	if t := toolCallContentText(p.ToolCall.Content); t != "" {
+	content, _ := p.ToolCall.Content.Value()
+	if t := toolCallContentText(content); t != "" {
 		parts = append(parts, t)
 	}
 	if len(parts) == 0 {
@@ -2000,11 +2068,11 @@ func (a *Agent) ReadTextFile(_ context.Context, p acpsdk.ReadTextFileRequest) (a
 		lines := strings.Split(content, "\n")
 		start := 0
 		if p.Line != nil && *p.Line > 0 {
-			start = min(*p.Line-1, len(lines))
+			start = int(min(*p.Line-1, int64(len(lines))))
 		}
 		end := len(lines)
-		if p.Limit != nil && *p.Limit > 0 && *p.Limit < end-start {
-			end = start + *p.Limit
+		if p.Limit != nil && *p.Limit > 0 && *p.Limit < int64(end-start) {
+			end = start + int(*p.Limit)
 		}
 		content = strings.Join(lines[start:end], "\n")
 	}
@@ -2044,6 +2112,8 @@ func (a *Agent) refreshConfig(sess *sessionState, options []acpsdk.SessionConfig
 	modelOptID, effortOptID := "", ""
 	var models []model.Model
 	var effortOpts []string
+	var remoteModes []code.Mode
+	var modeOptID, modeID string
 	for _, opt := range options {
 		if opt.Select == nil {
 			continue
@@ -2055,8 +2125,17 @@ func (a *Agent) refreshConfig(sess *sessionState, options []acpsdk.SessionConfig
 		if kind == "" {
 			kind = string(opt.Select.Id)
 		}
-		values := sessionConfigValues(opt.Select.Options)
+		values := acp.ConfigValues(opt.Select.Options)
 		switch kind {
+		case "mode":
+			modeOptID, modeID = string(opt.Select.Id), string(opt.Select.CurrentValue)
+			for _, v := range values {
+				mode := code.Mode{ID: string(v.Value), Name: v.Name}
+				if v.Description != nil {
+					mode.Description = *v.Description
+				}
+				remoteModes = append(remoteModes, mode)
+			}
 		case string(acpsdk.SessionConfigOptionCategoryModel):
 			modelOptID = string(opt.Select.Id)
 			modelID = string(opt.Select.CurrentValue)
@@ -2088,6 +2167,9 @@ func (a *Agent) refreshConfig(sess *sessionState, options []acpsdk.SessionConfig
 
 	if sess != nil {
 		sess.mu.Lock()
+		if _, v2 := a.conn.(*remoteV2); v2 {
+			sess.modeOptID, sess.modeID, sess.modes = modeOptID, modeID, remoteModes
+		}
 		sess.models = append(sess.models[:0], models...)
 		sess.modelID = modelID
 		sess.modelOptID = modelOptID
@@ -2096,20 +2178,6 @@ func (a *Agent) refreshConfig(sess *sessionState, options []acpsdk.SessionConfig
 		sess.effortOpts = append(sess.effortOpts[:0], effortOpts...)
 		sess.mu.Unlock()
 	}
-}
-
-func sessionConfigValues(options acpsdk.SessionConfigSelectOptions) []acpsdk.SessionConfigSelectOption {
-	if options.Ungrouped != nil {
-		return append([]acpsdk.SessionConfigSelectOption(nil), (*options.Ungrouped)...)
-	}
-	if options.Grouped == nil {
-		return nil
-	}
-	var result []acpsdk.SessionConfigSelectOption
-	for _, group := range *options.Grouped {
-		result = append(result, group.Options...)
-	}
-	return result
 }
 
 func blockText(b acpsdk.ContentBlock) string {
@@ -2201,7 +2269,7 @@ func agentToolLocations(workspaceRoot string, locations []acpsdk.ToolCallLocatio
 		}
 		mapped := harness.ToolLocation{Path: filepath.ToSlash(locationPath)}
 		if location.Line != nil {
-			mapped.Line = *location.Line
+			mapped.Line = int(min(*location.Line, int64(math.MaxInt)))
 		}
 		result = append(result, mapped)
 	}
@@ -2240,17 +2308,17 @@ func diffBlockText(d *acpsdk.ToolCallContentDiff) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func rawValueToString(v any) string {
-	if v == nil {
+func rawValueToString(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
 		return ""
 	}
-	if s, ok := v.(string); ok {
-		return s
+	if raw[0] == '"' {
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			return text
+		}
 	}
-	if data, err := json.Marshal(v); err == nil {
-		return string(data)
-	}
-	return fmt.Sprintf("%v", v)
+	return string(raw)
 }
 
 func (a *Agent) SetSessionUpdateHandler(handler func(string)) {

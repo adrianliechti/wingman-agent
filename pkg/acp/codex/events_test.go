@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 func TestFileChangeContentAddUnifiedDiff(t *testing.T) {
@@ -59,7 +61,7 @@ func TestReplayUserMessageRetainsClientIdentity(t *testing.T) {
 		if want == "" {
 			want = "backend-message"
 		}
-		if len(updates) != 1 || updates[0].UserMessageChunk == nil || updates[0].UserMessageChunk.MessageId == nil || *updates[0].UserMessageChunk.MessageId != want {
+		if len(updates) != 1 || updates[0].UserMessageChunk == nil || updates[0].UserMessageChunk.MessageId == nil || string(*updates[0].UserMessageChunk.MessageId) != want {
 			t.Fatalf("replayed user identity = %#v, want %q", updates, want)
 		}
 	}
@@ -74,8 +76,8 @@ func TestElicitationParamsPreserveSchemaAndURLFields(t *testing.T) {
 	if p.URL != "https://example.com" || p.ElicitationID != "e-1" || p.Meta["persist"] != "session" {
 		t.Fatalf("params = %#v", p)
 	}
-	var schema acp.UnstableElicitationSchema
-	if err := json.Unmarshal(p.RequestedSchema, &schema); err != nil || schema.Properties["answer"] == nil {
+	var schema acp.ElicitationSchema
+	if err := json.Unmarshal(p.RequestedSchema, &schema); err != nil || schema.Properties["answer"].String == nil {
 		t.Fatalf("schema = %#v, err=%v", schema, err)
 	}
 }
@@ -195,7 +197,7 @@ func TestFileChangeContentDeleteMeta(t *testing.T) {
 		t.Fatalf("expected one diff block, got %#v", content)
 	}
 	d := content[0].Diff
-	if d.Meta["kind"] != "delete" {
+	if acpjson.Object(d.Meta)["kind"] != "delete" {
 		t.Errorf("meta kind = %v, want delete", d.Meta["kind"])
 	}
 	if d.NewText != "" {
@@ -289,7 +291,7 @@ func TestCodexReasoningUsageStaysWithinOutput(t *testing.T) {
 			}}})
 			d.handleTokenUsage(payload)
 			u := d.getUsage()
-			if u.OutputTokens != tt.wantOutput || *u.ThoughtTokens != tt.wantReasoning {
+			if u.OutputTokens != int64(tt.wantOutput) || *u.ThoughtTokens != int64(tt.wantReasoning) {
 				t.Fatalf("output=%d reasoning=%d, want %d/%d", u.OutputTokens, *u.ThoughtTokens, tt.wantOutput, tt.wantReasoning)
 			}
 		})
@@ -325,31 +327,36 @@ func TestFileChangeRawDelete(t *testing.T) {
 	if d.OldText == nil || *d.OldText != "gone\n" || d.NewText != "" {
 		t.Fatalf("raw delete content = old %v new %q", d.OldText, d.NewText)
 	}
-	if len(d.Meta) != 1 || d.Meta["kind"] != "delete" {
+	if len(d.Meta) != 1 || acpjson.Object(d.Meta)["kind"] != "delete" {
 		t.Fatalf("diff metadata = %#v", d.Meta)
 	}
 }
 
 func TestToolCallsCarryCodexToolNames(t *testing.T) {
-	name := func(meta map[string]any) string { return toolNameFromMeta(meta) }
+	name := func(value *string) string {
+		if value != nil {
+			return *value
+		}
+		return ""
+	}
 	for source, want := range map[string]string{"unifiedExecStartup": "exec_command", "unifiedExecInteraction": "write_stdin", "agent": "", "userShell": ""} {
 		u, ok := itemToolCallStart(json.RawMessage(`{"command":"ls","source":"`+source+`"}`), "cmd", "commandExecution", acp.ToolCallStatusInProgress)
-		if !ok || name(u.ToolCall.Meta) != want {
+		if !ok || name(u.ToolCall.Name) != want {
 			t.Errorf("source %s: meta = %#v, want %q", source, u.ToolCall.Meta, want)
 		}
 	}
 	u, _ := itemToolCallStart(json.RawMessage(`{"command":"cat a","source":"unifiedExecStartup","commandActions":[{"type":"read","path":"/a"}]}`), "read", "commandExecution", acp.ToolCallStatusCompleted)
-	if name(u.ToolCall.Meta) != "exec_command" || u.ToolCall.Title != "Read file" {
+	if name(u.ToolCall.Name) != "exec_command" || u.ToolCall.Title != "Read file" {
 		t.Errorf("command action = %#v", u.ToolCall)
 	}
 	u, _ = itemToolCallStart(json.RawMessage(`{"tool":"lookup","namespace":"mcp__docs__","arguments":{}}`), "dyn", "dynamicToolCall", acp.ToolCallStatusInProgress)
-	if name(u.ToolCall.Meta) != "mcp__docs__lookup" {
+	if name(u.ToolCall.Name) != "mcp__docs__lookup" {
 		t.Errorf("dynamic tool meta = %#v", u.ToolCall.Meta)
 	}
-	if u, _ := imageViewToolCall(json.RawMessage(`{"id":"img","path":"/a.png"}`)); name(u.ToolCall.Meta) != "view_image" {
+	if u, _ := imageViewToolCall(json.RawMessage(`{"id":"img","path":"/a.png"}`)); name(u.ToolCall.Name) != "view_image" {
 		t.Errorf("image view meta = %#v", u.ToolCall.Meta)
 	}
-	if tc := permissionsToolCall(permissionsApprovalParams{ItemID: "perm"}); name(tc.Meta) != "request_permissions" {
+	if tc := permissionsToolCall(permissionsApprovalParams{ItemID: "perm"}); name(tc.Name.Ptr()) != "request_permissions" {
 		t.Errorf("permissions meta = %#v", tc.Meta)
 	}
 

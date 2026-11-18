@@ -21,7 +21,9 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
+	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
@@ -30,6 +32,8 @@ import (
 )
 
 type recordingClient struct {
+	acptest.NoElicitation
+
 	mu            sync.Mutex
 	toolStarts    int
 	toolCompletes int
@@ -45,10 +49,10 @@ func TestNotifyContentPreservesToolFailureStatus(t *testing.T) {
 		ToolResult: &harness.ToolResult{ID: "call-1", Name: "shell", Content: tool.TextContent("failed"), IsError: true},
 	})
 
-	if update.ToolCallUpdate == nil || update.ToolCallUpdate.Status == nil {
+	if update.ToolCallUpdate == nil || update.ToolCallUpdate.Status.Ptr() == nil {
 		t.Fatalf("tool update = %+v", update.ToolCallUpdate)
 	}
-	if got := *update.ToolCallUpdate.Status; got != acpsdk.ToolCallStatusFailed {
+	if got := *update.ToolCallUpdate.Status.Ptr(); got != acpsdk.ToolCallStatusFailed {
 		t.Fatalf("tool status = %q, want %q", got, acpsdk.ToolCallStatusFailed)
 	}
 }
@@ -68,15 +72,15 @@ func TestNotifyContentPreservesOrderedToolImages(t *testing.T) {
 		ToolResult: &harness.ToolResult{ID: "image-call", Content: content, IsError: true},
 	})
 	call := update.ToolCallUpdate
-	if call == nil || call.ToolCallId != "image-call" || call.Status == nil || *call.Status != acpsdk.ToolCallStatusFailed || len(call.Content) != 3 {
+	if call == nil || call.ToolCallId != "image-call" || call.Status.Ptr() == nil || *call.Status.Ptr() != acpsdk.ToolCallStatusFailed || len(acptest.Value(call.Content)) != 3 {
 		t.Fatalf("unexpected update: %+v", call)
 	}
-	for i, block := range call.Content {
+	for i, block := range acptest.Value(call.Content) {
 		if block.Content == nil {
 			t.Fatalf("missing block %d", i)
 		}
 	}
-	first, img, last := call.Content[0].Content.Content.Text, call.Content[1].Content.Content.Image, call.Content[2].Content.Content.Text
+	first, img, last := acptest.Value(call.Content)[0].Content.Content.Text, acptest.Value(call.Content)[1].Content.Content.Image, acptest.Value(call.Content)[2].Content.Content.Text
 	if first == nil || first.Text != "before" || last == nil || last.Text != "after" || img == nil || img.MimeType != "image/png" || img.Data != base64.StdEncoding.EncodeToString(pngBytes.Bytes()) {
 		t.Fatalf("lost content or order: %+v", call.Content)
 	}
@@ -133,8 +137,8 @@ func TestNotifyContentUsesCompactFilePresentation(t *testing.T) {
 		call.Locations[0].Line == nil || *call.Locations[0].Line != 12 {
 		t.Fatalf("locations = %#v", call.Locations)
 	}
-	args, ok := call.RawInput.(map[string]any)
-	if !ok || args["limit"] != float64(4) || args["offset"] != nil || args["file_path"] != nil || args["path"] != nil {
+	args := acpjson.Object(call.RawInput)
+	if args == nil || args["limit"] != json.Number("4") || args["offset"] != nil || args["file_path"] != nil || args["path"] != nil {
 		t.Fatalf("display input = %#v", call.RawInput)
 	}
 }
@@ -265,7 +269,7 @@ func (c *recordingClient) SessionUpdate(_ context.Context, n acpsdk.SessionNotif
 		c.toolStarts++
 		c.startIDs = append(c.startIDs, n.Update.ToolCall.ToolCallId)
 	}
-	if u := n.Update.ToolCallUpdate; u != nil && u.Status != nil && *u.Status == acpsdk.ToolCallStatusCompleted {
+	if u := n.Update.ToolCallUpdate; u != nil && u.Status.Ptr() != nil && *u.Status.Ptr() == acpsdk.ToolCallStatusCompleted {
 		c.toolCompletes++
 		c.completeIDs = append(c.completeIDs, u.ToolCallId)
 	}
@@ -398,14 +402,14 @@ func TestACPDeleteListedSessionWithoutLoading(t *testing.T) {
 		t.Fatalf("listed sessions = %+v, want %q", listed.Sessions, id)
 	}
 
-	params := acpsdk.UnstableDeleteSessionRequest{SessionId: id}
-	if _, err := s.UnstableDeleteSession(context.Background(), params); err != nil {
+	params := acpsdk.DeleteSessionRequest{SessionId: id}
+	if _, err := s.DeleteSession(context.Background(), params); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := session.Load(dir, id); err == nil {
 		t.Fatal("deleted session is still loadable")
 	}
-	if _, err := s.UnstableDeleteSession(context.Background(), params); err != nil {
+	if _, err := s.DeleteSession(context.Background(), params); err != nil {
 		t.Fatalf("idempotent delete: %v", err)
 	}
 }

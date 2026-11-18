@@ -267,7 +267,7 @@ func liveSubagents(t *testing.T, factory Factory, timeout time.Duration, sub Liv
 			if n.Update.ToolCall != nil && strings.Contains(n.Update.ToolCall.Title, sub.WantToolTitle) {
 				found = true
 			}
-			if u := n.Update.ToolCallUpdate; u != nil && u.Title != nil && strings.Contains(*u.Title, sub.WantToolTitle) {
+			if u := n.Update.ToolCallUpdate; u != nil && u.Title.Ptr() != nil && strings.Contains(*u.Title.Ptr(), sub.WantToolTitle) {
 				found = true
 			}
 		}
@@ -583,10 +583,10 @@ func liveSessionLifecycle(t *testing.T, factory Factory, timeout time.Duration) 
 	}
 
 	if caps.Delete != nil {
-		if _, err := h.conn.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: session.SessionId}); err != nil {
+		if _, err := h.conn.DeleteSession(ctx, acp.DeleteSessionRequest{SessionId: session.SessionId}); err != nil {
 			t.Fatalf("session/delete advertised but failed: %v", err)
 		}
-		if _, err := h.conn.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: session.SessionId}); err != nil {
+		if _, err := h.conn.DeleteSession(ctx, acp.DeleteSessionRequest{SessionId: session.SessionId}); err != nil {
 			t.Fatalf("session/delete is not idempotent: %v", err)
 		}
 	}

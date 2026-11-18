@@ -59,15 +59,17 @@ were captured again and each template was compared with its capture:
 
 | CLI | Version | Executable SHA-256 | Captured | Templates |
 | --- | --- | --- | --- | --- |
-| Codex | `0.163.0` | `8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31` | 2026-10-16 | GPT, except GPT-6.1 Terra |
+| Codex | `0.163.0` | `8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31` | 2026-10-16 | GPT through GPT-6.1 Sol |
 | Codex | `0.167.0` | `030316ecfbb41f4e7946e584b0063ef333b7a36cd312ba349f2f6869e39b62cc` | 2026-11-10 | GPT-6.1 Terra |
+| Codex | `0.169.0` | `739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002` | 2026-11-18 | GPT-6.2 Sol and Astra, nine earlier GPT models checked |
 | Claude Code | `2.1.301` | `1f04c69e1c24e4d0a716a863af0aad8fc64d49a499334c29701f073700276b99` | 2026-10-16 | Claude, first adaptation |
 | Claude Code | `2.1.319` | `1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd` | 2026-11-10 | Claude, current; Fable 5.2 added |
 
 `scripts/capture-code-prompts.py` points each CLI's API provider at a localhost
 mock with dummy credentials and returns synthetic text without tool calls.
 Codex uses a [custom Responses provider](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server#using-codex-app-server),
-its bundled model metadata, and flags that exclude user configuration and rules.
+the catalog selected by `--codex-catalog` (by default the CLI's bundled metadata),
+and flags that exclude user configuration and rules.
 Claude uses [`ANTHROPIC_BASE_URL` and a temporary `CLAUDE_CONFIG_DIR`](https://code.claude.com/docs/en/env-vars),
 safe mode, and an empty MCP configuration. It deliberately does not use bare
 mode or force the simplified prompt: either would change the prompt being
@@ -77,9 +79,11 @@ never forwards requests, and request headers are not saved.
 Reproduce from the repository root (Python standard library and the CLI required):
 
 ```bash
-python3 scripts/capture-code-prompts.py codex \
+python3 scripts/capture-code-prompts.py codex --codex-catalog pkg/external/codex/models.json \
+  --model gpt-6.2-sol --model gpt-6.2-astra \
   --model gpt-6.1-sol --model gpt-6.1-terra --model gpt-6-astra \
-  --model gpt-6-sol --model gpt-6-luna --model gpt-5.6-sol --model gpt-5.5
+  --model gpt-6-sol --model gpt-6-luna --model gpt-5.6-sol \
+  --model gpt-5.6-terra --model gpt-5.6-luna --model gpt-5.5
 
 python3 scripts/capture-code-prompts.py claude \
   --model claude-sonnet-5-5 --model claude-haiku-5-5 \
@@ -122,12 +126,25 @@ so `models/gpt-6-1-terra` is a copy of the Astra template. The capture's only
 Terra-specific runtime text prefers reasonable assumptions over questions in
 the default mode; the template's autonomy guidance already covers it.
 
-This Codex version reports fallback metadata for GPT-5.4, GPT-5.4 Mini, GPT-5.2,
+Codex 0.167.0 reports fallback metadata for GPT-5.4, GPT-5.4 Mini, GPT-5.2,
 and GPT-5.1. The script marks those runs unsuccessful even when the mock response
 completes. Their existing model-specific templates remain in use, with Wingman
 runtime improvements; generic fallback captures are not model-specific source
-evidence. All older GPT models remain in the catalog. GPT-5.6 Terra/Luna and other
-IDs sharing a family template were not separately captured.
+evidence.
+
+The 2026-11-18 capture used the catalog introduced by Codex commit
+`6c0cee502d`. All eleven model requests contained their catalog's exact base
+instructions. GPT-6.2 Sol and Astra share one base prompt (SHA-256
+`aa47d2dee261594c4944241b646088730d74d87afa4da8d2da0554540a5e7623`),
+so both route to `models/gpt-6-2`. The Wingman adaptation keeps its writing,
+coding, frontend, and task-completion guidance. The external Codex runner
+receives each model's own upstream entry, including its runtime instructions.
+
+Compared with the previous embedded catalog, the older GPT-6 base prompts
+changed only in Codex-specific skill and plugin instructions. GPT-6.1 Terra
+still matches GPT-6 Astra. The GPT-5.6 and GPT-5.5 base prompts are identical
+to their previous versions. The external runner also retains the last upstream
+GPT-5.4 entry in `models_legacy.json` for gateways that still serve it.
 
 Claude Sonnet/Opus 5.5, Opus 4.8, and Fable 5.2 use lean prompts; Haiku 5.5,
 Opus 5, Fable/Mythos 5 and 5.1, and general Sonnet 5 retain their respective

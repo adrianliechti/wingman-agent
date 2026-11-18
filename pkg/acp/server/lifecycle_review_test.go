@@ -2,21 +2,25 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
-	"strings"
+	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	acpsdk "github.com/coder/acp-go-sdk"
+
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
+	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
-	acpsdk "github.com/coder/acp-go-sdk"
 )
 
 type scopedFormClient struct {
@@ -30,13 +34,13 @@ type scopedFormCall struct {
 	ctx context.Context
 }
 
-func (c *scopedFormClient) UnstableCreateElicitation(ctx context.Context, req acpsdk.UnstableCreateElicitationRequest) (acpsdk.UnstableCreateElicitationResponse, error) {
-	sid, _ := req.Form.Meta["sessionId"].(string)
+func (c *scopedFormClient) CreateElicitation(ctx context.Context, req acpsdk.CreateElicitationRequest) (acpsdk.CreateElicitationResponse, error) {
+	sid := string(req.Form.Session.SessionId)
 	c.entered <- scopedFormCall{sid, ctx}
 	if release := c.release[sid]; release != nil {
 		<-release
 	}
-	return acpsdk.UnstableCreateElicitationResponse{Accept: &acpsdk.UnstableCreateElicitationAccept{Action: "accept", Content: map[string]any{"ok": true}}}, nil
+	return acpsdk.CreateElicitationResponse{Accept: &acpsdk.CreateElicitationAccept{Action: "accept", Content: acptest.Answers(map[string]any{"ok": true})}}, nil
 }
 
 func TestConcurrentFormsPreserveSessionScopeAndCancellation(t *testing.T) {
@@ -202,49 +206,55 @@ func TestHistoryReplaySurfacesStalledClientWrite(t *testing.T) {
 	})
 }
 
-type recordingWriter struct {
-	mu   sync.Mutex
-	data strings.Builder
-}
-
-func (w *recordingWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.data.Write(p)
-}
-
-func (w *recordingWriter) String() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.data.String()
-}
-
-// A client learns a new session's ID from the response, and drops updates for
-// IDs it does not know. The command list must therefore follow the response.
+// Read the actual response and notification from an unbuffered connection.
+// Even when the response write blocks, commands cannot overtake the session ID.
 func TestNewSessionAnnouncesCommandsAfterResponse(t *testing.T) {
-	s := newContractServer(t).(*contractServer)
-	t.Cleanup(func() { _ = s.Close() })
-	reader, peer := net.Pipe()
-	t.Cleanup(func() { _ = reader.Close(); _ = peer.Close() })
-	writer := &recordingWriter{}
-	s.SetAgentConnection(acpsdk.NewAgentSideConnection(s, writer, reader))
-
-	response, err := s.NewSession(t.Context(), acpsdk.NewSessionRequest{Cwd: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sent := writer.String(); strings.Contains(sent, "available_commands_update") {
-		t.Fatalf("commands announced before the session response:\n%s", sent)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(writer.String(), "available_commands_update") {
-		if time.Now().After(deadline) {
-			t.Fatalf("commands never announced:\n%s", writer.String())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	sent := writer.String()
-	if !strings.Contains(sent, string(response.SessionId)) || !strings.Contains(sent, `"review"`) {
-		t.Fatalf("command update lacks the session or the review command:\n%s", sent)
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			s := newContractServer(t).(*contractServer)
+			server, peer := net.Pipe()
+			conn := acp.NewAgentConnection(s, server, server)
+			t.Cleanup(func() { _ = peer.Close(); _ = server.Close(); <-conn.Done(); _ = s.Close() })
+			_ = peer.SetDeadline(time.Now().Add(5 * time.Second))
+			enc, dec := json.NewEncoder(peer), json.NewDecoder(peer)
+			call := func(id int, method string, params any) map[string]json.RawMessage {
+				t.Helper()
+				if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
+					t.Fatal(err)
+				}
+				var frame struct {
+					ID     int
+					Result map[string]json.RawMessage
+				}
+				if err := dec.Decode(&frame); err != nil || frame.ID != id || frame.Result == nil {
+					t.Fatalf("%s response out of order: %+v, err %v", method, frame, err)
+				}
+				return frame.Result
+			}
+			call(1, "initialize", map[string]any{"protocolVersion": version, "info": map[string]string{"name": "test", "version": "1"}})
+			result := call(2, "session/new", map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}})
+			var commands []acpsdk.AvailableCommand
+			if version == 2 {
+				if err := json.Unmarshal(result["availableCommands"], &commands); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				var frame struct {
+					Method string
+					Params acpsdk.SessionNotification
+				}
+				if err := dec.Decode(&frame); err != nil || frame.Method != "session/update" || frame.Params.Update.AvailableCommandsUpdate == nil {
+					t.Fatalf("command notification = %+v, err %v", frame, err)
+				}
+				var sid acpsdk.SessionId
+				if err := json.Unmarshal(result["sessionId"], &sid); err != nil || sid != frame.Params.SessionId {
+					t.Fatalf("command notification session = %q, want %q", frame.Params.SessionId, sid)
+				}
+				commands = frame.Params.Update.AvailableCommandsUpdate.AvailableCommands
+			}
+			if !slices.ContainsFunc(commands, func(command acpsdk.AvailableCommand) bool { return command.Name == "review" }) {
+				t.Fatalf("missing review command in %v", commands)
+			}
+		})
 	}
 }

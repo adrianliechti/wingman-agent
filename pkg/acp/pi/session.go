@@ -13,6 +13,7 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
@@ -80,10 +81,10 @@ func (s *session) titleUpdate(title string, activity bool) *acpsdk.SessionUpdate
 		return nil
 	}
 	s.title = title
-	info := &acpsdk.SessionSessionInfoUpdate{SessionUpdate: "session_info_update", Title: &title}
+	info := &acpsdk.SessionSessionInfoUpdate{SessionUpdate: "session_info_update", Title: acpsdk.PatchSet(title)}
 	if activity {
 		now := time.Now().UTC().Format(time.RFC3339)
-		info.UpdatedAt = &now
+		info.UpdatedAt = acpsdk.PatchSet(now)
 	}
 	return &acpsdk.SessionUpdate{SessionInfoUpdate: info}
 }
@@ -162,7 +163,7 @@ func parseContextUsage(data json.RawMessage) *acpsdk.SessionUpdate {
 	if usage.Tokens == nil || *usage.Tokens < 0 || usage.ContextWindow <= 0 {
 		return nil
 	}
-	update := &acpsdk.SessionUsageUpdate{SessionUpdate: "usage_update", Used: *usage.Tokens, Size: usage.ContextWindow}
+	update := &acpsdk.SessionUsageUpdate{SessionUpdate: "usage_update", Used: int64(*usage.Tokens), Size: int64(usage.ContextWindow)}
 	if stats.Cost > 0 {
 		update.Cost = &acpsdk.Cost{Amount: stats.Cost, Currency: "USD"}
 	}
@@ -543,7 +544,7 @@ func (t *turn) snapshotFileMutation(toolName, toolCallID string, args map[string
 		if toolName == "edit" && len(locs) > 0 {
 			for _, needle := range editOldTexts(args) {
 				if line := findUniqueLine(old, needle); line != nil {
-					locs[0].Line = line
+					locs[0].Line = new(int64(*line))
 					break
 				}
 			}
@@ -663,7 +664,7 @@ func (t *turn) handleExtensionUI(raw json.RawMessage) {
 			if level == "" {
 				level = "info"
 			}
-			u.AgentMessageChunk.Meta = map[string]any{"piAcp": map[string]any{"notify": map[string]any{"level": level}}}
+			u.AgentMessageChunk.Meta = acpjson.Metadata(map[string]any{"piAcp": map[string]any{"notify": map[string]any{"level": level}}})
 			t.emit(u)
 		}
 
@@ -687,12 +688,12 @@ func (t *turn) askConfirm(id, title, message string) bool {
 	kind := acpsdk.ToolKindOther
 	tc := acpsdk.ToolCallUpdate{
 		ToolCallId: acpsdk.ToolCallId("pi-ui-" + id),
-		Title:      &tcTitle,
-		Kind:       &kind,
-		Status:     &status,
+		Title:      acpsdk.PatchSet(tcTitle),
+		Kind:       acpsdk.PatchSet(kind),
+		Status:     acpsdk.PatchSet(status),
 	}
 	if message != "" {
-		tc.Content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(message))}
+		tc.Content = acpsdk.PatchSet([]acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(message))})
 	}
 
 	resp, err := acp.Call(t.ctx, func() (acpsdk.RequestPermissionResponse, error) {
@@ -723,9 +724,9 @@ func (t *turn) askSelect(id, title string, options []string) (string, bool) {
 	kind := acpsdk.ToolKindOther
 	tc := acpsdk.ToolCallUpdate{
 		ToolCallId: acpsdk.ToolCallId("pi-ui-" + id),
-		Title:      &tcTitle,
-		Kind:       &kind,
-		Status:     &status,
+		Title:      acpsdk.PatchSet(tcTitle),
+		Kind:       acpsdk.PatchSet(kind),
+		Status:     acpsdk.PatchSet(status),
 	}
 
 	opts := make([]acpsdk.PermissionOption, 0, len(options))
@@ -796,12 +797,13 @@ func toolLocations(args map[string]any, cwd string) []acpsdk.ToolCallLocation {
 	}
 	location := acpsdk.ToolCallLocation{Path: acp.ResolvePath(path, cwd)}
 	if offset, ok := tool.IntArg(args, "offset"); ok && offset > 0 {
-		location.Line = new(offset)
+		location.Line = new(int64(offset))
 	}
 	return []acpsdk.ToolCallLocation{location}
 }
 
 type toolPresentation struct {
+	name      string
 	title     string
 	kind      acpsdk.ToolKind
 	rawInput  any
@@ -847,6 +849,7 @@ func presentTool(name string, args map[string]any, cwd string) toolPresentation 
 		omit = append(omit, "path", "file_path")
 	}
 	return toolPresentation{
+		name:  name,
 		title: title, kind: kind,
 		rawInput: compactToolArgs(args, omit...), locations: locations,
 	}
@@ -867,7 +870,7 @@ func compactToolArgs(args map[string]any, omit ...string) any {
 }
 
 func startToolOptions(p toolPresentation, status acpsdk.ToolCallStatus) []acpsdk.ToolCallStartOpt {
-	opts := []acpsdk.ToolCallStartOpt{
+	opts := []acpsdk.ToolCallStartOpt{acpsdk.WithStartName(p.name),
 		acpsdk.WithStartKind(p.kind),
 		acpsdk.WithStartStatus(status),
 	}

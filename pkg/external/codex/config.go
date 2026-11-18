@@ -40,7 +40,7 @@ func resolveModels(available map[string]bool) []string {
 	var models []string
 	var fastModels []string
 
-	for _, m := range model.Available(available) {
+	for _, m := range external.LauncherModels(available) {
 		if !external.IsOpenAI(m.ID) {
 			continue
 		}

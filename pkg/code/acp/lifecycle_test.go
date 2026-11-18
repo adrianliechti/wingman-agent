@@ -8,10 +8,11 @@ import (
 	"testing"
 	"testing/synctest"
 
+	acpsdk "github.com/coder/acp-go-sdk"
+
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
-	acpsdk "github.com/coder/acp-go-sdk"
 )
 
 type lifecyclePeer struct {
@@ -241,9 +242,9 @@ func TestCancelledInteractionsDiscardLateAnswersAndStaySessionScoped(t *testing.
 				result := make(chan bool, 1)
 				go func() {
 					if form {
-						req := acpsdk.NewUnstableCreateElicitationRequestForm(acpsdk.UnstableElicitationSchema{Type: "object", Properties: map[string]any{}})
-						req.Form.Meta = map[string]any{"sessionId": "a"}
-						r, _ := a.UnstableCreateElicitation(context.Background(), req)
+						req := acpsdk.CreateElicitationRequest{Form: &acpsdk.CreateElicitationForm{Mode: "form", RequestedSchema: acpsdk.ElicitationSchema{Type: "object", Properties: map[string]acpsdk.ElicitationPropertySchema{}}}}
+						req.Form.Session = &acpsdk.ElicitationSessionScope{SessionId: "a"}
+						r, _ := a.CreateElicitation(context.Background(), req)
 						result <- r.Cancel != nil
 					} else {
 						r, _ := a.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{SessionId: "a", Options: []acpsdk.PermissionOption{{OptionId: "allow", Name: "Allow", Kind: acpsdk.PermissionOptionKindAllowOnce}}})
@@ -300,7 +301,7 @@ func TestSessionUpdateCallbackCanIssueACPRequest(t *testing.T) {
 		peer.promptFn = func(ctx context.Context, req acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
 			title := "Updated"
 			err := peer.conn.SessionUpdate(ctx, acpsdk.SessionNotification{SessionId: req.SessionId, Update: acpsdk.SessionUpdate{
-				SessionInfoUpdate: &acpsdk.SessionSessionInfoUpdate{SessionUpdate: "session_info_update", Title: &title},
+				SessionInfoUpdate: &acpsdk.SessionSessionInfoUpdate{SessionUpdate: "session_info_update", Title: acpsdk.PatchSet(title)},
 			}})
 			return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, err
 		}
@@ -387,9 +388,9 @@ func TestInvalidElicitationScopeDoesNotFallBackToAnotherSession(t *testing.T) {
 		calls.Add(1)
 		return tool.ElicitResult{Action: tool.ElicitAccept}, nil
 	}})
-	req := acpsdk.NewUnstableCreateElicitationRequestForm(acpsdk.UnstableElicitationSchema{Type: "object", Properties: map[string]any{}})
-	req.Form.Meta = map[string]any{"sessionId": "deleted"}
-	r, err := a.UnstableCreateElicitation(context.Background(), req)
+	req := acpsdk.CreateElicitationRequest{Form: &acpsdk.CreateElicitationForm{Mode: "form", RequestedSchema: acpsdk.ElicitationSchema{Type: "object", Properties: map[string]acpsdk.ElicitationPropertySchema{}}}}
+	req.Form.Session = &acpsdk.ElicitationSessionScope{SessionId: "deleted"}
+	r, err := a.CreateElicitation(context.Background(), req)
 	if err != nil || r.Cancel == nil || calls.Load() != 0 {
 		t.Fatalf("invalid session form = %#v, %v; UI calls=%d", r, err, calls.Load())
 	}

@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
+	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 )
 
 // askClient drives the approver's AskUserQuestion tiers with configurable
@@ -50,28 +53,28 @@ func (c *askClient) RequestPermission(_ context.Context, p acp.RequestPermission
 	}}, nil
 }
 
-func (c *askClient) UnstableCreateElicitation(_ context.Context, req acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+func (c *askClient) CreateElicitation(_ context.Context, req acp.CreateElicitationRequest) (acp.CreateElicitationResponse, error) {
 	c.mu.Lock()
 	c.formCalls++
 	if req.Form != nil {
-		c.formSession, _ = req.Form.Meta["sessionId"].(string)
+		c.formSession = string(req.Form.Session.SessionId)
 	}
 	c.mu.Unlock()
 	switch {
 	case c.formErr != nil:
-		return acp.UnstableCreateElicitationResponse{}, c.formErr
+		return acp.CreateElicitationResponse{}, c.formErr
 	case c.formCancel:
-		return acp.UnstableCreateElicitationResponse{Cancel: &acp.UnstableCreateElicitationCancel{Action: "cancel"}}, nil
+		return acp.CreateElicitationResponse{Cancel: &acp.CreateElicitationCancel{Action: "cancel"}}, nil
 	case c.formDecline:
-		return acp.UnstableCreateElicitationResponse{Decline: &acp.UnstableCreateElicitationDecline{Action: "decline"}}, nil
+		return acp.CreateElicitationResponse{Decline: &acp.CreateElicitationDecline{Action: "decline"}}, nil
 	}
-	return acp.UnstableCreateElicitationResponse{Accept: &acp.UnstableCreateElicitationAccept{
+	return acp.CreateElicitationResponse{Accept: &acp.CreateElicitationAccept{
 		Action:  "accept",
-		Content: c.formContent,
+		Content: acptest.Answers(c.formContent),
 	}}, nil
 }
 
-func (c *askClient) UnstableCompleteElicitation(context.Context, acp.UnstableCompleteElicitationNotification) error {
+func (c *askClient) CompleteElicitation(context.Context, acp.CompleteElicitationNotification) error {
 	return nil
 }
 
@@ -375,7 +378,7 @@ func TestPermissionOptionsFollowCLIHints(t *testing.T) {
 func TestPermissionRequestCarriesMCPServer(t *testing.T) {
 	client := &recordingPermissionClient{pick: optionRejectOnce}
 	reply := runPermission(t, client, &approver{}, `{"request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"mcp__github__list_issues","tool_use_id":"tu1","input":{},"mcp_server":{"name":"github","source":"sdk"}}}`)
-	claudeMeta, _ := client.got.ToolCall.Meta["claudeCode"].(map[string]any)
+	claudeMeta := acpjson.Object(client.got.ToolCall.Meta)["claudeCode"].(map[string]any)
 	server, _ := claudeMeta["mcpServer"].(map[string]any)
 	if server["name"] != "github" || server["source"] != "sdk" || claudeMeta["toolName"] != "mcp__github__list_issues" {
 		t.Fatalf("tool call meta = %#v", client.got.ToolCall.Meta)

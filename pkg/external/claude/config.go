@@ -52,7 +52,7 @@ func NewConfig(ctx context.Context, options *Options) (*ClaudeConfig, error) {
 	slices.Sort(cfg.Models)
 
 	// Use the catalog for preferred defaults.
-	for _, m := range model.Available(available) {
+	for _, m := range external.LauncherModels(available) {
 		if !external.IsAnthropic(m.ID) {
 			continue
 		}

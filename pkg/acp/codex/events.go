@@ -11,6 +11,7 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
@@ -28,6 +29,7 @@ type eventDispatcher struct {
 	seenReasoning   map[string]bool
 	seenAgentText   map[string]bool
 	guardianStarted map[string]bool
+	supportsNotices bool
 	startedTools    map[string]bool
 	agentPhases     map[string]string
 	lastGoal        string
@@ -313,6 +315,9 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			d.update(acpsdk.UpdateAgentMessageText("Warning: " + p.Message + "\n\n"))
 		}
 
+	case "hook/completed":
+		d.hookCompleted(params)
+
 	case "item/commandExecution/outputDelta":
 
 		var p struct {
@@ -379,6 +384,57 @@ func (d *eventDispatcher) handle(method string, params json.RawMessage) {
 			}
 		}
 	}
+}
+
+func (d *eventDispatcher) hookCompleted(params json.RawMessage) {
+	var p struct {
+		Run struct {
+			EventName, Status string
+			Entries           []struct{ Kind, Text string }
+		}
+	}
+	if json.Unmarshal(params, &p) != nil || p.Run.EventName == "" {
+		return
+	}
+	event := p.Run.EventName
+	title := strings.ToUpper(event[:1]) + event[1:] + " hook "
+	switch p.Run.Status {
+	case "stopped":
+		title += "stopped the turn"
+	case "blocked":
+		target := map[string]string{
+			"userPromptSubmit": "the prompt", "preToolUse": "the tool call", "permissionRequest": "the tool call",
+			"postToolUse": "the tool result", "preModelRequest": "the model request", "preCompact": "the compaction",
+			"subagentStart": "the subagent",
+		}[event]
+		if target == "" {
+			target = "the request"
+		}
+		title += "blocked " + target
+	default:
+		return
+	}
+	var reasons []string
+	for _, entry := range p.Run.Entries {
+		if text := strings.TrimSpace(entry.Text); entry.Kind != "context" && text != "" {
+			reasons = append(reasons, text)
+		}
+	}
+	detail := strings.Join(reasons, "\n")
+	if d.supportsNotices {
+		notice := &acpsdk.SessionUpdateNotice{SessionUpdate: "notice", Severity: acpsdk.NoticeSeverityWarning, Title: title}
+		if detail != "" {
+			notice.Description = &detail
+		}
+		d.update(acpsdk.SessionUpdate{Notice: notice})
+		return
+	}
+	if detail != "" {
+		title += ": " + detail
+	} else {
+		title += "."
+	}
+	d.update(acpsdk.UpdateAgentMessageText(title + "\n\n"))
 }
 
 func (d *eventDispatcher) handleGoalUpdated(params json.RawMessage) {
@@ -459,7 +515,9 @@ func (d *eventDispatcher) handleItemStarted(params json.RawMessage) {
 	case "commandExecution", "mcpToolCall", "dynamicToolCall":
 		if u, ok := itemToolCallStart(env.Item, id, kind, acpsdk.ToolCallStatusInProgress); ok {
 			if kind == "commandExecution" {
-				d.setCommandName(id, toolNameFromMeta(u.ToolCall.Meta))
+				if u.ToolCall.Name != nil {
+					d.setCommandName(id, *u.ToolCall.Name)
+				}
 			}
 			d.update(u)
 		}
@@ -552,7 +610,9 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		}
 		delete(d.toolOut, id)
 		u := acpsdk.UpdateToolCall(acpsdk.ToolCallId(id), opts...)
-		u.ToolCallUpdate.Meta = toolNameMeta(commandToolName(it.Source))
+		if name := commandToolName(it.Source); name != "" {
+			u.ToolCallUpdate.Name = acpsdk.PatchSet(name)
+		}
 		d.update(u)
 
 	case "fileChange":
@@ -574,7 +634,9 @@ func (d *eventDispatcher) handleItemCompleted(params json.RawMessage) {
 		}
 		_ = json.Unmarshal(env.Item, &it)
 		u := acpsdk.UpdateToolCall(acpsdk.ToolCallId(id), acpsdk.WithUpdateStatus(toolStatusFor(it.Status)))
-		u.ToolCallUpdate.Meta = toolNameMeta(functionToolName(it.Tool, it.Namespace))
+		if name := functionToolName(it.Tool, it.Namespace); name != "" {
+			u.ToolCallUpdate.Name = acpsdk.PatchSet(name)
+		}
 		d.update(u)
 
 	case "mcpToolCall":
@@ -745,8 +807,8 @@ func (d *eventDispatcher) handleTokenUsage(params json.RawMessage) {
 	if size := p.TokenUsage.ModelContextWindow; size > 0 {
 		d.update(acpsdk.SessionUpdate{UsageUpdate: &acpsdk.SessionUsageUpdate{
 			SessionUpdate: "usage_update",
-			Used:          last.TotalTokens,
-			Size:          size,
+			Used:          int64(last.TotalTokens),
+			Size:          int64(size),
 		}})
 	}
 }
@@ -869,7 +931,7 @@ func fileChangeContent(raw json.RawMessage) []acpsdk.ToolCallContent {
 				Path:    ch.Path,
 				OldText: oldText,
 				NewText: newText,
-				Meta:    meta,
+				Meta:    acpjson.Metadata(meta),
 			},
 		})
 	}

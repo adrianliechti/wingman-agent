@@ -9,6 +9,7 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
@@ -263,9 +264,9 @@ func withClaudeToolMeta(update *acpsdk.SessionUpdate, toolName, parentToolUseID 
 	root := map[string]any{"claudeCode": meta}
 	switch {
 	case update.ToolCall != nil:
-		update.ToolCall.Meta = root
+		update.ToolCall.Meta = acpjson.Metadata(root)
 	case update.ToolCallUpdate != nil:
-		update.ToolCallUpdate.Meta = root
+		update.ToolCallUpdate.Meta = acpsdk.PatchSet(acpjson.Metadata(root))
 	}
 }
 

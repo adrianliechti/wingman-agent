@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
+
+	protocol "github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 const (
@@ -26,10 +29,7 @@ const (
 
 type Agent interface {
 	acp.Agent
-}
-
-type connectionSetter interface {
-	SetAgentConnection(*acp.AgentSideConnection)
+	SetClientConnection(protocol.ClientConnection)
 }
 
 type closer interface {
@@ -70,12 +70,7 @@ func newHarness(t *testing.T, factory Factory) *harness {
 	t.Helper()
 	agentSide, clientSide := net.Pipe()
 	agent := factory(t)
-	agentConn := acp.NewAgentSideConnection(agent, agentSide, agentSide)
-	setter, ok := agent.(connectionSetter)
-	if !ok {
-		t.Fatalf("contract agent %T cannot receive its ACP connection", agent)
-	}
-	setter.SetAgentConnection(agentConn)
+	protocol.NewAgentConnection(agent, agentSide, agentSide)
 	client := newRecordingClient()
 	clientConn := acp.NewClientSideConnection(client, clientSide, clientSide)
 	t.Cleanup(func() {
@@ -180,8 +175,6 @@ func testSessionContract(t *testing.T, factory Factory) {
 		}
 		validateConfigOptions(t, resp.ConfigOptions)
 	}
-
-	messageID := uuid.NewString()
 	prompt := []acp.ContentBlock{
 		acp.TextBlock(NormalPrompt),
 		acp.ResourceLinkBlock("contract.txt", "file:///contract/context.txt"),
@@ -197,15 +190,12 @@ func testSessionContract(t *testing.T, factory Factory) {
 			},
 		}))
 	}
-	result, err := h.conn.Prompt(ctx, acp.PromptRequest{SessionId: session.SessionId, MessageId: &messageID, Prompt: prompt})
+	result, err := h.conn.Prompt(ctx, acp.PromptRequest{SessionId: session.SessionId, Prompt: prompt})
 	if err != nil {
 		t.Fatalf("session/prompt: %v", err)
 	}
 	if result.StopReason != acp.StopReasonEndTurn {
 		t.Fatalf("stop reason = %q, want end_turn", result.StopReason)
-	}
-	if result.UserMessageId == nil || *result.UserMessageId != messageID {
-		t.Fatalf("userMessageId = %v, want %q", result.UserMessageId, messageID)
 	}
 	validateUsage(t, result.Usage)
 	updates := h.client.snapshot()
@@ -224,7 +214,7 @@ func testSessionContract(t *testing.T, factory Factory) {
 			SessionId:             session.SessionId,
 			Cwd:                   newReq.Cwd,
 			AdditionalDirectories: newReq.AdditionalDirectories,
-			McpServers:            unstableMCPServers(newReq.McpServers),
+			McpServers:            newReq.McpServers,
 		})
 		if err != nil {
 			t.Fatalf("session/fork advertised but failed: %v", err)
@@ -233,8 +223,12 @@ func testSessionContract(t *testing.T, factory Factory) {
 			t.Fatalf("session/fork returned invalid sessionId %q", forked.SessionId)
 		}
 		validateModes(t, forked.Modes)
-		validateUnstableConfigOptions(t, forked.ConfigOptions)
+		validateConfigOptions(t, forked.ConfigOptions)
 		forkUpdates := h.client.snapshot()[forkUpdateStart:]
+		// A parent can advertise commands independently of its fork.
+		forkUpdates = slices.DeleteFunc(forkUpdates, func(n acp.SessionNotification) bool {
+			return n.SessionId == session.SessionId && n.Update.AvailableCommandsUpdate != nil
+		})
 		validateUpdates(t, forked.SessionId, forkUpdates)
 		if caps.Close != nil {
 			if _, err := h.conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: forked.SessionId}); err != nil {
@@ -299,10 +293,10 @@ func testSessionContract(t *testing.T, factory Factory) {
 	}
 
 	if caps.Delete != nil {
-		if _, err := h.conn.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: session.SessionId}); err != nil {
+		if _, err := h.conn.DeleteSession(ctx, acp.DeleteSessionRequest{SessionId: session.SessionId}); err != nil {
 			t.Fatalf("session/delete advertised but failed: %v", err)
 		}
-		if _, err := h.conn.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: session.SessionId}); err != nil {
+		if _, err := h.conn.DeleteSession(ctx, acp.DeleteSessionRequest{SessionId: session.SessionId}); err != nil {
 			t.Fatalf("idempotent session/delete: %v", err)
 		}
 	} else if init.AgentCapabilities.LoadSession && caps.Close != nil {
@@ -326,12 +320,11 @@ func testPromptReplacementContract(t *testing.T, factory Factory) {
 		resp acp.PromptResponse
 		err  error
 	}
-	firstID, secondID := uuid.NewString(), uuid.NewString()
 	firstDone := make(chan outcome, 1)
 	go func() {
 		resp, err := h.conn.Prompt(ctx, acp.PromptRequest{
-			SessionId: session.SessionId, MessageId: &firstID,
-			Prompt: []acp.ContentBlock{acp.TextBlock(CancelPrompt)},
+			SessionId: session.SessionId,
+			Prompt:    []acp.ContentBlock{acp.TextBlock(CancelPrompt)},
 		})
 		firstDone <- outcome{resp: resp, err: err}
 	}()
@@ -342,7 +335,7 @@ func testPromptReplacementContract(t *testing.T, factory Factory) {
 	secondDone := make(chan outcome, 1)
 	go func() {
 		resp, err := h.conn.Prompt(ctx, acp.PromptRequest{
-			SessionId: session.SessionId, MessageId: &secondID,
+			SessionId: session.SessionId,
 			Prompt: []acp.ContentBlock{
 				acp.TextBlock(NormalPrompt),
 				acp.ResourceLinkBlock("replacement.txt", "file:///contract/replacement.txt"),
@@ -351,7 +344,7 @@ func testPromptReplacementContract(t *testing.T, factory Factory) {
 		secondDone <- outcome{resp: resp, err: err}
 	}()
 
-	assertPromptOutcome := func(name string, done <-chan outcome, want acp.StopReason, messageID string) {
+	assertPromptOutcome := func(name string, done <-chan outcome, want acp.StopReason) {
 		t.Helper()
 		select {
 		case got := <-done:
@@ -361,16 +354,13 @@ func testPromptReplacementContract(t *testing.T, factory Factory) {
 			if got.resp.StopReason != want {
 				t.Fatalf("%s stop reason = %q, want %q", name, got.resp.StopReason, want)
 			}
-			if got.resp.UserMessageId == nil || *got.resp.UserMessageId != messageID {
-				t.Fatalf("%s userMessageId = %v, want %q", name, got.resp.UserMessageId, messageID)
-			}
 			validateUsage(t, got.resp.Usage)
 		case <-ctx.Done():
 			t.Fatalf("%s prompt did not terminate: %v", name, ctx.Err())
 		}
 	}
-	assertPromptOutcome("replaced", firstDone, acp.StopReasonCancelled, firstID)
-	assertPromptOutcome("replacement", secondDone, acp.StopReasonEndTurn, secondID)
+	assertPromptOutcome("replaced", firstDone, acp.StopReasonCancelled)
+	assertPromptOutcome("replacement", secondDone, acp.StopReasonEndTurn)
 
 	updates := h.client.snapshot()
 	validateUpdates(t, session.SessionId, updates)
@@ -384,33 +374,6 @@ func testPromptReplacementContract(t *testing.T, factory Factory) {
 	}
 }
 
-func unstableMCPServers(servers []acp.McpServer) []acp.UnstableMcpServer {
-	out := make([]acp.UnstableMcpServer, 0, len(servers))
-	for _, server := range servers {
-		converted := acp.UnstableMcpServer{Stdio: server.Stdio}
-		if server.Http != nil {
-			converted.Http = &acp.UnstableMcpServerHttp{
-				Meta: server.Http.Meta, Headers: server.Http.Headers,
-				Name: server.Http.Name, Type: server.Http.Type, Url: server.Http.Url,
-			}
-		}
-		if server.Sse != nil {
-			converted.Sse = &acp.UnstableMcpServerSse{
-				Meta: server.Sse.Meta, Headers: server.Sse.Headers,
-				Name: server.Sse.Name, Type: server.Sse.Type, Url: server.Sse.Url,
-			}
-		}
-		if server.Acp != nil {
-			converted.Acp = &acp.UnstableMcpServerAcpInline{
-				Meta: server.Acp.Meta, Id: acp.UnstableMcpServerAcpId(server.Acp.Id),
-				Name: server.Acp.Name, Type: server.Acp.Type,
-			}
-		}
-		out = append(out, converted)
-	}
-	return out
-}
-
 func testCancelContract(t *testing.T, factory Factory) {
 	h := newHarness(t, factory)
 	_ = initialize(t, h)
@@ -420,15 +383,13 @@ func testCancelContract(t *testing.T, factory Factory) {
 	if err != nil {
 		t.Fatalf("session/new: %v", err)
 	}
-
-	messageID := uuid.NewString()
 	type outcome struct {
 		resp acp.PromptResponse
 		err  error
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		resp, err := h.conn.Prompt(ctx, acp.PromptRequest{SessionId: session.SessionId, MessageId: &messageID, Prompt: []acp.ContentBlock{acp.TextBlock(CancelPrompt)}})
+		resp, err := h.conn.Prompt(ctx, acp.PromptRequest{SessionId: session.SessionId, Prompt: []acp.ContentBlock{acp.TextBlock(CancelPrompt)}})
 		done <- outcome{resp: resp, err: err}
 	}()
 	if !h.client.waitForText(ctx, CancelText) {
@@ -444,9 +405,6 @@ func testCancelContract(t *testing.T, factory Factory) {
 		}
 		if got.resp.StopReason != acp.StopReasonCancelled {
 			t.Fatalf("cancelled stop reason = %q", got.resp.StopReason)
-		}
-		if got.resp.UserMessageId == nil || *got.resp.UserMessageId != messageID {
-			t.Fatalf("cancelled userMessageId = %v", got.resp.UserMessageId)
 		}
 		validateUsage(t, got.resp.Usage)
 	case <-ctx.Done():
@@ -493,27 +451,6 @@ func validateConfigOptions(t *testing.T, options []acp.SessionConfigOption) {
 		}
 		if id == "" || seen[id] {
 			t.Fatalf("empty or duplicate config option id %q", id)
-		}
-		seen[id] = true
-	}
-}
-
-func validateUnstableConfigOptions(t *testing.T, options []acp.UnstableSessionConfigOption) {
-	t.Helper()
-	seen := map[acp.SessionConfigId]bool{}
-	for _, option := range options {
-		var id acp.SessionConfigId
-		name := ""
-		switch {
-		case option.Select != nil:
-			id, name = option.Select.Id, option.Select.Name
-		case option.Boolean != nil:
-			id, name = option.Boolean.Id, option.Boolean.Name
-		default:
-			t.Fatal("unstable config option has no variant")
-		}
-		if id == "" || name == "" || seen[id] {
-			t.Fatalf("invalid or duplicate unstable config option %q (%q)", id, name)
 		}
 		seen[id] = true
 	}
@@ -610,9 +547,9 @@ func validateUpdates(t *testing.T, sessionID acp.SessionId, updates []acp.Sessio
 			if state.terminal {
 				t.Fatalf("tool_call_update %q arrived after a terminal status", update.ToolCallId)
 			}
-			if update.Status != nil {
-				validateToolStatus(t, *update.Status)
-				state.terminal = terminalToolStatus(*update.Status)
+			if update.Status.Ptr() != nil {
+				validateToolStatus(t, *update.Status.Ptr())
+				state.terminal = terminalToolStatus(*update.Status.Ptr())
 				tools[update.ToolCallId] = state
 			}
 		}
@@ -669,10 +606,10 @@ func updatesForSession(updates []acp.SessionNotification, sessionID acp.SessionI
 	return filtered
 }
 
-func validateMessageID(t *testing.T, id *string) {
+func validateMessageID(t *testing.T, id *acp.MessageId) {
 	t.Helper()
 	if id != nil {
-		if _, err := uuid.Parse(*id); err != nil {
+		if _, err := uuid.Parse(string(*id)); err != nil {
 			t.Fatalf("messageId %q is not a UUID", *id)
 		}
 	}
@@ -772,9 +709,9 @@ func (*recordingClient) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequ
 func (*recordingClient) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
 	return acp.WaitForTerminalExitResponse{}, errors.ErrUnsupported
 }
-func (*recordingClient) UnstableCreateElicitation(_ context.Context, _ acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
-	return acp.UnstableCreateElicitationResponse{Accept: &acp.UnstableCreateElicitationAccept{Action: "accept", Content: map[string]any{}}}, nil
+func (*recordingClient) CreateElicitation(_ context.Context, _ acp.CreateElicitationRequest) (acp.CreateElicitationResponse, error) {
+	return acp.CreateElicitationResponse{Accept: &acp.CreateElicitationAccept{Action: "accept", Content: map[string]acp.ElicitationContentValue{}}}, nil
 }
-func (*recordingClient) UnstableCompleteElicitation(context.Context, acp.UnstableCompleteElicitationNotification) error {
+func (*recordingClient) CompleteElicitation(context.Context, acp.CompleteElicitationNotification) error {
 	return nil
 }

@@ -47,9 +47,9 @@ func TestPromptCancellationDuringNotification(t *testing.T) {
 		t.Fatal(err)
 	}
 	writer.cancel = func() { _ = s.Cancel(ctx, acpsdk.CancelNotification{SessionId: session.SessionId}) }
-	id := "cancel-during-notification"
-	response, err := s.Prompt(ctx, acpsdk.PromptRequest{SessionId: session.SessionId, MessageId: &id, Prompt: []acpsdk.ContentBlock{acpsdk.TextBlock(acptest.CancelPrompt)}})
-	if !writer.called.Load() || err != nil || response.StopReason != acpsdk.StopReasonCancelled || response.UserMessageId == nil || *response.UserMessageId != id {
+
+	response, err := s.Prompt(ctx, acpsdk.PromptRequest{SessionId: session.SessionId, Prompt: []acpsdk.ContentBlock{acpsdk.TextBlock(acptest.CancelPrompt)}})
+	if !writer.called.Load() || err != nil || response.StopReason != acpsdk.StopReasonCancelled {
 		t.Fatalf("cancelled=%t response=%+v error=%v", writer.called.Load(), response, err)
 	}
 }

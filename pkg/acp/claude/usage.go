@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 // Accessed only by the process reader.
@@ -97,13 +99,13 @@ func (c *contextUsage) update(cost float64) *acp.SessionUpdate {
 	if c.used == nil || c.window <= 0 {
 		return nil
 	}
-	update := &acp.SessionUsageUpdate{SessionUpdate: "usage_update", Used: max(0, *c.used), Size: c.window}
+	update := &acp.SessionUsageUpdate{SessionUpdate: "usage_update", Used: int64(max(0, *c.used)), Size: int64(c.window)}
 	if cost > 0 {
 		update.Cost = &acp.Cost{Amount: cost, Currency: "USD"}
 	}
 	// ACP's usage_update has no model field.
 	if c.lastModel != "" {
-		update.Meta = map[string]any{"_claude/model": c.lastModel}
+		update.Meta = acpjson.Metadata(map[string]any{"_claude/model": c.lastModel})
 	}
 	return &acp.SessionUpdate{UsageUpdate: update}
 }

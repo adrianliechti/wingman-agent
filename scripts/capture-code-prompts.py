@@ -66,7 +66,7 @@ def mock_response(provider, model):
     return response, events
 
 
-def launch_config(provider, binary, root, endpoint, model):
+def launch_config(provider, binary, root, endpoint, model, codex_catalog):
     # Preserve HOME and CODEX_HOME. Explicit flags exclude user configuration.
     env = {key: os.environ[key] for key in ("HOME", "CODEX_HOME", "PATH", "USER", "TMPDIR") if key in os.environ}
     env.update({"HTTP_PROXY": endpoint, "HTTPS_PROXY": endpoint, "NO_PROXY": "127.0.0.1,localhost"})
@@ -108,6 +108,8 @@ def launch_config(provider, binary, root, endpoint, model):
         "otel.exporter": "none", "otel.trace_exporter": "none", "otel.metrics_exporter": "none",
         "log_dir": str(root / "codex-logs"), "sqlite_home": str(root / "codex-state"),
     }
+    if codex_catalog:
+        config["model_catalog_json"] = str(codex_catalog)
     command = [binary, "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--model", model, "--json"]
     for key, value in config.items():
         command += ["-c", key + "=" + json.dumps(value)]
@@ -115,7 +117,7 @@ def launch_config(provider, binary, root, endpoint, model):
     return command, env
 
 
-def capture(provider, binary, root, model):
+def capture(provider, binary, root, model, codex_catalog):
     workspace = root / "workspace"
     workspace.mkdir(parents=True)
     requests = []
@@ -194,7 +196,7 @@ def capture(provider, binary, root, model):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     endpoint = f"http://127.0.0.1:{server.server_port}"
-    command, env = launch_config(provider, binary, root, endpoint, model)
+    command, env = launch_config(provider, binary, root, endpoint, model, codex_catalog)
     try:
         with (root / "stdout.txt").open("w") as stdout, (root / "stderr.txt").open("w") as stderr:
             result = subprocess.run(command, cwd=workspace, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=40)
@@ -217,9 +219,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("provider", choices=["codex", "claude"])
     parser.add_argument("--binary", help="CLI executable name or path")
+    parser.add_argument("--codex-catalog", type=Path, help="Codex models.json to use instead of the CLI's bundled catalog")
     parser.add_argument("--model", action="append", required=True, help="model ID; repeat to compare variants")
     parser.add_argument("--output", type=Path, help="new capture directory; defaults to a temporary directory")
     args = parser.parse_args()
+    if args.codex_catalog:
+        if args.provider != "codex" or not args.codex_catalog.is_file():
+            parser.error("--codex-catalog requires a models.json file and the codex provider")
+        args.codex_catalog = args.codex_catalog.resolve()
     binary = shutil.which(args.binary or args.provider)
     if not binary:
         parser.error("CLI executable not found")
@@ -229,18 +236,21 @@ def main():
         root.mkdir(parents=True, exist_ok=False)
     else:
         root = Path(tempfile.mkdtemp(prefix=f"wingman-{args.provider}-capture-")).resolve()
-    save_json(root / "source.json", {
+    source = {
         "provider": args.provider, "binary": binary,
         "binary_sha256": hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
         "version": subprocess.run([binary, "--version"], capture_output=True, text=True, check=True).stdout.strip(),
         "synthetic_response": True,
-    })
+    }
+    if args.codex_catalog:
+        source["catalog_sha256"] = hashlib.sha256(args.codex_catalog.read_bytes()).hexdigest()
+    save_json(root / "source.json", source)
     print(f"Captures: {root}", flush=True)
     failed = False
     for index, model in enumerate(args.model, 1):
         run = root / f"run-{index}"
         try:
-            manifest = capture(args.provider, binary, run, model)
+            manifest = capture(args.provider, binary, run, model, args.codex_catalog)
             failed |= not manifest["success"]
             print(f"{model}: {len(manifest['requests'])} requests; success={manifest['success']}; {run}", flush=True)
         except (OSError, subprocess.TimeoutExpired) as error:

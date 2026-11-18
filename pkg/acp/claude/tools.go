@@ -28,6 +28,7 @@ type toolInfo struct {
 func toolCallStartUpdate(id, name string, rawInput json.RawMessage, cwd string, status acpsdk.ToolCallStatus) acpsdk.SessionUpdate {
 	info := toolInfoFromToolUse(name, rawInput, cwd)
 	opts := []acpsdk.ToolCallStartOpt{
+		acpsdk.WithStartName(name),
 		acpsdk.WithStartKind(info.kind),
 		acpsdk.WithStartStatus(status),
 	}
@@ -52,6 +53,7 @@ func toolCallStartUpdate(id, name string, rawInput json.RawMessage, cwd string, 
 func toolCallRefineUpdate(id, name string, rawInput json.RawMessage, cwd string, status acpsdk.ToolCallStatus) acpsdk.SessionUpdate {
 	info := toolInfoFromToolUse(name, rawInput, cwd)
 	opts := []acpsdk.ToolCallUpdateOpt{
+		acpsdk.WithUpdateName(name),
 		acpsdk.WithUpdateTitle(info.title),
 		acpsdk.WithUpdateKind(info.kind),
 		acpsdk.WithUpdateStatus(status),
@@ -103,7 +105,7 @@ func displayLocation(path, cwd string, line int) []acpsdk.ToolCallLocation {
 	}
 	location := acpsdk.ToolCallLocation{Path: acp.ResolvePath(path, cwd)}
 	if line > 0 {
-		location.Line = new(line)
+		location.Line = new(int64(line))
 	}
 	return []acpsdk.ToolCallLocation{location}
 }

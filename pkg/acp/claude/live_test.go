@@ -12,12 +12,16 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 )
 
 // stubClient implements the acp.Client methods that the live test clients in
 // this package don't care about, so each one only needs to define the
 // methods its assertions actually exercise.
-type stubClient struct{}
+type stubClient struct {
+	acptest.NoElicitation
+}
 
 func (stubClient) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
 	return acp.ReadTextFileResponse{}, errors.ErrUnsupported

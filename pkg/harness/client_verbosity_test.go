@@ -13,6 +13,8 @@ func TestCompleteSendsModelVerbosity(t *testing.T) {
 		model string
 		want  any
 	}{
+		{model: "gpt-6.2-sol", want: "low"},
+		{model: "~openai/GPT-6.2-ASTRA:latest", want: "low"},
 		{model: "gpt-6-astra", want: "low"},
 		{model: "gpt-6.1-sol", want: "low"},
 		{model: "gpt-6.1-terra", want: "low"},

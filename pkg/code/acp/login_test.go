@@ -28,7 +28,7 @@ func (a *loginAgent) Initialize(ctx context.Context, req acpsdk.InitializeReques
 func (a *loginAgent) Authenticate(_ context.Context, req acpsdk.AuthenticateRequest) (acpsdk.AuthenticateResponse, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.methods = append(a.methods, req.MethodId)
+	a.methods = append(a.methods, string(req.MethodId))
 	if !a.loggedIn {
 		return acpsdk.AuthenticateResponse{}, acpsdk.NewAuthRequired(nil)
 	}

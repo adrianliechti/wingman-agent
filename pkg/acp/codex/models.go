@@ -115,14 +115,9 @@ func collaborationModeConfigOption(current string) acpsdk.SessionConfigOption {
 			Description: new("Plan before making changes"),
 		},
 	}
-	opt := acpsdk.NewSessionConfigOptionSelect(
-		acpsdk.SessionConfigValueId(current),
-		acpsdk.SessionConfigSelectOptions{Ungrouped: &ungrouped},
-	)
+	opt := acp.SelectConfigOption(collaborationModeConfigID, "Collaboration mode", current, ungrouped)
 	desc := "How Codex collaborates for subsequent turns"
 	category := acpsdk.SessionConfigOptionCategory("_codex_collaboration_mode")
-	opt.Select.Id = collaborationModeConfigID
-	opt.Select.Name = "Collaboration mode"
 	opt.Select.Description = &desc
 	opt.Select.Category = &category
 	return opt
@@ -160,13 +155,7 @@ func modelConfigOption(models []modelEntry, currentID string) acpsdk.SessionConf
 			{Value: acpsdk.SessionConfigValueId(currentID), Name: formatModelDisplayName(currentID)},
 		}, ungrouped...)
 	}
-	opt := acpsdk.NewSessionConfigOptionSelect(
-		acpsdk.SessionConfigValueId(currentID),
-		acpsdk.SessionConfigSelectOptions{Ungrouped: &ungrouped},
-	)
-	opt.Select.Id = modelConfigID
-	opt.Select.Name = "Model"
-	return opt
+	return acp.SelectConfigOption(modelConfigID, "Model", currentID, ungrouped)
 }
 
 func effortConfigOption(models []modelEntry, currentModelID, currentEffort string) *acpsdk.SessionConfigOption {

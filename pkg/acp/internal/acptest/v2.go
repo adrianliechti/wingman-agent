@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	acpsdk "github.com/coder/acp-go-sdk"
-
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
@@ -20,14 +18,7 @@ func RunV2(t *testing.T, factory Factory) {
 		t.Run(fmt.Sprintf("cancel=%v", cancelTurn), func(t *testing.T) {
 			agent := factory(t)
 			server, client := net.Pipe()
-			connected, ok := agent.(interface {
-				acpsdk.Agent
-				SetClientConnection(acp.ClientConnection)
-			})
-			if !ok {
-				t.Fatalf("%T cannot negotiate ACP", agent)
-			}
-			acp.NewAgentConnection(connected, server, server)
+			acp.NewAgentConnection(agent, server, server)
 			t.Cleanup(func() {
 				_ = client.Close()
 				_ = server.Close()

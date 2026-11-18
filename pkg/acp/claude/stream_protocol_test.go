@@ -11,6 +11,8 @@ import (
 	"testing/synctest"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 const rootUsageFrame = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"root","model":"claude-sonnet-5","usage":{"input_tokens":100,"cache_read_input_tokens":900,"output_tokens":50},"content":[{"type":"text","text":"done"}]}}`
@@ -103,7 +105,7 @@ func TestContextUsageUsesLatestRootResponse(t *testing.T) {
 					usage = update.UsageUpdate
 				}
 			}
-			if usage == nil || usage.Used != tt.used || usage.Size != 200000 {
+			if usage == nil || usage.Used != int64(tt.used) || usage.Size != 200000 {
 				t.Fatalf("context usage=%+v, want %d/200000", usage, tt.used)
 			}
 			if usage.Cost == nil || usage.Cost.Amount != 0.25 {
@@ -136,7 +138,7 @@ func TestCompactionRefreshesContextUsageImmediately(t *testing.T) {
 		boundary, _ := json.Marshal(map[string]any{"type": "system", "subtype": "compact_boundary", "compact_metadata": map[string]any{"post_tokens": used}})
 		updates, _ := captureCLITranscript(t, context.Background(), rootUsageFrame, cumulativeResultFrame, string(boundary))
 		last := updates[len(updates)-1].UsageUpdate
-		if last == nil || last.Used != used || last.Size != 200000 {
+		if last == nil || last.Used != int64(used) || last.Size != 200000 {
 			t.Fatalf("compacted usage=%+v, want %d/200000", last, used)
 		}
 	}
@@ -224,7 +226,7 @@ func TestUsageUpdateCarriesAssistantModel(t *testing.T) {
 			usage = update.UsageUpdate
 		}
 	}
-	if usage == nil || usage.Meta["_claude/model"] != "claude-sonnet-5" {
+	if usage == nil || acpjson.Object(usage.Meta)["_claude/model"] != "claude-sonnet-5" {
 		t.Fatalf("usage update = %+v, want _claude/model meta", usage)
 	}
 }
@@ -241,7 +243,7 @@ func TestInformationalNoticeIsMarkedAndOwnsResultText(t *testing.T) {
 			if got := transcriptText(updates); got != tt.want {
 				t.Fatalf("text = %q, want %q", got, tt.want)
 			}
-			meta, _ := updates[0].AgentMessageChunk.Meta["claudeCode"].(map[string]any)
+			meta := acpjson.Object(updates[0].AgentMessageChunk.Meta)["claudeCode"].(map[string]any)
 			if meta["kind"] != "informational" || meta["level"] != tt.level {
 				t.Fatalf("meta = %#v", updates[0].AgentMessageChunk.Meta)
 			}
