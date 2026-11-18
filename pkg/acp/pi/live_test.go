@@ -12,9 +12,13 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 )
 
 type liveClient struct {
+	acptest.NoElicitation
+
 	mu         sync.Mutex
 	text       strings.Builder
 	toolTitles []string
@@ -63,10 +67,10 @@ func (c *liveClient) SessionUpdate(_ context.Context, n acp.SessionNotification)
 		c.recordDiffs(u.Content)
 	}
 	if u := n.Update.ToolCallUpdate; u != nil {
-		if u.Title != nil {
-			c.toolTitles = append(c.toolTitles, *u.Title)
+		if u.Title.Ptr() != nil {
+			c.toolTitles = append(c.toolTitles, *u.Title.Ptr())
 		}
-		c.recordDiffs(u.Content)
+		c.recordDiffs(acptest.Value(u.Content))
 	}
 	return nil
 }

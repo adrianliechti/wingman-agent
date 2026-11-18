@@ -273,11 +273,11 @@ func (c *sessionController) compactedLocked(inputID string, result harness.Compa
 	c.upsertLocked(notice)
 }
 
-// warnLocked adds a notice the agent's history does not contain and keeps it at
+// noticeLocked adds a notice the agent's history does not contain and keeps it at
 // its place when the history is replaced. During a compaction or an invisible
 // input it joins that turn, which must stay the last host turn until it ends.
-func (c *sessionController) warnLocked(message string) {
-	notice := TranscriptEntry{ID: "notice:" + uuid.NewString(), Type: "notice", Content: "Warning: " + message}
+func (c *sessionController) noticeLocked(message string) {
+	notice := TranscriptEntry{ID: "notice:" + uuid.NewString(), Type: "notice", Content: message}
 	if n := len(c.hostTurns); n > 0 && c.activeInput != "" && c.hostTurns[n-1].entries[0].InputID == c.activeInput {
 		c.hostTurns[n-1].entries = append(c.hostTurns[n-1].entries, notice)
 	} else {

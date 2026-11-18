@@ -26,7 +26,7 @@ func NewConfig(ctx context.Context, options *Options) (*AntigravityConfig, error
 		return nil, err
 	}
 
-	models := model.Available(available)
+	models := external.LauncherModels(available)
 
 	return &AntigravityConfig{
 		BaseURL:   options.WingmanURL,

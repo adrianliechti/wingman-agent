@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 // toolStateClient approves every permission and records each tool call's
@@ -74,10 +76,10 @@ func (c *toolStateClient) SessionUpdate(_ context.Context, n acp.SessionNotifica
 	}
 	if u := n.Update.ToolCall; u != nil {
 		status := u.Status
-		c.record(u.ToolCallId, &status, u.Meta)
+		c.record(u.ToolCallId, &status, acpjson.Object(u.Meta))
 	}
 	if u := n.Update.ToolCallUpdate; u != nil {
-		c.record(u.ToolCallId, u.Status, u.Meta)
+		c.record(u.ToolCallId, u.Status.Ptr(), acpjson.Object(u.Meta))
 	}
 	return nil
 }

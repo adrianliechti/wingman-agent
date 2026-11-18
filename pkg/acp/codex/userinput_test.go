@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 func TestUserInputFormSchemaAndAnswers(t *testing.T) {
@@ -21,7 +23,7 @@ func TestUserInputFormSchemaAndAnswers(t *testing.T) {
 	if !reflect.DeepEqual(schema.Required, []string{"color", "color_note", "name", "done"}) {
 		t.Fatalf("required = %v", schema.Required)
 	}
-	color := schema.Properties["color"].(map[string]any)
+	color := acpjson.Object(schema.Properties["color"])
 	if color["title"] != "Which color?" || color["description"] != "Color" {
 		t.Fatalf("color field = %#v", color)
 	}
@@ -29,14 +31,14 @@ func TestUserInputFormSchemaAndAnswers(t *testing.T) {
 	if len(oneOf) != 3 || oneOf[0].(map[string]any)["description"] != "Warm" || oneOf[1].(map[string]any)["description"] != nil || oneOf[2].(map[string]any)["const"] != userInputOtherOption {
 		t.Fatalf("color choices = %#v", oneOf)
 	}
-	note, ok := schema.Properties["color_note1"].(map[string]any)
-	if !ok || note["title"] != "Additional answer or note" {
+	note := acpjson.Object(schema.Properties["color_note1"])
+	if note == nil || note["title"] != "Additional answer or note" {
 		t.Fatalf("colliding note field = %#v", schema.Properties)
 	}
-	if name := schema.Properties["name"].(map[string]any); name["title"] != "Name only" || name["oneOf"] != nil {
+	if name := acpjson.Object(schema.Properties["name"]); name["title"] != "Name only" || name["oneOf"] != nil {
 		t.Fatalf("free-text field = %#v", name)
 	}
-	if done := schema.Properties["done"].(map[string]any)["oneOf"].([]any); len(done) != 1 {
+	if done := acpjson.Object(schema.Properties["done"])["oneOf"].([]any); len(done) != 1 {
 		t.Fatalf("duplicate other choice = %#v", done)
 	}
 
@@ -90,9 +92,9 @@ func TestUserInputRoundTripThroughACPElicitation(t *testing.T) {
 				frame := peer.next(t)
 				switch frame.Method {
 				case "elicitation/create":
-					var params acp.UnstableCreateElicitationForm
+					var params acp.CreateElicitationForm
 					_ = json.Unmarshal(frame.Params, &params)
-					if params.Meta["sessionId"] != "thread-1" || params.Meta["toolCallId"] != "ask" || params.RequestedSchema.Properties["q"] == nil {
+					if params.Session == nil || params.Session.SessionId != "thread-1" || params.Session.ToolCallId == nil || *params.Session.ToolCallId != "ask" || params.RequestedSchema.Properties["q"].String == nil {
 						t.Fatalf("elicitation = %s", frame.Params)
 					}
 					if tt.reply != "" {

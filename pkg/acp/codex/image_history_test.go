@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 func TestUserInputImageReferences(t *testing.T) {
@@ -30,7 +32,7 @@ func TestUserInputImageReferences(t *testing.T) {
 			continue
 		}
 		want := acp.TextBlock(tc.text)
-		want.Text.Meta = tc.metadata
+		want.Text.Meta = acpjson.Metadata(tc.metadata)
 		if !ok || !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: got=%+v want=%+v", tc.raw, got, want)
 		}
@@ -116,7 +118,7 @@ func TestImageHistoryE2EThroughACP(t *testing.T) {
 							t.Fatalf("lost message identity: %+v", notification)
 						}
 						blocks = append(blocks, chunk.Content)
-						metadata = append(metadata, chunk.Meta)
+						metadata = append(metadata, acpjson.Object(chunk.Content.Text.Meta))
 					}
 				}
 				want := []string{"before", "[@image](https://example.test/a.png)", "Image attachment (preview unavailable): file-a", "between", "Image attachment (preview unavailable): file-b", "Image attachment (preview unavailable): file-a"}

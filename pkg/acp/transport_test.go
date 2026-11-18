@@ -11,7 +11,37 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	sdk "github.com/coder/acp-go-sdk"
 )
+
+func TestV1CommandsWaitForTheirOwnSessionResponse(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		published := make(chan string, 4)
+		w := sessionResponseWriter{out: io.Discard, pending: map[sdk.SessionId]func(){
+			"parent": func() { published <- "parent" }, "child": func() { published <- "child" },
+		}}
+		send := func(frame string) {
+			t.Helper()
+			if _, err := w.Write([]byte(frame)); err != nil {
+				t.Fatal(err)
+			}
+			synctest.Wait()
+		}
+		send(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"child"}}`)
+		send(`{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"data":{"sessionId":"child"}}}`)
+		send(`{"jsonrpc":"2.0","id":3,"result":{"sessionId":"other"}}`)
+		if len(published) != 0 {
+			t.Fatal("unrelated traffic announced commands")
+		}
+		send(`{"jsonrpc":"2.0","id":4,"result":{"sessionId":"child"}}`)
+		send(`{"jsonrpc":"2.0","id":4,"result":{"sessionId":"child"}}`)
+		send(`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"parent"}}`)
+		if len(published) != 2 || <-published != "child" || <-published != "parent" {
+			t.Fatal("command announcement was duplicated or belonged to a different session")
+		}
+	})
+}
 
 func TestConnectionWriterUnblocksConcurrentWritersOnTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

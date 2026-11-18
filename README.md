@@ -105,6 +105,11 @@ Opens the web UI at `http://localhost:9000`, or another available port. Use
 editor, changes, and terminals. Select code to chat about it or preview an AI
 edit. Use **Run | Debug** above a supported entry point to launch a debugger.
 
+The session list shows the sessions of every agent in the folder, with what
+needs you first. In the desktop app it holds the sessions of every project, and
+opening a session of another project moves the window there while all agents
+keep running; see [sessions and recovery](docs/sessions.md#resume-a-conversation).
+
 Wingman manages language servers and offers to install missing debuggers when
 you launch them. Your project's runtimes and build tools must be installed
 separately. See the [debugging examples](examples/debug/README.md) for supported
@@ -253,3 +258,51 @@ browser for sign-in.
 See [configuration examples](examples/README.md) for ready-to-copy skills,
 plugins, custom agents, and MCP settings. Wingman stores its settings and sessions
 in `~/.wingman`; set `WINGMAN_HOME` to choose another location.
+
+## Test on Windows 11 Arm64
+
+On an Apple Silicon Mac, install Homebrew QEMU (`brew install qemu`), Go, Task,
+Python 3, and Node.js with npm. Supply an English (US) Windows 11 Arm64 ISO
+containing the Pro edition and a VirtIO driver ISO containing `viostor` and `NetKVM` for Windows
+11 Arm64. [Windows installation media](https://www.microsoft.com/en-us/software-download/windows11arm64) · [VirtIO driver downloads](https://github.com/virtio-win/virtio-win-pkg-scripts#downloads)
+
+```bash
+WINDOWS_ISO="$HOME/Downloads/Windows11-arm64.iso" \
+VIRTIO_ISO="$HOME/Downloads/virtio-win.iso" \
+task lab:windows:test
+```
+
+The first run installs Windows Pro unattended, accepts its setup license terms,
+and uses Windows Update to install OpenSSH. The guest signs in its dedicated
+test user at boot. The VM gets four CPUs, 8 GiB of RAM,
+and an 80 GiB sparse disk. Later runs reuse the installation and rebuild Wingman
+and its embedded web UI from the current checkout. The shell tests need a Windows
+build with PSEC 1.0 and native denied paths. [Windows sandbox requirements](docs/sessions.md)
+
+| Command | What it does |
+| --- | --- |
+| `task lab:windows` | Boot the VM and copy the Arm64 CLI and desktop app to `C:\wingman-lab`. |
+| `task lab:windows:test` | Run CLI script, agent edit-and-undo, ConPTY, desktop launcher and sandboxed PowerShell tests in the guest. A failing guest test fails the task. |
+| `task lab:windows:ssh` | Open a PowerShell session in the running VM. |
+| `task lab:windows:stop` | Shut Windows down and keep the disk for next time. |
+
+For a desktop check, run these commands from the repo on your Mac, then paste
+the password into Screen Sharing.
+
+```bash
+pbcopy < .windows-lab/vm/vnc-password
+open vnc://127.0.0.1:5916
+```
+
+If Windows asks you to sign in, use `wingman` and the password in
+`.windows-lab/vm/password`. Launch `C:\wingman-lab\Wingman Agent.exe` from
+Explorer. SSH and VNC listen on loopback.
+
+The lab runs the sandbox tests in the signed-in user's desktop. On Windows build
+26300.9457 the same PowerShell sandbox exits with `0xc0000142` when launched
+from the SSH service session.
+
+To try a real agent turn, open a project folder in PowerShell on the guest desktop,
+configure your model provider there, and run `C:\wingman-lab\wingman.exe`.
+For Ollama running on the Mac, set `$env:OLLAMA_HOST = 'http://10.0.2.2:11434'`
+in that shell.

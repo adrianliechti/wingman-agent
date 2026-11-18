@@ -1,6 +1,10 @@
 package codex
 
-import "github.com/coder/acp-go-sdk"
+import (
+	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
+)
 
 func userMessageUpdate(content acp.ContentBlock, id string) acp.SessionUpdate {
 	if content.Text != nil {
@@ -9,13 +13,8 @@ func userMessageUpdate(content acp.ContentBlock, id string) acp.SessionUpdate {
 		content.Text = &copy
 	}
 	u := acp.UpdateUserMessage(content)
-	// The SDK omits text-block _meta when encoding ContentBlock. Preserve
-	// attachment references on the enclosing message chunk, which survives.
-	if content.Text != nil {
-		u.UserMessageChunk.Meta = content.Text.Meta
-	}
 	if id != "" {
-		u.UserMessageChunk.MessageId = new(id)
+		u.UserMessageChunk.MessageId = new(acp.MessageId(id))
 	}
 	return u
 }
@@ -23,10 +22,10 @@ func userMessageUpdate(content acp.ContentBlock, id string) acp.SessionUpdate {
 func agentMessageUpdate(text, id, phase string) acp.SessionUpdate {
 	u := acp.UpdateAgentMessageText(text)
 	if id != "" {
-		u.AgentMessageChunk.MessageId = new(id)
+		u.AgentMessageChunk.MessageId = new(acp.MessageId(id))
 	}
 	if phase != "" {
-		u.AgentMessageChunk.Meta = map[string]any{"codex": map[string]any{"phase": phase}}
+		u.AgentMessageChunk.Meta = acpjson.Metadata(map[string]any{"codex": map[string]any{"phase": phase}})
 	}
 	return u
 }
@@ -34,7 +33,7 @@ func agentMessageUpdate(text, id, phase string) acp.SessionUpdate {
 func agentThoughtUpdate(text, id string) acp.SessionUpdate {
 	u := acp.UpdateAgentThoughtText(text)
 	if id != "" {
-		u.AgentThoughtChunk.MessageId = new(id)
+		u.AgentThoughtChunk.MessageId = new(acp.MessageId(id))
 	}
 	return u
 }
@@ -42,6 +41,6 @@ func agentThoughtUpdate(text, id string) acp.SessionUpdate {
 func sessionTitleUpdate(title string) acp.SessionUpdate {
 	return acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{
 		SessionUpdate: "session_info_update",
-		Title:         &title,
+		Title:         acp.PatchSet(title),
 	}}
 }

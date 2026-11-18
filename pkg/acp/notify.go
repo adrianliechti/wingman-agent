@@ -18,6 +18,12 @@ func Notify(ctx context.Context, conn ClientConnection, sid acp.SessionId, updat
 	return err
 }
 
+func UpdateAvailableCommands(commands []acp.AvailableCommand) acp.SessionUpdate {
+	return acp.SessionUpdate{AvailableCommandsUpdate: &acp.SessionAvailableCommandsUpdate{
+		SessionUpdate: "available_commands_update", AvailableCommands: commands,
+	}}
+}
+
 // Configuration updates replace the complete list, including options removed
 // by a model change. Publish before returning a successful setter response.
 func NotifyConfig(ctx context.Context, conn ClientConnection, sid acp.SessionId, before, after []acp.SessionConfigOption) error {

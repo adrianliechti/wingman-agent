@@ -86,8 +86,8 @@ func (s *Project) checkWorkspace() {
 	}
 
 	lspNow := ws.HasLSP()
-	if lspNow != s.prevLSP {
-		s.prevLSP = lspNow
+	if lspNow != s.hasLSP.Load() {
+		s.hasLSP.Store(lspNow)
 		s.workspaceChanged(Frame{Type: EvtWorkspaceChanged})
 		if lspNow {
 			s.refreshDiagnostics()
@@ -95,8 +95,8 @@ func (s *Project) checkWorkspace() {
 	}
 
 	debugNow := s.debugAvailable(s.ctx)
-	if debugNow != s.prevDebug {
-		s.prevDebug = debugNow
+	if debugNow != s.hasDebug.Load() {
+		s.hasDebug.Store(debugNow)
 		s.workspaceChanged(Frame{Type: EvtWorkspaceChanged})
 	}
 

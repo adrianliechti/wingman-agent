@@ -309,11 +309,11 @@ func replayMessages(send func(acp.SessionUpdate), data json.RawMessage, cwd stri
 			if messageID != "" {
 				switch {
 				case update.UserMessageChunk != nil:
-					update.UserMessageChunk.MessageId = new(messageID)
+					update.UserMessageChunk.MessageId = new(acp.MessageId(messageID))
 				case update.AgentMessageChunk != nil:
-					update.AgentMessageChunk.MessageId = new(messageID)
+					update.AgentMessageChunk.MessageId = new(acp.MessageId(messageID))
 				case update.AgentThoughtChunk != nil:
-					update.AgentThoughtChunk.MessageId = new(messageID + "-thought")
+					update.AgentThoughtChunk.MessageId = new(acp.MessageId(messageID + "-thought"))
 				}
 			}
 			send(update)

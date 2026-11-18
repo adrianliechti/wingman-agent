@@ -5,15 +5,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	claudecli "github.com/adrianliechti/wingman-agent/pkg/external/claude"
-	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
 func binPath() string {
@@ -148,10 +149,7 @@ func (a *Agent) sendAvailableCommands(s *session) {
 		}
 		_ = a.conn.SessionUpdate(context.Background(), acpsdk.SessionNotification{
 			SessionId: s.id,
-			Update: acpsdk.SessionUpdate{AvailableCommandsUpdate: &acpsdk.SessionAvailableCommandsUpdate{
-				SessionUpdate:     "available_commands_update",
-				AvailableCommands: cmds,
-			}},
+			Update:    acp.UpdateAvailableCommands(cmds),
 		})
 	}()
 }
@@ -212,7 +210,7 @@ func (a *Agent) NewSession(ctx context.Context, params acpsdk.NewSessionRequest)
 	modelID, effort := normalizeSessionConfig(a.models, a.defaultModel, a.defaultEffort)
 	s := a.newSession(id, cwd, modelID, effort, additional)
 	s.mcpServers = params.McpServers
-	s.allowBypass = a.bypassAllowed(cwd, params.Meta)
+	s.allowBypass = a.bypassAllowed(cwd, acpjson.Object(params.Meta))
 	a.storeSession(s)
 	a.sendAvailableCommands(s)
 
@@ -224,12 +222,9 @@ func (a *Agent) NewSession(ctx context.Context, params acpsdk.NewSessionRequest)
 }
 
 func (a *Agent) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
-	if params.MessageId != nil {
-		ctx = harness.WithInputID(ctx, *params.MessageId)
-	}
 	s := a.lookup(params.SessionId)
 	if s == nil {
-		return acpsdk.PromptResponse{}, fmt.Errorf("session %s not found", params.SessionId)
+		return acpsdk.PromptResponse{}, acp.SessionNotFound(params.SessionId)
 	}
 	if err := s.promptMu.Lock(ctx); err != nil {
 		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
@@ -237,16 +232,16 @@ func (a *Agent) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk
 	defer s.promptMu.Unlock()
 	// A prompt that raced session/close ends like one the close cancelled.
 	if s.isClosed() {
-		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled, UserMessageId: params.MessageId}, nil
+		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
 	}
 	if ctx.Err() != nil {
-		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled, UserMessageId: params.MessageId}, nil
+		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
 	}
 	stop, usage, err := s.runTurn(ctx, params.Prompt)
 	if err != nil {
 		return acpsdk.PromptResponse{}, err
 	}
-	return acpsdk.PromptResponse{StopReason: stop, Usage: usage, UserMessageId: params.MessageId}, nil
+	return acpsdk.PromptResponse{StopReason: stop, Usage: usage}, nil
 }
 
 func (a *Agent) Cancel(_ context.Context, params acpsdk.CancelNotification) error {
@@ -259,11 +254,11 @@ func (a *Agent) Cancel(_ context.Context, params acpsdk.CancelNotification) erro
 func (a *Agent) SetSessionMode(_ context.Context, params acpsdk.SetSessionModeRequest) (acpsdk.SetSessionModeResponse, error) {
 	s := a.lookup(params.SessionId)
 	if s == nil {
-		return acpsdk.SetSessionModeResponse{}, fmt.Errorf("session %s not found", params.SessionId)
+		return acpsdk.SetSessionModeResponse{}, acp.SessionNotFound(params.SessionId)
 	}
 	id := string(params.ModeId)
 	if findMode(id) == nil {
-		return acpsdk.SetSessionModeResponse{}, fmt.Errorf("unknown mode %q", id)
+		return acpsdk.SetSessionModeResponse{}, acpsdk.NewInvalidParams(fmt.Sprintf("unknown mode %q", id))
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -281,7 +276,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSes
 	v := params.ValueId
 	s := a.lookup(v.SessionId)
 	if s == nil {
-		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("session %s not found", v.SessionId)
+		return acpsdk.SetSessionConfigOptionResponse{}, acp.SessionNotFound(v.SessionId)
 	}
 	value := string(v.Value)
 
@@ -297,7 +292,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSes
 	case modelConfigID:
 		m := resolveModel(a.models, value)
 		if m == nil && value != s.modelID {
-			return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown model %q", value)
+			return acpsdk.SetSessionConfigOptionResponse{}, acpsdk.NewInvalidParams(fmt.Sprintf("unknown model %q", value))
 		}
 		if m != nil {
 			s.modelID = m.ID
@@ -313,7 +308,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSes
 		}
 		s.effort = value
 	default:
-		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown configId %q", v.ConfigId)
+		return acpsdk.SetSessionConfigOptionResponse{}, acpsdk.NewInvalidParams(fmt.Sprintf("unknown configId %q", v.ConfigId))
 	}
 	return acpsdk.SetSessionConfigOptionResponse{
 		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
@@ -331,7 +326,7 @@ func (a *Agent) CloseSession(_ context.Context, params acpsdk.CloseSessionReques
 	return acpsdk.CloseSessionResponse{}, nil
 }
 
-func (a *Agent) UnstableDeleteSession(_ context.Context, params acpsdk.UnstableDeleteSessionRequest) (acpsdk.UnstableDeleteSessionResponse, error) {
+func (a *Agent) DeleteSession(_ context.Context, params acpsdk.DeleteSessionRequest) (acpsdk.DeleteSessionResponse, error) {
 	a.mu.Lock()
 	s := a.sessions[params.SessionId]
 	delete(a.sessions, params.SessionId)
@@ -340,12 +335,18 @@ func (a *Agent) UnstableDeleteSession(_ context.Context, params acpsdk.UnstableD
 		s.close()
 	}
 	if err := deleteProjectSession(params.SessionId, a.env); err != nil {
-		return acpsdk.UnstableDeleteSessionResponse{}, err
+		return acpsdk.DeleteSessionResponse{}, err
 	}
-	return acpsdk.UnstableDeleteSessionResponse{}, nil
+	return acpsdk.DeleteSessionResponse{}, nil
 }
 
 func (a *Agent) ListSessions(_ context.Context, params acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
+	if params.Cursor != nil {
+		return acpsdk.ListSessionsResponse{}, acpsdk.NewInvalidParams("unknown session list cursor")
+	}
+	if params.Cwd != nil && !filepath.IsAbs(*params.Cwd) {
+		return acpsdk.ListSessionsResponse{}, acpsdk.NewInvalidParams("cwd must be absolute")
+	}
 	cwd := ""
 	if params.Cwd != nil {
 		cwd = *params.Cwd
@@ -370,7 +371,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionRe
 		return acpsdk.ResumeSessionResponse{}, err
 	}
 	a.ensureModels(ctx)
-	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, params.Meta, src)
+	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, acpjson.Object(params.Meta), src)
 	a.sendAvailableCommands(s)
 	return acpsdk.ResumeSessionResponse{
 		Modes:         buildSessionModeState(s.mode, s.allowBypass),
@@ -391,7 +392,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acpsdk.LoadSessionReques
 		return acpsdk.LoadSessionResponse{}, err
 	}
 	a.ensureModels(ctx)
-	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, params.Meta, src)
+	s := a.adoptSession(params.SessionId, cwd, additional, params.McpServers, acpjson.Object(params.Meta), src)
 	if src.from != "" {
 		if err := replayHistory(ctx, a.conn, params.SessionId, cwd, src.from, a.env); err != nil {
 			return acpsdk.LoadSessionResponse{}, fmt.Errorf("replay history: %w", err)
@@ -405,8 +406,8 @@ func (a *Agent) LoadSession(ctx context.Context, params acpsdk.LoadSessionReques
 }
 
 func (a *Agent) UnstableForkSession(_ context.Context, params acpsdk.UnstableForkSessionRequest) (acpsdk.UnstableForkSessionResponse, error) {
-	servers, err := acp.StableMCPServers(params.McpServers, acpsdk.McpCapabilities{Http: true, Sse: true})
-	if err != nil {
+	servers := params.McpServers
+	if err := acp.ValidateMCPServers(servers, acpsdk.McpCapabilities{Http: true, Sse: true}); err != nil {
 		return acpsdk.UnstableForkSessionResponse{}, err
 	}
 	cwd, additional, err := acp.NormalizeSessionRoots(params.Cwd, params.AdditionalDirectories)
@@ -414,13 +415,13 @@ func (a *Agent) UnstableForkSession(_ context.Context, params acpsdk.UnstableFor
 		return acpsdk.UnstableForkSessionResponse{}, err
 	}
 	newID := acpsdk.SessionId(uuid.NewString())
-	s := a.adoptSession(newID, cwd, additional, servers, params.Meta, resumeSource{from: string(params.SessionId), fork: true})
+	s := a.adoptSession(newID, cwd, additional, servers, acpjson.Object(params.Meta), resumeSource{from: string(params.SessionId), fork: true})
 	a.sendAvailableCommands(s)
 
 	return acpsdk.UnstableForkSessionResponse{
 		SessionId:     newID,
 		Modes:         buildSessionModeState(s.mode, s.allowBypass),
-		ConfigOptions: acp.UnstableConfigOptions(buildConfigOptions(a.models, s.modelID, s.effort)),
+		ConfigOptions: buildConfigOptions(a.models, s.modelID, s.effort),
 	}, nil
 }
 
@@ -439,9 +440,10 @@ func (a *Agent) resumeSourceFor(cwd string, id acpsdk.SessionId) (resumeSource, 
 		}
 		live.mu.Unlock()
 	}
-	// Claude Code writes a session's own transcript only at its first prompt.
+	// Claude Code writes a session's own transcript only at its first prompt,
+	// so a session never prompted has none to resume.
 	if src.from == string(id) && !sessionExists(cwd, id, a.env) {
-		return resumeSource{}, fmt.Errorf("no on-disk session %s for cwd %s", id, cwd)
+		return resumeSource{}, acp.SessionNotFound(id)
 	}
 	return src, nil
 }

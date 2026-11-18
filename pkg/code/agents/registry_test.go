@@ -137,6 +137,41 @@ func TestAvailableMergesConfiguredAndDetectedAgents(t *testing.T) {
 	}
 }
 
+// Only an agent known to list every folder's sessions is listed from one
+// running agent. Another may answer with its own folder's, or with none, so
+// it is started and asked in each project.
+func TestOnlyKnownAgentsListEveryFolder(t *testing.T) {
+	_, home := isolateHomes(t)
+	for env, name := range map[string]string{
+		"WINGMAN_CLAUDE_PATH":   "claude",
+		"WINGMAN_CODEX_PATH":    "codex",
+		"WINGMAN_COPILOT_PATH":  "copilot",
+		"WINGMAN_OPENCODE_PATH": "opencode",
+		"WINGMAN_PI_PATH":       "pi",
+	} {
+		t.Setenv(env, fakeExecutable(t, name))
+	}
+	custom := fakeExecutable(t, "custom-acp")
+	data, err := json.Marshal([]code.AgentDef{
+		{Name: "Scoped", Command: custom},
+		{Name: "Global", Command: custom, AllFolders: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "agents.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{
+		"claude": true, "codex": true, "copilot": true, "pi": true, "global": true,
+		"opencode": false, "scoped": false, "unknown": false, code.BuiltinAgentName: false,
+	} {
+		if got := ListsAllFolders(name); got != want {
+			t.Errorf("ListsAllFolders(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestAvailableReportsMalformedConfiguration(t *testing.T) {
 	_, dir := isolateHomes(t)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

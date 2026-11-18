@@ -149,7 +149,6 @@ Server flags:
 
 Host flags:
   --port N                      Local port (default: 9100)
-  --root PATH                   Directory projects may be opened in (default: home)
   --token TOKEN                 Token clients must connect with (or WINGMAN_HOST_TOKEN)
 
 Relay flags:

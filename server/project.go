@@ -46,8 +46,8 @@ type Project struct {
 	fileMonitor     *watch.Monitor
 	skillFiles      *watch.Monitor
 	prevGit         bool
-	prevLSP         bool
-	prevDebug       bool
+	hasLSP          atomic.Bool // language servers and debuggers, as last found:
+	hasDebug        atomic.Bool // finding them looks through the whole folder
 	prevFingerprint uint64
 	workspaceFiles  filewatch.Source // feeds language-server file watchers
 	fileScanning    atomic.Bool
@@ -55,10 +55,9 @@ type Project struct {
 	managedTools atomic.Pointer[managedToolsStatus] // immutable published snapshot
 
 	host             *Host
-	onDiagnostics    func() // optional web subscriber, protected by host.mu
-	dir              string // the project's identity: its directory with links resolved
-	namespace        string // prefix of the channels this project names itself
-	aliases          aliasStore
+	onDiagnostics    func()    // optional web subscriber, protected by host.mu
+	dir              string    // the project's identity: its directory with links resolved
+	namespace        string    // prefix of the channels this project names itself
 	used             time.Time // when a client last reached the project; protected by host.mu
 	terminalOnce     sync.Once
 	terminalChannels map[string]*terminalChannel
@@ -67,6 +66,9 @@ type Project struct {
 	changesMu        sync.Mutex
 	changesOnce      sync.Once
 	changesets       map[string]*changeset
+	storageRoot      string  // the repository that keeps its builtin journals, while its folder tells
+	window           *Server // web adapter for a secondary project, published under host.mu
+	windowRequests   int     // open scoped HTTP requests and WebSockets, protected by host.mu
 }
 
 // newProject starts a project's resources under the host's lifetime.
@@ -116,8 +118,6 @@ func (h *Host) newProject(workDir string) (_ *Project, err error) {
 	}
 
 	s.prevGit = ws.IsGitRepo()
-	s.prevLSP = ws.HasLSP()
-	s.prevDebug = s.debugAvailable(serverCtx)
 	s.fileMonitor = watch.New(watch.Options{Active: s.hasClients}, s.checkWorkspace)
 	s.workspaceFiles = filewatch.NewScanner(ws.Root.FS(), ".", filewatch.Options{
 		Recursive: true,
@@ -126,6 +126,15 @@ func (h *Host) newProject(workDir string) (_ *Project, err error) {
 		Limit:     100000,
 	})
 	s.background.Go(func() {
+		// Whether the project has language servers and debuggers is found by
+		// looking through its folder, which takes a while in a large one. The
+		// project opens without waiting, and other projects behind it; a window
+		// that showed it meanwhile hears of what was found.
+		s.hasLSP.Store(ws.HasLSP())
+		s.hasDebug.Store(s.debugAvailable(serverCtx))
+		if (s.hasLSP.Load() || s.hasDebug.Load()) && serverCtx.Err() == nil {
+			s.workspaceChanged(Frame{Type: EvtWorkspaceChanged})
+		}
 		s.fileMonitor.Run(serverCtx)
 	})
 	if !h.disableManagedTools {
@@ -224,7 +233,10 @@ func (s *Project) close() {
 		}
 		s.background.Wait()
 		if s.host != nil {
-			s.saveAliases()
+			s.host.saveAliases()
+			if s.window != nil {
+				s.window.preview.Close()
+			}
 		}
 		if s.workspace != nil {
 			s.workspace.Close()
@@ -247,14 +259,18 @@ func (h *Host) attach(p *Project) *Project {
 	if p.workspace != nil {
 		p.dir = canonicalPath(p.workspace.RootPath)
 	}
+	p.storageRoot = sessionAlias{Backend: code.BuiltinAgentName, Project: p.dir}.rooted().StorageRoot
 	var saved []sessionAlias
 	if dir, err := p.aliasDirectory(); err == nil {
 		saved = readAliases(dir)
 	}
+	for i := range saved {
+		saved[i].Project = p.dir
+		saved[i] = saved[i].rooted()
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, alias := range saved {
-		alias.Project = p.dir
 		h.rememberAliasLocked(alias)
 	}
 	return p
@@ -268,15 +284,15 @@ func (h *Host) show(p *Project) {
 	h.projects[p.dir] = p
 }
 
-// Only the web UI follows a project's files.
+// Only web windows follow a project's files; each finds its own by the workspace.
 func (p *Project) workspaceChanged(f Frame) {
 	if p == nil || p.host == nil {
 		return
 	}
 	p.host.mu.Lock()
 	defer p.host.mu.Unlock()
-	if p.host.web == p {
-		p.host.notifyRoot("x-wingman/workspaceChanged", map[string]any{"channel": types.RootResourceURI, "event": f})
+	if p.host.web == p || p.window != nil {
+		p.host.notifyRoot("x-wingman/workspaceChanged", map[string]any{"channel": types.RootResourceURI, "event": f, "workspace": p.scope.WorkspaceID})
 	}
 }
 
@@ -319,11 +335,13 @@ func (p *Project) detach() {
 }
 
 // info is the spec's description of the project, which its sessions carry.
+// It names the project by its directory with the links resolved, as saved
+// sessions do, so that a project started through a link is one project.
 func (p *Project) info() *types.ProjectInfo {
 	if p.workspace == nil {
 		return nil
 	}
-	return projectInfo(p.workspace.RootPath)
+	return projectInfo(p.dir)
 }
 
 func (p *Project) directoryURI() string { return p.fileURI(".") }

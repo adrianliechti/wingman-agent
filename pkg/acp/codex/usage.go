@@ -64,12 +64,12 @@ func (a tokenBreakdown) acpUsage() *acp.Usage {
 	output := max(0, a.OutputTokens)
 	reasoning := min(max(0, a.ReasoningOutputTokens), output)
 	return &acp.Usage{
-		TotalTokens:       a.TotalTokens,
-		InputTokens:       max(0, a.InputTokens-cachedRead-cachedWrite),
-		OutputTokens:      output - reasoning,
-		CachedReadTokens:  &cachedRead,
-		CachedWriteTokens: &cachedWrite,
-		ThoughtTokens:     &reasoning,
+		TotalTokens:       int64(a.TotalTokens),
+		InputTokens:       int64(max(0, a.InputTokens-cachedRead-cachedWrite)),
+		OutputTokens:      int64(output - reasoning),
+		CachedReadTokens:  new(int64(cachedRead)),
+		CachedWriteTokens: new(int64(cachedWrite)),
+		ThoughtTokens:     new(int64(reasoning)),
 	}
 }
 

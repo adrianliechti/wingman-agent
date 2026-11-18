@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
 	"github.com/adrianliechti/wingman-agent/server/ahp"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
@@ -22,22 +24,37 @@ import (
 // sessionAlias maps an AHP URI to the native session behind it. A session's
 // alias names its default chat; a forked chat's alias also names the chat.
 type sessionAlias struct {
-	Resource      string              `json:"resource"`
-	Project       string              `json:"project,omitempty"` // directory
-	Chat          string              `json:"chat,omitempty"`
-	Title         string              `json:"title,omitempty"`
-	Backend       string              `json:"backend"`
-	Session       string              `json:"session"`
-	Fork          string              `json:"fork,omitempty"` // source chat
-	Turn          string              `json:"turn,omitempty"` // source turn
-	Created       time.Time           `json:"created,omitzero"`
-	Modified      time.Time           `json:"modified,omitzero"` // the session's last change
-	Status        types.SessionStatus `json:"status,omitempty"`  // the session's own read and archived flags
-	CreationError string              `json:"creationError,omitempty"`
+	Resource      string                `json:"resource"`
+	Project       string                `json:"project,omitempty"`     // directory
+	StorageRoot   string                `json:"storageRoot,omitempty"` // repository owning a builtin journal, including after a worktree is removed
+	Chat          string                `json:"chat,omitempty"`
+	Title         string                `json:"title,omitempty"`
+	Backend       string                `json:"backend"`
+	Session       string                `json:"session"`
+	Fork          string                `json:"fork,omitempty"` // source chat
+	Turn          string                `json:"turn,omitempty"` // source turn
+	Created       time.Time             `json:"created,omitzero"`
+	Modified      time.Time             `json:"modified,omitzero"` // the session's last change
+	Status        types.SessionStatus   `json:"status,omitempty"`  // the session's archived flag
+	Unread        bool                  `json:"unread,omitempty"`  // activity no client has seen yet
+	Changes       *types.ChangesSummary `json:"changes,omitempty"` // the files its default chat changed
+	CreationError string                `json:"creationError,omitempty"`
 }
 
-// aliasStore serializes persistence without holding the publication lock.
-// Pending changes are protected by host.mu and stay pending until written.
+// flags are a saved session's read and archived flags. A session is read
+// unless it was saved with activity no client had seen, so sessions saved
+// before the host tracked reading do not all show as new.
+func (a sessionAlias) flags() types.SessionStatus {
+	flags := a.Status & types.SessionStatusIsArchived
+	if !a.Unread {
+		flags |= types.SessionStatusIsRead
+	}
+	return flags
+}
+
+// aliasStore serializes the host's persistence of aliases, of open and closed
+// projects alike, without holding the publication lock. Pending changes are
+// protected by host.mu and stay pending until written.
 type aliasStore struct {
 	mu      sync.Mutex
 	pending map[string]*aliasWrite
@@ -55,57 +72,57 @@ func (a sessionAlias) key() string {
 	return a.Resource
 }
 
-// Caller holds host.mu. A newer change supersedes an older write or deletion.
-func (p *Project) stageAliasLocked(alias sessionAlias, remove bool) {
-	if p.aliases.pending == nil {
-		p.aliases.pending = map[string]*aliasWrite{}
+// Caller holds h.mu. A newer change supersedes an older write or deletion.
+func (h *Host) stageAliasLocked(alias sessionAlias, remove bool) {
+	if h.aliasWrites.pending == nil {
+		h.aliasWrites.pending = map[string]*aliasWrite{}
 	}
-	p.aliases.pending[alias.key()] = &aliasWrite{alias: alias, remove: remove}
+	h.aliasWrites.pending[alias.key()] = &aliasWrite{alias: alias, remove: remove}
 }
 
-func (p *Project) flushAliases() error {
-	p.host.mu.Lock()
-	clean := len(p.aliases.pending) == 0
-	p.host.mu.Unlock()
+func (h *Host) flushAliases() error {
+	h.mu.Lock()
+	clean := len(h.aliasWrites.pending) == 0
+	h.mu.Unlock()
 	if clean {
 		return nil
 	}
-	p.aliases.mu.Lock()
-	defer p.aliases.mu.Unlock()
-	p.host.mu.Lock()
-	keys := slices.Collect(maps.Keys(p.aliases.pending))
-	p.host.mu.Unlock()
+	h.aliasWrites.mu.Lock()
+	defer h.aliasWrites.mu.Unlock()
+	h.mu.Lock()
+	keys := slices.Collect(maps.Keys(h.aliasWrites.pending))
+	h.mu.Unlock()
 	var errs []error
 	for _, key := range keys {
-		if err := p.flushAlias(key); err != nil {
+		if err := h.flushAlias(key); err != nil {
 			errs = append(errs, fmt.Errorf("persist %s: %w", key, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// Caller holds aliases.mu. Recheck after I/O so an older write cannot clear
-// a newer pending change or resurrect a deleted alias.
-func (p *Project) flushAlias(key string) error {
+// Caller holds aliasWrites.mu. Recheck after I/O so an older write cannot
+// clear a newer pending change or resurrect a deleted alias.
+func (h *Host) flushAlias(key string) error {
 	for {
-		p.host.mu.Lock()
-		change := p.aliases.pending[key]
-		p.host.mu.Unlock()
+		h.mu.Lock()
+		change := h.aliasWrites.pending[key]
+		h.mu.Unlock()
 		if change == nil {
 			return nil
 		}
 		var err error
 		if change.remove {
-			err = p.removeAlias(change.alias)
+			err = removeAlias(change.alias)
 		} else {
-			err = p.saveAlias(change.alias)
+			err = writeAlias(change.alias)
 		}
-		p.host.mu.Lock()
-		current := p.aliases.pending[key] == change
+		h.mu.Lock()
+		current := h.aliasWrites.pending[key] == change
 		if current && err == nil {
-			delete(p.aliases.pending, key)
+			delete(h.aliasWrites.pending, key)
 		}
-		p.host.mu.Unlock()
+		h.mu.Unlock()
 		if current {
 			return err
 		}
@@ -113,8 +130,8 @@ func (p *Project) flushAlias(key string) error {
 }
 
 // Published metadata is retried on the next update and during project teardown.
-func (p *Project) saveAliases() {
-	if err := p.flushAliases(); err != nil {
+func (h *Host) saveAliases() {
+	if err := h.flushAliases(); err != nil {
 		fmt.Fprintf(os.Stderr, "session metadata warning: %v\n", err)
 	}
 }
@@ -135,6 +152,18 @@ func readAliases(dir string) []sessionAlias {
 	return aliases
 }
 
+// rooted names the repository that keeps a builtin session's journal while
+// the session's folder still tells. It reads the disk, so callers do it
+// before they take the host's lock.
+func (a sessionAlias) rooted() sessionAlias {
+	if a.Backend == code.BuiltinAgentName && a.StorageRoot == "" && a.Project != "" {
+		if info, err := os.Stat(a.Project); err == nil && info.IsDir() {
+			a.StorageRoot = code.SessionStorageRoot(a.Project)
+		}
+	}
+	return a
+}
+
 // Caller holds h.mu.
 func (h *Host) rememberAliasLocked(alias sessionAlias) {
 	if alias.Chat != "" {
@@ -144,12 +173,17 @@ func (h *Host) rememberAliasLocked(alias sessionAlias) {
 	}
 }
 
-func (p *Project) aliasDirectory() (string, error) {
-	return layout.WingmanPath("ahp", p.scope.WorkspaceID)
+// aliasDirectory is where the host keeps the aliases of a project's sessions.
+func aliasDirectory(project string) (string, error) {
+	return layout.WingmanPath("ahp", workspaceID(project))
 }
 
-func (p *Project) saveAlias(alias sessionAlias) error {
-	dir, err := p.aliasDirectory()
+func (p *Project) aliasDirectory() (string, error) { return aliasDirectory(p.dir) }
+
+// writeAlias saves what the host keeps of a session with its project's, which
+// need not be open.
+func writeAlias(alias sessionAlias) error {
+	dir, err := aliasDirectory(alias.Project)
 	if err != nil {
 		return err
 	}
@@ -180,28 +214,52 @@ func aliasPath(dir string, alias sessionAlias) string {
 	return filepath.Join(dir, hex.EncodeToString(sum[:])+".json")
 }
 
-// Caller holds host.mu and flushes persistence after releasing it.
-func (p *Project) forgetChatAlias(chat string) {
-	alias, ok := p.host.chatAliases[chat]
+// Caller holds h.mu and flushes persistence after releasing it.
+func (h *Host) forgetChatAliasLocked(chat string) {
+	alias, ok := h.chatAliases[chat]
 	if !ok {
 		return
 	}
-	delete(p.host.chatAliases, chat)
-	p.stageAliasLocked(alias, true)
+	delete(h.chatAliases, chat)
+	h.stageAliasLocked(alias, true)
 }
 
-// Caller holds host.mu and flushes persistence after releasing it.
-func (p *Project) forgetAlias(resource string) {
-	alias, ok := p.host.aliases[resource]
+// Caller holds h.mu and flushes persistence after releasing it.
+func (h *Host) forgetAliasLocked(resource string) {
+	alias, ok := h.aliases[resource]
 	if !ok {
 		return
 	}
-	delete(p.host.aliases, resource)
-	p.stageAliasLocked(alias, true)
+	delete(h.aliases, resource)
+	h.stageAliasLocked(alias, true)
 }
 
-func (p *Project) removeAlias(alias sessionAlias) error {
-	dir, err := p.aliasDirectory()
+// forgetSessionLocked drops a session that is gone, with its forks, from what
+// the host keeps and tells the clients that list sessions. Caller holds h.mu
+// and flushes persistence after releasing it.
+func (h *Host) forgetSessionLocked(resource string) {
+	for _, fork := range h.forksLocked(resource) {
+		h.forgetChatAliasLocked(fork.Chat)
+	}
+	h.forgetAliasLocked(resource)
+	h.forgetEverywhere()
+	h.notifyRoot("root/sessionRemoved", types.SessionRemovedParams{Channel: types.RootResourceURI, Session: resource})
+}
+
+// forgetSession drops a deleted session that no client has open. Its project
+// may open meanwhile and read its aliases from disk, so that waits until the
+// change is written.
+func (h *Host) forgetSession(resource string) error {
+	h.projectMu.Lock()
+	defer h.projectMu.Unlock()
+	h.mu.Lock()
+	h.forgetSessionLocked(resource)
+	h.mu.Unlock()
+	return h.flushAliases()
+}
+
+func removeAlias(alias sessionAlias) error {
+	dir, err := aliasDirectory(alias.Project)
 	if err != nil {
 		return err
 	}
@@ -215,7 +273,16 @@ func (p *Project) removeAlias(alias sessionAlias) error {
 // nativeKey names a native session, whose id is unique only within its project and agent.
 type nativeKey struct{ project, backend, session string }
 
-func (a sessionAlias) native() nativeKey { return nativeKey{a.Project, a.Backend, a.Session} }
+func (a sessionAlias) native() nativeKey {
+	return nativeKey{cmp.Or(a.StorageRoot, a.Project), a.Backend, a.Session}
+}
+
+func nativeSessionKey(dir, backend, id string) nativeKey {
+	if backend == code.BuiltinAgentName {
+		dir = code.SessionStorageRoot(dir)
+	}
+	return nativeKey{dir, backend, id}
+}
 
 // forksLocked returns the saved chats in the same order for loading and listing.
 // Caller holds h.mu.
@@ -230,14 +297,13 @@ func (h *Host) forksLocked(resource string) []sessionAlias {
 	return forks
 }
 
-// savedIndexLocked finds a project's saved sessions and chats by native session; a forked chat's alias wins. Caller holds h.mu.
-func (h *Host) savedIndexLocked(dir string) map[nativeKey]sessionAlias {
+// savedIndexLocked finds aliases by native session. Builtin journals may be
+// shared by several worktrees. A fork's chat alias wins. Caller holds h.mu.
+func (h *Host) savedIndexLocked() map[nativeKey]sessionAlias {
 	index := map[nativeKey]sessionAlias{}
 	for _, aliases := range []map[string]sessionAlias{h.aliases, h.chatAliases} {
 		for _, alias := range aliases {
-			if alias.Project == dir {
-				index[alias.native()] = alias
-			}
+			index[alias.native()] = alias
 		}
 	}
 	return index
@@ -248,12 +314,12 @@ func (h *Host) savedIndexLocked(dir string) map[nativeKey]sessionAlias {
 func (p *Project) discard(c *sessionController, alias sessionAlias) {
 	p.host.mu.Lock()
 	if alias.Chat != "" {
-		p.forgetChatAlias(alias.Chat)
+		p.host.forgetChatAliasLocked(alias.Chat)
 	} else {
-		p.forgetAlias(alias.Resource)
+		p.host.forgetAliasLocked(alias.Resource)
 	}
 	p.host.mu.Unlock()
-	p.saveAliases()
+	p.host.saveAliases()
 	_ = c.command(c.backend.Project.ctx, Command{ID: "ahp-discard:" + c.ref.SessionID, Type: "delete"})
 }
 
@@ -278,13 +344,14 @@ func (h *Host) discardSaved(alias sessionAlias) error {
 // storeAlias saves a session's or chat's alias and makes it known to the host.
 func (p *Project) storeAlias(alias sessionAlias) error {
 	alias.Project = p.dir
+	alias = alias.rooted()
 	p.host.mu.Lock()
 	p.host.rememberAliasLocked(alias)
-	p.stageAliasLocked(alias, false)
+	p.host.stageAliasLocked(alias, false)
 	p.host.mu.Unlock()
-	p.aliases.mu.Lock()
-	defer p.aliases.mu.Unlock()
-	return p.flushAlias(alias.key())
+	p.host.aliasWrites.mu.Lock()
+	defer p.host.aliasWrites.mu.Unlock()
+	return p.host.flushAlias(alias.key())
 }
 
 func (h *Host) loadSavedSessions() {
@@ -301,7 +368,7 @@ func (h *Host) loadSavedSessions() {
 		for _, alias := range readAliases(filepath.Join(dir, project.Name())) {
 			// Sessions saved before hosts served several projects name none.
 			if alias.Project != "" && h.serves(alias.Project) {
-				saved = append(saved, alias)
+				saved = append(saved, alias.rooted())
 			}
 		}
 	}

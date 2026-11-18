@@ -260,14 +260,14 @@ func TestHistoryUsesSubprocessEnvironment(t *testing.T) {
 				if chunk := update.UserMessageChunk; chunk != nil && chunk.Content.Text != nil {
 					replayed += chunk.Content.Text.Text
 				}
-				if info := update.SessionInfoUpdate; info != nil && info.Title != nil {
-					title = *info.Title
+				if info := update.SessionInfoUpdate; info != nil && info.Title.Ptr() != nil {
+					title = *info.Title.Ptr()
 				}
 			}
 			if replayed != "expected profile" || title != "expected profile" {
 				t.Fatalf("replay = %q, title = %q", replayed, title)
 			}
-			if _, err := a.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: id}); err != nil {
+			if _, err := a.DeleteSession(ctx, acp.DeleteSessionRequest{SessionId: id}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Stat(path); !os.IsNotExist(err) {

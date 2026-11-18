@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
+	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 )
 
 func TestCommandApprovalChoicesIncludePolicyAmendments(t *testing.T) {
@@ -134,16 +137,16 @@ func TestPermissionsToolCallUsesOneReadableRepresentation(t *testing.T) {
 			"network": map[string]any{"enabled": true},
 		},
 	})
-	if tc.Title == nil || *tc.Title != "Permissions request" {
+	if tc.Title.Ptr() == nil || *tc.Title.Ptr() != "Permissions request" {
 		t.Fatalf("title = %#v", tc.Title)
 	}
-	if tc.RawInput != nil {
+	if tc.RawInput.Ptr() != nil {
 		t.Fatalf("internal request duplicated as raw input: %#v", tc.RawInput)
 	}
-	if len(tc.Content) != 1 || tc.Content[0].Content == nil {
+	if len(acptest.Value(tc.Content)) != 1 || acptest.Value(tc.Content)[0].Content == nil {
 		t.Fatalf("content = %#v", tc.Content)
 	}
-	text := tc.Content[0].Content.Content.Text
+	text := acptest.Value(tc.Content)[0].Content.Content.Text
 	if text == nil || text.Text != "The command needs network access.\n\nNetwork Access: true" {
 		t.Fatalf("content text = %#v", text)
 	}
@@ -161,12 +164,12 @@ func choiceByID(t *testing.T, choices []approvalChoice, id acp.PermissionOptionI
 }
 
 func permissionDescription(option acp.PermissionOption) string {
-	permission, _ := option.Meta["permission"].(map[string]any)
-	changes, _ := permission["changes"].([]map[string]any)
+	permission := acpjson.Object(option.Meta)["permission"].(map[string]any)
+	changes, _ := permission["changes"].([]any)
 	if len(changes) == 0 {
 		return ""
 	}
-	description, _ := changes[0]["description"].(string)
+	description, _ := changes[0].(map[string]any)["description"].(string)
 	return description
 }
 

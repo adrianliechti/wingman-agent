@@ -9,3 +9,4 @@ node_modules/
 .env.*
 mcp.json
 app/build/
+.windows-lab/

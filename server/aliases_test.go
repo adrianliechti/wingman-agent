@@ -60,7 +60,7 @@ func TestAliasMetadataRetriesUnchangedValueAtClose(t *testing.T) {
 	p.host.mu.Lock()
 	a.keep(types.SessionSummary{})
 	p.host.mu.Unlock()
-	if err := p.flushAliases(); err == nil {
+	if err := p.host.flushAliases(); err == nil {
 		t.Fatal("metadata write unexpectedly succeeded")
 	}
 	// Publishing the same value does not stage another update. The failed write
@@ -97,9 +97,9 @@ func TestAliasDeletionRetriesAndAllowsURIReuse(t *testing.T) {
 				t.Fatal(err)
 			}
 			p.host.mu.Lock()
-			p.forgetAlias(alias.Resource)
+			p.host.forgetAliasLocked(alias.Resource)
 			p.host.mu.Unlock()
-			if err := p.flushAliases(); err == nil {
+			if err := p.host.flushAliases(); err == nil {
 				t.Fatal("deletion unexpectedly succeeded")
 			}
 			if err := os.Remove(blocker); err != nil {
@@ -114,7 +114,7 @@ func TestAliasDeletionRetriesAndAllowsURIReuse(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := p.flushAliases(); err != nil {
+			if err := p.host.flushAliases(); err != nil {
 				t.Fatal(err)
 			}
 			if reuse {
@@ -125,7 +125,7 @@ func TestAliasDeletionRetriesAndAllowsURIReuse(t *testing.T) {
 				t.Fatalf("deleted alias reappeared: %v", err)
 			}
 			p.host.mu.Lock()
-			pending := len(p.aliases.pending)
+			pending := len(p.host.aliasWrites.pending)
 			p.host.mu.Unlock()
 			if pending != 0 {
 				t.Fatalf("successful retry left %d pending changes", pending)
@@ -136,7 +136,7 @@ func TestAliasDeletionRetriesAndAllowsURIReuse(t *testing.T) {
 
 func TestAliasConcurrentUpdatesAndDeletionKeepLatestValue(t *testing.T) {
 	p, dir := aliasTestProject(t)
-	alias := sessionAlias{Resource: "ahp-session:/concurrent", Chat: "ahp-chat:/reused", Backend: "one"}
+	alias := sessionAlias{Resource: "ahp-session:/concurrent", Project: p.dir, Chat: "ahp-chat:/reused", Backend: "one"}
 	var workers sync.WaitGroup
 	for i := range 40 {
 		workers.Go(func() {
@@ -144,12 +144,12 @@ func TestAliasConcurrentUpdatesAndDeletionKeepLatestValue(t *testing.T) {
 			change.Session = fmt.Sprint(i)
 			p.host.mu.Lock()
 			p.host.rememberAliasLocked(change)
-			p.stageAliasLocked(change, false)
+			p.host.stageAliasLocked(change, false)
 			if i%2 == 0 {
-				p.forgetChatAlias(change.Chat)
+				p.host.forgetChatAliasLocked(change.Chat)
 			}
 			p.host.mu.Unlock()
-			if err := p.flushAliases(); err != nil {
+			if err := p.host.flushAliases(); err != nil {
 				t.Error(err)
 			}
 		})

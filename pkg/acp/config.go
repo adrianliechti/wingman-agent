@@ -43,6 +43,30 @@ func IsValidEffort(levels []string, level string) bool {
 	return slices.Contains(levels, level)
 }
 
+// SelectConfigOption builds a flat select using the adapter's labels and choices.
+func SelectConfigOption(id acpsdk.SessionConfigId, name, current string, choices acpsdk.SessionConfigSelectOptionsUngrouped) acpsdk.SessionConfigOption {
+	option := acpsdk.NewSessionConfigOptionSelect(acpsdk.SessionConfigValueId(current), acpsdk.SessionConfigSelectOptions{Ungrouped: &choices})
+	option.Select.Id = id
+	option.Select.Name = name
+	return option
+}
+
+// ConfigValues returns the choices of a select in display order, across groups.
+// Callers must treat the returned slice as read-only.
+func ConfigValues(options acpsdk.SessionConfigSelectOptions) []acpsdk.SessionConfigSelectOption {
+	if options.Ungrouped != nil {
+		return *options.Ungrouped
+	}
+	if options.Grouped == nil {
+		return nil
+	}
+	var result []acpsdk.SessionConfigSelectOption
+	for _, group := range *options.Grouped {
+		result = append(result, group.Options...)
+	}
+	return result
+}
+
 // EffortConfigOption renders the reasoning-effort selector for a model, or nil
 // when the model exposes no effort levels.
 func EffortConfigOption(levels []string, currentEffort string) *acpsdk.SessionConfigOption {
@@ -64,14 +88,9 @@ func EffortConfigOption(levels []string, currentEffort string) *acpsdk.SessionCo
 	if !IsValidEffort(levels, current) || current == "" {
 		current = "default"
 	}
-	opt := acpsdk.NewSessionConfigOptionSelect(
-		acpsdk.SessionConfigValueId(current),
-		acpsdk.SessionConfigSelectOptions{Ungrouped: &ungrouped},
-	)
+	opt := SelectConfigOption(EffortConfigID, "Effort", current, ungrouped)
 	desc := "Reasoning effort for the selected model"
 	cat := acpsdk.SessionConfigOptionCategoryThoughtLevel
-	opt.Select.Id = EffortConfigID
-	opt.Select.Name = "Effort"
 	opt.Select.Description = &desc
 	opt.Select.Category = &cat
 	return &opt

@@ -36,6 +36,13 @@ type timedEvent struct {
 	Preview string `json:"preview,omitempty"`
 }
 
+func (*benchClient) CompleteElicitation(context.Context, acp.CompleteElicitationNotification) error {
+	return nil
+}
+func (*benchClient) CreateElicitation(context.Context, acp.CreateElicitationRequest) (acp.CreateElicitationResponse, error) {
+	return acp.CreateElicitationResponse{}, acp.NewMethodNotFound("elicitation/create")
+}
+
 type benchClient struct {
 	mu          sync.Mutex
 	start       time.Time
@@ -104,12 +111,12 @@ func (c *benchClient) SessionUpdate(_ context.Context, n acp.SessionNotification
 		})
 	case u.ToolCallUpdate != nil:
 		status := ""
-		if u.ToolCallUpdate.Status != nil {
-			status = string(*u.ToolCallUpdate.Status)
+		if u.ToolCallUpdate.Status.Ptr() != nil {
+			status = string(*u.ToolCallUpdate.Status.Ptr())
 		}
 		title := ""
-		if u.ToolCallUpdate.Title != nil {
-			title = *u.ToolCallUpdate.Title
+		if u.ToolCallUpdate.Title.Ptr() != nil {
+			title = *u.ToolCallUpdate.Title.Ptr()
 		}
 		c.add(timedEvent{
 			Kind: "tool_update", ID: string(u.ToolCallUpdate.ToolCallId), Title: title,

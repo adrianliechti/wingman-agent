@@ -60,7 +60,7 @@ func (a *protocolAgent) NewSession(context.Context) (string, error) {
 func (a *protocolAgent) LoadSession(_ context.Context, id string) error {
 	a.loaded.Add(1)
 	if id == "missing" {
-		return errors.New("session not found")
+		return code.ErrSessionNotFound
 	}
 	return nil
 }
@@ -115,10 +115,13 @@ func (a *protocolAgent) Send(ctx context.Context, _ string, input []harness.Cont
 }
 
 // webProject makes a test server the project its own host's web UI shows.
+// webProject is the project of a server started in dir, which shows no other
+// folder, as `wingman server` does.
 func webProject(s *Server, dir string) *Project {
 	h := newHost(s.Project.ctx)
+	s.Project.dir = canonicalPath(dir)
+	h.home, h.folder = s.Project.dir, s.Project.dir
 	p := h.attach(s.Project)
-	p.dir = canonicalPath(dir)
 	h.show(p)
 	return p
 }
@@ -140,6 +143,13 @@ func newProtocolServer(t *testing.T) (*Server, *backendRuntime, *protocolAgent) 
 	s.handler = s.checkInstance(s.mux)
 	t.Cleanup(s.Close)
 	return s, b, a
+}
+
+// everyProject makes a test server's host the desktop app's, which opens
+// every folder and lists the sessions of all.
+func everyProject(s *Server) *Host {
+	s.Project.host.folder = ""
+	return s.Project.host
 }
 
 // Controller tests address domain operations directly. Wire behavior is covered

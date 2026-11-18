@@ -11,13 +11,18 @@ import {
 } from "./state/workspaceContext.ts";
 import { composerDrafts as getComposerDrafts } from "./state/composerDrafts.ts";
 import { canonicalChatURI, draftKey, isDraft } from "./state/sessionStore.ts";
-import { workspaceClient } from "./state/workspaceClient.ts";
+import {
+	openProject,
+	projectHref,
+	workspaceClient,
+} from "./state/workspaceClient.ts";
 import {
 	type QueryClient,
 	useQuery,
 	useQueryClient,
 } from "@tanstack/react-query";
 import {
+	AppWindow,
 	Bot,
 	Bug,
 	ChartColumn,
@@ -34,6 +39,7 @@ import {
 	GitFork,
 	Globe2,
 	History,
+	Inbox,
 	Loader2,
 	type LucideIcon,
 	MessageSquare,
@@ -42,6 +48,7 @@ import {
 	Monitor,
 	MonitorPlay,
 	PanelBottom,
+	PanelLeftClose,
 	PanelLeftOpen,
 	PanelRightOpen,
 	PanelTop,
@@ -83,7 +90,7 @@ import {
 } from "./api/debug";
 import { createWorkspaceFile } from "./api/files";
 import { queryKeys } from "./api/query";
-import { deleteSession, forkSession, type SessionInfo } from "./api/sessions";
+import { deleteSession, forkSession } from "./api/sessions";
 import {
 	setWindowSidebarPosition,
 	setWindowTerminalPosition,
@@ -95,7 +102,13 @@ import {
 	startTerminal,
 	terminalQueries,
 } from "./api/terminals";
-import { chooseWorkspaceFolder, replaceWorkspace } from "./api/workspaces";
+import { errorText } from "./utils/errorText.ts";
+import { readStored, writeStored } from "./utils/storage.ts";
+import {
+	chooseWorkspaceFolder,
+	openNewWindow,
+	openWorkspace,
+} from "./api/workspaces";
 import { SessionChatPanel } from "./components/SessionChatPanel";
 import {
 	PaneDropZones,
@@ -148,7 +161,17 @@ import {
 	useToast,
 } from "./components/ui/Feedback";
 import { FloatingMenu, FloatingSurface } from "./components/ui/Floating";
-import { AgentSessions } from "./components/AgentSessions";
+import { SessionsPanel } from "./components/SessionsPanel";
+import {
+	currentFleet,
+	useFleet,
+	useFleetNotifications,
+	useHere,
+	useMarkShownRead,
+	useNeedsInputCount,
+	useTitleCount,
+} from "./hooks/useFleet.ts";
+import { nextAttention } from "./state/fleet.ts";
 import { useWorkspaceInfo } from "./hooks/useWorkspaceInfo";
 import { isAbsolutePath, workspaceFileTarget } from "./utils/workspacePath";
 import { useAutoHidingScrollbars } from "./hooks/useAutoHidingScrollbars";
@@ -193,7 +216,6 @@ const CompareTab = lazy(async () => {
 	return { default: (await import("./components/CompareTab")).CompareTab };
 });
 type WorkspaceTab = "changes" | "files" | "inspect";
-type ChatAuxiliaryView = "sessions" | "agents";
 type DebugContentView = "output" | "terminal";
 type CloseRequest = { kind: "file" | "terminal"; tab: CenterTab } | null;
 type SaveConflictRequest = { path: string; closeTabId?: string } | null;
@@ -205,6 +227,15 @@ type WorkspaceEditRequest = {
 	applying: boolean;
 } | null;
 type SessionDeleteRequest = { id: string; title: string } | null;
+/** A move away from the page, which the user confirms as it discards unsaved files. */
+type DiscardRequest = {
+	title: string;
+	/** What else to know, after the count of files that are discarded. */
+	description?: string;
+	/** The label of the button that discards them. */
+	confirm: string;
+	run: () => void;
+} | null;
 type FilePathRequest = {
 	path: string;
 	sourcePath: string;
@@ -222,6 +253,28 @@ const CENTER_PANEL_MIN_SIZE = 320;
 const TERMINAL_PANEL_DEFAULT_SIZE = 240;
 const TERMINAL_PANEL_MIN_SIZE = 120;
 const RIGHT_PANEL_WIDTH = "min(240px, 50%)";
+const SESSIONS_PANEL_MIN_SIZE = 200;
+const SESSIONS_PANEL_DEFAULT_SIZE = 240;
+const SESSIONS_PANEL_MAX_SIZE = 420;
+const SESSIONS_LAYOUT_KEY = "wingman.sessions";
+type SessionsLayout = { open: boolean; width: number };
+
+/** How this browser last left the session list: open or not, and how wide. */
+function readSessionsLayout(): SessionsLayout {
+	try {
+		const saved = JSON.parse(readStored("local", SESSIONS_LAYOUT_KEY) ?? "{}");
+		const width = Math.round(Number(saved?.width));
+		return {
+			open: saved?.open === true,
+			width:
+				width >= SESSIONS_PANEL_MIN_SIZE && width <= SESSIONS_PANEL_MAX_SIZE
+					? width
+					: SESSIONS_PANEL_DEFAULT_SIZE,
+		};
+	} catch {
+		return { open: false, width: SESSIONS_PANEL_DEFAULT_SIZE };
+	}
+}
 const DEBUG_DETAILS_MIN_SIZE = 240;
 const DEBUG_DETAILS_MAX_SIZE = 480;
 // Width per workspace tab below which the label is replaced by its icon.
@@ -436,9 +489,15 @@ export default function App() {
 	const sidebarPosition = sidebarLayout.position;
 	const sidebarOnRight = sidebarPosition === "right";
 	const SidePanelOpenIcon = sidebarOnRight ? PanelRightOpen : PanelLeftOpen;
-	const [chatAuxiliaryViews, setChatAuxiliaryViews] = useState<
-		Record<string, ChatAuxiliaryView | undefined>
-	>({});
+	// The chat tab beside which the agents show: one at a time.
+	const [agentsTab, setAgentsTab] = useState<string | null>(null);
+	// The session list belongs to the window, not to a tab: it stays at the
+	// left whatever the center shows. Phones have their own navigation.
+	const [savedSessions] = useState(readSessionsLayout);
+	const [sessionsOpen, setSessionsOpen] = useState(savedSessions.open);
+	const sessionsDocked = sessionsOpen && !mobile;
+	const sessionsPanelRef = usePanelRef();
+	const sessionsLayoutRef = useRef(savedSessions);
 	const workspaceTabsRef = useRef<HTMLDivElement>(null);
 	// The workspace tablist shares the title bar with the native window
 	// controls, so its width is whatever the panel leaves over. Once a tab is too
@@ -458,7 +517,7 @@ export default function App() {
 		const observer = new ResizeObserver(updateCompactMode);
 		observer.observe(element);
 		return () => observer.disconnect();
-	}, [sidePanelCollapsed, sidebarPosition, showInspect]);
+	}, [sidePanelCollapsed, sidebarPosition, showInspect, sessionsDocked]);
 	const appRef = useRef<HTMLDivElement>(null);
 	const sidePanelWidthRef = useRef(SIDE_PANEL_DEFAULT_SIZE);
 	const sidePanelRef = usePanelRef();
@@ -538,8 +597,10 @@ export default function App() {
 		useState<SessionDeleteRequest>(null);
 	const [filePathRequest, setFilePathRequest] =
 		useState<FilePathRequest | null>(null);
-	const [openFolderRequest, setOpenFolderRequest] = useState(false);
+	const [discardRequest, setDiscardRequest] = useState<DiscardRequest>(null);
 	const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
+	/** The move to another project that is still opening it. */
+	const projectSwitch = useRef<AbortController | null>(null);
 	const [debugLauncher, setDebugLauncher] = useState<DebugLauncherSeed | null>(
 		null,
 	);
@@ -742,6 +803,10 @@ export default function App() {
 			e.preventDefault();
 			void createTerminal();
 		}
+		if (e.ctrlKey && e.altKey && !e.metaKey && e.code === "KeyN") {
+			e.preventDefault();
+			goToNextAttention();
+		}
 	});
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => handleShortcutKey(e);
@@ -828,6 +893,13 @@ export default function App() {
 		leftPool.find((tab) => tab.id === leftActiveId) ??
 		leftPool[0] ??
 		(activeTab.id ? activeTab : undefined);
+	// The app renders for the count alone; `FleetWatch` follows every session.
+	const needsInput = useNeedsInputCount();
+	const here = useHere();
+	useTitleCount(needsInput, workspace?.name);
+	const shownChats = [leftTab, mobile ? undefined : rightTab].flatMap((tab) =>
+		tab?.type === "chat" && tab.sessionId ? [tab.sessionId] : [],
+	);
 	const activeDocument =
 		activeTab.type === "file" && activeTab.path
 			? documents[activeTab.path]
@@ -884,7 +956,9 @@ export default function App() {
 		const path = isDraft(sessionId)
 			? `/${encodeURIComponent(agentId)}`
 			: `/${encodeURIComponent(client.backendOf(sessionId))}/${encodeURIComponent(sessionId)}`;
-		if (location.pathname !== path) window.history.replaceState(null, "", path);
+		// The address keeps naming the window's project.
+		if (location.pathname !== path)
+			window.history.replaceState(null, "", path + location.search);
 		// The provider of a restored chat is known once it loads.
 	}, [client, agentId, sessionId, activeSession?.status]);
 	const observedKeys = JSON.stringify(
@@ -903,23 +977,8 @@ export default function App() {
 			);
 		}
 	};
-	const toggleChatAuxiliary = (tabId: string, view: ChatAuxiliaryView) => {
-		setChatAuxiliaryViews((current) =>
-			current[tabId] === view ? {} : { [tabId]: view },
-		);
-	};
-	const showActiveChatAuxiliary = (view: ChatAuxiliaryView) => {
-		const tab =
-			activeTab.type === "chat"
-				? activeTab
-				: (tabs.find(
-						(candidate) =>
-							candidate.type === "chat" &&
-							candidate.sessionId === currentSessionId,
-					) ?? tabs.find((candidate) => candidate.type === "chat"));
-		if (!tab) return;
-		activateTab(tab);
-		setChatAuxiliaryViews({ [tab.id]: view });
+	const toggleAgents = (tabId: string) => {
+		setAgentsTab((current) => (current === tabId ? null : tabId));
 	};
 	const keepTab = (id: string) => {
 		setTabs((current) =>
@@ -1240,12 +1299,7 @@ export default function App() {
 		const closing = tabs[idx];
 		if (closing.type === "file" && closing.path) closeDocument(closing.path);
 		setTabs((prev) => prev.filter((tab) => tab.id !== id));
-		setChatAuxiliaryViews((current) => {
-			if (!(id in current)) return current;
-			const next = { ...current };
-			delete next[id];
-			return next;
-		});
+		setAgentsTab((current) => (current === id ? null : current));
 		setFileViews((prev) => {
 			if (!(id in prev)) return prev;
 			const next = { ...prev };
@@ -1425,13 +1479,14 @@ export default function App() {
 				return;
 			}
 
-			await replaceWorkspace(path);
-			window.location.replace("/");
+			// The host opens the folder beside the others, whose agents keep running.
+			await openWorkspace(path);
+			window.location.assign(projectHref(path));
 		} catch (error) {
 			setWorkspaceSwitching(false);
 			toast({
 				title: "Could not open folder",
-				description: error instanceof Error ? error.message : String(error),
+				description: errorText(error),
 				tone: "error",
 			});
 		}
@@ -1459,8 +1514,22 @@ export default function App() {
 				openUntitledFile();
 				break;
 			case "open-folder":
-				if (dirtyPaths.size > 0) setOpenFolderRequest(true);
+				if (dirtyPaths.size > 0)
+					setDiscardRequest({
+						title: "Open another folder?",
+						confirm: "Discard and Open",
+						run: () => void openFolder(),
+					});
 				else void openFolder();
+				break;
+			case "new-window":
+				openNewWindow().catch((error: unknown) =>
+					toast({
+						title: "Window did not open",
+						description: error instanceof Error ? error.message : String(error),
+						tone: "error",
+					}),
+				);
 				break;
 			case "save":
 				if (canSaveFile && activeTab.path && activeDocument) {
@@ -1649,11 +1718,18 @@ export default function App() {
 			if (!primary || event.altKey) return;
 
 			const key = event.key.toLowerCase();
-			let command: "new-file" | "open-folder" | "save" | "save-as" | null =
-				null;
+			let command:
+				| "new-file"
+				| "new-window"
+				| "open-folder"
+				| "save"
+				| "save-as"
+				| null = null;
 			let enabled = true;
 
-			if (key === "n" && !event.shiftKey) {
+			if (key === "n" && event.shiftKey) {
+				command = "new-window";
+			} else if (key === "n") {
 				command = "new-file";
 				enabled = !workspaceSwitching;
 			} else if (key === "o" && !event.shiftKey) {
@@ -1794,30 +1870,24 @@ export default function App() {
 		if (tab) closeTabNow(tab.id);
 	};
 
+	// Deleting can take a moment: an agent such as Codex resumes a thread first.
+	const [sessionDeleting, setSessionDeleting] = useState(false);
 	const confirmSessionDelete = async () => {
-		if (!sessionDelete) return;
+		if (!sessionDelete || sessionDeleting) return;
+		setSessionDeleting(true);
 		try {
 			await deleteSession(sessionDelete.id);
 		} catch (error) {
 			toast({
 				title: "Session was not deleted",
-				description: error instanceof Error ? error.message : String(error),
+				description: errorText(error),
 				tone: "error",
 			});
 			return;
+		} finally {
+			setSessionDeleting(false);
 		}
 		const id = sessionDelete.id;
-		// Deleting a default chat deletes its session; a fork leaves the session.
-		queryClient.setQueryData(
-			queryKeys.sessions.list(client.backendOf(id)),
-			(current: SessionInfo[] = []) =>
-				current
-					.filter((session) => session.id !== id)
-					.map((session) => ({
-						...session,
-						chats: session.chats.filter((chat) => chat.id !== id),
-					})),
-		);
 		setSessionDelete(null);
 		handleSessionDeleted(id);
 	};
@@ -1829,8 +1899,79 @@ export default function App() {
 		selectBackend(client.backendOf(id));
 		openChatTab(id, disposition);
 	};
+	/** Shows another project in this window; its agents and these keep running.
+	 * The host opens the project first, so the window finds it ready, and one
+	 * that cannot open, such as a folder that is gone, leaves the window here. */
+	const switchProject = async (
+		project: string,
+		name: string,
+		chat?: { backend: string; id: string },
+	) => {
+		// A newer choice takes the place of one that is still opening: a project
+		// that is slow to open must not leave the list deaf to the next click.
+		projectSwitch.current?.abort();
+		const attempt = new AbortController();
+		projectSwitch.current = attempt;
+		// A project that takes a moment to open says so.
+		const slow = setTimeout(() => toast({ title: `Opening ${name}…` }), 400);
+		try {
+			await openProject(project, attempt.signal);
+		} catch (error) {
+			if (!attempt.signal.aborted)
+				toast({
+					title: `Could not open ${name}`,
+					description: errorText(error),
+					tone: "error",
+				});
+			return;
+		} finally {
+			clearTimeout(slow);
+		}
+		if (attempt.signal.aborted) return;
+		client.fleetView.keep();
+		const href = projectHref(project, chat);
+		if (dirtyPaths.size > 0) {
+			setDiscardRequest({
+				title: `Switch to ${name}?`,
+				description: "Agents keep running in both projects.",
+				confirm: "Discard and Switch",
+				run: () => window.location.assign(href),
+			});
+		} else window.location.assign(href);
+	};
+	/** The listed session that holds a chat, as its default chat or a fork. */
+	const listedSession = (id: string) =>
+		currentFleet().find(
+			(candidate) =>
+				candidate.id === id || candidate.forks.some((fork) => fork.id === id),
+		);
+	/** Opens a chat here, or moves the window to the project the chat belongs to.
+	 * The chat's session, when given, names the project of a chat the list does
+	 * not show yet. */
+	const openSession = (
+		id: string,
+		disposition: TabDisposition = "keep",
+		session = listedSession(id),
+	) => {
+		if (session?.project && !here(session)) {
+			void switchProject(session.project.uri, session.project.displayName, {
+				backend: session.provider,
+				id,
+			});
+			return;
+		}
+		handleSessionSelect(id, disposition);
+	};
+	/** Opens the next session that waits for the user or finished unseen. */
+	const goToNextAttention = () => {
+		const next = nextAttention(currentFleet(), sessionId);
+		if (next) openSession(next, "keep");
+		else toast({ title: "No session needs you right now" });
+	};
 
 	const handleSessionFork = async (id: string) => {
+		// A fork joins its session, so it opens in that session's project.
+		const session = listedSession(id);
 		let forked: string;
 		try {
 			forked = await forkSession(id);
@@ -1842,11 +1983,7 @@ export default function App() {
 			});
 			return;
 		}
-		// A new chat changes its session, not the root catalogue.
-		void queryClient.invalidateQueries({
-			queryKey: queryKeys.sessions.list(client.backendOf(id)),
-		});
-		handleSessionSelect(forked, "keep");
+		openSession(forked, "keep", session);
 	};
 	const draftCreations = useRef(new Map<string, Promise<string>>());
 	useEffect(() => composerDrafts.syncTabs(tabs), [composerDrafts, tabs]);
@@ -1929,16 +2066,36 @@ export default function App() {
 			});
 		}
 	}, [tabs, agentId, connected]);
+	// Tabs whose session went away close; one gone while open says why.
+	const goneNoticed = useRef(new Set<string>());
+	const noticeGone = useEffectEvent((gone: readonly CenterTab[]) => {
+		const unnoticed = gone.filter(
+			(tab) => !goneNoticed.current.has(tab.sessionId!),
+		);
+		for (const tab of unnoticed) goneNoticed.current.add(tab.sessionId!);
+		if (!unnoticed.length) return;
+		toast({
+			title:
+				unnoticed.length === 1
+					? `“${chatTabLabel(unnoticed[0])}” is no longer available`
+					: `${unnoticed.length} sessions are no longer available`,
+			description: "It was deleted, or its agent no longer has it.",
+		});
+	});
 	useEffect(() => {
 		const deleted = new Set(
 			Object.values(sessions)
 				.filter((session) => session.status === "deleted")
 				.map((session) => session.id),
 		);
-		if (tabs.some((tab) => tab.sessionId && deleted.has(tab.sessionId)))
-			setTabs((current) =>
-				current.filter((tab) => !tab.sessionId || !deleted.has(tab.sessionId)),
-			);
+		const gone = tabs.filter(
+			(tab) => tab.sessionId && deleted.has(tab.sessionId),
+		);
+		if (!gone.length) return;
+		setTabs((current) =>
+			current.filter((tab) => !tab.sessionId || !deleted.has(tab.sessionId)),
+		);
+		noticeGone(gone);
 	}, [sessions, tabs, setTabs]);
 	// The tab keeps its id so its composer draft stays attached.
 	const redirectTabs = useEffectEvent((from: string, to: string) =>
@@ -2083,6 +2240,34 @@ export default function App() {
 		const visible = inPixels > 0;
 		setDebugDetailsVisible(visible);
 		if (visible) setDebugDetailsWidth(Math.round(inPixels));
+	};
+	// The list's width follows a drag without rendering the app again.
+	const handleSessionsResize = ({ inPixels }: PanelSize) => {
+		const open = inPixels >= 1;
+		// A closed list keeps the width it had.
+		const width = open ? Math.round(inPixels) : sessionsLayoutRef.current.width;
+		if (open)
+			appRef.current?.style.setProperty("--sessions-panel-width", `${width}px`);
+		setSessionsOpen(open);
+		saveSessionsLayout({ open, width });
+	};
+	/** Remembers the list for the next load; a drag reports many sizes. */
+	const saveSessionsLayout = (layout: SessionsLayout) => {
+		const saved = sessionsLayoutRef.current;
+		if (saved.open === layout.open && saved.width === layout.width) return;
+		sessionsLayoutRef.current = layout;
+		// The list opens closed where the browser keeps no storage.
+		writeStored("local", SESSIONS_LAYOUT_KEY, JSON.stringify(layout));
+	};
+	const toggleSessions = () => {
+		const panel = sessionsPanelRef.current;
+		if (!panel) return;
+		const open = panel.isCollapsed();
+		if (open) panel.resize(`${sessionsLayoutRef.current.width}px`);
+		else panel.collapse();
+		setSessionsOpen(open);
+		// A resize has reported the width the panel took.
+		saveSessionsLayout({ open, width: sessionsLayoutRef.current.width });
 	};
 	const toggleSidePanel = () => {
 		const panel = sidePanelRef.current;
@@ -2272,16 +2457,27 @@ export default function App() {
 					},
 				]
 			: []),
-		...(tabs.some((tab) => tab.type === "chat")
+		...(!mobile
 			? [
 					{
 						id: "show-sessions",
-						label: "Show sessions",
-						icon: <History size={12} className="text-fg-dim shrink-0" />,
-						run: () => showActiveChatAuxiliary("sessions"),
+						label: sessionsDocked ? "Hide sessions" : "Show sessions",
+						icon: sessionsDocked ? (
+							<PanelLeftClose size={12} className="text-fg-dim shrink-0" />
+						) : (
+							<PanelLeftOpen size={12} className="text-fg-dim shrink-0" />
+						),
+						run: toggleSessions,
 					},
 				]
 			: []),
+		{
+			id: "next-attention",
+			label: "Go to next session that needs you",
+			hint: IS_MAC ? "⌃⌥N" : "Ctrl+Alt+N",
+			icon: <Inbox size={12} className="text-fg-dim shrink-0" />,
+			run: goToNextAttention,
+		},
 		...(canCompact &&
 		activeTab.type === "chat" &&
 		!isDraft(sessionId) &&
@@ -2450,17 +2646,9 @@ export default function App() {
 				: undefined;
 			return (
 				<ChatTabLayout
-					view={chatAuxiliaryViews[tab.id]}
+					agents={agentsTab === tab.id}
 					sessionId={key}
-					backendId={backendId}
-					runningSessionIds={runningSessionIds}
-					onSessionSelect={(id, disposition) => {
-						const tabId = chatTabId(id);
-						setChatAuxiliaryViews({ [tabId]: "sessions" });
-						void handleSessionSelect(id, disposition);
-					}}
-					onSessionDelete={(id, title) => setSessionDelete({ id, title })}
-					onSessionFork={(id) => void handleSessionFork(id)}
+					running={runningSessionIds.has(key)}
 					onOpenTask={openTask}
 				>
 					<SessionChatPanel
@@ -2766,8 +2954,53 @@ export default function App() {
 			: "translate-x-0 opacity-100"
 	}`;
 	const collapsedSideTitlebarWidth = 40;
-	const activeChatAuxiliary =
-		activeTab.type === "chat" ? chatAuxiliaryViews[activeTab.id] : undefined;
+	const sessionsToggle = (
+		<button
+			type="button"
+			data-window-interactive
+			className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-fg-dim transition-colors hover:!bg-bg-hover hover:text-fg"
+			onClick={toggleSessions}
+			aria-pressed={sessionsDocked}
+			title={
+				sessionsDocked
+					? "Hide sessions"
+					: needsInput
+						? `Show sessions · ${needsInput} ${needsInput === 1 ? "needs" : "need"} you`
+						: "Show sessions"
+			}
+			aria-label={sessionsDocked ? "Hide sessions" : "Show sessions"}
+		>
+			{sessionsDocked ? (
+				<PanelLeftClose size={13} />
+			) : (
+				<PanelLeftOpen size={13} />
+			)}
+			{!sessionsDocked && needsInput > 0 && (
+				<span
+					data-needs-you={needsInput}
+					aria-hidden="true"
+					className="absolute top-0.5 right-0 min-w-[14px] rounded-full bg-warning px-1 text-center text-[9px] leading-[14px] font-semibold text-bg tabular-nums"
+				>
+					{needsInput}
+				</span>
+			)}
+		</button>
+	);
+	const sessionsTitlebar = mobile ? null : (
+		<div
+			data-window-interactive
+			data-titlebar-sessions
+			className="relative z-20 flex shrink-0 items-center overflow-hidden px-1"
+			style={{
+				width: sessionsDocked
+					? "calc(var(--sessions-panel-width) - var(--window-controls-inset) - var(--window-menu-inset))"
+					: `${collapsedSideTitlebarWidth}px`,
+			}}
+		>
+			{sessionsToggle}
+		</div>
+	);
+	const agentsShown = activeTab.type === "chat" && agentsTab === activeTab.id;
 	const titlebarActions = (
 		<div
 			data-window-interactive
@@ -2789,15 +3022,11 @@ export default function App() {
 					{activeTaskActivity.available && (
 						<button
 							type="button"
-							className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors hover:text-fg-muted ${activeChatAuxiliary === "agents" ? "bg-bg-active text-fg" : "text-fg-muted hover:bg-bg-hover"}`}
-							onClick={() => toggleChatAuxiliary(activeTab.id, "agents")}
-							aria-pressed={activeChatAuxiliary === "agents"}
-							title={
-								activeChatAuxiliary === "agents" ? "Hide agents" : "Show agents"
-							}
-							aria-label={
-								activeChatAuxiliary === "agents" ? "Hide agents" : "Show agents"
-							}
+							className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors hover:text-fg-muted ${agentsShown ? "bg-bg-active text-fg" : "text-fg-muted hover:bg-bg-hover"}`}
+							onClick={() => toggleAgents(activeTab.id)}
+							aria-pressed={agentsShown}
+							title={agentsShown ? "Hide agents" : "Show agents"}
+							aria-label={agentsShown ? "Hide agents" : "Show agents"}
 						>
 							<Bot
 								size={13}
@@ -2809,24 +3038,6 @@ export default function App() {
 							/>
 						</button>
 					)}
-					<button
-						type="button"
-						className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors hover:text-fg-muted ${activeChatAuxiliary === "sessions" ? "bg-bg-active text-fg" : "text-fg-dim hover:bg-bg-hover"}`}
-						onClick={() => toggleChatAuxiliary(activeTab.id, "sessions")}
-						aria-pressed={activeChatAuxiliary === "sessions"}
-						title={
-							activeChatAuxiliary === "sessions"
-								? "Hide sessions"
-								: "Show sessions"
-						}
-						aria-label={
-							activeChatAuxiliary === "sessions"
-								? "Hide sessions"
-								: "Show sessions"
-						}
-					>
-						<History size={13} />
-					</button>
 				</>
 			)}
 			{activePreviewKind && (
@@ -3034,7 +3245,9 @@ export default function App() {
 					width: sidePanelDocked
 						? sidebarOnRight
 							? "calc(var(--side-panel-width) - var(--window-controls-reserve-end))"
-							: "calc(var(--side-panel-width) - var(--window-controls-inset) - var(--window-menu-inset))"
+							: sessionsDocked
+								? "var(--side-panel-width)"
+								: "calc(var(--side-panel-width) - var(--window-controls-inset) - var(--window-menu-inset))"
 						: `${collapsedSideTitlebarWidth}px`,
 				}}
 			>
@@ -3091,6 +3304,46 @@ export default function App() {
 			key="side-panel-resize"
 			label="Resize Side Panel"
 			hidden={sidePanelCollapsed}
+		/>
+	);
+	const sessionsPanelElement = (
+		<Panel
+			key="sessions-panel"
+			id="sessions-panel"
+			panelRef={sessionsPanelRef}
+			defaultSize={savedSessions.open ? `${savedSessions.width}px` : "0px"}
+			minSize={`${SESSIONS_PANEL_MIN_SIZE}px`}
+			maxSize={`${SESSIONS_PANEL_MAX_SIZE}px`}
+			collapsedSize="0px"
+			collapsible
+			groupResizeBehavior="preserve-pixel-size"
+			onResize={handleSessionsResize}
+			data-layout-panel="sessions"
+			inert={!sessionsDocked}
+			className="h-full overflow-hidden"
+		>
+			{sessionsDocked && (
+				<aside
+					data-sessions-panel
+					aria-label="Session list"
+					className="h-full overflow-hidden"
+				>
+					<SessionsPanel
+						currentSessionId={sessionId}
+						onSessionSelect={(id, disposition) => openSession(id, disposition)}
+						onSessionDelete={(id, title) => setSessionDelete({ id, title })}
+						onSessionFork={(id) => void handleSessionFork(id)}
+						onOpenProject={(uri, name) => void switchProject(uri, name)}
+					/>
+				</aside>
+			)}
+		</Panel>
+	);
+	const sessionsResizeHandle = (
+		<ResizeHandle
+			key="sessions-resize"
+			label="Resize Session List"
+			hidden={!sessionsDocked}
 		/>
 	);
 	const terminalDockVisible = terminalDocked && !!activeDockedTerminal;
@@ -3219,11 +3472,13 @@ export default function App() {
 			style={
 				{
 					"--side-panel-width": `${SIDE_PANEL_DEFAULT_SIZE}px`,
+					"--sessions-panel-width": `${savedSessions.width}px`,
 					"--right-pane-width": "0px",
 					"--terminal-panel-height": `${TERMINAL_PANEL_DEFAULT_SIZE}px`,
 				} as CSSProperties
 			}
 		>
+			<FleetWatch shown={shownChats} onOpen={(id) => openSession(id, "keep")} />
 			{mobile && (
 				<MobileNavigation
 					title={
@@ -3234,12 +3489,22 @@ export default function App() {
 					connected={connected}
 					running={phase !== "idle"}
 					currentSessionId={sessionId}
-					runningSessionIds={runningSessionIds}
+					needsInput={needsInput}
 					onSelectBackend={handleBackendSelect}
-					onSelectSession={(id) => void handleSessionSelect(id, "keep")}
+					onSelectSession={(id) => openSession(id, "keep")}
 					onDeleteSession={(id, title) => setSessionDelete({ id, title })}
+					onForkSession={(id) => void handleSessionFork(id)}
+					onOpenProject={(uri, name) => void switchProject(uri, name)}
 					onNewSession={() => void handleNewSession()}
 					onBackToChat={activeTab.type === "chat" ? undefined : focusChat}
+				/>
+			)}
+			{sessionsDocked && (
+				<div
+					data-panel-frame="sessions"
+					aria-hidden="true"
+					className="pointer-events-none absolute inset-y-0 left-0 z-0 rounded-[10px] bg-bg-surface/40"
+					style={{ width: "var(--sessions-panel-width)" }}
 				/>
 			)}
 			<div
@@ -3247,7 +3512,12 @@ export default function App() {
 				data-panel-side={sidebarPosition}
 				aria-hidden="true"
 				className={`pointer-events-none absolute inset-y-0 ${sidebarOnRight ? "right-0" : "left-0"} z-0 rounded-[10px] bg-bg-surface/40 ${sidePanelTransitionClass}`}
-				style={{ width: "var(--side-panel-width)" }}
+				style={{
+					width: "var(--side-panel-width)",
+					...(sidebarOnRight
+						? {}
+						: { left: sessionsDocked ? "var(--sessions-panel-width)" : "0px" }),
+				}}
 			/>
 			<header
 				data-window-titlebar
@@ -3261,8 +3531,12 @@ export default function App() {
 					style={{
 						left:
 							sidePanelDocked && !sidebarOnRight
-								? "var(--side-panel-width)"
-								: "0px",
+								? sessionsDocked
+									? "calc(var(--sessions-panel-width) + var(--side-panel-width))"
+									: "var(--side-panel-width)"
+								: sessionsDocked
+									? "var(--sessions-panel-width)"
+									: "0px",
 						right:
 							sidePanelDocked && sidebarOnRight
 								? "var(--side-panel-width)"
@@ -3278,7 +3552,9 @@ export default function App() {
 					canOpenFolder={!workspaceSwitching}
 					canSave={canSaveFile}
 				/>
+				{sessionsDocked && sessionsTitlebar}
 				{!sidebarOnRight && renderSidePanelTitlebar()}
+				{!sessionsDocked && sessionsTitlebar}
 
 				<TabStrip
 					items={leftStripItems}
@@ -3353,9 +3629,12 @@ export default function App() {
 				orientation="horizontal"
 				className="relative z-10 flex-1 overflow-hidden"
 			>
-				{sidebarOnRight
-					? [centerPanelElement, sidePanelResizeHandle, sidePanelElement]
-					: [sidePanelElement, sidePanelResizeHandle, centerPanelElement]}
+				{[
+					...(mobile ? [] : [sessionsPanelElement, sessionsResizeHandle]),
+					...(sidebarOnRight
+						? [centerPanelElement, sidePanelResizeHandle, sidePanelElement]
+						: [sidePanelElement, sidePanelResizeHandle, centerPanelElement]),
+				]}
 			</Group>
 
 			{paletteOpen && (
@@ -3369,7 +3648,7 @@ export default function App() {
 					}}
 					actions={paletteActions}
 					onRunSkill={runSkill}
-					onSelectSession={(id) => void handleSessionSelect(id, "keep")}
+					onSelectSession={(id) => openSession(id, "keep")}
 					onOpenFile={openFile}
 				/>
 			)}
@@ -3488,15 +3767,15 @@ export default function App() {
 			</Dialog>
 
 			<Dialog
-				open={openFolderRequest}
-				title="Open another folder?"
-				description={`${dirtyPaths.size} unsaved ${dirtyPaths.size === 1 ? "file" : "files"} will be discarded.`}
-				onClose={() => setOpenFolderRequest(false)}
+				open={!!discardRequest}
+				title={discardRequest?.title ?? ""}
+				description={`${dirtyPaths.size} unsaved ${dirtyPaths.size === 1 ? "file" : "files"} will be discarded.${discardRequest?.description ? ` ${discardRequest.description}` : ""}`}
+				onClose={() => setDiscardRequest(null)}
 			>
 				<button
 					type="button"
 					className={dialogButtonClass}
-					onClick={() => setOpenFolderRequest(false)}
+					onClick={() => setDiscardRequest(null)}
 				>
 					Cancel
 				</button>
@@ -3504,11 +3783,11 @@ export default function App() {
 					type="button"
 					className={`${dialogButtonClass} border-danger/40 text-danger hover:bg-danger/10`}
 					onClick={() => {
-						setOpenFolderRequest(false);
-						void openFolder();
+						setDiscardRequest(null);
+						discardRequest?.run();
 					}}
 				>
-					Discard and Open
+					{discardRequest?.confirm}
 				</button>
 			</Dialog>
 
@@ -3678,6 +3957,7 @@ export default function App() {
 				<button
 					type="button"
 					className={dialogButtonClass}
+					disabled={sessionDeleting}
 					onClick={() => setSessionDelete(null)}
 				>
 					Cancel
@@ -3685,9 +3965,10 @@ export default function App() {
 				<button
 					type="button"
 					className={`${dialogButtonClass} border-danger/40 text-danger hover:bg-danger/10`}
+					disabled={sessionDeleting}
 					onClick={() => void confirmSessionDelete()}
 				>
-					Delete
+					{sessionDeleting ? "Deleting…" : "Delete"}
 				</button>
 			</Dialog>
 
@@ -3743,25 +4024,34 @@ function EmptyWorkspace() {
 	);
 }
 
+/** Follows every session for the window, so that the app renders for its own
+ * chats only: it marks the chats on screen read and tells the user of the
+ * sessions that want them. */
+function FleetWatch({
+	shown,
+	onOpen,
+}: {
+	shown: readonly string[];
+	onOpen: (id: string) => void;
+}) {
+	const { sessions, loaded } = useFleet();
+	useMarkShownRead(shown, sessions);
+	useFleetNotifications(sessions, loaded, onOpen);
+	return null;
+}
+
 function ChatTabLayout({
 	children,
-	view,
+	agents,
 	sessionId,
-	backendId,
-	runningSessionIds,
-	onSessionSelect,
-	onSessionDelete,
-	onSessionFork,
+	running,
 	onOpenTask,
 }: {
 	children: ReactNode;
-	view?: ChatAuxiliaryView;
+	/** Whether the chat's agents show beside it. */
+	agents: boolean;
 	sessionId: string;
-	backendId: string;
-	runningSessionIds: Set<string>;
-	onSessionSelect: (id: string, disposition?: TabDisposition) => void;
-	onSessionDelete: (id: string, title: string) => void;
-	onSessionFork: (id: string) => void;
+	running: boolean;
 	onOpenTask: (task: TaskEntry) => void;
 }) {
 	return (
@@ -3769,32 +4059,16 @@ function ChatTabLayout({
 			<div className="min-h-0 min-w-0 flex-1">{children}</div>
 			<aside
 				data-chat-auxiliary-panel
-				data-view={view ?? "closed"}
-				aria-label={
-					view === "sessions"
-						? "Sessions"
-						: view === "agents"
-							? "Agents"
-							: "Chat details"
-				}
-				inert={!view}
-				className={`h-full shrink-0 overflow-hidden transition-[width] duration-150 ${view ? "border-l border-border-subtle" : ""}`}
-				style={{ width: view ? RIGHT_PANEL_WIDTH : "0px" }}
+				data-view={agents ? "agents" : "closed"}
+				aria-label={agents ? "Agents" : "Chat details"}
+				inert={!agents}
+				className={`h-full shrink-0 overflow-hidden transition-[width] duration-150 ${agents ? "border-l border-border-subtle" : ""}`}
+				style={{ width: agents ? RIGHT_PANEL_WIDTH : "0px" }}
 			>
 				<div className="h-full w-full bg-bg">
-					<div className={view === "sessions" ? "h-full" : "hidden"}>
-						<AgentSessions
-							backendId={backendId}
-							currentSessionId={sessionId}
-							runningSessionIds={runningSessionIds}
-							onSessionSelect={onSessionSelect}
-							onSessionDelete={onSessionDelete}
-							onSessionFork={onSessionFork}
-						/>
-					</div>
-					<div className={view === "agents" ? "h-full" : "hidden"}>
+					<div className={agents ? "h-full" : "hidden"}>
 						<TasksPanel
-							sessionRunning={runningSessionIds.has(sessionId)}
+							sessionRunning={running}
 							sessionId={isDraft(sessionId) ? "" : sessionId}
 							onOpenTask={onOpenTask}
 						/>
@@ -4170,6 +4444,12 @@ function AppMenu({
 					shortcut="Ctrl+N"
 					disabled={!canCreateFile}
 					onClick={() => run("new-file")}
+				/>
+				<AppMenuItem
+					icon={<AppWindow size={12} />}
+					label="New Window"
+					shortcut="Ctrl+Shift+N"
+					onClick={() => run("new-window")}
 				/>
 				<AppMenuItem
 					icon={<FolderOpen size={12} />}

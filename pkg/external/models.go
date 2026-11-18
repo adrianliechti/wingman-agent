@@ -67,6 +67,23 @@ func AvailableModels(ctx context.Context, options *Options) (map[string]bool, er
 	return available, nil
 }
 
+// LauncherModels promotes each provider's first medium model for CLIs that
+// take the first eligible entry as their default. Other entries keep catalog order.
+func LauncherModels(available map[string]bool) []model.Model {
+	models := model.Available(available)
+	first := 0
+	for i, m := range models {
+		if m.Namespace != models[first].Namespace {
+			first = i
+		}
+		if m.Class == model.ClassMedium && models[first].Class != model.ClassMedium {
+			copy(models[first+1:i+1], models[first:i])
+			models[first] = m
+		}
+	}
+	return models
+}
+
 func Models(ctx context.Context, options *Options, modelOpts *ModelOptions) ([]string, error) {
 	available, err := AvailableModels(ctx, options)
 
@@ -80,7 +97,7 @@ func Models(ctx context.Context, options *Options, modelOpts *ModelOptions) ([]s
 
 	var out []string
 
-	for _, m := range model.Available(available) {
+	for _, m := range LauncherModels(available) {
 		switch modelOpts.Kind {
 		case ModelFast:
 			if m.Class != model.ClassSmall {

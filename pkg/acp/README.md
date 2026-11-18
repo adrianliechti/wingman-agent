@@ -56,15 +56,31 @@ at or below the client's version: `1` selects v1; `2` or later selects v2.
 Different connections can use different versions concurrently. A connection
 keeps its negotiated version for its lifetime.
 
-V2 follows the draft shipped with the ACP TypeScript SDK 2.2. Prompt responses
-acknowledge accepted input; `state_update` reports completion and cancellation.
-Modes appear in `configOptions`. To replay history, use `session/resume` with
-`replayFrom: {"type":"start"}` after the active turn finishes. Omitting
-`replayFrom` resumes without replay. Other replay cursors are rejected.
+The four servers implement the [ACP v2 draft](https://agentclientprotocol.com/protocol/v2/overview).
+A prompt response acknowledges insertion. A later `state_update` reports
+foreground completion or cancellation. Clients can submit another prompt during
+a turn and use an `idempotencyKey` to retry after reconnecting. Wingman stores
+the accepted message ID under its state directory. If the process exits during
+insertion, before it can record the ID, a retry reports an unknown outcome to
+avoid executing the prompt twice. Modes appear in `configOptions`.
 
-Available model settings, plan controls, forms, and approvals depend on the
-selected agent and the client's capabilities. Wingman's internal agent-host
-adapter continues to use v1.
+Request `session/resume` with `replayFrom: {"type":"start"}` to replay retained
+history. Wingman sends `replay_complete`, current session information, and the
+foreground state before responding. When a backend needs to reload a running
+session, replay or workspace reconfiguration waits for that turn to settle.
+The adapters fork whole sessions. A v2 fork that supplies a `cursorId`
+returns `-32602`, since the adapters do not issue session cursors.
+
+Claude receives session MCP configuration through a private temporary file so
+headers and environment values stay out of process arguments. Codex reports a
+hook that blocks work or stops a turn as a live notice on v2 and on v1 clients
+that advertise `session.notices`. Other v1 clients receive the reason as text.
+
+Wingman's UI also negotiates v2 with external ACP servers. It accepts a v1
+selection and supports older servers that require a v1 initialization request.
+Installed Copilot CLI and OpenCode are detected automatically and run as
+`copilot --acp --stdio` and `opencode acp`. Custom ACP agents can be registered
+in `agents.json`. In-process adapters use the Go SDK's v1 interface.
 
 With Wingman's built-in agent, results of background subagents, background
 commands, and scheduled tasks reach the model inside a prompt. One that arrives

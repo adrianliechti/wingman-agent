@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -10,9 +9,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/adrianliechti/go-shell"
 
@@ -23,28 +24,45 @@ import (
 //go:embed all:public
 var publicFS embed.FS
 
+// App serves the native windows in this process. Each window names its own
+// folder and shares the background host with other windows and processes.
 type App struct {
-	server atomic.Pointer[server.Server]
+	host         atomic.Pointer[hostClient]
+	openMu       sync.Mutex // one open or reconnect at a time
+	projects     []string   // folders opened in this process, which a reconnect shows again; guarded by openMu
+	reconnecting atomic.Bool
 
 	launcher http.Handler
+	// start starts the shared host with a first project; tests run it in process.
+	start func(dir string) (hostInfo, error)
+	// openWindow opens another window of this process, and startWindow
+	// another process of the app where a process has a single window.
+	openWindow  func(params map[string]string) error
+	startWindow func() error
 }
 
-const shutdownTimeout = time.Second
-
 func main() {
+	// The background host shares the executable and runs without a window;
+	// it inherits the PATH its window repaired.
+	if len(os.Args) > 1 && os.Args[1] == hostCommand {
+		if err := runHost(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	// Repair PATH before anything detects agents via exec.LookPath: GUI
 	// launches (Finder/Dock) inherit a minimal PATH that hides Homebrew /
 	// ~/.local/bin CLIs like codex and copilot.
 	ensureShellPath()
 
-	app := &App{}
+	app := &App{start: spawnHost, openWindow: shell.NewWindow, startWindow: startWindowProcess}
 	app.launcher = app.newLauncher()
 
 	err := shell.Run(shell.Options{
 		Title: "Wingman Agent",
 
-		Handler:    app,
-		OnShutdown: app.shutdown,
+		Handler: app,
 
 		Width:  1280,
 		Height: 800,
@@ -65,6 +83,7 @@ func main() {
 		// renders the same commands in the web UI and owns their Ctrl shortcuts.
 		FileMenu: []shell.MenuItem{
 			{Title: "New File...", Command: "new-file", Key: "n", Disabled: true},
+			{Title: "New Window", Command: "new-window", Key: "n", Shift: true},
 			{Title: "Open Folder...", Command: "open-folder", Key: "o"},
 			{Separator: true},
 			{Title: "Save", Command: "save", Key: "s", Disabled: true},
@@ -80,21 +99,22 @@ func main() {
 	}
 }
 
-// ServeHTTP hands everything to the workspace server once one is open;
-// until then the launcher (start page + its API) answers. Both share the
-// window's origin — go-shell opens any other origin in the default browser,
-// and staying behind its session cookie keeps the workspace server
-// unreachable for other local processes.
+// ServeHTTP hands everything to the shared host once the window opened a
+// folder; until then the launcher (start page + its API) answers. Both share
+// the window's origin — go-shell opens any other origin in the default
+// browser — and the host answers only windows that know its token.
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// App-level commands stay available after a workspace is mounted so the
 	// native menu can select and switch folders without restarting the shell.
-	if strings.HasPrefix(r.URL.Path, "/app/") {
+	// A window shows its project by naming it; without one, as a new window
+	// opens, it shows the start page.
+	if strings.HasPrefix(r.URL.Path, "/app/") || r.URL.Path == "/" && !r.URL.Query().Has("project") {
 		a.launcher.ServeHTTP(w, r)
 		return
 	}
 
-	if srv := a.server.Load(); srv != nil {
-		srv.ServeHTTP(w, r)
+	if host := a.host.Load(); host != nil {
+		host.ServeHTTP(w, r)
 		return
 	}
 
@@ -103,14 +123,18 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) newLauncher() http.Handler {
 	public, _ := fs.Sub(publicFS, "public")
+	files := http.FileServer(http.FS(public))
 
 	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.FS(public)))
+	mux.Handle("/", files)
+	// The start page's own files, which stay its once a folder opened.
+	mux.Handle("GET /app/", http.StripPrefix("/app", files))
 
 	mux.HandleFunc("GET /app/workspaces", a.handleWorkspaces)
 	mux.HandleFunc("POST /app/workspaces/remove", a.handleRemoveWorkspace)
 	mux.HandleFunc("POST /app/workspaces/open", a.handleOpenWorkspace)
 	mux.HandleFunc("POST /app/folder", a.handleSelectFolder)
+	mux.HandleFunc("POST /app/window", a.handleNewWindow)
 
 	return server.LocalHostOnly(http.NewCrossOriginProtection().Handler(mux))
 }
@@ -151,50 +175,56 @@ func (a *App) handleRemoveWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleOpenWorkspace(w http.ResponseWriter, r *http.Request) {
-	var request struct {
-		Path    string `json:"path"`
-		Replace bool   `json:"replace"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil && !errors.Is(err, io.EOF) {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if request.Path == "" {
-		http.Error(w, "path is required", http.StatusBadRequest)
+	path, ok := readPath(w, r)
+	if !ok {
 		return
 	}
 
-	current := a.server.Load()
-	if current != nil && request.Replace && r.Header.Get("X-Wingman-Instance") != current.InstanceID() {
-		http.Error(w, "workspace instance changed; reload the workspace", http.StatusConflict)
+	// One host serves every window and folder, so the agents of the others
+	// keep running; the window then shows the folder by naming it.
+	a.openMu.Lock()
+	defer a.openMu.Unlock()
+	if err := a.attach(path); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if current != nil && !request.Replace {
-		http.Error(w, "workspace already open", http.StatusConflict)
-		return
+	if !slices.Contains(a.projects, path) {
+		a.projects = append(a.projects, path)
 	}
-	srv, err := server.New(context.Background(), request.Path, nil)
 
+	_, _ = settings.Update(func(settings *settings.Settings) {
+		settings.AddWorkspace(path)
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleNewWindow opens another window on the start page. Where a process has
+// a single window, it starts another process of the app, which shares the
+// host all the same.
+func (a *App) handleNewWindow(w http.ResponseWriter, r *http.Request) {
+	err := a.openWindow(nil)
+	if errors.Is(err, errors.ErrUnsupported) {
+		err = a.startWindow()
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	if !a.server.CompareAndSwap(current, srv) {
-		srv.Close()
-		http.Error(w, "workspace changed while opening", http.StatusConflict)
-		return
-	}
-
-	_, _ = settings.Update(func(settings *settings.Settings) {
-		settings.AddWorkspace(request.Path)
-	})
-
 	w.WriteHeader(http.StatusNoContent)
+}
 
-	if current != nil {
-		go current.Close()
+// startWindowProcess starts another process of the app, with its own window.
+func startWindowProcess() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
 	}
+	cmd := exec.Command(exe)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
 }
 
 func (a *App) handleSelectFolder(w http.ResponseWriter, r *http.Request) {
@@ -206,27 +236,6 @@ func (a *App) handleSelectFolder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]string{"path": path})
-}
-
-// shutdown gives normal cleanup a brief opportunity to finish without making
-// native app termination depend on a slow protocol handshake or installer.
-func (a *App) shutdown() {
-	srv := a.server.Load()
-	if srv == nil {
-		return
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		srv.Close()
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(shutdownTimeout):
-		log.Println("shutdown timed out, exiting anyway")
-	}
 }
 
 func readPath(w http.ResponseWriter, r *http.Request) (string, bool) {

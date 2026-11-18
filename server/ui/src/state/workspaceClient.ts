@@ -21,6 +21,8 @@ import {
 	ToolCallConfirmationReason,
 } from "./ahpValues.ts";
 import { RpcError } from "@microsoft/agent-host-protocol/client";
+import { errorText } from "../utils/errorText.ts";
+import { readStored, writeStored } from "../utils/storage.ts";
 import { AHPConnection } from "./ahpConnection.ts";
 import {
 	AHPSessionProjection,
@@ -33,7 +35,8 @@ import {
 	setWorkspaceHTTP,
 } from "../api/http.ts";
 import type { PromptReply, ServerMessage } from "../types/protocol.ts";
-import type { SessionInfo } from "../api/sessions.ts";
+import { FleetViewStore } from "./fleet.ts";
+import { SessionCatalog } from "./sessionCatalog.ts";
 import {
 	SessionStore,
 	canonicalBackend,
@@ -51,9 +54,51 @@ export type Bootstrap = WorkspaceScope & {
 	protocol: number;
 	namespace: string;
 };
+/** The project a window shows, which its address names; none is the host's start folder. */
+export function windowProject(): string | null {
+	return new URLSearchParams(location.search).get("project");
+}
+/** The address of a project's window, opening a chat there when one is given. */
+export function projectHref(
+	project: string,
+	chat?: { backend: string; id: string },
+): string {
+	const path = chat
+		? `/${encodeURIComponent(chat.backend)}/${encodeURIComponent(chat.id)}`
+		: "/";
+	return `${path}?project=${encodeURIComponent(project)}`;
+}
+/** Asks the host for a project's window, which opens the project there. */
+async function requestWorkspace(
+	project: string | null,
+	signal?: AbortSignal,
+): Promise<Response> {
+	const response = await fetch(
+		project
+			? `/api/workspace?project=${encodeURIComponent(project)}`
+			: "/api/workspace",
+		{ signal },
+	);
+	if (response.ok) return response;
+	const text = (await response.text()).trim();
+	throw new APIError(
+		// The host's own words for a missing folder are a system call's.
+		response.status === 404 && project
+			? "Its folder no longer exists."
+			: text || `HTTP ${response.status}`,
+		response.status,
+	);
+}
+/** Opens a project on the host before a window moves there: one that cannot
+ * open, such as a folder that is gone, leaves the window where it is. */
+export async function openProject(
+	project: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	await requestWorkspace(project, signal);
+}
 export async function fetchWorkspace(): Promise<WorkspaceInfo & Bootstrap> {
-	const response = await fetch("/api/workspace");
-	if (!response.ok) throw new APIError(await response.text(), response.status);
+	const response = await requestWorkspace(windowProject());
 	const scope = (await response.json()) as WorkspaceInfo;
 	if (
 		scope.protocol !== 2 ||
@@ -76,8 +121,8 @@ type SendRequest = {
 type Send = { request: SendRequest; pending?: Promise<void> };
 const same = (a: readonly unknown[], b: readonly unknown[]) =>
 	a.length === b.length && a.every((value, i) => value === b[i]);
-// SessionStatus.InProgress, which InputNeeded includes.
-const SESSION_IN_PROGRESS = 1 << 3;
+
+const FLEET_VIEW_KEY = "wingman.fleetView";
 
 export function chatPath(key: string): string {
 	return `/api/v2/chats/${encodeURIComponent(key)}`;
@@ -98,13 +143,14 @@ export class WorkspaceClient {
 	readonly dap: DAPClient;
 	readonly files: FileClient;
 	readonly changesets: ChangesetClient;
+	/** The host's sessions, kept current from its root notifications. */
+	readonly catalog: SessionCatalog;
+	/** What the session list shows, kept for the window's next page. */
+	readonly fleetView: FleetViewStore;
 	private observed = new Map<string, { count: number; release: () => void }>();
 	/** Chat URI to the URI of the session that owns it. */
 	private sessions = new Map<string, string>();
 	private providers = new Map<string, string>();
-	private catalogue?: Promise<void>;
-	/** Agents started on this connection, which can list their sessions. */
-	private started = new Map<string, Promise<unknown>>();
 	private redirects = new Map<string, string>();
 	private redirectListeners = new Set<(from: string, to: string) => void>();
 	/** Each chat's latest send, kept after a failure so a retry reuses its request. */
@@ -121,11 +167,20 @@ export class WorkspaceClient {
 		this.changesets = new ChangesetClient(ahp, scope.namespace);
 		this.scope = scope;
 		this.ahp = ahp;
+		this.catalog = new SessionCatalog(ahp, (summary) => this.remember(summary));
+		this.fleetView = new FleetViewStore(
+			{
+				// A browser without storage starts each window's list afresh, and
+				// a view it does not keep still holds for the page.
+				read: () => readStored("session", FLEET_VIEW_KEY),
+				write: (view) => void writeStored("session", FLEET_VIEW_KEY, view),
+			},
+			scope.project,
+		);
 		this.http = createWorkspaceHTTP(scope.instanceId);
 		ahp.subscribeConnection(() => {
 			if (ahp.getConnected()) return;
 			this.store.disconnect();
-			this.started.clear();
 		});
 	}
 	readonly getReplaced = () => this.ahp.getReplaced();
@@ -190,25 +245,11 @@ export class WorkspaceClient {
 			this.providers.set(chat, summary.provider);
 		}
 	}
-	private async listSessions() {
-		const result = await this.ahp.request("listSessions", {
-			channel: "ahp-root://",
-		});
-		for (const summary of result.items) this.remember(summary);
-		return result.items;
-	}
 	async sessionOf(chat: string): Promise<string> {
 		chat = this.redirects.get(chat) ?? chat;
 		const known = this.sessions.get(chat);
 		if (known) return known;
-		if (canonicalBackend(chat) === undefined) {
-			this.catalogue ??= this.listSessions()
-				.then(() => {})
-				.finally(() => {
-					this.catalogue = undefined;
-				});
-			await this.catalogue;
-		}
+		if (canonicalBackend(chat) === undefined) await this.catalog.read();
 		// A default chat shares its session's path.
 		return this.sessions.get(chat) ?? chatToSession(chat);
 	}
@@ -253,7 +294,7 @@ export class WorkspaceClient {
 					this.store.set(key, {
 						...emptySession(key),
 						status: "error",
-						error: String(error),
+						error: errorText(error),
 					});
 			};
 			const deleted = () => {
@@ -511,10 +552,37 @@ export class WorkspaceClient {
 	async dispose(key: string) {
 		this.sends.delete(key);
 		const uri = await this.sessionOf(key);
-		const session = await this.ahp.read<SessionState>(uri);
-		if (session.defaultChat && session.defaultChat !== key)
+		// The list tells a session's own chat from a fork, so a listed session
+		// is deleted without loading it: its folder may be gone.
+		const listed = this.catalog.summary(uri);
+		let own: boolean;
+		if (listed) own = (listed.defaultChat ?? sessionToChat(uri)) === key;
+		else {
+			const session = await this.ahp.read<SessionState>(uri);
+			own = !session.defaultChat || session.defaultChat === key;
+		}
+		if (!own) {
 			await this.ahp.request("disposeChat", { channel: key });
-		else await this.ahp.request("disposeSession", { channel: uri });
+			return;
+		}
+		await this.ahp.request("disposeSession", { channel: uri });
+		this.catalog.forget(uri);
+	}
+	/** Marks a chat read or unread, or a session with all its chats. */
+	markRead(uri: string, read: boolean): Promise<void> {
+		return this.ahp.dispatch(
+			uri,
+			uri.startsWith("ahp-session:")
+				? { type: ActionType.SessionIsReadChanged, isRead: read }
+				: { type: ActionType.ChatIsReadChanged, isRead: read },
+		);
+	}
+	/** Archived sessions leave the list until they need the user. */
+	archive(session: string, archived: boolean): Promise<void> {
+		return this.ahp.dispatch(session, {
+			type: ActionType.SessionIsArchivedChanged,
+			isArchived: archived,
+		});
 	}
 	async send(
 		key: string,
@@ -612,6 +680,10 @@ export class WorkspaceClient {
 			await this.ahp.request("createSession", {
 				channel: uri,
 				provider: backend,
+				// The host's default project is only the start folder's window.
+				...(this.ahp.directory
+					? { workingDirectories: [this.ahp.directory] }
+					: {}),
 			});
 		} catch (error) {
 			if (!(error instanceof RpcError && error.code === -32003)) throw error;
@@ -674,54 +746,6 @@ export class WorkspaceClient {
 		this.sessions.set(uri, session);
 		this.providers.set(uri, this.backendOf(key));
 		return uri;
-	}
-	async list(backend: string): Promise<SessionInfo[]> {
-		// Resolve config starts a lazily loaded provider before cataloguing it.
-		let started = this.started.get(backend);
-		if (!started) {
-			started = this.ahp
-				.request("resolveSessionConfig", {
-					channel: "ahp-root://",
-					provider: backend,
-				})
-				.catch((error) => {
-					this.started.delete(backend);
-					throw error;
-				});
-			this.started.set(backend, started);
-		}
-		await started;
-		const items = await this.listSessions();
-		return items
-			.filter((summary) => summary.provider === backend)
-			.map((summary) => {
-				const fallback = summary.defaultChat ?? sessionToChat(summary.resource);
-				const chats = summary.chats?.length
-					? summary.chats
-					: [
-							{
-								resource: fallback,
-								title: summary.title,
-								status: summary.status,
-							},
-						];
-				const first =
-					chats.find((chat) => chat.resource === summary.defaultChat) ??
-					chats[0];
-				return {
-					id: first.resource,
-					session: summary.resource,
-					title: summary.title,
-					updated_at: summary.modifiedAt,
-					chats: [first, ...chats.filter((chat) => chat !== first)].map(
-						(chat) => ({
-							id: chat.resource,
-							title: chat.title,
-							running: ((chat.status ?? 0) & SESSION_IN_PROGRESS) !== 0,
-						}),
-					),
-				};
-			});
 	}
 }
 

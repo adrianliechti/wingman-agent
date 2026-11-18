@@ -13,70 +13,75 @@ import (
 // The SDK dispatches requests concurrently. Preserve their arrival order for
 // session/cancel and signal when setup/prompt responses have reached the wire.
 type v2Wire struct {
-	scanner   *bufio.Scanner
-	out       io.Writer
-	buffer    []byte
-	frames    []json.RawMessage
-	sequence  uint64
-	mu        sync.Mutex
-	outMu     sync.Mutex
-	requests  map[uint64]json.RawMessage
-	responses map[string]chan struct{}
-	batches   map[string]*v2Batch
-}
-
-type v2Batch struct {
-	pending   int
-	responses []json.RawMessage
-	sent      []chan struct{}
+	scanner        *bufio.Scanner
+	out            io.Writer
+	buffer         []byte
+	sequence       uint64
+	mu             sync.Mutex
+	outMu          sync.Mutex
+	previousPrompt <-chan struct{}
+	requests       map[uint64]v2Request
+	responses      map[string]v2Request
 }
 
 type v2Request struct {
-	sequence uint64
-	sent     <-chan struct{}
+	sequence       uint64
+	sent           chan struct{}
+	previousPrompt <-chan struct{}
+	registered     func()
 }
 type v2RequestKey struct{}
 
 func newV2Wire(out io.Writer, in io.Reader) *v2Wire {
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(nil, 10*1024*1024)
-	return &v2Wire{scanner: scanner, out: out, requests: map[uint64]json.RawMessage{}, responses: map[string]chan struct{}{}, batches: map[string]*v2Batch{}}
+	return &v2Wire{scanner: scanner, out: out, requests: map[uint64]v2Request{}, responses: map[string]v2Request{}}
 }
 
 func (w *v2Wire) Read(p []byte) (int, error) {
 	for len(w.buffer) == 0 {
-		if len(w.frames) == 0 {
-			if !w.scanner.Scan() {
-				if err := w.scanner.Err(); err != nil {
-					return 0, err
-				}
-				return 0, io.EOF
+		if !w.scanner.Scan() {
+			if err := w.scanner.Err(); err != nil {
+				return 0, err
 			}
-			line := bytes.TrimSpace(w.scanner.Bytes())
-			if len(line) == 0 {
-				continue
-			}
-			if line[0] == '[' {
-				if err := w.readBatch(line); err != nil {
-					return 0, err
-				}
-				continue
-			}
-			w.frames = append(w.frames, bytes.Clone(line))
+			return 0, io.EOF
 		}
-		line := w.frames[0]
-		w.frames = w.frames[1:]
+		line := bytes.TrimSpace(w.scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
 		var frame map[string]json.RawMessage
-		if json.Unmarshal(line, &frame) != nil {
-			w.buffer = append(bytes.Clone(line), '\n')
-			break
+		if !json.Valid(line) {
+			if err := w.writeLine(parseErrorFrame); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if json.Unmarshal(line, &frame) != nil || string(frame["jsonrpc"]) != `"2.0"` || (frame["method"] != nil && !validRequestID(frame["id"])) {
+			if err := w.writeLine(invalidRequestFrame); err != nil {
+				return 0, err
+			}
+			continue
 		}
 		var method string
 		_ = json.Unmarshal(frame["method"], &method)
 		if method != "" && method != "$/cancel_request" {
 			w.sequence++
 			w.mu.Lock()
-			w.requests[w.sequence] = frame["id"]
+			req := v2Request{sequence: w.sequence, sent: make(chan struct{})}
+			if method == "session/prompt" {
+				registered := make(chan struct{})
+				req.previousPrompt = w.previousPrompt
+				req.registered = sync.OnceFunc(func() { close(registered) })
+				w.previousPrompt = registered
+			}
+			w.requests[w.sequence] = req
+			if id := frame["id"]; id != nil {
+				w.responses[v2RequestIDKey(id)] = req
+			} else {
+				close(req.sent)
+			}
+
 			w.mu.Unlock()
 			frame["method"], _ = json.Marshal(method + "\x00" + strconv.FormatUint(w.sequence, 10))
 			line, _ = json.Marshal(frame)
@@ -88,7 +93,16 @@ func (w *v2Wire) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-var invalidBatchEntry = json.RawMessage(`{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Invalid Request"}}`)
+func validRequestID(id json.RawMessage) bool {
+	if id == nil || (len(id) > 0 && id[0] == '"') {
+		return true
+	}
+	digits := bytes.TrimPrefix(id, []byte("-"))
+	return len(digits) > 0 && len(bytes.Trim(digits, "0123456789")) == 0
+}
+
+var parseErrorFrame = json.RawMessage(`{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}`)
+var invalidRequestFrame = json.RawMessage(`{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Invalid Request"}}`)
 
 // Forwarding through encoding/json can change a string ID's escape spelling.
 // Compare decoded strings, while preserving numeric IDs without float rounding.
@@ -103,33 +117,6 @@ func v2RequestIDKey(id json.RawMessage) string {
 	return string(id)
 }
 
-func (w *v2Wire) readBatch(line []byte) error {
-	var entries []json.RawMessage
-	if err := json.Unmarshal(line, &entries); err != nil || len(entries) == 0 {
-		return w.writeLine(invalidBatchEntry)
-	}
-	batch := &v2Batch{}
-	w.mu.Lock()
-	for _, entry := range entries {
-		var frame map[string]json.RawMessage
-		if json.Unmarshal(entry, &frame) != nil || frame == nil || frame["method"] == nil && frame["result"] == nil && frame["error"] == nil {
-			batch.responses = append(batch.responses, invalidBatchEntry)
-			continue
-		}
-		if frame["method"] != nil && frame["id"] != nil {
-			batch.pending++
-			w.batches[v2RequestIDKey(frame["id"])] = batch
-		}
-		w.frames = append(w.frames, entry)
-	}
-	w.mu.Unlock()
-	if batch.pending == 0 && len(batch.responses) > 0 {
-		data, _ := json.Marshal(batch.responses)
-		return w.writeLine(data)
-	}
-	return nil
-}
-
 func (w *v2Wire) request(method string) (string, v2Request) {
 	index := strings.LastIndexByte(method, 0)
 	if index < 0 {
@@ -138,15 +125,9 @@ func (w *v2Wire) request(method string) (string, v2Request) {
 	sequence, _ := strconv.ParseUint(method[index+1:], 10, 64)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	id := w.requests[sequence]
+	request := w.requests[sequence]
 	delete(w.requests, sequence)
-	sent := make(chan struct{})
-	if len(id) > 0 {
-		w.responses[v2RequestIDKey(id)] = sent
-	} else {
-		close(sent)
-	}
-	return method[:index], v2Request{sequence: sequence, sent: sent}
+	return method[:index], request
 }
 
 func (w *v2Wire) Write(p []byte) (int, error) {
@@ -154,34 +135,23 @@ func (w *v2Wire) Write(p []byte) (int, error) {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
 	}
-	var sent []chan struct{}
-	line := p
+	var response v2Request
 	if json.Unmarshal(p, &frame) == nil && frame.Method == "" && len(frame.ID) > 0 {
 		w.mu.Lock()
 		id := v2RequestIDKey(frame.ID)
-		if signal := w.responses[id]; signal != nil {
-			sent = append(sent, signal)
-			delete(w.responses, id)
-		}
-		if batch := w.batches[id]; batch != nil {
-			delete(w.batches, id)
-			batch.responses = append(batch.responses, bytes.Clone(p))
-			batch.sent = append(batch.sent, sent...)
-			batch.pending--
-			if batch.pending > 0 {
-				w.mu.Unlock()
-				return len(p), nil
-			}
-			line, _ = json.Marshal(batch.responses)
-			sent = batch.sent
-		}
+		response = w.responses[id]
+		delete(w.requests, response.sequence)
+		delete(w.responses, id)
 		w.mu.Unlock()
 	}
-	if err := w.writeLine(line); err != nil {
+	if err := w.writeLine(p); err != nil {
 		return 0, err
 	}
-	for _, signal := range sent {
-		close(signal)
+	if response.registered != nil {
+		response.registered()
+	}
+	if response.sent != nil {
+		close(response.sent)
 	}
 	return len(p), nil
 }

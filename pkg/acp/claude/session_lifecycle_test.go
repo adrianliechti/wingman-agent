@@ -14,6 +14,7 @@ import (
 	"github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 )
 
@@ -77,7 +78,7 @@ func TestBypassModeHonorsHostOptOutAndSettings(t *testing.T) {
 	checkBypassFlag(resp.SessionId, true)
 
 	optOut := map[string]any{"claudeCode": map[string]any{"options": map[string]any{"allowDangerouslySkipPermissions": false}}}
-	resp, err = a.NewSession(context.Background(), acp.NewSessionRequest{Cwd: open, McpServers: []acp.McpServer{}, Meta: optOut})
+	resp, err = a.NewSession(context.Background(), acp.NewSessionRequest{Cwd: open, McpServers: []acp.McpServer{}, Meta: acpjson.Metadata(optOut)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +227,7 @@ func TestDeleteSessionTouchesOnlySessionTranscripts(t *testing.T) {
 		}
 	}
 	for _, sid := range []string{"../../outside", uuid.NewString(), id} {
-		if _, err := a.UnstableDeleteSession(context.Background(), acp.UnstableDeleteSessionRequest{SessionId: acp.SessionId(sid)}); err != nil {
+		if _, err := a.DeleteSession(context.Background(), acp.DeleteSessionRequest{SessionId: acp.SessionId(sid)}); err != nil {
 			t.Fatalf("delete %q: %v", sid, err)
 		}
 	}

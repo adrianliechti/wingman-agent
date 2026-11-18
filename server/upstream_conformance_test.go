@@ -53,7 +53,7 @@ func TestAHPUpstreamConformance(t *testing.T) {
 	t.Setenv("WINGMAN_MODEL_COMPLEX", "fixture-model")
 	t.Setenv("WINGMAN_MODEL_UTILITY", "fixture-model")
 	root := canonicalPath(t.TempDir())
-	host, err := NewHost(t.Context(), &HostOptions{Roots: []string{root}, disableManagedTools: true})
+	host, err := NewHost(t.Context(), hostTestOptions(t, root, ""))
 	if err != nil {
 		t.Fatal(err)
 	}

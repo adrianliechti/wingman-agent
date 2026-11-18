@@ -88,6 +88,73 @@ func TestServiceErrorsPreserveUnrecognizedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestBlockingHooksSurfaceOnlyReasonsFromTheCurrentTurn(t *testing.T) {
+	for _, variant := range []string{"notices", "legacy"} {
+		t.Run(variant, func(t *testing.T) {
+			agent, _ := scriptedAgent(t, func(s *contractAppServer, req rpcMessage) {
+				if req.Method != "turn/start" {
+					s.respond(req, map[string]any{})
+					return
+				}
+				s.respond(req, turnStartResponse{Turn: turn{ID: "live", Status: "inProgress"}})
+				hook := func(turnID, event, status string) {
+					s.notify("hook/completed", map[string]any{"threadId": "s", "turnId": turnID, "run": map[string]any{
+						"eventName": event, "status": status, "entries": []any{
+							map[string]string{"kind": "context", "text": "internal model context"},
+							map[string]string{"kind": "feedback", "text": "  Workspace policy  "},
+						},
+					}})
+				}
+				hook("old", "userPromptSubmit", "blocked")
+				hook("live", "preToolUse", "completed")
+				hook("live", "preToolUse", "blocked")
+				hook("live", "stop", "stopped")
+				s.notify("turn/completed", map[string]any{"threadId": "s", "turn": turn{ID: "live", Status: "completed"}})
+			})
+			peer := newProtocolPeer(t, agent)
+			caps := `{}`
+			if variant == "notices" {
+				caps = `{"session":{"notices":{}}}`
+			}
+			peer.send(t, `"init"`, "initialize", `{"protocolVersion":1,"clientCapabilities":`+caps+`}`)
+			if reply := peer.response(t, `"init"`); reply.Error != nil {
+				t.Fatal(reply.Error)
+			}
+			agent.registerSession("s", t.TempDir(), "default", "", "", nil)
+			peer.send(t, `"p"`, "session/prompt", `{"sessionId":"s","prompt":[{"type":"text","text":"go"}]}`)
+			var titles []string
+			for {
+				frame := peer.next(t)
+				if string(frame.ID) == `"p"` {
+					if frame.Error != nil {
+						t.Fatal(frame.Error)
+					}
+					break
+				}
+				var n acp.SessionNotification
+				if err := json.Unmarshal(frame.Params, &n); err != nil {
+					t.Fatal(err)
+				}
+				if notice := n.Update.Notice; notice != nil {
+					if variant != "notices" || notice.Severity != "warning" || notice.Description == nil || *notice.Description != "Workspace policy" {
+						t.Fatalf("unexpected notice %+v", notice)
+					}
+					titles = append(titles, notice.Title)
+				} else if chunk := n.Update.AgentMessageChunk; chunk != nil {
+					title, ok := strings.CutSuffix(chunk.Content.Text.Text, ": Workspace policy\n\n")
+					if variant != "legacy" || !ok {
+						t.Fatalf("unexpected text %q", chunk.Content.Text.Text)
+					}
+					titles = append(titles, title)
+				}
+			}
+			if !slices.Equal(titles, []string{"PreToolUse hook blocked the tool call", "Stop hook stopped the turn"}) {
+				t.Fatalf("hook updates = %v", titles)
+			}
+		})
+	}
+}
+
 func TestUnrelatedThreadLockErrorsKeepTheirDiagnostics(t *testing.T) {
 	agent, _ := scriptedAgent(t, func(s *contractAppServer, req rpcMessage) {
 		if req.Method == "thread/resume" {

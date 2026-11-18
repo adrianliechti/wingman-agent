@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 const (
@@ -28,13 +30,12 @@ func (a *approver) handleUserInput(p userInputParams) userInputResponse {
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(max(0, *p.AutoResolutionMs))*time.Millisecond)
 		defer cancel()
 	}
-	meta := a.elicitationMeta(nil)
-	meta["toolCallId"] = p.ItemID
+	meta := map[string]any{}
 	meta["codex"] = map[string]any{"autoResolutionMs": p.AutoResolutionMs}
-	resp, err := callClient(ctx, a.conn, func() (acp.UnstableCreateElicitationResponse, error) {
-		return a.conn.UnstableCreateElicitation(ctx, acp.UnstableCreateElicitationRequest{
-			Form: &acp.UnstableCreateElicitationForm{
-				Meta:            meta,
+	resp, err := callClient(ctx, a.conn, func() (acp.CreateElicitationResponse, error) {
+		return a.conn.CreateElicitation(ctx, acp.CreateElicitationRequest{
+			Form: &acp.CreateElicitationForm{
+				Session: &acp.ElicitationSessionScope{SessionId: a.sessionID, ToolCallId: new(acp.ToolCallId(p.ItemID))}, Meta: acpjson.Metadata(meta),
 				Message:         "Codex needs your input to continue.",
 				Mode:            "form",
 				RequestedSchema: userInputSchema(p.Questions),
@@ -44,12 +45,12 @@ func (a *approver) handleUserInput(p userInputParams) userInputResponse {
 	if err != nil || ctx.Err() != nil || resp.Accept == nil {
 		return emptyUserInputResponse()
 	}
-	return userInputAnswers(p.Questions, resp.Accept.Content)
+	return userInputAnswers(p.Questions, acpjson.Object(resp.Accept.Content))
 }
 
-func userInputSchema(questions []userInputQuestion) acp.UnstableElicitationSchema {
+func userInputSchema(questions []userInputQuestion) acp.ElicitationSchema {
 	ids := questionIDs(questions)
-	properties := map[string]any{}
+	properties := map[string]acp.ElicitationPropertySchema{}
 	required := make([]string, 0, len(questions))
 	for _, q := range questions {
 		title := q.Question
@@ -59,43 +60,28 @@ func userInputSchema(questions []userInputQuestion) acp.UnstableElicitationSchem
 		if title == "" {
 			title = q.ID
 		}
-		field := map[string]any{
-			"type":  "string",
-			"title": title,
-			"_meta": map[string]any{"codex": map[string]any{"isOther": q.IsOther, "isSecret": q.IsSecret}},
-		}
+		field := &acp.ElicitationPropertySchemaString{Title: &title, Meta: acpjson.Metadata(map[string]any{"codex": map[string]any{"isOther": q.IsOther, "isSecret": q.IsSecret}})}
 		if q.Header != "" {
-			field["description"] = q.Header
+			field.Description = &q.Header
 		}
-		if len(q.Options) > 0 {
-			oneOf := make([]any, 0, len(q.Options)+1)
-			for _, option := range q.Options {
-				choice := map[string]any{"const": option.Label, "title": option.Label}
-				if option.Description != "" {
-					choice["description"] = option.Description
-				}
-				oneOf = append(oneOf, choice)
+		for _, o := range q.Options {
+			opt := acp.EnumOption{Const: o.Label, Title: o.Label}
+			if o.Description != "" {
+				opt.Description = &o.Description
 			}
-			hasOther := slices.ContainsFunc(q.Options, func(o userInputOption) bool { return o.Label == userInputOtherOption })
-			if q.IsOther && !hasOther {
-				oneOf = append(oneOf, map[string]any{
-					"const": userInputOtherOption, "title": userInputOtherOption,
-					"description": "Provide a different answer in the note field.",
-				})
-			}
-			field["oneOf"] = oneOf
+			field.OneOf = append(field.OneOf, opt)
 		}
-		properties[q.ID] = field
+		properties[q.ID] = acp.ElicitationPropertySchema{String: field}
 		required = append(required, q.ID)
 		if q.IsOther && len(q.Options) > 0 {
-			properties[userInputNoteFieldID(q.ID, ids)] = map[string]any{
-				"type":  "string",
-				"title": "Additional answer or note",
-				"_meta": map[string]any{"codex": map[string]any{"questionId": q.ID, "role": "user_note", "isSecret": q.IsSecret}},
+			if !slices.ContainsFunc(q.Options, func(o userInputOption) bool { return o.Label == userInputOtherOption }) {
+				field.OneOf = append(field.OneOf, acp.EnumOption{Const: userInputOtherOption, Title: userInputOtherOption, Description: new("Provide a different answer in the note field.")})
 			}
+			properties[userInputNoteFieldID(q.ID, ids)] = acp.ElicitationPropertySchema{String: &acp.ElicitationPropertySchemaString{Title: new("Additional answer or note"), Meta: acpjson.Metadata(map[string]any{"codex": map[string]any{"questionId": q.ID, "role": "user_note", "isSecret": q.IsSecret}})}}
 		}
 	}
-	return acp.UnstableElicitationSchema{Type: acp.UnstableElicitationSchemaTypeObject, Properties: properties, Required: required}
+
+	return acp.ElicitationSchema{Type: acp.ElicitationSchemaTypeObject, Properties: properties, Required: required}
 }
 
 func userInputAnswers(questions []userInputQuestion, content map[string]any) userInputResponse {

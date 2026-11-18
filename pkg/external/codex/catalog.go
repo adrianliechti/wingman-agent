@@ -18,6 +18,12 @@ import (
 //go:embed models.json
 var embeddedModelCatalog []byte
 
+// Retain the last upstream entries for supported models removed from Codex's
+// current catalog. Refreshing models.json must still allow these deployments.
+//
+//go:embed models_legacy.json
+var legacyModelCatalog []byte
+
 type modelCatalog struct {
 	Models []map[string]any `json:"models"`
 }
@@ -52,18 +58,19 @@ func PrepareModelCatalog(cfg *CodexConfig) (cleanup func(), err error) {
 }
 
 func buildModelCatalog(modelIDs []string) ([]byte, error) {
-	var embedded modelCatalog
-	if err := json.Unmarshal(embeddedModelCatalog, &embedded); err != nil {
-		return nil, fmt.Errorf("parse embedded Codex model catalog: %w", err)
-	}
-
-	templates := make(map[string]map[string]any, len(embedded.Models))
-	for _, entry := range embedded.Models {
-		slug, ok := entry["slug"].(string)
-		if !ok || slug == "" {
-			return nil, fmt.Errorf("embedded Codex model is missing a slug")
+	templates := make(map[string]map[string]any)
+	for _, data := range [][]byte{legacyModelCatalog, embeddedModelCatalog} {
+		var catalog modelCatalog
+		if err := json.Unmarshal(data, &catalog); err != nil {
+			return nil, fmt.Errorf("parse embedded Codex model catalog: %w", err)
 		}
-		templates[slug] = entry
+		for _, entry := range catalog.Models {
+			slug, ok := entry["slug"].(string)
+			if !ok || slug == "" {
+				return nil, fmt.Errorf("embedded Codex model is missing a slug")
+			}
+			templates[slug] = entry
+		}
 	}
 
 	selected := make([]map[string]any, 0, len(modelIDs))

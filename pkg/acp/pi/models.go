@@ -141,13 +141,7 @@ func modelConfigOption(models []modelEntry, currentID string) acpsdk.SessionConf
 	if findModel(models, currentID) == nil && len(models) > 0 {
 		currentID = models[0].ID
 	}
-	opt := acpsdk.NewSessionConfigOptionSelect(
-		acpsdk.SessionConfigValueId(currentID),
-		acpsdk.SessionConfigSelectOptions{Ungrouped: &ungrouped},
-	)
-	opt.Select.Id = modelConfigID
-	opt.Select.Name = "Model"
-	return opt
+	return acp.SelectConfigOption(modelConfigID, "Model", currentID, ungrouped)
 }
 
 func effortConfigOption(levels []string, thinking string) acpsdk.SessionConfigOption {
@@ -161,14 +155,9 @@ func effortConfigOption(levels []string, thinking string) acpsdk.SessionConfigOp
 			Name:  acp.TitleCase(l),
 		})
 	}
-	opt := acpsdk.NewSessionConfigOptionSelect(
-		acpsdk.SessionConfigValueId(thinking),
-		acpsdk.SessionConfigSelectOptions{Ungrouped: &ungrouped},
-	)
+	opt := acp.SelectConfigOption(effortConfigID, "Thinking", thinking, ungrouped)
 	desc := "Reasoning effort for this session"
 	cat := acpsdk.SessionConfigOptionCategoryThoughtLevel
-	opt.Select.Id = effortConfigID
-	opt.Select.Name = "Thinking"
 	opt.Select.Description = &desc
 	opt.Select.Category = &cat
 	return opt

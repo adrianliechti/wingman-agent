@@ -6,13 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"reflect"
+	"slices"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
+	"github.com/rogpeppe/go-internal/lockedfile"
+
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 )
 
-// ACP v2 is the experimental draft shipped by ACP SDK 2.2. Its session
+// ACP v2 is the experimental draft shipped by ACP SDK 2.8. Its session
 // operations reuse the v1 agents; requests and entities are converted here.
 type v2Connection struct {
 	agent        acp.Agent
@@ -21,37 +28,52 @@ type v2Connection struct {
 	mu           sync.Mutex
 	sessions     map[string]*v2Session
 	capabilities acp.AgentCapabilities
+	agentName    string
 	initialized  bool
 	initializing bool
+	used         bool
 }
 
 type v2Session struct {
-	ready, closed         bool
-	restoring             bool
-	ctx                   context.Context
-	cancel                context.CancelFunc
-	requests              sync.WaitGroup
-	config                []acp.SessionConfigOption
-	modes                 *acp.SessionModeState
-	commands              any
-	lastConfig            any
-	setup                 <-chan struct{}
-	deferred              []map[string]any
-	messageIDs            map[string]string
-	lastKind, lastMessage string
-	turn                  *v2Turn
-	interactions          int
-	cancelledThrough      uint64
-	closedThrough         uint64
+	ready, closed                         bool
+	restoring, replaying, inactiveRestore bool
+	closing                               chan struct{}
+	closeErr                              error
+	workspace                             map[string]any
+	info                                  map[string]any
+	replayMessage                         int
+	replaySequence                        uint64
+	afterReplay                           []json.RawMessage
+	receipts                              map[string]string
+	ctx                                   context.Context
+	cancel                                context.CancelFunc
+	requests                              sync.WaitGroup
+	config                                []acp.SessionConfigOption
+	modes                                 *acp.SessionModeState
+	commands                              []any
+	lastConfig                            any
+	setup                                 <-chan struct{}
+	deferred                              []map[string]any
+	reportedEntities                      map[string]bool
+	toolStatuses                          map[string]string
+	lastKind, lastMessage                 string
+	turn                                  *v2Turn
+	pending                               []*v2Turn
+	keyed                                 map[string]*v2Turn
+	interactions                          int
+	cancelledThrough                      uint64
+	closedThrough                         uint64
 }
 
 type v2Turn struct {
+	start        chan struct{}
 	accept       func(string)
 	ctx          context.Context
 	cancel       context.CancelFunc
 	accepted     chan struct{}
 	done         chan struct{}
-	once         sync.Once
+	mu           sync.Mutex
+	sealed       bool
 	messageID    string
 	sequence     uint64
 	acknowledged <-chan struct{}
@@ -59,13 +81,22 @@ type v2Turn struct {
 	err          error
 }
 
-func newV2Connection(agent acp.Agent, out io.Writer, in io.Reader, ready <-chan struct{}) *v2Connection {
+func newV2Connection(agent acp.Agent, out io.Writer, in io.Reader) *v2Connection {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &v2Connection{agent: agent, ctx: ctx, sessions: map[string]*v2Session{}}
 	wire := newV2Wire(out, in)
 	c.rpc = acp.NewConnection(func(ctx context.Context, method string, raw json.RawMessage) (any, *acp.RequestError) {
-		<-ready
 		method, request := wire.request(method)
+		if request.registered != nil {
+			if request.previousPrompt != nil {
+				select {
+				case <-request.previousPrompt:
+				case <-c.ctx.Done():
+					return nil, protocolError(c.ctx.Err())
+				}
+			}
+			defer request.registered()
+		}
 		result, err := c.handle(context.WithValue(ctx, v2RequestKey{}, request), method, raw)
 		return result, protocolError(err)
 	}, wire, wire)
@@ -104,9 +135,28 @@ func decodeRequest[T any](raw json.RawMessage) (T, error) {
 	return p, nil
 }
 
+func callRequest[P, R any](ctx context.Context, raw json.RawMessage, call func(context.Context, P) (R, error)) (R, error) {
+	request, err := decodeRequest[P](raw)
+	if err != nil {
+		var zero R
+		return zero, err
+	}
+	return call(ctx, request)
+}
+
+// IsV2Request reports whether a lifecycle request came through the v2
+// dispatcher. V1 can make history optional, while v2 requires active replay.
+func IsV2Request(ctx context.Context) bool {
+	_, v2 := ctx.Value(v2RequestKey{}).(v2Request)
+	return v2
+}
+
 func (c *v2Connection) handle(ctx context.Context, method string, raw json.RawMessage) (any, error) {
 	c.mu.Lock()
-	initialized := c.initialized
+	initialized := c.initialized && !c.initializing
+	if initialized && method != "initialize" {
+		c.used = true
+	}
 	c.mu.Unlock()
 	if method != "initialize" && !initialized {
 		return nil, &acp.RequestError{Code: -32600, Message: "Initialize the connection first"}
@@ -114,7 +164,7 @@ func (c *v2Connection) handle(ctx context.Context, method string, raw json.RawMe
 	switch method {
 	case "initialize":
 		c.mu.Lock()
-		if c.initialized || c.initializing {
+		if c.used || c.initializing {
 			c.mu.Unlock()
 			return nil, &acp.RequestError{Code: -32600, Message: "Connection is already initialized"}
 		}
@@ -126,28 +176,36 @@ func (c *v2Connection) handle(ctx context.Context, method string, raw json.RawMe
 			c.mu.Unlock()
 		}()
 		var p struct {
-			ProtocolVersion *uint16             `json:"protocolVersion"`
-			Info            *acp.Implementation `json:"info"`
-			Capabilities    map[string]any      `json:"capabilities"`
-			Meta            map[string]any      `json:"_meta"`
+			Info         *acp.Implementation `json:"info"`
+			Capabilities map[string]any      `json:"capabilities"`
+			Meta         acp.Meta            `json:"_meta"`
 		}
-		if err := json.Unmarshal(raw, &p); err != nil {
+		var version struct {
+			ProtocolVersion *uint16 `json:"protocolVersion"`
+		}
+		if err := json.Unmarshal(raw, &version); err != nil || version.ProtocolVersion == nil {
 			return nil, acp.NewInvalidParams(nil)
 		}
-		if p.ProtocolVersion == nil {
-			return nil, acp.NewInvalidParams(map[string]any{"reason": "protocolVersion is required"})
+		if err := json.Unmarshal(raw, &p); err != nil && *version.ProtocolVersion <= 2 {
+			return nil, acp.NewInvalidParams(nil)
 		}
-		if *p.ProtocolVersion < 2 {
-			return nil, &acp.RequestError{Code: -32022, Message: "Unsupported protocol version", Data: map[string]any{"requested": *p.ProtocolVersion, "supported": []int{1, 2}}}
+		if *version.ProtocolVersion < 2 {
+			return nil, acp.NewRequestError(-32022, "Unsupported protocol version", map[string]any{"requested": *version.ProtocolVersion, "supported": []int{1, 2}})
 		}
-		if p.Info == nil || p.Info.Name == "" {
-			return nil, acp.NewInvalidParams(map[string]any{"reason": "info.name is required"})
+		if *version.ProtocolVersion == 2 && (p.Info == nil || p.Info.Name == "" || p.Info.Version == "") {
+			return nil, acp.NewInvalidParams(map[string]any{"reason": "info.name and info.version are required"})
 		}
 		if auth, ok := p.Capabilities["auth"].(map[string]any); ok {
 			auth["terminal"] = auth["terminal"] != nil
 		}
 		var capabilities acp.ClientCapabilities
 		decodeObject(p.Capabilities, &capabilities)
+		// Notices are part of the v2 baseline. The v1 backend uses this
+		// capability to choose between a live notice and a chat message.
+		if capabilities.Session == nil {
+			capabilities.Session = &acp.ClientSessionCapabilities{}
+		}
+		capabilities.Session.Notices = &acp.NoticeCapabilities{}
 		capabilities.Fs = acp.FileSystemCapabilities{}
 		capabilities.Terminal = false
 		response, err := c.agent.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: 1, ClientInfo: p.Info, ClientCapabilities: capabilities, Meta: p.Meta})
@@ -155,6 +213,9 @@ func (c *v2Connection) handle(ctx context.Context, method string, raw json.RawMe
 			return nil, err
 		}
 		c.mu.Lock()
+		if response.AgentInfo != nil {
+			c.agentName = response.AgentInfo.Name
+		}
 		c.capabilities = response.AgentCapabilities
 		c.initialized = true
 		c.mu.Unlock()
@@ -177,7 +238,17 @@ func (c *v2Connection) handle(ctx context.Context, method string, raw json.RawMe
 				return nil, acp.NewInvalidParams(map[string]any{"reason": "prompt content was not advertised"})
 			}
 		}
-		return c.prompt(ctx, p)
+		var params struct {
+			Key *string `json:"idempotencyKey"`
+		}
+		if err := json.Unmarshal(raw, &params); err != nil || (params.Key != nil && (*params.Key == "" || utf8.RuneCountInString(*params.Key) > 255)) {
+			return nil, acp.NewInvalidParams("idempotencyKey must contain 1 to 255 characters")
+		}
+		var key string
+		if params.Key != nil {
+			key = *params.Key
+		}
+		return c.prompt(ctx, p, key)
 	case "session/cancel":
 		p, err := decodeRequest[acp.CancelNotification](raw)
 		if err != nil {
@@ -185,8 +256,17 @@ func (c *v2Connection) handle(ctx context.Context, method string, raw json.RawMe
 		}
 		c.mu.Lock()
 		request, _ := ctx.Value(v2RequestKey{}).(v2Request)
-		s := c.sessionLocked(string(p.SessionId))
+		s := c.sessions[string(p.SessionId)]
+		if s == nil || !s.ready || s.closed {
+			c.mu.Unlock()
+			return nil, nil
+		}
 		s.cancelledThrough = max(s.cancelledThrough, request.sequence)
+		for _, pending := range s.pending {
+			if pending.sequence <= s.cancelledThrough {
+				pending.cancel()
+			}
+		}
 		if s.turn != nil && s.turn.sequence <= s.cancelledThrough {
 			s.turn.cancel()
 		}
@@ -197,64 +277,25 @@ func (c *v2Connection) handle(ctx context.Context, method string, raw json.RawMe
 		if err != nil {
 			return nil, err
 		}
-		var turn *v2Turn
-		c.mu.Lock()
-		s := c.sessions[string(p.SessionId)]
-		if s != nil {
-			request, _ := ctx.Value(v2RequestKey{}).(v2Request)
-			s.cancelledThrough = max(s.cancelledThrough, request.sequence)
-			s.closedThrough = max(s.closedThrough, request.sequence)
-			s.closed = true
-			s.cancel()
-			turn = s.turn
-		}
-		c.mu.Unlock()
-		if turn != nil {
-			turn.cancel()
-			<-turn.done
-		}
-		if s != nil {
-			s.requests.Wait()
-		}
-		return c.agent.CloseSession(ctx, p)
+		return acp.CloseSessionResponse{}, c.closeSession(ctx, p.SessionId, nil)
 	case "session/list":
-		p, err := decodeRequest[acp.ListSessionsRequest](raw)
-		if err != nil {
-			return nil, err
-		}
-		response, err := c.agent.ListSessions(ctx, p)
-		if err != nil {
-			return nil, err
-		}
-		result := object(response)
-		if result["sessions"] == nil {
-			result["sessions"] = []any{}
-		}
-		return result, nil
+		return callRequest(ctx, raw, c.agent.ListSessions)
 	case "session/delete":
-		p, err := decodeRequest[acp.UnstableDeleteSessionRequest](raw)
+		p, err := decodeRequest[acp.DeleteSessionRequest](raw)
 		if err != nil {
 			return nil, err
 		}
-		if agent, ok := c.agent.(interface {
-			UnstableDeleteSession(context.Context, acp.UnstableDeleteSessionRequest) (acp.UnstableDeleteSessionResponse, error)
-		}); ok {
-			return agent.UnstableDeleteSession(ctx, p)
+		if c.capabilities.SessionCapabilities.Delete == nil {
+			return nil, acp.NewMethodNotFound(method)
 		}
+		err = c.closeSession(ctx, p.SessionId, func() error { _, err := c.agent.DeleteSession(ctx, p); return err })
+		return acp.DeleteSessionResponse{}, err
 	case "session/set_config_option":
 		return c.setConfig(ctx, raw)
 	case "auth/login":
-		p, err := decodeRequest[acp.AuthenticateRequest](raw)
-		if err != nil {
-			return nil, err
-		}
-		return c.agent.Authenticate(ctx, p)
+		return callRequest(ctx, raw, c.agent.Authenticate)
 	case "auth/logout":
-		p, err := decodeRequest[acp.LogoutRequest](raw)
-		if err != nil {
-			return nil, err
-		}
-		return c.agent.Logout(ctx, p)
+		return callRequest(ctx, raw, c.agent.Logout)
 	default:
 		if len(method) > 0 && method[0] == '_' {
 			if agent, ok := c.agent.(acp.ExtensionMethodHandler); ok {
@@ -265,11 +306,75 @@ func (c *v2Connection) handle(ctx context.Context, method string, raw json.RawMe
 	return nil, acp.NewMethodNotFound(method)
 }
 
+// Mark the session closed under the registration lock before waiting for
+// prompts and interactions. The backend is released after the last idle update.
+func (c *v2Connection) closeSession(ctx context.Context, id acp.SessionId, remove func() error) error {
+	request, _ := ctx.Value(v2RequestKey{}).(v2Request)
+	c.mu.Lock()
+	s := c.sessionLocked(string(id))
+	for s.closing != nil {
+		closing := s.closing
+		c.mu.Unlock()
+		select {
+		case <-closing:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		c.mu.Lock()
+	}
+	if s.closed && remove == nil {
+		err := s.closeErr
+		c.mu.Unlock()
+		return err
+	}
+	active := s.ready || s.restoring
+	s.closing = make(chan struct{})
+	s.closed = true
+	s.closedThrough = max(s.closedThrough, request.sequence)
+	s.cancelledThrough = max(s.cancelledThrough, request.sequence)
+	s.cancel()
+	c.mu.Unlock()
+	s.requests.Wait()
+	var err error
+	if remove != nil {
+		err = remove()
+	} else if active {
+		_, err = c.agent.CloseSession(ctx, acp.CloseSessionRequest{SessionId: id})
+	}
+	c.mu.Lock()
+	s.closeErr = err
+	close(s.closing)
+	s.closing = nil
+	c.mu.Unlock()
+	return err
+}
+
+func (c *v2Connection) sendSnapshot(ctx context.Context, id string, s *v2Session) error {
+	if err := c.sendLocked(ctx, id, s.info); err != nil {
+		return err
+	}
+	state := "idle"
+	if s.turn != nil {
+		state = "running"
+		if s.interactions > 0 {
+			state = "requires_action"
+		}
+	}
+	return c.sendLocked(ctx, id, map[string]any{"sessionUpdate": "state_update", "state": state})
+}
+
 func (c *v2Connection) sessionLocked(id string) *v2Session {
 	s := c.sessions[id]
 	if s == nil {
 		ctx, cancel := context.WithCancel(c.ctx)
-		s = &v2Session{ctx: ctx, cancel: cancel, messageIDs: map[string]string{}}
+		s = &v2Session{
+			ctx: ctx, cancel: cancel,
+			reportedEntities: map[string]bool{},
+			toolStatuses:     map[string]string{},
+			keyed:            map[string]*v2Turn{},
+			receipts:         map[string]string{},
+			info:             map[string]any{"sessionUpdate": "session_info_update"},
+		}
 		c.sessions[id] = s
 	}
 	return s
@@ -282,6 +387,24 @@ func (c *v2Connection) setup(ctx context.Context, method string, raw json.RawMes
 		return nil, err
 	}
 	id, _ := p["sessionId"].(string)
+	workspace := map[string]any{"cwd": p["cwd"], "additionalDirectories": p["additionalDirectories"], "mcpServers": p["mcpServers"]}
+	if method == "session/fork" {
+		c.mu.Lock()
+		parent := c.sessions[id]
+		active := parent != nil && parent.ready && !parent.closed
+		c.mu.Unlock()
+		if !active {
+			return nil, SessionNotFound(acp.SessionId(id))
+		}
+		if c.capabilities.SessionCapabilities.Fork == nil {
+			return nil, acp.NewMethodNotFound(method)
+		}
+		if p["cursorId"] != nil {
+			// No backend emits cursor_update. A whole-session fork would
+			// silently include history beyond the client's requested point.
+			return nil, acp.NewInvalidParams(map[string]any{"cursorId": p["cursorId"], "reason": "unknown fork cursor"})
+		}
+	}
 	replay := false
 	if value := p["replayFrom"]; value != nil {
 		cursor, ok := value.(map[string]any)
@@ -294,7 +417,21 @@ func (c *v2Connection) setup(ctx context.Context, method string, raw json.RawMes
 	if method == "session/resume" {
 		c.mu.Lock()
 		s := c.sessionLocked(id)
-		if request.sequence <= s.closedThrough {
+		if previous := s.setup; previous != nil {
+			c.mu.Unlock()
+			select {
+			case <-previous:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-c.ctx.Done():
+				return nil, c.ctx.Err()
+			}
+			c.mu.Lock()
+			if s.setup == previous {
+				c.flushSetupLocked(s, id)
+			}
+		}
+		if s.closing != nil || request.sequence <= s.closedThrough {
 			c.mu.Unlock()
 			return nil, context.Canceled
 		}
@@ -302,26 +439,16 @@ func (c *v2Connection) setup(ctx context.Context, method string, raw json.RawMes
 			c.mu.Unlock()
 			return nil, &acp.RequestError{Code: -32600, Message: "Session is already being restored"}
 		}
-		if s.turn != nil {
+		if s.ready && !s.closed && !replay && reflect.DeepEqual(s.workspace, workspace) && (s.turn != nil || c.capabilities.SessionCapabilities.Resume == nil) {
 			defer c.mu.Unlock()
-			if replay {
-				return nil, &acp.RequestError{Code: -32600, Message: "Wait for the active turn before replaying history"}
-			}
-			state := "running"
-			if s.interactions > 0 {
-				state = "requires_action"
-			}
-			if err := c.sendLocked(ctx, id, map[string]any{"sessionUpdate": "state_update", "state": state}); err != nil {
+			if err := c.sendSnapshot(ctx, id, s); err != nil {
 				return nil, err
 			}
-			result := map[string]any{"configOptions": v2Config(s.config, s.modes)}
-			if s.commands != nil {
-				result["availableCommands"] = s.commands
-			}
-			return result, nil
+			return s.setupResult(), nil
 		}
-		wasReady, wasClosed := s.ready, s.closed
+		wasReady, wasClosed, oldWorkspace := s.ready, s.closed, s.workspace
 		s.restoring = true
+		s.inactiveRestore = !wasReady || wasClosed
 		s.requests.Add(1)
 		if s.ctx.Err() != nil {
 			s.ctx, s.cancel = context.WithCancel(c.ctx)
@@ -329,70 +456,56 @@ func (c *v2Connection) setup(ctx context.Context, method string, raw json.RawMes
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
 		stop := context.AfterFunc(s.ctx, cancel)
-		s.closed, s.ready = false, true
-		s.messageIDs = map[string]string{}
-		s.lastKind, s.lastMessage = "", ""
+		s.closed = false
+		turn := s.turn
 		c.mu.Unlock()
 		defer func() {
 			stop()
 			cancel()
 			c.mu.Lock()
-			s.restoring = false
+			s.restoring, s.replaying, s.inactiveRestore = false, false, false
+			s.afterReplay = nil
+			s.startNext()
 			if err != nil && !s.closed {
-				s.ready, s.closed = wasReady, wasClosed
+				s.ready, s.closed, s.workspace = wasReady, wasClosed, oldWorkspace
 			}
 			c.mu.Unlock()
 			s.requests.Done()
 		}()
-	}
-	data, _ := json.Marshal(p)
-	var response any
-	switch method {
-	case "session/new":
-		request, e := decodeRequest[acp.NewSessionRequest](data)
-		if e != nil {
-			return nil, e
+		// Backend reloads may replace the session object. Finish its running
+		// turn first and keep held inputs queued on the same session.
+		if turn != nil {
+			select {
+			case <-turn.done:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
-		response, err = c.agent.NewSession(ctx, request)
-	case "session/resume":
+		c.mu.Lock()
+		if s.closed {
+			c.mu.Unlock()
+			return nil, context.Canceled
+		}
+		s.ready, s.replaying = true, replay
+		s.replaySequence = request.sequence
+		s.workspace = workspace
 		if replay {
-			request, e := decodeRequest[acp.LoadSessionRequest](data)
-			if e != nil {
-				return nil, e
-			}
-			if agent, ok := c.agent.(interface {
-				LoadSession(context.Context, acp.LoadSessionRequest) (acp.LoadSessionResponse, error)
-			}); ok {
-				response, err = agent.LoadSession(ctx, request)
-			} else {
-				err = acp.NewMethodNotFound("session/resume")
-			}
-		} else {
-			request, e := decodeRequest[acp.ResumeSessionRequest](data)
-			if e != nil {
-				return nil, e
-			}
-			response, err = c.agent.ResumeSession(ctx, request)
+			s.reportedEntities = map[string]bool{}
 		}
-	case "session/fork":
-		request, e := decodeRequest[acp.UnstableForkSessionRequest](data)
-		if e != nil {
-			return nil, e
-		}
-		if agent, ok := c.agent.(interface {
-			UnstableForkSession(context.Context, acp.UnstableForkSessionRequest) (acp.UnstableForkSessionResponse, error)
-		}); ok {
-			response, err = agent.UnstableForkSession(ctx, request)
-		} else {
-			err = acp.NewMethodNotFound(method)
-		}
+		s.lastKind, s.lastMessage = "", ""
+		s.replayMessage = 0
+		c.mu.Unlock()
 	}
+	data, err := json.Marshal(p)
 	if err != nil {
 		return nil, err
 	}
-	result := object(response)
-	if newID, ok := result["sessionId"].(string); ok {
-		id = newID
+	response, err := c.openSession(ctx, method, data, replay)
+	if err != nil {
+		return nil, err
+	}
+	if method != "session/resume" {
+		id = string(response.SessionId)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -401,31 +514,44 @@ func (c *v2Connection) setup(ctx context.Context, method string, raw json.RawMes
 		return nil, context.Canceled
 	}
 	s.ready, s.closed = true, false
+	s.workspace = workspace
 	if s.ctx.Err() != nil {
 		s.ctx, s.cancel = context.WithCancel(c.ctx)
 	}
-	s.config = configFromObject(result["configOptions"])
-	if modes := result["modes"]; modes != nil {
-		decodeObject(modes, &s.modes)
-	}
-	result["configOptions"] = v2Config(s.config, s.modes)
-	s.lastConfig = result["configOptions"]
-	delete(result, "modes")
-	if s.commands != nil {
-		result["availableCommands"] = s.commands
+	s.config = response.ConfigOptions
+	if response.Modes != nil {
+		modes := *response.Modes
+		s.modes = &modes
 	}
 	if method == "session/resume" {
-		state := "idle"
-		if s.turn != nil {
-			state = "running"
-			if s.interactions > 0 {
-				state = "requires_action"
+		if replay {
+			if err := c.sendLocked(ctx, id, map[string]any{"sessionUpdate": "replay_complete"}); err != nil {
+				return nil, err
 			}
 		}
-		if err := c.sendLocked(ctx, id, map[string]any{"sessionUpdate": "state_update", "state": state}); err != nil {
+		s.replaying = false
+		for _, raw := range s.afterReplay {
+			var update acp.SessionUpdate
+			if err := json.Unmarshal(raw, &update); err != nil {
+				return nil, err
+			}
+			if err := c.updateLocked(ctx, id, s, update); err != nil {
+				return nil, err
+			}
+		}
+		s.afterReplay = nil
+		if err := c.sendSnapshot(ctx, id, s); err != nil {
 			return nil, err
 		}
 	}
+	result := s.setupResult()
+	if method != "session/resume" {
+		result["sessionId"] = id
+	}
+	if len(response.Meta) > 0 {
+		result["_meta"] = response.Meta
+	}
+	s.lastConfig = result["configOptions"]
 	s.setup = request.sent
 	go func() {
 		select {
@@ -438,16 +564,54 @@ func (c *v2Connection) setup(ctx context.Context, method string, raw json.RawMes
 		if s.setup != request.sent {
 			return
 		}
-		s.setup = nil
-		for _, update := range s.deferred {
-			_ = c.sendLocked(c.ctx, id, update)
-		}
-		s.deferred = nil
+		c.flushSetupLocked(s, id)
 	}()
 	return result, nil
 }
 
-func (c *v2Connection) prompt(ctx context.Context, p acp.PromptRequest) (any, error) {
+func (s *v2Session) setupResult() map[string]any {
+	result := map[string]any{"configOptions": v2Config(s.config, s.modes)}
+	if s.commands != nil {
+		result["availableCommands"] = s.commands
+	}
+	return result
+}
+
+func (c *v2Connection) openSession(ctx context.Context, method string, raw json.RawMessage, replay bool) (acp.NewSessionResponse, error) {
+	switch method {
+	case "session/new":
+		return callRequest(ctx, raw, c.agent.NewSession)
+	case "session/fork":
+		if agent, ok := c.agent.(acp.AgentUnstableForkSession); ok {
+			response, err := callRequest(ctx, raw, agent.UnstableForkSession)
+			return acp.NewSessionResponse(response), err
+		}
+	case "session/resume":
+		var response acp.ResumeSessionResponse
+		var err error
+		if replay {
+			loader, ok := c.agent.(acp.AgentLoader)
+			if !ok {
+				return acp.NewSessionResponse{}, acp.NewMethodNotFound(method)
+			}
+			loaded, loadErr := callRequest(ctx, raw, loader.LoadSession)
+			response, err = acp.ResumeSessionResponse(loaded), loadErr
+		} else {
+			response, err = callRequest(ctx, raw, c.agent.ResumeSession)
+		}
+		return acp.NewSessionResponse{Meta: response.Meta, ConfigOptions: response.ConfigOptions, Modes: response.Modes}, err
+	}
+	return acp.NewSessionResponse{}, acp.NewMethodNotFound(method)
+}
+
+func (c *v2Connection) flushSetupLocked(s *v2Session, id string) {
+	s.setup = nil
+	for _, update := range s.deferred {
+		_ = c.sendLocked(c.ctx, id, update)
+	}
+	s.deferred = nil
+}
+func (c *v2Connection) prompt(ctx context.Context, p acp.PromptRequest, key string) (any, error) {
 	id := string(p.SessionId)
 	request, _ := ctx.Value(v2RequestKey{}).(v2Request)
 	c.mu.Lock()
@@ -458,57 +622,105 @@ func (c *v2Connection) prompt(ctx context.Context, p acp.PromptRequest) (any, er
 	}
 	if s == nil || !s.ready || s.closed {
 		c.mu.Unlock()
-		return nil, acp.NewInvalidParams(map[string]any{"sessionId": id})
+		return nil, SessionNotFound(acp.SessionId(id))
 	}
-	if s.turn != nil || s.restoring {
+	if s.inactiveRestore {
 		c.mu.Unlock()
-		return nil, &acp.RequestError{Code: -32600, Message: "Session already has an active prompt"}
+		return nil, SessionNotFound(p.SessionId)
+	}
+	if messageID := s.receipts[key]; key != "" && messageID != "" {
+		c.mu.Unlock()
+		return map[string]any{"messageId": messageID}, nil
+	}
+	if prior := s.keyed[key]; key != "" && prior != nil {
+		c.mu.Unlock()
+		request.registered()
+		return prior.wait(ctx)
 	}
 	turnCtx, cancel := context.WithCancel(s.ctx)
-	t := &v2Turn{ctx: turnCtx, cancel: cancel, accepted: make(chan struct{}), done: make(chan struct{}), sequence: request.sequence, acknowledged: request.sent}
-	if p.MessageId != nil {
-		t.messageID = *p.MessageId
-	}
-	if t.messageID == "" {
-		t.messageID = uuid.NewString()
-	}
-	p.MessageId = new(t.messageID)
-	stopRequestCancel := context.AfterFunc(ctx, cancel)
+	t := &v2Turn{start: make(chan struct{}), ctx: turnCtx, cancel: cancel, accepted: make(chan struct{}), done: make(chan struct{}), sequence: request.sequence, acknowledged: request.sent}
+	t.messageID = uuid.NewString()
+	turnCtx = harness.WithInputID(turnCtx, t.messageID)
+	var receipt *lockedfile.File
 	accept := func(messageID string) {
-		t.once.Do(func() {
-			if turnCtx.Err() != nil {
-				return
-			}
-			if messageID != "" {
-				t.messageID = messageID
-			}
-			stopRequestCancel()
-			c.mu.Lock()
-			_ = c.sendLocked(turnCtx, id, map[string]any{"sessionUpdate": "user_message", "messageId": t.messageID, "content": p.Prompt})
-			_ = c.sendLocked(turnCtx, id, map[string]any{"sessionUpdate": "state_update", "state": "running"})
-			c.mu.Unlock()
-			close(t.accepted)
-		})
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if t.sealed {
+			return
+		}
+		t.sealed = true
+		if messageID != "" {
+			t.messageID = messageID
+		}
+		if err := finishPromptReceipt(receipt, t.messageID); err != nil {
+			slog.Error("save ACP prompt receipt", "err", err)
+		}
+		receipt = nil
+		c.mu.Lock()
+		if key != "" {
+			s.receipts[key] = t.messageID
+		}
+		_ = c.sendLocked(c.ctx, id, map[string]any{"sessionUpdate": "user_message", "messageId": t.messageID, "content": p.Prompt})
+		_ = c.sendLocked(c.ctx, id, map[string]any{"sessionUpdate": "state_update", "state": "running"})
+		c.mu.Unlock()
+		close(t.accepted)
 	}
-	t.accept = accept
-	s.turn = t
-	s.lastKind, s.lastMessage = "", ""
+	if key != "" {
+		s.keyed[key] = t
+	}
+	s.pending = append(s.pending, t)
+	s.startNext()
+	s.requests.Add(1)
+	request.registered()
 	c.mu.Unlock()
 	go func() {
+		defer s.requests.Done()
 		defer close(t.done)
 		defer cancel()
-		t.response, t.err = c.agent.Prompt(context.WithValue(turnCtx, acceptedPromptKey{}, accept), p)
-		if t.err == nil && t.response.StopReason != acp.StopReasonCancelled {
+		var path, recorded string
+		if key != "" {
+			path, t.err = promptReceiptPath(c.agentName, id, key)
+			if t.err == nil {
+				recorded = recordedPrompt(path)
+			}
+		}
+		if recorded == "" && t.err == nil {
+			select {
+			case <-t.start:
+			case <-turnCtx.Done():
+			}
+			if path != "" && turnCtx.Err() == nil {
+				receipt, recorded, t.err = openPromptReceipt(path)
+			}
+		}
+		if recorded != "" {
+			c.mu.Lock()
+			s.receipts[key] = recorded
+			t.messageID = recorded
+			close(t.accepted)
+			c.mu.Unlock()
+		} else if turnCtx.Err() != nil {
+			t.err = turnCtx.Err()
+		} else if t.err == nil {
+			c.mu.Lock()
+			t.accept = accept
+			c.mu.Unlock()
+			t.response, t.err = c.agent.Prompt(context.WithValue(turnCtx, acceptedPromptKey{}, accept), p)
+		}
+		if recorded == "" && turnCtx.Err() == nil && t.err == nil && t.response.StopReason != acp.StopReasonCancelled {
 			accept("")
 		}
-		stopRequestCancel()
+		t.mu.Lock()
+		t.sealed = true
+		if err := finishPromptReceipt(receipt, ""); err != nil {
+			slog.Error("release ACP prompt receipt", "err", err)
+		}
+		t.mu.Unlock()
 		select {
 		case <-t.accepted:
 			select {
 			case <-t.acknowledged:
 			case <-turnCtx.Done():
-				// A close in the same JSON-RPC batch must be able to finish
-				// before the batch (including this acknowledgement) is written.
 			case <-c.ctx.Done():
 			}
 		default:
@@ -517,6 +729,12 @@ func (c *v2Connection) prompt(ctx context.Context, p acp.PromptRequest) (any, er
 		defer c.mu.Unlock()
 		if s.turn == t {
 			s.turn = nil
+		}
+		s.pending = slices.DeleteFunc(s.pending, func(p *v2Turn) bool { return p == t })
+		delete(s.keyed, key)
+		defer s.startNext()
+		if recorded != "" {
+			return
 		}
 		select {
 		case <-t.accepted:
@@ -534,6 +752,30 @@ func (c *v2Connection) prompt(ctx context.Context, p acp.PromptRequest) (any, er
 		default:
 		}
 	}()
+	return t.wait(ctx)
+}
+
+func (s *v2Session) startNext() {
+	if s.turn == nil && len(s.pending) > 0 && !s.closed && !s.restoring {
+		s.turn = s.pending[0]
+		s.pending = s.pending[1:]
+		s.lastKind, s.lastMessage = "", ""
+		close(s.turn.start)
+	}
+}
+
+func (t *v2Turn) wait(ctx context.Context) (any, error) {
+	// Once accepted, cancelling an RPC must not cancel foreground work.
+	select {
+	case <-ctx.Done():
+		t.mu.Lock()
+		if !t.sealed {
+			t.cancel()
+		}
+		t.mu.Unlock()
+	case <-t.accepted:
+	case <-t.done:
+	}
 	select {
 	case <-t.accepted:
 		return map[string]any{"messageId": t.messageID}, nil
@@ -550,80 +792,69 @@ func (c *v2Connection) prompt(ctx context.Context, p acp.PromptRequest) (any, er
 			return nil, context.Canceled
 		}
 		return nil, fmt.Errorf("backend ended before accepting the prompt")
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
 }
 
-func (c *v2Connection) setConfig(ctx context.Context, raw json.RawMessage) (any, error) {
-	var p map[string]any
-	if json.Unmarshal(raw, &p) != nil || p["type"] != "id" {
-		return nil, acp.NewInvalidParams(map[string]any{"reason": "only id config values are supported"})
+func (s *v2Session) acceptsConfig(option *acp.SetSessionConfigOptionValueId) bool {
+	if s.modes != nil && option.ConfigId == "mode" {
+		return slices.ContainsFunc(s.modes.AvailableModes, func(mode acp.SessionMode) bool {
+			return mode.Id == acp.SessionModeId(option.Value)
+		})
 	}
-	delete(p, "type")
-	id, _ := p["sessionId"].(string)
-	c.mu.Lock()
-	s := c.sessions[id]
-	if s == nil || !s.ready || s.closed {
-		c.mu.Unlock()
-		return nil, acp.NewInvalidParams(map[string]any{"sessionId": id})
-	}
-	mode := s.modes != nil && p["configId"] == "mode"
-	valid := false
-	for _, value := range v2Config(s.config, s.modes) {
-		option := value.(map[string]any)
-		if option["configId"] != p["configId"] {
-			continue
-		}
-		values, _ := option["options"].([]any)
-		for _, value := range values {
-			entry := value.(map[string]any)
-			if entry["value"] == p["value"] {
-				valid = true
-			}
-			if group, ok := entry["options"].([]any); ok {
-				for _, item := range group {
-					if item.(map[string]any)["value"] == p["value"] {
-						valid = true
-					}
+	for _, config := range s.config {
+		if config.Select != nil && config.Select.Id == option.ConfigId {
+			for _, choice := range ConfigValues(config.Select.Options) {
+				if choice.Value == option.Value {
+					return true
 				}
 			}
 		}
 	}
+	return false
+}
+
+func (c *v2Connection) setConfig(ctx context.Context, raw json.RawMessage) (any, error) {
+	request, err := decodeRequest[acp.SetSessionConfigOptionRequest](raw)
+	if err != nil {
+		return nil, err
+	}
+	var kind struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &kind) != nil || kind.Type != "id" || request.ValueId == nil {
+		return nil, acp.NewInvalidParams(map[string]any{"reason": "only id config values are supported"})
+	}
+	option := request.ValueId
+	id := string(option.SessionId)
+	c.mu.Lock()
+	s := c.sessions[id]
+	if s == nil || !s.ready || s.closed {
+		c.mu.Unlock()
+		return nil, SessionNotFound(option.SessionId)
+	}
+	mode := s.modes != nil && option.ConfigId == "mode"
+	valid := s.acceptsConfig(option)
 	c.mu.Unlock()
 	if !valid {
 		return nil, acp.NewInvalidParams(map[string]any{"reason": "unknown config option or value"})
 	}
-	var options []acp.SessionConfigOption
+	var response acp.SetSessionConfigOptionResponse
 	if mode {
-		value, ok := p["value"].(string)
-		if !ok {
-			return nil, acp.NewInvalidParams(nil)
-		}
-		if _, err := c.agent.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: acp.SessionId(id), ModeId: acp.SessionModeId(value)}); err != nil {
-			return nil, err
-		}
-		c.mu.Lock()
-		s.modes.CurrentModeId = acp.SessionModeId(value)
-		options = s.config
-		c.mu.Unlock()
+		_, err = c.agent.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: option.SessionId, ModeId: acp.SessionModeId(option.Value)})
 	} else {
-		data, _ := json.Marshal(p)
-		request, err := decodeRequest[acp.SetSessionConfigOptionRequest](data)
-		if err != nil {
-			return nil, err
-		}
-		response, err := c.agent.SetSessionConfigOption(ctx, request)
-		if err != nil {
-			return nil, err
-		}
-		options = response.ConfigOptions
+		response, err = c.agent.SetSessionConfigOption(ctx, request)
+	}
+	if err != nil {
+		return nil, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s = c.sessionLocked(id)
-	s.config = options
-	converted := v2Config(options, s.modes)
+	if mode {
+		s.modes.CurrentModeId = acp.SessionModeId(option.Value)
+	} else {
+		s.config = response.ConfigOptions
+	}
+	converted := v2Config(s.config, s.modes)
 	if err := c.sendLocked(ctx, id, map[string]any{"sessionUpdate": "config_option_update", "configOptions": converted}); err != nil {
 		return nil, err
 	}

@@ -24,7 +24,8 @@ const procThreadAttributePseudoConsole = 0x00020016
 //
 // I/O flows through two anonymous pipes: what we write reaches the child's stdin;
 // what the child writes to stdout/stderr we read back. ConPTY has no notion of a
-// foreground process group, so HasForegroundProcess is always false.
+// foreground process group, so HasForegroundProcess looks for the processes the
+// shell started instead.
 type windowsPTY struct {
 	in  *os.File
 	out *os.File
@@ -211,6 +212,31 @@ func (p *windowsPTY) ProcessID() int {
 // always treated as idle. Callers use this only to warn before closing a busy
 // terminal; on Windows that guard is simply skipped.
 func (p *windowsPTY) HasForegroundProcess() bool {
+	if p.process == nil {
+		return false
+	}
+	select {
+	case <-p.waited:
+		return false
+	default:
+	}
+	return hasChildProcess(uint32(p.process.Pid))
+}
+
+// hasChildProcess reports whether a process started another that still runs:
+// a shell at its prompt has none, one that runs a command has that command.
+func hasChildProcess(pid uint32) bool {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(snapshot)
+	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	for err = windows.Process32First(snapshot, &entry); err == nil; err = windows.Process32Next(snapshot, &entry) {
+		if entry.ParentProcessID == pid && entry.ProcessID != pid {
+			return true
+		}
+	}
 	return false
 }
 
