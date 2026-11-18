@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/adrianliechti/go-extract v0.0.0-20261029154039-97b29af3f71f
-	github.com/adrianliechti/go-shell v0.1.10
+	github.com/adrianliechti/go-shell v0.1.12
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/bmatcuk/doublestar/v4 v4.10.4
 	github.com/coder/acp-go-sdk v0.20.0

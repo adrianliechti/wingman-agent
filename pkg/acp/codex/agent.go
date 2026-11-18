@@ -756,6 +756,9 @@ func (a *Agent) LoadSession(ctx context.Context, params acpsdk.LoadSessionReques
 		ModelProvider: a.resumeModelProvider(ctx),
 		Config:        sessionConfig(cwd, additional, params.McpServers),
 	})
+	if isMissingThreadError(err) {
+		return acpsdk.LoadSessionResponse{}, acp.SessionNotFound(params.SessionId)
+	}
 	if err != nil {
 		if isUnknownThreadError(err) {
 			return acpsdk.LoadSessionResponse{}, acp.SessionNotFound(params.SessionId)

@@ -33,7 +33,6 @@ export type ServerMessage = {
 		| "files_changed"
 		| "diffs_changed"
 		| "git_index_changed"
-		| "sessions_changed"
 		| "diagnostics_changed"
 		| "workspace_changed"
 		| "tasks_changed"

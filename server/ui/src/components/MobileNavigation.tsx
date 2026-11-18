@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useWorkspace } from "../state/workspaceContext.ts";
 import { useAgents } from "../hooks/useAgents.ts";
 import { formatAgentName } from "../utils/agents";
-import { AgentSessions } from "./AgentSessions";
+import { SessionsPanel } from "./SessionsPanel";
 import { Dialog } from "./ui/Feedback";
 
 interface Props {
@@ -11,10 +11,13 @@ interface Props {
 	connected: boolean;
 	running: boolean;
 	currentSessionId: string;
-	runningSessionIds: Set<string>;
+	/** Sessions that wait for the user, counted on the menu button. */
+	needsInput: number;
 	onSelectBackend: (id: string) => void;
 	onSelectSession: (id: string) => void;
 	onDeleteSession: (id: string, title: string) => void;
+	onForkSession: (id: string) => void;
+	onOpenProject: (uri: string, name: string) => void;
 	onNewSession: () => void;
 	onBackToChat?: () => void;
 }
@@ -35,11 +38,23 @@ export function MobileNavigation(props: Props) {
 				<div className="flex h-14 items-center gap-2 px-2">
 					<button
 						type="button"
-						className="flex size-11 shrink-0 items-center justify-center rounded-lg text-fg-muted active:bg-bg-hover"
-						aria-label="Show sessions"
+						className="relative flex size-11 shrink-0 items-center justify-center rounded-lg text-fg-muted active:bg-bg-hover"
+						aria-label={
+							props.needsInput
+								? `Show sessions, ${props.needsInput} ${props.needsInput === 1 ? "needs" : "need"} you`
+								: "Show sessions"
+						}
 						onClick={() => setOpen(true)}
 					>
 						<Menu size={21} />
+						{props.needsInput > 0 && (
+							<span
+								aria-hidden="true"
+								className="absolute top-1.5 right-1 min-w-[16px] rounded-full bg-warning px-1 text-center text-[10px] leading-4 font-semibold text-bg tabular-nums"
+							>
+								{props.needsInput}
+							</span>
+						)}
 					</button>
 					{backends.length > 1 ? (
 						<select
@@ -97,10 +112,9 @@ export function MobileNavigation(props: Props) {
 					data-mobile-sessions
 					className="h-[60dvh] min-h-0 w-full overflow-hidden"
 				>
-					<AgentSessions
+					<SessionsPanel
 						touch
 						currentSessionId={props.currentSessionId}
-						runningSessionIds={props.runningSessionIds}
 						onSessionSelect={(id) => {
 							close();
 							props.onSelectSession(id);
@@ -108,6 +122,14 @@ export function MobileNavigation(props: Props) {
 						onSessionDelete={(id, title) => {
 							close();
 							props.onDeleteSession(id, title);
+						}}
+						onSessionFork={(id) => {
+							close();
+							props.onForkSession(id);
+						}}
+						onOpenProject={(uri, name) => {
+							close();
+							props.onOpenProject(uri, name);
 						}}
 					/>
 				</div>

@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,11 @@ import (
 type Agent struct {
 	workspace *code.Workspace
 	def       code.AgentDef
+	// login is what the agent asks of a user who has not logged in yet, by
+	// the method loginMethod, and title how it names itself.
+	login       string
+	loginMethod string
+	title       string
 
 	cmd           *exec.Cmd
 	stdin         io.WriteCloser
@@ -328,7 +334,7 @@ func New(ctx context.Context, ws *code.Workspace, def code.AgentDef) (*Agent, er
 func NewInProcess(
 	ctx context.Context,
 	ws *code.Workspace,
-	name string,
+	def code.AgentDef,
 	serverAgent acpsdk.Agent,
 	setupServer func(*acpsdk.AgentSideConnection),
 	cleanup func() error,
@@ -338,7 +344,7 @@ func NewInProcess(
 
 	a := &Agent{
 		workspace: ws,
-		def:       code.AgentDef{Name: name},
+		def:       def,
 		stdin:     acp.NewConnectionWriter(clientW, 0),
 		stdout:    clientR,
 		sessions:  map[string]*sessionState{},
@@ -370,9 +376,11 @@ func NewInProcess(
 	resp, err := a.initialize(ctx, v1)
 	if err != nil {
 		a.shutdown()
-		return nil, fmt.Errorf("agent %q: initialize: %w", name, err)
+		return nil, fmt.Errorf("agent %q: initialize: %w", def.Name, err)
 	}
 	a.caps = resp.AgentCapabilities
+	a.login, a.loginMethod = loginHint(resp.AuthMethods)
+	a.title = agentTitle(resp.AgentInfo)
 	return a, nil
 }
 
@@ -552,21 +560,38 @@ func (s *sessionState) applyModes(modes *acpsdk.SessionModeState) {
 	s.modeID = string(modes.CurrentModeId)
 }
 
+// ListSessions lists the sessions of the agent's workspace.
 func (a *Agent) ListSessions(ctx context.Context) ([]code.SessionInfo, error) {
+	cwd := a.workspace.RootPath
+	return a.listSessions(ctx, &cwd)
+}
+
+// ListsAllSessions reports whether the agent, asked without a folder, lists
+// the sessions of every folder. Only agents known to do so are asked: another
+// may answer with its own folder's sessions, or with none.
+func (a *Agent) ListsAllSessions() bool {
+	return a.def.AllFolders && a.caps.SessionCapabilities.List != nil
+}
+
+// ListAllSessions lists the sessions of every folder, each with its own.
+func (a *Agent) ListAllSessions(ctx context.Context) ([]code.SessionInfo, error) {
+	return a.listSessions(ctx, nil)
+}
+
+func (a *Agent) listSessions(ctx context.Context, cwd *string) ([]code.SessionInfo, error) {
 	if a.caps.SessionCapabilities.List == nil {
 		return nil, nil
 	}
-	cwd := a.workspace.RootPath
 	var cursor *string
 	seen := map[string]bool{}
 	var out []code.SessionInfo
 	for {
-		resp, err := a.conn.ListSessions(ctx, acpsdk.ListSessionsRequest{Cwd: &cwd, Cursor: cursor})
+		resp, err := a.conn.ListSessions(ctx, acpsdk.ListSessionsRequest{Cwd: cwd, Cursor: cursor})
 		if err != nil {
-			return nil, err
+			return nil, a.loginError(err)
 		}
 		for _, s := range resp.Sessions {
-			info := code.SessionInfo{ID: string(s.SessionId)}
+			info := code.SessionInfo{ID: string(s.SessionId), Dir: s.Cwd}
 			if s.Title != nil {
 				info.Title = *s.Title
 			}
@@ -599,9 +624,11 @@ func (a *Agent) ListSessions(ctx context.Context) ([]code.SessionInfo, error) {
 }
 
 func (a *Agent) NewSession(ctx context.Context) (string, error) {
-	resp, err := a.conn.NewSession(ctx, acpsdk.NewSessionRequest{
-		Cwd:        a.workspace.RootPath,
-		McpServers: []acpsdk.McpServer{},
+	resp, err := withLogin(ctx, a, func() (acpsdk.NewSessionResponse, error) {
+		return a.conn.NewSession(ctx, acpsdk.NewSessionRequest{
+			Cwd:        a.workspace.RootPath,
+			McpServers: []acpsdk.McpServer{},
+		})
 	})
 	if err != nil {
 		return "", err
@@ -637,6 +664,92 @@ func (a *Agent) NewSession(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return id, nil
+}
+
+// authRequired is ACP's error for a user who has not logged in to the agent.
+const authRequired = -32000
+
+// loginHint is what an agent asks of a user who has not logged in, from the
+// first login method it offers: its description, else its name. It has an id
+// when the agent takes the login up itself through `authenticate`; one the
+// user makes in a terminal is not passed to it.
+func loginHint(methods []acpsdk.AuthMethod) (hint, id string) {
+	for _, method := range methods {
+		var name string
+		var description *string
+		switch {
+		case method.Agent != nil:
+			id, name, description = string(method.Agent.Id), method.Agent.Name, method.Agent.Description
+		case method.Terminal != nil:
+			name, description = method.Terminal.Name, method.Terminal.Description
+		default:
+			continue
+		}
+		if description != nil && *description != "" {
+			return *description, id
+		}
+		return name, id
+	}
+	return "", ""
+}
+
+// withLogin runs a request the user asked for. An agent that wants a login
+// is asked to take up the one the user made, such as with `copilot login` in
+// a terminal, which it read only when it started, and the request runs once
+// more.
+func withLogin[T any](ctx context.Context, a *Agent, call func() (T, error)) (T, error) {
+	result, err := call()
+	var request *acpsdk.RequestError
+	if !errors.As(err, &request) || request.Code != authRequired || a.loginMethod == "" {
+		return result, a.loginError(err)
+	}
+	// Only a connection of the first protocol version takes a login up.
+	login, ok := a.conn.(interface {
+		Authenticate(context.Context, acpsdk.AuthenticateRequest) (acpsdk.AuthenticateResponse, error)
+	})
+	if !ok {
+		return result, a.loginError(err)
+	}
+	if _, authErr := login.Authenticate(ctx, acpsdk.AuthenticateRequest{MethodId: acpsdk.AuthMethodId(a.loginMethod)}); authErr != nil {
+		return result, a.loginError(err)
+	}
+	result, err = call()
+	return result, a.loginError(err)
+}
+
+// agentTitle is how an agent names itself.
+func agentTitle(info *acpsdk.Implementation) string {
+	if info == nil {
+		return ""
+	}
+	if info.Title != nil && *info.Title != "" {
+		return *info.Title
+	}
+	return info.Name
+}
+
+// loginError tells a user who has not logged in to the agent how to, where
+// the agent only answers "authentication required".
+func (a *Agent) loginError(err error) error {
+	var request *acpsdk.RequestError
+	if !errors.As(err, &request) || request.Code != authRequired {
+		return err
+	}
+	name := cmp.Or(a.title, a.def.Name, "The agent")
+	if a.login == "" {
+		return fmt.Errorf("%s needs you to log in: %w", name, err)
+	}
+	return fmt.Errorf("%s needs you to log in: %s", name, a.login)
+}
+
+// notFound tells a session the agent does not have, which it answers with
+// "resource not found", from other failures to load one.
+func notFound(err error, id string) error {
+	var request *acpsdk.RequestError
+	if errors.As(err, &request) && request.Code == acp.CodeResourceNotFound {
+		return fmt.Errorf("%w: %s", code.ErrSessionNotFound, id)
+	}
+	return err
 }
 
 func (a *Agent) LoadSession(ctx context.Context, id string) error {
@@ -733,28 +846,32 @@ func (a *Agent) loadSessionStream(ctx context.Context, id string, snapshots bool
 			defer close(responseDone)
 			defer cancelRPC()
 			if a.caps.LoadSession {
-				resp, err := a.conn.LoadSession(rpcCtx, acpsdk.LoadSessionRequest{
-					SessionId:  acpsdk.SessionId(id),
-					Cwd:        a.workspace.RootPath,
-					McpServers: []acpsdk.McpServer{},
+				resp, err := withLogin(rpcCtx, a, func() (acpsdk.LoadSessionResponse, error) {
+					return a.conn.LoadSession(rpcCtx, acpsdk.LoadSessionRequest{
+						SessionId:  acpsdk.SessionId(id),
+						Cwd:        a.workspace.RootPath,
+						McpServers: []acpsdk.McpServer{},
+					})
 				})
 				if err == nil {
 					a.refreshConfig(sess, resp.ConfigOptions)
 					sess.applyModes(resp.Modes)
 				}
-				loadErrCh <- err
+				loadErrCh <- notFound(err, id)
 				return
 			}
-			resp, err := a.conn.ResumeSession(rpcCtx, acpsdk.ResumeSessionRequest{
-				SessionId:  acpsdk.SessionId(id),
-				Cwd:        a.workspace.RootPath,
-				McpServers: []acpsdk.McpServer{},
+			resp, err := withLogin(rpcCtx, a, func() (acpsdk.ResumeSessionResponse, error) {
+				return a.conn.ResumeSession(rpcCtx, acpsdk.ResumeSessionRequest{
+					SessionId:  acpsdk.SessionId(id),
+					Cwd:        a.workspace.RootPath,
+					McpServers: []acpsdk.McpServer{},
+				})
 			})
 			if err == nil {
 				a.refreshConfig(sess, resp.ConfigOptions)
 				sess.applyModes(resp.Modes)
 			}
-			loadErrCh <- err
+			loadErrCh <- notFound(err, id)
 		}()
 
 		for {
@@ -806,6 +923,9 @@ func (a *Agent) DeleteSession(ctx context.Context, id string) error {
 	_, err := a.conn.DeleteSession(ctx, acpsdk.DeleteSessionRequest{
 		SessionId: acpsdk.SessionId(id),
 	})
+	if errors.Is(notFound(err, id), code.ErrSessionNotFound) {
+		err = nil // Deletion is idempotent when the agent already removed it.
+	}
 	if err == nil {
 		a.mu.Lock()
 		delete(a.sessions, id)
@@ -1095,6 +1215,10 @@ func (a *Agent) Cancel(id string) {
 }
 
 func (a *Agent) Close() error {
+	// An agent that never started has nothing to close.
+	if a == nil {
+		return nil
+	}
 	a.shutdown()
 	return nil
 }

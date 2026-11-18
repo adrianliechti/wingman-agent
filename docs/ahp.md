@@ -58,22 +58,23 @@ same-origin Web UI.
 
 ## One host for every project
 
-`wingman host` serves any project: a session names its working directory and
-the host opens that project when the session is created or reopened.
-`wingman server` is the same host, rooted at the directory it was started in,
-with the web UI for that directory's project.
+`wingman host` serves any project in any folder: a session names its working
+directory and the host opens that project when the session is created or
+reopened. The desktop app's host does the same; its windows show one project
+each (see [windows for every project](#windows-for-every-project)).
+`wingman server` is the same host with a web UI, for the directory it was
+started in and no other: it opens no second project, lists that directory's
+sessions, and refuses sessions and file access outside it with AHP
+`PermissionDenied`.
 
 ```bash
-wingman host --root ~/Projects --token "$(openssl rand -hex 16)"
+wingman host --token "$(openssl rand -hex 16)"
 ```
 
 The host prints its address, normally `ws://localhost:9100/ahp`, and has no
 web UI. Add it in VS Code like any other host and choose a folder per session;
-the folder picker starts in the host's root.
+the folder picker starts in the home directory.
 
-- `--root PATH` limits the directories the host serves; the default is the
-  home directory. Sessions and file access outside it are refused with AHP
-  `PermissionDenied`.
 - `--token TOKEN` (or `WINGMAN_HOST_TOKEN`) is required from every client as
   the `tkn` query parameter, which VS Code sends from a host entry's
   `connectionToken`. Without a token the endpoint is open to local clients,
@@ -99,9 +100,79 @@ namespace. A project owns its agents, sessions, terminals, file watches and
 changesets, and is the directory its sessions work in. Sessions carry it as
 the protocol's `project` (`uri` and `displayName`), with links in the
 directory resolved; a directory reached through a link opens the project it
-leads to. On `wingman server` the web UI, `/lsp`, `/dap` and the REST routes
-describe the project of its directory, which stays open; projects below it
-open on demand as on any host, and the REST routes refuse their chats.
+leads to. On `wingman server` each browser window shows one project, and its
+web UI, `/lsp`, `/dap` and REST routes describe that project. The project of
+the start directory stays open; others open when a window or a session names
+them and close like any project once idle. A window's REST routes refuse the
+chats of other projects.
+
+### Sessions of every folder
+
+`listSessions` asks each started agent that keeps one list for every folder
+(Claude, Codex, Copilot and Pi, and agents marked `"allFolders": true` in
+`agents.json`) once for the sessions of every folder (`session/list` without
+`cwd`) and lists each in its own folder, with the canonical URI of that
+folder's project; other agents list the sessions of the open projects.
+A session whose folder no longer exists is left out unless its project is
+open, and a `wingman server` asks only for its own folder. A client that starts an agent just to have its
+sessions listed says so with `_meta["wingman.listing"]` on
+`resolveSessionConfig`; an agent that lists every folder then runs once, in
+the host's start project, however many windows ask. The host
+reuses an agent's list for 30 seconds and forgets it when it deletes a
+session. An agent answers a session it does not have with ACP's "resource not
+found" (`-32002`); the host then forgets the saved session, tells clients with
+`root/sessionRemoved`, and answers `SessionNotFound`. "Authentication
+required" (`-32000`) on creating or loading a session makes the host call
+`authenticate` with the login method the agent offered in `initialize`, so it
+takes up a login the user made since, and try once more; otherwise the error
+says how to log in. `disposeSession` of a session no client has open deletes it
+without loading it: an ACP agent deletes it by its id from any folder, and
+Wingman's own agent from where it kept it, so its folder may be gone. The
+`session/isReadChanged` and `session/isArchivedChanged` actions of such a
+session change what the host saved of it, without loading it either.
+
+### Windows for every project
+
+The desktop app's server keeps one window server per project a window shows,
+on the same host, so switching projects stops no agent. A window names its
+project once, when it asks for its workspace: `GET /api/workspace?project=<directory or file
+URI>` opens the project and answers its scope; the launcher sends the same
+request when a window opens a folder.
+Without `project` the answer is the start directory's. Any website can send a
+browser to the address of a `wingman server`, and opening a project starts
+tools such as language servers that may run its code, so that server opens
+its own directory only and refuses any other with 403; the desktop app's host
+answers only its windows, which hold its token. Every later request carries the
+project's instance (`X-Wingman-Instance`, or `instance` on WebSockets, content
+and preview URLs), and the server routes it to that project's window server;
+an instance it does not know is answered with 409, as for a replaced
+workspace. The scope adds `host`, the host process, which a
+window compares with the root's `_meta["wingman.host"]` when it reconnects;
+`directory`, the URI where it creates sessions (`workingDirectories`),
+resolves session configuration (`workingDirectory`) and opens terminals
+(`cwd`); and `project`, the same directory with its links resolved, as saved
+sessions name it. `GET /api/workspace/terminals` lists the terminals of the
+window's project, since the root lists those of every project. Browser
+preferences belong to the server and apply to all windows. In the desktop app,
+**Open Folder** opens the folder on the running host and moves the window
+there.
+
+Every launch of the desktop app is a process of its own, but all of them share
+one host. The first window that opens a folder starts the host in the
+background, from the same executable (`--background-host`), and the host
+announces its loopback address and a random token in
+`WINGMAN_HOME/app/host.json` (0600). A window forwards its page, API and
+WebSocket requests to that address with the token; the host refuses requests
+without it. Windows find or start the host under a lock (`host.lock`), so two
+that start at once agree on one. The host stops a minute after no window used
+it, unless an agent works, a task runs or a terminal runs a command; schedules
+wait for the next start, as they do when the app is closed. Before it stops it
+removes its state under the same lock, so it never stops while a window
+connects. A window of another build stops an unused host and starts its own,
+and uses a host in use as it is. A window whose host died starts another, and
+its page reloads its project there. **New Window** opens another window of the same
+process on macOS (go-shell's `NewWindow`) and starts another process of the
+app on Windows. A window whose address names no `project` shows the start page.
 
 In the server package, `Host` owns connections, ordered publication, saved
 session identities, and the project registry. `Project` owns the workspace,
@@ -162,9 +233,10 @@ Channels a project names itself carry the project:
 `ahp-terminal:/wingman/<project>/<id>`, and a third path segment with the
 project directory on unaliased session URIs. Clients read them from session
 and root state; the web UI takes its project's namespace (`wingman/<project>`)
-from `/api/workspace`. The `wingman.workspace` root metadata and the
-`x-wingman/workspaceChanged` notification exist only on `wingman server`, for
-the web UI's project.
+from `/api/workspace`. The `wingman.workspace` root metadata exists only on
+`wingman server`, for the start directory's project. The
+`x-wingman/workspaceChanged` notification is sent for each project a window
+shows, with its `workspace` id, and a window follows only its own.
 
 ## Shared host and browser architecture
 
@@ -284,6 +356,23 @@ controller remains the single authority when browser and IDE clients act
 concurrently. Retry receipts are bounded and scoped to a running host; they do
 not survive a server restart. Session and chat URI mappings are saved under
 `WINGMAN_HOME/ahp`.
+
+Session summaries carry what a list needs without subscribing to each session.
+`activity` names what the session waits for (an approval's or question's first
+line) or does (a retry, compaction or tool progress, else its latest tool with
+its intention or file); it is empty when idle, and `root/sessionSummaryChanged`
+sends `""` to clear it. `changes` counts the lines and files the builtin
+agent's turns changed, net per file and without undone turns, recounted when a
+turn ends, after an undo or a rewind, and when the session loads; a fork's
+copied history is not counted again. Sessions keep both, with their read flag,
+for listing while their project is closed.
+
+A chat is unread from the start or end of a live turn until a client marks it
+read with `chat/isReadChanged`; replaying history when a session loads does not
+mark it. Reducers do not clear the flag for a turn's end, so the host announces
+it. A session is unread once one of its chats is and read when a client reads
+all of them; `session/isReadChanged` sets every chat. Sessions saved before
+this, and native sessions no client opened, list as read.
 
 Sessions and chats are identified only by their AHP URIs. A native session that
 was never given an alias is reachable at
@@ -437,8 +526,9 @@ Side chats, chats from other providers, TCP channels, experimental channel
 windows, and protocol-native automations are not advertised. Chat drafts and a chat's own read and archived flags last while its project is open.
 The remaining Wingman extensions are the `x-wingman/workspaceChanged` root
 notification (`files_changed`, `workspace_changed`, `skills_changed` and
-`tasks_changed`), the root's `_meta["wingman.workspace"]` identity used to
-detect a replaced workspace, and `createTerminal`'s `_meta["wingman.shell"]`.
+`tasks_changed`), the root's `_meta["wingman.host"]` and
+`_meta["wingman.workspace"]` identities used to detect a replaced host or
+workspace, and `createTerminal`'s `_meta["wingman.shell"]`.
 Sessions, models, terminals and Git changes reach clients through the standard
 root notifications and changeset channels. Wingman also follows VS Code's
 `_meta` conventions: `vscode.agentHost.resources` on the root, `toolKind` on tool

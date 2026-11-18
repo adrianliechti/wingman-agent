@@ -4,10 +4,6 @@ import type { ServerMessage } from "../types/protocol";
 export const queryKeys = {
 	all: ["server"] as const,
 	workspace: ["server", "workspace"] as const,
-	sessions: {
-		all: ["server", "sessions"] as const,
-		list: (backend: string) => ["server", "sessions", "list", backend] as const,
-	},
 	skills: {
 		all: ["server", "skills"] as const,
 		list: ["server", "skills", "list"] as const,
@@ -133,9 +129,6 @@ export function invalidateForServerMessage(
 	switch (message.type) {
 		case "workspace_changed":
 			invalidate(queryKeys.workspace);
-			break;
-		case "sessions_changed":
-			invalidate(queryKeys.sessions.all);
 			break;
 		case "skills_changed":
 			invalidate(queryKeys.skills.all);

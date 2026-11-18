@@ -58,5 +58,5 @@ func ResolvePath(path, cwd string) string {
 
 // SessionNotFound identifies a missing or inactive session on the wire.
 func SessionNotFound(id acp.SessionId) *acp.RequestError {
-	return acp.NewRequestError(-32002, "Resource not found", map[string]any{"sessionId": id})
+	return acp.NewRequestError(CodeResourceNotFound, "Resource not found", map[string]any{"sessionId": id})
 }

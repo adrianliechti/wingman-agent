@@ -1,4 +1,5 @@
 import type { Page, WebSocketRoute } from "@playwright/test";
+import { SessionStatus } from "../src/state/ahpValues.ts";
 import {
 	canonicalChatURI,
 	chatToSession,
@@ -18,6 +19,13 @@ export type FixtureSession = Saved & {
 	entries: ChatEntry[];
 	phase: string;
 	activity?: string;
+	/** What the session list shows: status bits, what it does, the lines it changed. */
+	listed?: {
+		status?: number;
+		activity?: string;
+		changes?: { additions: number; deletions: number; files: number };
+		project?: { uri: string; displayName: string };
+	};
 	settings: ReturnType<typeof emptySession>["settings"];
 	prompts: PendingPrompt[];
 	pendingInputs: PendingTurnInput[];
@@ -62,6 +70,8 @@ export class AHPFixture {
 	sequence = 0;
 	directory = "";
 	onLoad = (_session: FixtureSession) => {};
+	/** Whether the host lists a session, as an agent that has not started lists none. */
+	listable = (_session: FixtureSession) => true;
 	onCreate?: (params: any) => Promise<FixtureSession>;
 	onCommand?: (command: any, session: FixtureSession) => Promise<void>;
 	onCompletions?: (params: any, session: FixtureSession) => any[];
@@ -92,16 +102,48 @@ export class AHPFixture {
 		);
 	}
 	summary(session: FixtureSession) {
+		// Idle and read, as the host lists a session no client left unread.
+		const status =
+			session.listed?.status ?? SessionStatus.Idle | SessionStatus.IsRead;
 		return {
 			resource: session.resource,
 			provider: session.backend,
 			title: session.title,
-			status: 1,
+			status,
+			...(session.listed?.activity
+				? { activity: session.listed.activity }
+				: {}),
+			...(session.listed?.changes ? { changes: session.listed.changes } : {}),
+			...(session.listed?.project ? { project: session.listed.project } : {}),
 			createdAt: session.updated_at,
 			modifiedAt: session.updated_at,
 			defaultChat: chatURI(session.resource),
-			chats: [{ resource: chatURI(session.resource), title: session.title }],
+			chats: [
+				{ resource: chatURI(session.resource), title: session.title, status },
+			],
 		};
+	}
+	/** Sends a root notification, such as a summary change, to every client. */
+	notifyRoot(method: string, params: unknown) {
+		for (const peer of this.connections)
+			peer.send(JSON.stringify({ jsonrpc: "2.0", method, params }));
+	}
+	/** The approvals a busy session waits on, as the host lists them in its state. */
+	inputNeeded(session: FixtureSession) {
+		const chat = this.chat(session);
+		return (chat.activeTurn?.responseParts ?? [])
+			.filter(
+				(part: any) =>
+					part.kind === "toolCall" &&
+					part.toolCall.status === "pending-confirmation",
+			)
+			.map((part: any) => ({
+				id: part.toolCall.toolCallId,
+				kind: "toolConfirmation",
+				chat: chat.resource,
+				turnId: chat.activeTurn.id,
+				toolCall: part.toolCall,
+			}));
 	}
 	values(session: FixtureSession) {
 		const { model, mode, effort, unattended } = session.settings;
@@ -161,6 +203,7 @@ export class AHPFixture {
 				schema: { type: "object", properties },
 				values: this.values(session),
 			},
+			inputNeeded: this.inputNeeded(session),
 		};
 	}
 	tool(entry: ChatEntry) {
@@ -516,7 +559,9 @@ export class AHPFixture {
 					}
 					if (request.method === "listSessions") {
 						reply({
-							items: [...this.sessions.values()].map((s) => this.summary(s)),
+							items: [...this.sessions.values()]
+								.filter((s) => this.listable(s))
+								.map((s) => this.summary(s)),
 						});
 						return;
 					}

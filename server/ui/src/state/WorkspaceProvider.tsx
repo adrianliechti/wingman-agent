@@ -1,6 +1,10 @@
 import { useState, useSyncExternalStore, type ReactNode } from "react";
 import { WorkspaceContext, type SettingsPatch } from "./workspaceContext.ts";
-import { workspaceClient } from "./workspaceClient.ts";
+import {
+	projectHref,
+	windowProject,
+	workspaceClient,
+} from "./workspaceClient.ts";
 import { useRootAgents } from "../hooks/useAgents.ts";
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
@@ -44,7 +48,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 					<button
 						type="button"
 						className="cursor-pointer rounded border border-border px-3 py-1.5"
-						onClick={() => location.assign("/")}
+						onClick={() => {
+							const project = windowProject();
+							location.assign(project ? projectHref(project) : "/");
+						}}
 					>
 						Reload workspace
 					</button>

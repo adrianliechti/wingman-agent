@@ -90,6 +90,8 @@ func (a *Agent) connectExternal(ctx context.Context, in io.Reader) error {
 			return err
 		}
 		a.caps = v1.AgentCapabilities
+		a.login, a.loginMethod = loginHint(v1.AuthMethods)
+		a.title = agentTitle(v1.AgentInfo)
 		a.conn = sdk.NewClientSideConnection(a, a.stdin, reader)
 	case 2:
 		session := response.Capabilities.Session
@@ -109,6 +111,7 @@ func (a *Agent) connectExternal(ctx context.Context, in io.Reader) error {
 		if session.Delete != nil {
 			a.caps.SessionCapabilities.Delete = &sdk.SessionDeleteCapabilities{}
 		}
+		a.title = agentTitle(response.Info)
 		a.conn = newRemoteV2(a, a.stdin, reader)
 	default:
 		return fmt.Errorf("unsupported ACP protocol version %d", response.ProtocolVersion)

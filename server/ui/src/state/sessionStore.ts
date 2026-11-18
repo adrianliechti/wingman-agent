@@ -8,7 +8,16 @@ import type { ModelInfo } from "../api/models.ts";
 import type { ModeOption } from "../api/sessions.ts";
 import { summarizeSession, type SessionSummary } from "./sessionSummary.ts";
 
-export type WorkspaceScope = { workspaceId: string; instanceId: string };
+export type WorkspaceScope = {
+	workspaceId: string;
+	instanceId: string;
+	/** The host process; a host serves the windows of several projects. */
+	host?: string;
+	/** The project's directory URI, where its sessions, terminals and files are. */
+	directory?: string;
+	/** The project's URI with its links resolved, as saved sessions name it. */
+	project?: string;
+};
 export type SessionSettings = {
 	models: ModelInfo[];
 	model: string;

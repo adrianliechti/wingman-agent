@@ -31,7 +31,10 @@ import {
 	type SessionView,
 } from "./sessionStore.ts";
 
-function display(value: string | { markdown: string } | undefined): string {
+/** The words of a text the host sends plain or as Markdown. */
+export function display(
+	value: string | { markdown: string } | undefined,
+): string {
 	return typeof value === "string" ? value : (value?.markdown ?? "");
 }
 function strings(property?: ConfigPropertySchema): string[] {

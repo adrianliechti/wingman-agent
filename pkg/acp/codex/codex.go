@@ -656,6 +656,17 @@ func isMissingRolloutError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no rollout found for thread id")
 }
 
+// isMissingThreadError reports that Codex keeps no thread under an ID. Unlike
+// isUnknownThreadError it leaves out other "not found" failures, such as a
+// model a resume names, which do not mean the session is gone.
+func isMissingThreadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no rollout found") || strings.Contains(msg, "invalid thread id:") || strings.Contains(msg, "invalid session id:")
+}
+
 // isUnknownThreadError reports that Codex has no persisted thread under an ID,
 // including IDs it cannot parse: ACP session IDs are opaque strings.
 func isUnknownThreadError(err error) bool {
@@ -663,9 +674,7 @@ func isUnknownThreadError(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "no rollout found") || strings.Contains(msg, "thread not loaded:") ||
-		strings.Contains(msg, "invalid thread id:") || strings.Contains(msg, "invalid session id:") ||
-		strings.Contains(strings.ToLower(msg), "not found")
+	return isMissingThreadError(err) || strings.Contains(msg, "thread not loaded:") || strings.Contains(strings.ToLower(msg), "not found")
 }
 
 func (c *codexClient) threadReadWithHistory(ctx context.Context, threadID string) (threadReadResponse, error) {

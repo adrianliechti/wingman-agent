@@ -28,8 +28,9 @@ import {
 } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 test.use({
 	extraHTTPHeaders: { "X-Wingman-Instance": process.env.E2E_INSTANCE ?? "" },
@@ -346,13 +347,19 @@ async function mockACPBackend(
 	return control;
 }
 
+function sessionsPanel(page: Page) {
+	return page
+		.locator("[data-sessions-panel]")
+		.getByRole("navigation", { name: "Sessions", exact: true });
+}
+
+/** Opens the window's session list, which a window remembers open. */
 async function openSessions(page: Page) {
-	await page
-		.getByRole("button", { name: "Show sessions", exact: true })
-		.click();
-	await expect(
-		page.locator('[data-chat-auxiliary-panel][data-view="sessions"]'),
-	).toBeVisible();
+	const toggle = page.getByRole("button", { name: /^(Show|Hide) sessions$/ });
+	await expect(toggle).toBeVisible();
+	if ((await toggle.getAttribute("aria-pressed")) !== "true")
+		await toggle.click();
+	await expect(sessionsPanel(page)).toBeVisible();
 }
 
 async function resetCompletionFile(_request: APIRequestContext) {
@@ -3518,18 +3525,8 @@ test("keeps scheduled-agent actions above inspector clipping", async ({
 		name: "Show agents",
 		exact: true,
 	});
-	const sessionsButton = page.getByRole("button", {
-		name: /^(Show|Hide) sessions$/,
-	});
 	await expect(showAgentsButton).toBeVisible({ timeout: 7000 });
 	await expect(showAgentsButton).toHaveAttribute("aria-pressed", "false");
-	await expect
-		.poll(async () => {
-			const agentsBox = await showAgentsButton.boundingBox();
-			const sessionsBox = await sessionsButton.boundingBox();
-			return !!(agentsBox && sessionsBox && agentsBox.x < sessionsBox.x);
-		})
-		.toBe(true);
 	await expect(showAgentsButton.locator("svg.animate-pulse")).toHaveCount(1);
 	await showAgentsButton.click();
 	await expect(
@@ -3539,9 +3536,8 @@ test("keeps scheduled-agent actions above inspector clipping", async ({
 		'[data-chat-auxiliary-panel][data-view="agents"]',
 	);
 	await expect(agents).toBeVisible();
-	await expect(
-		page.locator('[data-chat-auxiliary-panel][data-view="sessions"]'),
-	).toHaveCount(0);
+	// The session list belongs to the window and stays open beside them.
+	await expect(sessionsPanel(page)).toBeVisible();
 	await expect
 		.poll(async () => {
 			const agentsBox = await agents.boundingBox();
@@ -3570,6 +3566,99 @@ test("keeps scheduled-agent actions above inspector clipping", async ({
 	await expect(
 		page.getByRole("dialog", { name: "Delete scheduled task?" }),
 	).toBeVisible();
+});
+
+test("deletes a session of the host from the list", async ({ page }) => {
+	const input = await composer(page);
+	await input.fill("render markdown before deleting");
+	await input.press("Enter");
+	await expect(
+		page.getByRole("heading", { name: "Migration result" }),
+	).toBeVisible();
+	await openSessions(page);
+	const rows = () =>
+		sessionsPanel(page)
+			.locator("[data-session-id]")
+			.filter({ hasText: /render markdown before deleting|Migration result/i });
+	await expect(rows()).toHaveCount(1);
+	await rows().click({ button: "right" });
+	await page.getByRole("menuitem", { name: "Delete session" }).click();
+	const dialog = page.getByRole("dialog", { name: "Delete session?" });
+	await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+	await expect(dialog).toBeHidden();
+	await expect(rows()).toHaveCount(0);
+	// The host forgot it too.
+	await page.reload();
+	await openSessions(page);
+	await expect(sessionsPanel(page)).toBeVisible();
+	await expect(rows()).toHaveCount(0);
+});
+
+test("keeps the session list at the left whatever the center shows", async ({
+	page,
+}) => {
+	await composer(page);
+	await openSessions(page);
+	const toolbar = page.getByLabel("Window toolbar");
+	const list = page.locator('[data-layout-panel="sessions"]');
+	await expect(list).toHaveCSS("width", "240px");
+	await expect
+		.poll(async () => (await list.boundingBox())?.x ?? -1)
+		.toBeLessThanOrEqual(1);
+	// It resizes like the side panel, and its titlebar follows.
+	const handle = page.getByRole("separator", { name: "Resize Session List" });
+	const handleBox = await handle.boundingBox();
+	expect(handleBox).not.toBeNull();
+	await page.mouse.move(
+		handleBox!.x + handleBox!.width / 2,
+		handleBox!.y + handleBox!.height / 2,
+	);
+	await page.mouse.down();
+	await page.mouse.move(handleBox!.x + 80, handleBox!.y + 20, { steps: 5 });
+	await page.mouse.up();
+	await expect
+		.poll(async () => (await list.boundingBox())?.width ?? 0)
+		.toBeGreaterThan(300);
+	await expect
+		.poll(async () => {
+			const listBox = await list.boundingBox();
+			const titleBox = await toolbar
+				.locator("[data-titlebar-sessions]")
+				.boundingBox();
+			return !!(
+				listBox &&
+				titleBox &&
+				Math.abs(listBox.width - titleBox.width) < 1
+			);
+		})
+		.toBe(true);
+	const width = (await list.boundingBox())!.width;
+	// A file in the center leaves the list where it is.
+	await page.getByRole("treeitem", { name: /editable\.txt/ }).click();
+	await expect(
+		page.locator('[data-center-tab="file:editable.txt"]'),
+	).toBeVisible();
+	await expect(sessionsPanel(page)).toBeVisible();
+	// The window remembers it open, and as wide.
+	await page.reload();
+	await expect(sessionsPanel(page)).toBeVisible();
+	await expect
+		.poll(async () => Math.round((await list.boundingBox())?.width ?? 0))
+		.toBe(Math.round(width));
+	await page
+		.getByRole("button", { name: "Hide sessions", exact: true })
+		.click();
+	await expect(page.locator("[data-sessions-panel]")).toHaveCount(0);
+	await page.reload();
+	await expect(
+		page.getByRole("button", { name: "Show sessions", exact: true }),
+	).toBeVisible();
+	await expect(page.locator("[data-sessions-panel]")).toHaveCount(0);
+	// Opened again, it takes the width it had.
+	await openSessions(page);
+	await expect
+		.poll(async () => Math.round((await list.boundingBox())?.width ?? 0))
+		.toBe(Math.round(width));
 });
 
 test("uses one compact right side panel with stable tab order", async ({
@@ -3609,11 +3698,15 @@ test("uses one compact right side panel with stable tab order", async ({
 			const panel = await sidePanel.boundingBox();
 			const frameBox = await frame.boundingBox();
 			const firstTab = await openTabs.getByRole("tab").first().boundingBox();
-			if (!panel || !frameBox || !firstTab) return false;
+			const sessions = await toolbar
+				.locator("[data-titlebar-sessions]")
+				.boundingBox();
+			if (!panel || !frameBox || !firstTab || !sessions) return false;
 			return (
 				Math.abs(panel.x + panel.width - page.viewportSize()!.width) <= 1 &&
 				Math.abs(frameBox.x - panel.x) <= 1 &&
-				Math.abs(firstTab.x) <= 1
+				Math.abs(sessions.x) <= 1 &&
+				Math.abs(firstTab.x - sessions.x - sessions.width) <= 1
 			);
 		})
 		.toBe(true);
@@ -3890,7 +3983,7 @@ test("composer hides mode then model as session history narrows the chat", async
 	for (const [width, showMode, showModel] of [
 		[1280, true, true],
 		[900, false, true],
-		[740, false, false],
+		// The session list and the side panel keep their minimums; the chat narrows.
 		[680, false, false],
 		[1280, true, true],
 	] as const) {
@@ -4469,17 +4562,6 @@ test("docks only terminals at the bottom with tabs on the right", async ({
 	const wingmanLogo = page.getByRole("img", { name: "Wingman" });
 	await expect(chatComposer).toBeVisible();
 	await openSessions(page);
-	await expect
-		.poll(async () => {
-			const sessions = await page
-				.locator('[data-chat-auxiliary-panel][data-view="sessions"]')
-				.boundingBox();
-			const divider = await page
-				.locator("[data-terminal-tabs-separator]")
-				.boundingBox();
-			return sessions && divider ? Math.abs(sessions.x - divider.x) : Infinity;
-		})
-		.toBeLessThan(1);
 	await expect
 		.poll(async () => {
 			const surface = await originalSurface.boundingBox();
@@ -6584,4 +6666,482 @@ test("recovery: streaming output is followed until the user scrolls away", async
 	await expect(jump).toBeHidden();
 	for (let step = 0; step < 3; step++) stream();
 	await expect.poll(distance).toBeLessThan(40);
+});
+
+test.describe("session list", () => {
+	// SessionStatus bits as the host lists them.
+	const IDLE = 1,
+		WORKING = 8,
+		NEEDS_INPUT = 24,
+		READ = 32,
+		ARCHIVED = 64;
+	const ago = (minutes: number) =>
+		new Date(Date.now() - minutes * 60_000).toISOString();
+
+	async function fleet(page: Page) {
+		const fixture = await ahpFixture(page);
+		const dispatched: any[] = [];
+		fixture.resourceObservers.add((request) => {
+			if (request.method === "dispatchAction" && request.params?.action)
+				dispatched.push(request.params);
+		});
+		const commands: any[] = [];
+		fixture.onCommand = async (command) => {
+			commands.push(command);
+		};
+		const waiting = fixture.add(
+			"wingman",
+			{ id: "fleet-waiting", title: "Waiting session", updated_at: ago(5) },
+			[],
+			"tool_running",
+		);
+		waiting.prompts = [
+			{ id: "push", kind: "confirm", message: "Push to origin?\n\nRisk: low" },
+		];
+		waiting.listed = {
+			status: NEEDS_INPUT | READ,
+			activity: "Push to origin?",
+		};
+		const working = fixture.add(
+			"wingman",
+			{ id: "fleet-working", title: "Working session", updated_at: ago(1) },
+			[],
+			"tool_running",
+		);
+		working.listed = {
+			status: WORKING | READ,
+			activity: "Run command: go test ./...",
+		};
+		const finished = fixture.add("wingman", {
+			id: "fleet-finished",
+			title: "Finished session",
+			updated_at: ago(10),
+		});
+		finished.listed = {
+			status: IDLE,
+			changes: { additions: 12, deletions: 3, files: 2 },
+		};
+		const old = fixture.add("wingman", {
+			id: "fleet-old",
+			title: "Old session",
+			updated_at: "2026-01-01T00:00:00Z",
+		});
+		await composer(page);
+		// The history button counts what waits while the list is closed.
+		await expect(page.locator('[data-needs-you="1"]')).toBeVisible();
+		await expect(page).toHaveTitle(/^\(1\) .+ – Wingman$/);
+		await openSessions(page);
+		await expect(page.locator("[data-needs-you]")).toHaveCount(0);
+		return { fixture, dispatched, commands, waiting, finished, old };
+	}
+
+	test("shows what needs the user first and answers an approval in place", async ({
+		page,
+	}) => {
+		const { commands } = await fleet(page);
+		const panel = sessionsPanel(page);
+		await expect(panel.getByRole("heading")).toHaveText([
+			/^Needs you\s*1$/,
+			/^Working\s*1$/,
+			"Today",
+			"Older",
+		]);
+		await expect(sessionRow(page, "fleet-working")).toContainText(
+			"Run command: go test ./...",
+		);
+		const finished = sessionRow(page, "fleet-finished");
+		await expect(finished.getByRole("img", { name: "Unread" })).toBeVisible();
+		await expect(finished).toContainText("+12");
+		await expect(finished).toContainText("−3");
+		const request = panel.locator("[data-session-request]");
+		await expect(request).toContainText("Push to origin?");
+		await request.getByRole("button", { name: "Allow", exact: true }).click();
+		await expect
+			.poll(() =>
+				commands.find((command) => command.type === "prompt_response"),
+			)
+			.toMatchObject({ action: "accept", promptId: "push" });
+	});
+
+	test("opening an unseen session reads it, and next goes to what waits", async ({
+		page,
+	}) => {
+		const { dispatched } = await fleet(page);
+		await sessionRow(page, "fleet-finished").click();
+		await expect
+			.poll(() =>
+				dispatched.find(
+					(params) => params.action.type === "chat/isReadChanged",
+				),
+			)
+			.toMatchObject({
+				channel: canonicalChatURI("wingman", "fleet-finished"),
+				action: { isRead: true },
+			});
+		await page.keyboard.press("Control+Alt+n");
+		await expect(sessionTab(page, "fleet-waiting")).toBeVisible();
+	});
+
+	test("opens each session that is clicked, one after another", async ({
+		page,
+	}) => {
+		await fleet(page);
+		for (const id of [
+			"fleet-finished",
+			"fleet-old",
+			"fleet-finished",
+			"fleet-waiting",
+			"fleet-old",
+		]) {
+			await sessionRow(page, id).click();
+			await expect(sessionTab(page, id)).toBeVisible();
+			await expect(
+				sessionRow(page, id).locator('[aria-current="page"]'),
+			).toBeVisible();
+		}
+	});
+
+	test("shows a long group's latest sessions and the rest on request", async ({
+		page,
+	}) => {
+		const fixture = await ahpFixture(page);
+		for (let index = 0; index < 12; index++)
+			fixture.add("wingman", {
+				id: `fleet-long-${index}`,
+				title: `Long list ${index}`,
+				updated_at: new Date(Date.UTC(2020, 0, 28 - index)).toISOString(),
+			});
+		await composer(page);
+		await openSessions(page);
+		const rows = sessionsPanel(page)
+			.locator("[data-session-id]")
+			.filter({ hasText: /^Long list / });
+		await expect(rows).toHaveCount(8);
+		await expect(rows.first()).toContainText("Long list 0");
+		await sessionsPanel(page)
+			.getByRole("button", { name: "Show 4 more" })
+			.click();
+		await expect(rows).toHaveCount(12);
+		await expect(
+			sessionsPanel(page).getByRole("button", { name: /^Show \d+ more/ }),
+		).toHaveCount(0);
+	});
+
+	test("deletes a session from the list", async ({ page }) => {
+		await fleet(page);
+		const old = sessionRow(page, "fleet-old");
+		await expect(old).toBeVisible();
+		await old.click({ button: "right" });
+		await page.getByRole("menuitem", { name: "Delete session" }).click();
+		const dialog = page.getByRole("dialog", { name: "Delete session?" });
+		await expect(dialog).toBeVisible();
+		await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+		await expect(dialog).toBeHidden();
+		await expect(old).toHaveCount(0);
+	});
+
+	test("lists the sessions of agents that were never picked", async ({
+		page,
+	}) => {
+		const fixture = await ahpFixture(page);
+		fixture.agents.set("codex", "Codex");
+		fixture.add("codex", {
+			id: "fleet-codex-cli",
+			title: "Started in the Codex CLI",
+			updated_at: ago(3),
+		});
+		// An agent lists the sessions of its own CLI only once it runs.
+		let started = false;
+		fixture.resourceObservers.add((request) => {
+			if (
+				request.method === "resolveSessionConfig" &&
+				request.params?.provider === "codex"
+			)
+				started = true;
+		});
+		fixture.listable = (session) => session.backend !== "codex" || started;
+		await composer(page);
+		await openSessions(page);
+		await expect(
+			sessionsPanel(page).getByText("Started in the Codex CLI"),
+		).toBeVisible();
+		expect(started).toBe(true);
+	});
+
+	test("archives a session out of the list and filters it back in", async ({
+		page,
+	}) => {
+		const { fixture, dispatched, old } = await fleet(page);
+		await sessionRow(page, "fleet-old").click({ button: "right" });
+		await page
+			.getByRole("menu", { name: "Actions for Old session" })
+			.getByRole("menuitem", { name: "Archive" })
+			.click();
+		await expect
+			.poll(() =>
+				dispatched.find(
+					(params) => params.action.type === "session/isArchivedChanged",
+				),
+			)
+			.toMatchObject({ channel: old.resource, action: { isArchived: true } });
+		old.listed = { status: IDLE | READ | ARCHIVED };
+		fixture.notifyRoot("root/sessionSummaryChanged", {
+			channel: "ahp-root://",
+			session: old.resource,
+			changes: { status: IDLE | READ | ARCHIVED },
+		});
+		await expect(sessionRow(page, "fleet-old")).toHaveCount(0);
+		await sessionsPanel(page)
+			.getByRole("button", { name: "Filter sessions" })
+			.click();
+		await page.getByRole("menuitemradio", { name: "Archived" }).click();
+		await expect(sessionRow(page, "fleet-old")).toBeVisible();
+		await expect(sessionRow(page, "fleet-finished")).toHaveCount(0);
+		// The list follows the chat it opens, with its filter.
+		await sessionRow(page, "fleet-old").click();
+		await expect(sessionTab(page, "fleet-old")).toBeVisible();
+		await expect(
+			sessionsPanel(page).getByRole("button", {
+				name: "Clear filter Archived",
+			}),
+		).toBeVisible();
+	});
+});
+
+test.describe("session list across projects", () => {
+	// Real windows send their own instance; the suite's would name the start folder.
+	test.use({ extraHTTPHeaders: {} });
+	const IDLE = 1,
+		READ = 32;
+	const ago = (minutes: number) =>
+		new Date(Date.now() - minutes * 60_000).toISOString();
+
+	test("switches the window to another project, whose sessions it lists", async ({
+		page,
+	}) => {
+		const fixture = await ahpFixture(page);
+		// The server opened this second project as the user would, and names
+		// projects by their directory with its links resolved.
+		const other = await realpath(process.env.E2E_OTHER_PROJECT ?? "");
+		const elsewhere = fixture.add("wingman", {
+			id: "fleet-elsewhere",
+			title: "Work in another project",
+			updated_at: ago(2),
+		});
+		elsewhere.listed = {
+			status: IDLE | READ,
+			project: { uri: pathToFileURL(other).href, displayName: "fleet-other" },
+		};
+		const start = await realpath(workspacePath("."));
+		fixture.add("wingman", {
+			id: "fleet-here",
+			title: "Work in this project",
+			updated_at: ago(4),
+		}).listed = {
+			status: IDLE | READ,
+			project: {
+				uri: pathToFileURL(start).href,
+				displayName: start.split("/").pop() ?? "start",
+			},
+		};
+		await composer(page);
+		await openSessions(page);
+		// Another project's group starts closed, below the window's own.
+		const group = sessionsPanel(page).getByRole("button", {
+			name: /^fleet-other/,
+		});
+		await expect(group).toHaveAttribute("aria-expanded", "false");
+		await expect(sessionRow(page, "fleet-here")).toBeVisible();
+		await expect(sessionRow(page, "fleet-elsewhere")).toHaveCount(0);
+		await group.click();
+		await sessionRow(page, "fleet-elsewhere").click();
+		// The window moves to that project and opens the session there.
+		await expect(page).toHaveURL(/[?&]project=/);
+		await expect(sessionTab(page, "fleet-elsewhere")).toBeVisible();
+		// Its files are the other project's, not the first one's.
+		await expect(
+			page.getByTitle("fleet-other", { exact: true }).first(),
+		).toBeVisible();
+		await expect(
+			page.getByRole("treeitem", { name: /theme-preview\.html/ }),
+		).toHaveCount(0);
+		await openSessions(page);
+		// Now the first project is the other one, and its group opens the window back.
+		await expect(
+			sessionsPanel(page).getByRole("button", { name: /^Open project / }),
+		).toBeVisible();
+		await expect(sessionRow(page, "fleet-elsewhere")).toBeVisible();
+		// The list looks as the window left it: the project it came from is
+		// still open in it.
+		await expect(sessionRow(page, "fleet-here")).toBeVisible();
+	});
+
+	test("a busy session names its project, and one that cannot open leaves the window here", async ({
+		page,
+	}) => {
+		const fixture = await ahpFixture(page);
+		const IN_PROGRESS = 8;
+		// A project the host does not know stands for a folder that is gone.
+		fixture.add("wingman", {
+			id: "fleet-gone",
+			title: "Work in a removed folder",
+			updated_at: ago(1),
+		}).listed = {
+			status: IN_PROGRESS | READ,
+			project: {
+				uri: pathToFileURL("/wingman-e2e/removed-project").href,
+				displayName: "removed-project",
+			},
+		};
+		await composer(page);
+		await openSessions(page);
+		// What it does shows beside where it does it.
+		const row = sessionRow(page, "fleet-gone");
+		await expect(row).toContainText("Working…");
+		await expect(row.locator("[data-session-origin]")).toHaveText(
+			"removed-project",
+		);
+		await row.click();
+		await expect(
+			page
+				.getByRole("alert")
+				.filter({ hasText: "Could not open removed-project" }),
+		).toBeVisible();
+		await expect(page).not.toHaveURL(/[?&]project=/);
+		await expect(
+			page.getByPlaceholder("Message Wingman…").filter({ visible: true }),
+		).toBeVisible();
+		// The window still moves to a project that opens.
+		const other = await realpath(process.env.E2E_OTHER_PROJECT ?? "");
+		fixture.add("wingman", {
+			id: "fleet-elsewhere",
+			title: "Work in another project",
+			updated_at: ago(2),
+		}).listed = {
+			status: IN_PROGRESS | READ,
+			project: { uri: pathToFileURL(other).href, displayName: "fleet-other" },
+		};
+		// A project that is slow to open does not hold up the next choice.
+		fixture.add("wingman", {
+			id: "fleet-slow",
+			title: "Work in a slow folder",
+			updated_at: ago(3),
+		}).listed = {
+			status: IN_PROGRESS | READ,
+			project: {
+				uri: pathToFileURL("/wingman-e2e/slow-project").href,
+				displayName: "slow-project",
+			},
+		};
+		await page.route(/\/api\/workspace\?project=.*slow-project/, () => {
+			// Never answered: the host is still opening the project.
+		});
+		await page.reload();
+		await openSessions(page);
+		await sessionRow(page, "fleet-gone").click();
+		await expect(
+			page
+				.getByRole("alert")
+				.filter({ hasText: "Could not open removed-project" }),
+		).toBeVisible();
+		await sessionRow(page, "fleet-slow").click();
+		await expect(
+			page.getByRole("status").filter({ hasText: "Opening slow-project" }),
+		).toBeVisible();
+		await sessionRow(page, "fleet-elsewhere").click();
+		await expect(page).toHaveURL(/[?&]project=/);
+		await expect(sessionTab(page, "fleet-elsewhere")).toBeVisible();
+	});
+
+	test("a link to a project that cannot open offers the way back", async ({
+		page,
+	}) => {
+		await ahpFixture(page);
+		await page.goto(
+			`/?project=${encodeURIComponent("/wingman-e2e/removed-project")}`,
+		);
+		const notice = page.getByRole("alert", { name: "Project unavailable" });
+		await expect(notice).toContainText("removed-project could not be opened");
+		await notice.getByRole("button", { name: "Back to start" }).click();
+		await expect(page).not.toHaveURL(/[?&]project=/);
+		await expect(
+			page.getByPlaceholder("Message Wingman…").filter({ visible: true }),
+		).toBeVisible();
+	});
+});
+
+test.describe("session list on the host", () => {
+	// Real windows send their own instance; the suite's would name the start folder.
+	test.use({ extraHTTPHeaders: {} });
+
+	/** Sends a first message in a new chat of the window's project and
+	 * returns the chat's id in the list. */
+	async function startSession(
+		page: Page,
+		project: string | null,
+		text: string,
+	) {
+		await page.goto(project ? `/?project=${encodeURIComponent(project)}` : "/");
+		const input = page
+			.getByPlaceholder("Message Wingman…")
+			.filter({ visible: true });
+		await input.fill(text);
+		await input.press("Enter");
+		await expect(
+			page.getByRole("heading", { name: "Migration result" }),
+		).toBeVisible();
+		await expect(page).toHaveURL(/\/wingman\/[^/?]+/);
+		const id = decodeURIComponent(
+			new URL(page.url()).pathname.split("/").filter(Boolean)[1],
+		);
+		return id;
+	}
+	const row = (page: Page, id: string) =>
+		page.locator(`[data-session-id=${JSON.stringify(id)}]`).filter({
+			visible: true,
+		});
+	async function expectOpen(page: Page, id: string, text: string) {
+		await expect(
+			page.locator(`[data-center-tab=${JSON.stringify(`chat:${id}`)}]`),
+		).toBeVisible();
+		await expect(
+			page.getByText(text).filter({ visible: true }).first(),
+		).toBeVisible();
+	}
+
+	test("opens sessions again and again, in the window's project and another", async ({
+		page,
+	}) => {
+		const other = await realpath(process.env.E2E_OTHER_PROJECT ?? "");
+		const first = await startSession(page, null, "render markdown first");
+		const second = await startSession(page, null, "render markdown second");
+		const third = await startSession(page, other, "render markdown third");
+		// Back in the start folder, its sessions open one after another.
+		await page.goto("/");
+		await openSessions(page);
+		for (const [id, text] of [
+			[first, "render markdown first"],
+			[second, "render markdown second"],
+			[first, "render markdown first"],
+			[second, "render markdown second"],
+		]) {
+			await row(page, id).click();
+			await expectOpen(page, id, text);
+		}
+		// A session of the other project moves the window there, and back.
+		const group = (name: RegExp) =>
+			sessionsPanel(page).getByRole("button", { name });
+		for (let round = 0; round < 2; round++) {
+			if ((await row(page, third).count()) === 0)
+				await group(/^fleet-other/).click();
+			await row(page, third).click();
+			await expect(page).toHaveURL(/[?&]project=/);
+			await expectOpen(page, third, "render markdown third");
+			await openSessions(page);
+			await expect(row(page, first)).toBeVisible();
+			await row(page, first).click();
+			await expectOpen(page, first, "render markdown first");
+			await openSessions(page);
+		}
+	});
 });

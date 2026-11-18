@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"strings"
+	"time"
 )
 
 const instanceHeader = "X-Wingman-Instance"
@@ -21,6 +22,23 @@ func (s *Server) checkInstance(next http.Handler) http.Handler {
 				http.Error(w, "workspace instance changed; reload the workspace", http.StatusConflict)
 				return
 			}
+		}
+		if s.front != nil {
+			p := s.Project
+			p.host.mu.Lock()
+			if !p.availableLocked() {
+				p.host.mu.Unlock()
+				http.Error(w, "workspace instance changed; reload the workspace", http.StatusConflict)
+				return
+			}
+			p.windowRequests++
+			p.host.mu.Unlock()
+			defer func() {
+				p.host.mu.Lock()
+				p.windowRequests--
+				p.used = time.Now()
+				p.host.mu.Unlock()
+			}()
 		}
 		next.ServeHTTP(w, r)
 	})
