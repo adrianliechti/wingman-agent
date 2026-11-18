@@ -6677,8 +6677,7 @@ test("recovery: streaming output is followed until the user scrolls away", async
 
 test("holding Space dictates into the composer", async ({ page }) => {
 	const input = await composer(page);
-	const mic = page.getByRole("button", { name: "Dictate" });
-	await expect(mic).toBeVisible();
+	await expect(input).toHaveAttribute("data-dictation", "idle");
 	await input.fill("run");
 	await input.press("End");
 
@@ -6687,11 +6686,12 @@ test("holding Space dictates into the composer", async ({ page }) => {
 
 	await page.keyboard.down("Space");
 	await expect(
-		page.getByRole("button", { name: "Stop dictation" }),
+		page.getByRole("status").filter({ hasText: "Listening…" }),
 	).toBeVisible();
 	await page.waitForTimeout(900);
 	await page.keyboard.up("Space");
 	await expect(input).toHaveValue("run dictated by voice");
+	await expect(input).toHaveAttribute("data-dictation", "idle");
 });
 
 test("leaving a composer cancels pending Space dictation", async ({ page }) => {
@@ -6706,7 +6706,7 @@ test("leaving a composer cancels pending Space dictation", async ({ page }) => {
 		};
 	});
 	const input = await composer(page);
-	await expect(page.getByRole("button", { name: "Dictate" })).toBeVisible();
+	await expect(input).toHaveAttribute("data-dictation", "idle");
 	await input.fill("keep this draft");
 	const menu = await openNewMenu(page);
 	await page.clock.install();
@@ -6732,13 +6732,16 @@ test("voice conversation delegates to the coding model and preserves the draft",
 	request,
 }) => {
 	const input = await composer(page);
-	await input.fill("keep this draft");
-	await page
-		.getByRole("button", { name: "Start voice conversation", exact: true })
-		.click();
+	// With nothing to send, the send button starts voice; with a draft it sends.
+	const start = page.getByRole("button", {
+		name: "Start voice conversation",
+		exact: true,
+	});
+	await start.click();
 	await expect(
 		page.getByRole("button", { name: "End voice conversation", exact: true }),
 	).toBeVisible();
+	await input.fill("keep this draft");
 	await expect(
 		page.locator("[data-chat-history]").filter({ visible: true }),
 	).toContainText("Voice coding task complete.");
@@ -6762,8 +6765,9 @@ test("voice conversation delegates to the coding model and preserves the draft",
 	).toBeVisible();
 	await input.press("Escape");
 	await expect(
-		page.getByRole("button", { name: "Start voice conversation", exact: true }),
-	).toBeVisible();
+		page.getByRole("button", { name: "End voice conversation", exact: true }),
+	).toBeHidden();
+	await expect(start).toBeHidden();
 	await expect
 		.poll(
 			async () =>
@@ -6772,6 +6776,8 @@ test("voice conversation delegates to the coding model and preserves the draft",
 		)
 		.toBe(0);
 	await expect(input).toHaveValue("keep this draft");
+	await input.fill("");
+	await expect(start).toBeVisible();
 });
 
 test("voice conversation interrupts queued playback and closes on tab changes", async ({
@@ -6870,64 +6876,72 @@ test("voice conversation can queue more than thirty seconds of speech", async ({
 	).toBeVisible();
 });
 
-test("switching harness cancels dictation", async ({ page }) => {
+test("switching harness drops a pending transcript", async ({ page }) => {
 	await mockACPBackend(page);
-	const requests: string[] = [];
-	await page.route("**/api/v2/backends/*/transcription", (route) => {
+	let deliver = () => {};
+	const held = new Promise<void>((resolve) => {
+		deliver = resolve;
+	});
+	let requests = 0;
+	await page.route("**/api/v2/backends/*/transcription", async (route) => {
 		if (route.request().method() === "GET")
 			return route.fulfill({ json: { available: true } });
-		requests.push(route.request().url());
-		return route.fulfill({ json: { text: "stale transcript" } });
+		requests++;
+		await held;
+		// The switch already aborted this request.
+		await route.fulfill({ json: { text: "stale transcript" } }).catch(() => {});
 	});
 	const input = await composer(page);
+	await expect(input).toHaveAttribute("data-dictation", "idle");
 	await input.fill("keep this draft");
-	await page.getByRole("button", { name: "Dictate", exact: true }).click();
+	// At the start of the prompt Space records right away.
+	await input.evaluate((element: HTMLTextAreaElement) =>
+		element.setSelectionRange(0, 0),
+	);
+	await page.keyboard.down("Space");
 	await expect(
-		page.getByRole("button", { name: "Stop dictation" }),
+		page.getByRole("status").filter({ hasText: "Listening…" }),
 	).toBeVisible();
 	await page.waitForTimeout(900);
 
+	// Leaving the composer ends the hold and sends the recording.
 	await page
 		.getByRole("button", { name: "Harness: Wingman", exact: true })
 		.click();
+	await expect.poll(() => requests).toBe(1);
 	await page
 		.getByRole("menu", { name: "Harness", exact: true })
 		.getByRole("menuitemradio", { name: "Codex", exact: true })
 		.click();
-	await expect(
-		page.getByRole("button", { name: "Dictate", exact: true }),
-	).toBeVisible();
-	await expect(page.getByPlaceholder("Message Codex…")).toHaveValue(
-		"keep this draft",
-	);
-	expect(requests).toEqual([]);
+	const codex = page.getByPlaceholder("Message Codex…");
+	await expect(codex).toHaveAttribute("data-dictation", "idle");
+	deliver();
+	await page.waitForTimeout(200);
+	await expect(codex).toHaveValue("keep this draft");
+	await page.keyboard.up("Space");
 });
 
-test("mic button dictates and Escape cancels without stopping the turn", async ({
-	page,
-}) => {
+test("a Space tap or Escape cancels dictation", async ({ page }) => {
 	const input = await composer(page);
+	await expect(input).toHaveAttribute("data-dictation", "idle");
 	await input.click();
+	const listening = page.getByRole("status").filter({ hasText: "Listening…" });
+
+	// A tap is not dictation.
 	await page.keyboard.down("Space");
-	await expect(
-		page.getByRole("button", { name: "Stop dictation" }),
-	).toBeVisible();
+	await expect(listening).toBeVisible();
 	await page.keyboard.up("Space");
-	await expect(page.getByRole("button", { name: "Dictate" })).toBeVisible();
+	await expect(listening).toBeHidden();
 	await expect(input).toHaveValue("");
 
-	await page.getByRole("button", { name: "Dictate" }).click();
-	await expect(
-		page.getByRole("button", { name: "Stop dictation" }),
-	).toBeVisible();
-	await page.keyboard.press("Escape");
-	await expect(page.getByRole("button", { name: "Dictate" })).toBeVisible();
-	await expect(input).toHaveValue("");
-
-	await page.getByRole("button", { name: "Dictate" }).click();
+	await page.keyboard.down("Space");
+	await expect(listening).toBeVisible();
 	await page.waitForTimeout(900);
-	await page.getByRole("button", { name: "Stop dictation" }).click();
-	await expect(input).toHaveValue("dictated by voice");
+	await page.keyboard.press("Escape");
+	await expect(listening).toBeHidden();
+	await page.keyboard.up("Space");
+	await expect(input).toHaveAttribute("data-dictation", "idle");
+	await expect(input).toHaveValue("");
 	await expect(input).toBeFocused();
 });
 

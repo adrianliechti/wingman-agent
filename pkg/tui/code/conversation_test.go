@@ -37,6 +37,7 @@ func TestConversationTerminalCleanup(t *testing.T) {
 			peers := make(chan *websocket.Conn, 1)
 			forwarded := make(chan struct{}, 8)
 			truncations := make(chan int, 8)
+			replies := make(chan struct{}, 8)
 			gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				conn, err := websocket.Accept(w, r, nil)
 				if err != nil {
@@ -61,6 +62,10 @@ func TestConversationTerminalCleanup(t *testing.T) {
 					}
 					if event.Type == "conversation.item.truncate" {
 						truncations <- event.AudioEndMS
+					}
+					if event.Type == "response.create" {
+						_ = wsjson.Write(ctx, conn, map[string]any{"type": "response.created"})
+						replies <- struct{}{}
 					}
 				}
 			}))
@@ -120,6 +125,17 @@ func TestConversationTerminalCleanup(t *testing.T) {
 			case <-forwarded:
 			case <-ctx.Done():
 				t.Fatal("microphone audio was not forwarded")
+			}
+			// Voice only speaks in a reply it asked for, here the one to a spoken request.
+			for _, kind := range []string{"input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped"} {
+				if err := wsjson.Write(ctx, peer, map[string]any{"type": kind}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case <-replies:
+			case <-ctx.Done():
+				t.Fatal("voice did not reply to speech")
 			}
 			for _, event := range []map[string]any{
 				{"type": "response.output_audio.delta", "item_id": "reply", "delta": base64.StdEncoding.EncodeToString(make([]byte, 48000))},
@@ -348,5 +364,27 @@ func TestConversationEscapeRespectsApproval(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("approval did not finish")
+	}
+}
+
+// /voice is listed only where a conversation can start, so WINGMAN_DISABLE_VOICE hides it.
+func TestVoiceCommandListedOnlyWhereAvailable(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_TTY", "")
+	listed := func(agent code.Agent) bool {
+		app := &App{agent: agent, editor: NewEditor()}
+		return app.findBuiltin("/voice") != nil
+	}
+	plain := newUITestAgent(nil)
+	voice := &conversationUITestAgent{uiTestAgent: plain, model: &audio.Realtime{}}
+	if listed(plain) {
+		t.Fatal("/voice listed without voice")
+	}
+	if !listed(voice) {
+		t.Fatal("/voice missing where voice is available")
+	}
+	t.Setenv("SSH_TTY", "/dev/pts/1")
+	if listed(voice) {
+		t.Fatal("/voice listed in an SSH session")
 	}
 }

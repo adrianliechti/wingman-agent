@@ -5,7 +5,6 @@ import {
 	Headphones,
 	ListEnd,
 	Loader2,
-	Mic,
 	MicOff,
 	PhoneOff,
 	Plus,
@@ -31,11 +30,8 @@ import { atTextareaEdge } from "../utils/textareaNavigation";
 import { useColorScheme } from "../hooks/useColorScheme";
 import { useCanCompact, useChatCommands } from "../hooks/useChatCommands";
 import { useVoiceAvailable, useVoiceInput } from "../hooks/useVoiceInput";
-import {
-	useConversation,
-	useConversationAvailable,
-} from "../hooks/useConversation";
-import { ConversationMeter, VoiceMeter } from "./chat/VoiceMeter";
+import { useConversation } from "../hooks/useConversation";
+import { VoiceMeter } from "./chat/VoiceMeter";
 import {
 	type ChatCommand,
 	sentAttachments,
@@ -388,9 +384,11 @@ export function ChatPanel({
 	const canCompact = useCanCompact(sessionId);
 
 	const voiceBackend = workspaceClient().backendOf(sessionId ?? "");
+	const catalogue = settings.models.map((m) => m.id).join();
 	const voiceAvailable = useVoiceAvailable(
 		voiceBackend,
-		settings.models.map((m) => m.id).join(),
+		catalogue,
+		"transcription",
 	);
 	const setTextAndCaret = (text: string, pos: number) => {
 		draft.update({ text });
@@ -422,9 +420,10 @@ export function ChatPanel({
 				tone: "error",
 			}),
 	});
-	const conversationAvailable = useConversationAvailable(
+	const conversationAvailable = useVoiceAvailable(
 		voiceBackend,
-		settings.models.map((m) => m.id).join(),
+		catalogue,
+		"conversation",
 	);
 	const conversation = useConversation({
 		backend: voiceBackend,
@@ -446,6 +445,12 @@ export function ChatPanel({
 			toast({ title: "Voice conversation", description: message }),
 	});
 	const conversationActive = conversation.phase !== "idle";
+	// With nothing to send, the send button starts a voice conversation instead.
+	const startsVoice =
+		conversationAvailable &&
+		!conversationActive &&
+		!hasDraft &&
+		!editingQueueId;
 	const spaceHold = useRef<{
 		at: number;
 		started: boolean;
@@ -1281,6 +1286,7 @@ export function ChatPanel({
 									}}
 									onBlur={() => endSpaceHold(true)}
 									onPaste={handlePaste}
+									data-dictation={voiceAvailable ? voice.phase : undefined}
 									placeholder={placeholder}
 									rows={1}
 								/>
@@ -1392,10 +1398,8 @@ export function ChatPanel({
 										</button>
 									)}
 									{conversationActive && (
-										<span
-											role="status"
-											className="flex items-center gap-1.5 px-1 text-[11px] text-fg-muted"
-										>
+										// Read out for screen readers; the meter and icons show it.
+										<span role="status" className="sr-only">
 											{conversation.phase === "connecting"
 												? "Connecting…"
 												: conversation.muted
@@ -1403,16 +1407,19 @@ export function ChatPanel({
 													: conversation.phase === "speaking"
 														? "Speaking…"
 														: "Listening…"}
-											{conversation.phase !== "connecting" && (
-												<ConversationMeter level={conversation.level} />
-											)}
+										</span>
+									)}
+									{conversation.phase === "connecting" && (
+										<span className="flex h-7 w-7 items-center justify-center text-fg-muted">
+											<Loader2 size={14} className="animate-spin" />
 										</span>
 									)}
 									{conversationActive &&
 										conversation.phase !== "connecting" && (
+											// The level meter is the mute button; hovering shows what a click does.
 											<button
 												type="button"
-												className={composerIconButton}
+												className={`group ${composerIconButton}`}
 												onClick={conversation.toggleMuted}
 												aria-label={
 													conversation.muted
@@ -1425,94 +1432,79 @@ export function ChatPanel({
 														: "Mute microphone"
 												}
 											>
-												{conversation.muted ? (
-													<MicOff size={14} />
-												) : (
-													<Mic size={14} />
+												{!conversation.muted && (
+													<span className="group-hover:hidden group-focus-visible:hidden">
+														<VoiceMeter level={conversation.level} />
+													</span>
 												)}
+												<MicOff
+													size={14}
+													className={
+														conversation.muted
+															? undefined
+															: "hidden group-hover:block group-focus-visible:block"
+													}
+												/>
 											</button>
 										)}
-									{(conversationAvailable || conversationActive) && (
+									{conversationActive && (
 										<button
 											type="button"
 											className={composerIconButton}
-											disabled={!available && !conversationActive}
 											onMouseDown={(e) => e.preventDefault()}
-											onClick={() => {
-												if (conversationActive) conversation.stop();
-												else {
-													endSpaceHold(false);
-													voice.cancel();
-													void conversation.start();
-												}
-											}}
-											aria-label={
-												conversationActive
-													? "End voice conversation"
-													: "Start voice conversation"
-											}
-											title={
-												conversationActive
-													? "End voice conversation · Esc"
-													: "Start voice conversation"
-											}
+											onClick={conversation.stop}
+											aria-label="End voice conversation"
+											title="End voice conversation · Esc"
 										>
-											{conversationActive ? (
-												<PhoneOff size={14} />
-											) : (
-												<Headphones size={14} />
-											)}
+											<PhoneOff size={14} />
 										</button>
 									)}
-									{voiceAvailable && !conversationActive && (
-										<button
-											type="button"
-											className={composerIconButton}
-											// Keep focus in the composer so Space and Esc still reach it.
-											onMouseDown={(e) => e.preventDefault()}
-											onClick={() => {
-												if (voice.phase === "idle") voice.start();
-												else if (voice.phase === "recording") void voice.stop();
-												else voice.cancel();
-											}}
-											title={
-												voice.phase === "recording"
-													? "Stop and transcribe · Esc cancels"
-													: voice.phase === "transcribing"
-														? "Cancel transcription (Esc)"
-														: "Dictate · or hold Space"
-											}
-											aria-label={
-												voice.phase === "recording"
-													? "Stop dictation"
-													: voice.phase === "transcribing"
-														? "Cancel transcription"
-														: "Dictate"
-											}
+									{voice.phase !== "idle" && (
+										<span
+											role="status"
+											className="flex h-7 w-7 items-center justify-center text-fg-muted"
 										>
+											<span className="sr-only">
+												{voice.phase === "recording"
+													? "Listening…"
+													: "Transcribing…"}
+											</span>
 											{voice.phase === "recording" ? (
-												<VoiceMeter levels={voice.levels} />
-											) : voice.phase === "transcribing" ? (
-												<Loader2 size={14} className="animate-spin" />
+												<VoiceMeter level={voice.level} />
 											) : (
-												<Mic size={14} />
+												<Loader2 size={14} className="animate-spin" />
 											)}
-										</button>
+										</span>
 									)}
 									<button
 										type="button"
 										className="flex h-7 w-7 items-center justify-center rounded-full bg-fg text-bg transition-colors hover:bg-fg-muted disabled:bg-bg-active disabled:text-fg-dim"
-										onClick={() => void handleSubmit()}
-										disabled={blocked || !hasDraft}
+										// Starting voice keeps focus in the composer so Esc can end it.
+										onMouseDown={
+											startsVoice ? (e) => e.preventDefault() : undefined
+										}
+										onClick={() => {
+											if (!startsVoice) return void handleSubmit();
+											endSpaceHold(false);
+											voice.cancel();
+											void conversation.start();
+										}}
+										disabled={startsVoice ? !available : blocked || !hasDraft}
 										title={
-											editingQueueId
-												? "Update queued message (Enter)"
-												: isActive
-													? "Steer current turn (Enter) · Queue with Alt+Enter"
-													: "Send (Enter)"
+											startsVoice
+												? "Start voice conversation"
+												: editingQueueId
+													? "Update queued message (Enter)"
+													: isActive
+														? "Steer current turn (Enter) · Queue with Alt+Enter"
+														: "Send (Enter)"
 										}
 									>
-										<ArrowUp size={14} />
+										{startsVoice ? (
+											<Headphones size={14} />
+										) : (
+											<ArrowUp size={14} />
+										)}
 									</button>
 								</div>
 							</div>

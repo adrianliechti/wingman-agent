@@ -18,7 +18,7 @@ func TestTranscriptionAPI(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/v1/models":
-			io.WriteString(w, `{"object":"list","data":[{"id":"gpt-6-sol","object":"model"},{"id":"gpt-transcribe","object":"model"}]}`)
+			io.WriteString(w, `{"object":"list","data":[{"id":"gpt-6-sol","object":"model"},{"id":"gpt-transcribe","object":"model"},{"id":"gpt-realtime-test","object":"model"}]}`)
 		case "/v1/audio/transcriptions":
 			gotModel = r.FormValue("model")
 			io.WriteString(w, `{"text":"run the tests"}`)
@@ -34,6 +34,7 @@ func TestTranscriptionAPI(t *testing.T) {
 		available bool
 	}{
 		{"detected", "", true},
+		// Disabling voice hides both dictation and voice conversation.
 		{"disabled", "1", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -53,18 +54,20 @@ func TestTranscriptionAPI(t *testing.T) {
 			}
 			url := web.URL + "/api/v2/backends/wingman/transcription"
 
-			res, err := http.Get(url)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var status struct{ Available bool }
-			json.NewDecoder(res.Body).Decode(&status)
-			res.Body.Close()
-			if status.Available != c.available {
-				t.Fatalf("available = %v, want %v", status.Available, c.available)
+			for _, feature := range []string{"transcription", "conversation"} {
+				res, err := http.Get(web.URL + "/api/v2/backends/wingman/" + feature)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var status struct{ Available bool }
+				json.NewDecoder(res.Body).Decode(&status)
+				res.Body.Close()
+				if status.Available != c.available {
+					t.Fatalf("%s available = %v, want %v", feature, status.Available, c.available)
+				}
 			}
 
-			res, err = http.Post(url, "audio/wav", bytes.NewReader(audio.WAV(make([]byte, 3200))))
+			res, err := http.Post(url, "audio/wav", bytes.NewReader(audio.WAV(make([]byte, 3200))))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -1171,8 +1171,10 @@ func (a *App) terminalTitle() string {
 	return "Wingman — " + project
 }
 
+// A voice conversation announces the result itself, and its open microphone
+// would hear the bell as speech and cut that announcement off.
 func (a *App) bellIfUnfocused() {
-	if !a.termFocused {
+	if !a.termFocused && a.conversation == nil {
 		a.term.Bell()
 	}
 }

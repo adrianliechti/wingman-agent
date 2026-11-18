@@ -41,14 +41,9 @@ func (a *App) runVoiceCommand(args string) {
 		a.endConversation()
 		return
 	}
-	provider, ok := a.agent.(realtimeProvider)
-	if !ok || remoteTerminal() {
-		a.showToast("Voice conversation requires a local terminal and a realtime model", theme.Default.Yellow)
-		return
-	}
-	model, ok := provider.Realtime(a.sessionID)
+	model, ok := a.realtimeModel()
 	if !ok {
-		a.showToast("No realtime model available; set WINGMAN_MODEL_REALTIME", theme.Default.Yellow)
+		a.showToast("Voice conversation is not available", theme.Default.Yellow)
 		return
 	}
 	a.resolveVoicePending()
@@ -70,6 +65,16 @@ func (a *App) runVoiceCommand(args string) {
 		})
 	}()
 	a.invalidate()
+}
+
+// realtimeModel is the voice conversation model, when voice is on and the
+// terminal is local: an SSH session cannot reach the user's microphone.
+func (a *App) realtimeModel() (*audio.Realtime, bool) {
+	provider, ok := a.agent.(realtimeProvider)
+	if !ok || remoteTerminal() {
+		return nil, false
+	}
+	return provider.Realtime(a.sessionID)
 }
 
 func (a *App) endConversation() {

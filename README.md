@@ -197,16 +197,17 @@ Ollama. With none set, Wingman uses `http://localhost:4242/v1`. A gateway must r
 separately; `wingman server` starts the web UI.
 
 Voice conversations use a separate speech model while the selected coding model
-continues handling files and tools. Click the headphones button in the web or
-desktop composer, or run `/voice` in a local terminal. Speak requests and
-corrections normally; corrections steer running work. Escape ends voice, and
-coding work continues unless you ask to cancel the task.
+continues handling files and tools. With an empty message, the send button in
+the web or desktop composer starts voice; in a local terminal, run `/voice`.
+Speak requests and corrections normally; corrections steer running work. Escape
+ends voice, and coding work continues unless you ask to cancel the task.
 Status questions use a read-only tool and do not add a coding-chat turn or steer work.
 While voice is connected, completed coding turns trigger a spoken summary,
 including work started in chat.
 
 The provider must support the OpenAI Realtime API over WebSockets, including
-per-response `tool_choice` overrides. Wingman
+server VAD with `create_response: false` and per-response `tool_choice` and
+`instructions` overrides. Wingman
 discovers models with `realtime` in their name, or you can set
 `WINGMAN_MODEL_REALTIME=gpt-realtime-2.1`. GPT-Live uses a different protocol.
 The web UI streams audio and supports speech interruptions and microphone mute.

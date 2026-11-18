@@ -11,7 +11,6 @@ import { fetchJSON } from "../api/http.ts";
 const SAMPLE_RATE = 16000;
 const MIN_SECONDS = 0.5;
 const MAX_MS = 2 * 60_000;
-const METER_BARS = 4;
 
 export type VoicePhase = "idle" | "recording" | "transcribing";
 
@@ -22,13 +21,23 @@ const supported = () =>
 	typeof AudioWorkletNode !== "undefined" &&
 	!!navigator.mediaDevices?.getUserMedia;
 
-/** The catalogue revision refetches availability once the host discovers models. */
-export function useVoiceAvailable(backend: string, catalogue: string) {
+/**
+ * Whether the backend offers dictation ("transcription") or voice conversation.
+ * The catalogue revision refetches availability once the host discovers models.
+ */
+export function useVoiceAvailable(
+	backend: string,
+	catalogue: string,
+	feature: "transcription" | "conversation",
+) {
 	const enabled = supported() && !!backend;
 	const { data } = useQuery({
-		queryKey: ["server", "transcription", backend, catalogue],
+		queryKey: ["server", feature, backend, catalogue],
 		queryFn: ({ signal }) =>
-			fetchJSON<{ available: boolean }>(voicePath(backend), { signal }),
+			fetchJSON<{ available: boolean }>(
+				`/api/v2/backends/${encodeURIComponent(backend)}/${feature}`,
+				{ signal },
+			),
 		enabled,
 		staleTime: 60_000,
 	});
@@ -179,9 +188,6 @@ export function useVoiceInput({
 	onError: (error: Error) => void;
 }) {
 	const [phase, setPhase] = useState<VoicePhase>("idle");
-	const [levels, setLevels] = useState<number[]>(() =>
-		Array(METER_BARS).fill(0),
-	);
 	const recorder = useRef<Promise<Recorder> | null>(null);
 	const request = useRef<AbortController | null>(null);
 	const level = useRef(0);
@@ -239,7 +245,7 @@ export function useVoiceInput({
 		if (recorder.current || request.current) return;
 		level.current = 0;
 		const pending = startRecorder((value) => {
-			level.current = value;
+			level.current = meterLevel(value);
 		});
 		recorder.current = pending;
 		setPhase("recording");
@@ -253,15 +259,8 @@ export function useVoiceInput({
 
 	useEffect(() => {
 		if (phase !== "recording") return;
-		const meter = setInterval(
-			() => setLevels((prev) => [...prev.slice(1), meterLevel(level.current)]),
-			100,
-		);
 		const limit = setTimeout(() => void stop(), MAX_MS);
-		return () => {
-			clearInterval(meter);
-			clearTimeout(limit);
-		};
+		return () => clearTimeout(limit);
 	}, [phase, stop]);
 
 	// Escape cancels before it can reach the composer and stop the running turn.
@@ -280,5 +279,5 @@ export function useVoiceInput({
 	// Cancel before a backend change can send audio or deliver a stale result.
 	useLayoutEffect(() => cancel, [backend, cancel]);
 
-	return { phase, levels, start, stop, cancel };
+	return { phase, level, start, stop, cancel };
 }

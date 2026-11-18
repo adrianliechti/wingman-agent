@@ -274,12 +274,14 @@ func (m *webE2EModel) handleRealtime(w http.ResponseWriter, r *http.Request) {
 	defer conn.CloseNow()
 	m.voiceActive.Add(1)
 	defer m.voiceActive.Add(-1)
-	input, result := false, false
+	input, delegated, result := false, false, false
 	for {
 		var event struct {
-			Type     string                               `json:"type"`
-			Response struct{ Metadata map[string]string } `json:"response"`
-			Item     struct {
+			Type     string `json:"type"`
+			Response struct {
+				ToolChoice string `json:"tool_choice"`
+			} `json:"response"`
+			Item struct {
 				Type    string
 				Content []struct{ Text string }
 			} `json:"item"`
@@ -304,9 +306,6 @@ func (m *webE2EModel) handleRealtime(w http.ResponseWriter, r *http.Request) {
 			if !send(map[string]any{"type": "input_audio_buffer.speech_stopped"}) || !send(map[string]any{"type": "input_audio_buffer.committed"}) {
 				return
 			}
-			if !send(map[string]any{"type": "response.created"}) || !send(map[string]any{"type": "response.done", "response": map[string]any{"status": "completed", "output": []any{map[string]any{"type": "function_call", "name": "coding_agent", "call_id": "voice_task", "arguments": `{"text":"voice conversation fixture"}`}}}}) {
-				return
-			}
 		case "conversation.item.create":
 			for _, part := range event.Item.Content {
 				if strings.HasPrefix(part.Text, "[Coding agent]") {
@@ -314,8 +313,16 @@ func (m *webE2EModel) handleRealtime(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		case "response.create":
-			if !send(map[string]any{"type": "response.created", "response": map[string]any{"metadata": event.Response.Metadata}}) {
+			if !send(map[string]any{"type": "response.created"}) {
 				return
+			}
+			// The reply to the spoken request delegates it to the coding agent.
+			if event.Response.ToolChoice == "auto" && !delegated {
+				delegated = true
+				if !send(map[string]any{"type": "response.done", "response": map[string]any{"status": "completed", "output": []any{map[string]any{"type": "function_call", "name": "coding_agent", "call_id": "voice_task", "arguments": `{"text":"voice conversation fixture"}`}}}}) {
+					return
+				}
+				continue
 			}
 			if result {
 				pcm := make([]byte, 24000*2)

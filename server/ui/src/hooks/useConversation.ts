@@ -1,26 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
-import { fetchJSON } from "../api/http.ts";
 import { workspaceClient } from "../state/workspaceClient.ts";
 import { base64PCM, openConversationAudio } from "./conversationAudio.ts";
 import { meterLevel } from "./useVoiceInput.ts";
-
-export function useConversationAvailable(backend: string, catalogue: string) {
-	const supported =
-		typeof AudioWorkletNode !== "undefined" &&
-		!!navigator.mediaDevices?.getUserMedia;
-	const { data } = useQuery({
-		queryKey: ["server", "conversation", backend, catalogue],
-		queryFn: ({ signal }) =>
-			fetchJSON<{ available: boolean }>(
-				`/api/v2/backends/${encodeURIComponent(backend)}/conversation`,
-				{ signal },
-			),
-		enabled: supported && !!backend,
-		staleTime: 60_000,
-	});
-	return supported && data?.available === true;
-}
 
 type Audio = Awaited<ReturnType<typeof openConversationAudio>>;
 type Active = {

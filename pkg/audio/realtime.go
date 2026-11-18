@@ -45,9 +45,9 @@ func (r *Realtime) Connect(ctx context.Context, instructions string, tools realt
 			Input: realtime.RealtimeAudioConfigInputParam{
 				Format: format,
 				TurnDetection: realtime.RealtimeAudioInputTurnDetectionUnionParam{OfServerVad: &realtime.RealtimeAudioInputTurnDetectionServerVadParam{
-					// Let server VAD answer when speech ends. The bridge only
-					// requests additional replies for tool results and task updates.
-					CreateResponse: openai.Bool(true), InterruptResponse: openai.Bool(true),
+					// Server VAD finds the turns and cuts off a reply the user talks
+					// over. The caller creates each reply, so it knows what it answers.
+					CreateResponse: openai.Bool(false), InterruptResponse: openai.Bool(true),
 				}},
 			},
 			Output: realtime.RealtimeAudioConfigOutputParam{Format: format, Voice: realtime.RealtimeAudioConfigOutputVoiceUnionParam{OfString: openai.String("marin")}},
