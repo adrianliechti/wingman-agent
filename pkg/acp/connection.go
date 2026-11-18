@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -18,7 +19,7 @@ type ClientConnection interface {
 	Done() <-chan struct{}
 	SessionUpdate(context.Context, acp.SessionNotification) error
 	RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error)
-	UnstableCreateElicitation(context.Context, acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
+	CreateElicitation(context.Context, acp.CreateElicitationRequest) (acp.CreateElicitationResponse, error)
 }
 
 type connectedAgent interface {
@@ -35,6 +36,7 @@ type AgentConnection struct {
 	mu        sync.Mutex
 	logger    *slog.Logger
 	setLogger func(*slog.Logger)
+	v1Output  *sessionResponseWriter
 }
 
 func NewAgentConnection(agent connectedAgent, out io.Writer, in io.Reader) *AgentConnection {
@@ -43,42 +45,22 @@ func NewAgentConnection(agent connectedAgent, out io.Writer, in io.Reader) *Agen
 	go func() {
 		defer close(c.done)
 		reader := bufio.NewReader(in)
-		var first []byte
-		for len(first) < 32*1024*1024 {
-			part, err := reader.ReadSlice('\n')
-			first = append(first, part...)
-			if err == bufio.ErrBufferFull {
-				continue
-			}
-			if err != nil {
-				close(c.ready)
-				return
-			}
-			if len(bytes.TrimSpace(first)) == 0 {
-				first = first[:0]
-				continue
-			}
-			break
-		}
-		if len(first) >= 32*1024*1024 {
+		first, version, err := firstInitialize(reader, out)
+		if err != nil {
 			close(c.ready)
 			return
 		}
-		var frame struct {
-			Method string `json:"method"`
-			Params struct {
-				ProtocolVersion int `json:"protocolVersion"`
-			} `json:"params"`
-		}
-		_ = json.Unmarshal(first, &frame)
-		input := io.MultiReader(bytes.NewReader(first), reader)
+		// The SDK starts its reader inside the constructor. Publish the
+		// connection before it can dispatch any already-buffered requests.
+		input := io.MultiReader(connectionReady(c.ready), bytes.NewReader(first), reader)
 		c.mu.Lock()
-		if frame.Method == "initialize" && frame.Params.ProtocolVersion != 1 {
-			v2 := newV2Connection(agent, out, input, c.ready)
+		if version == 2 {
+			v2 := newV2Connection(agent, out, input)
 			c.ClientConnection = v2
 			c.setLogger = v2.rpc.SetLogger
 		} else {
-			v1 := acp.NewAgentSideConnection(agent, out, input)
+			c.v1Output = &sessionResponseWriter{out: out}
+			v1 := acp.NewAgentSideConnection(agent, c.v1Output, input)
 			c.ClientConnection = v1
 			c.setLogger = v1.SetLogger
 		}
@@ -90,6 +72,127 @@ func NewAgentConnection(agent connectedAgent, out io.Writer, in io.Reader) *Agen
 		<-c.ClientConnection.Done()
 	}()
 	return c
+}
+
+type connectionReady <-chan struct{}
+
+func (ready connectionReady) Read([]byte) (int, error) {
+	<-ready
+	return 0, io.EOF
+}
+
+// AfterV1SessionResponse schedules an announcement for a newly allocated
+// session. V2 carries the initial command list in the setup response itself.
+func (c *AgentConnection) AfterV1SessionResponse(id acp.SessionId, announce func()) bool {
+	<-c.ready
+	w := c.v1Output
+	if w == nil {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.pending == nil {
+		w.pending = make(map[acp.SessionId]func())
+	}
+	w.pending[id] = announce
+	return true
+}
+
+type sessionResponseWriter struct {
+	out     io.Writer
+	mu      sync.Mutex
+	pending map[acp.SessionId]func()
+}
+
+func (w *sessionResponseWriter) Write(frame []byte) (int, error) {
+	n, err := w.out.Write(frame)
+	if err != nil || n != len(frame) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		return n, err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.pending) != 0 {
+		var response struct {
+			ID     json.RawMessage
+			Method string
+			Result struct{ SessionId acp.SessionId }
+		}
+		if json.Unmarshal(frame, &response) == nil && response.ID != nil && response.Method == "" {
+			if announce := w.pending[response.Result.SessionId]; announce != nil {
+				delete(w.pending, response.Result.SessionId)
+				// The SDK holds its write lock until this call returns.
+				go announce()
+			}
+		}
+	}
+	return n, nil
+}
+
+// Until a valid version arrives there is no version-specific dispatcher.
+func firstInitialize(reader *bufio.Reader, out io.Writer) ([]byte, uint16, error) {
+	var line []byte
+	for {
+		part, err := reader.ReadSlice('\n')
+		line = append(line, part...)
+		if len(line) > 10<<20 {
+			return nil, 0, fmt.Errorf("ACP frame exceeds 10 MiB")
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		var frame struct {
+			Method  string
+			ID      json.RawMessage
+			Params  json.RawMessage
+			JSONRPC string
+		}
+		var failure *acp.RequestError
+		if len(bytes.TrimSpace(line)) != 0 {
+			switch {
+			case !json.Valid(line):
+				failure = acp.NewParseError(nil)
+			case json.Unmarshal(line, &frame) != nil || frame.JSONRPC != "2.0" || !validRequestID(frame.ID):
+				frame.ID = nil
+				failure = acp.NewInvalidRequest(nil)
+			case frame.ID == nil: // Ignore notifications until initialization.
+			case frame.Method != "initialize":
+				failure = acp.NewInvalidRequest(nil)
+			default:
+				var params struct {
+					ProtocolVersion *uint16 `json:"protocolVersion"`
+				}
+				if json.Unmarshal(frame.Params, &params) != nil || params.ProtocolVersion == nil {
+					failure = acp.NewInvalidParams(nil)
+				} else if *params.ProtocolVersion == 0 {
+					failure = acp.NewRequestError(-32022, "Unsupported protocol version", map[string]any{"requested": 0, "supported": []int{1, 2}})
+				} else if *params.ProtocolVersion == 2 {
+					var v2 struct {
+						Info         *acp.Implementation
+						Capabilities map[string]json.RawMessage
+					}
+					if json.Unmarshal(frame.Params, &v2) != nil || v2.Info == nil || v2.Info.Name == "" || v2.Info.Version == "" {
+						failure = acp.NewInvalidParams("invalid v2 initialization")
+					} else {
+						return line, 2, nil
+					}
+				} else {
+					return line, min(*params.ProtocolVersion, 2), nil
+				}
+			}
+			if failure != nil {
+				if err := json.NewEncoder(out).Encode(map[string]any{"jsonrpc": "2.0", "id": frame.ID, "error": failure}); err != nil {
+					return nil, 0, err
+				}
+			}
+		}
+		line = line[:0]
+	}
 }
 
 func (c *AgentConnection) Done() <-chan struct{} { return c.done }
@@ -131,12 +234,12 @@ func (c *AgentConnection) RequestPermission(ctx context.Context, p acp.RequestPe
 	return client.RequestPermission(ctx, p)
 }
 
-func (c *AgentConnection) UnstableCreateElicitation(ctx context.Context, p acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+func (c *AgentConnection) CreateElicitation(ctx context.Context, p acp.CreateElicitationRequest) (acp.CreateElicitationResponse, error) {
 	client, err := c.client(ctx)
 	if err != nil {
-		return acp.UnstableCreateElicitationResponse{}, err
+		return acp.CreateElicitationResponse{}, err
 	}
-	return client.UnstableCreateElicitation(ctx, p)
+	return client.CreateElicitation(ctx, p)
 }
 
 type acceptedPromptKey struct{}
@@ -147,4 +250,11 @@ func PromptAccepted(ctx context.Context, messageID string) {
 	if accepted, ok := ctx.Value(acceptedPromptKey{}).(func(string)); ok {
 		accepted(messageID)
 	}
+}
+
+type backgroundInteractionKey struct{}
+
+// WithBackgroundInteraction marks an interaction that leaves the foreground turn running.
+func WithBackgroundInteraction(ctx context.Context) context.Context {
+	return context.WithValue(ctx, backgroundInteractionKey{}, true)
 }

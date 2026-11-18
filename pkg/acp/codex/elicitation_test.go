@@ -8,6 +8,8 @@ import (
 	"testing/synctest"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 type mcpPermissionClient struct {
@@ -73,10 +75,10 @@ func TestStandaloneMCPPermissionsCompleteWithDistinctIDs(t *testing.T) {
 			}
 			seen[id] = true
 			update := updates[0].ToolCallUpdate
-			if update == nil || update.ToolCallId != id || update.Status == nil || *update.Status != acp.ToolCallStatusCompleted {
+			if update == nil || update.ToolCallId != id || update.Status.Ptr() == nil || *update.Status.Ptr() != acp.ToolCallStatusCompleted {
 				t.Fatalf("terminal update = %+v", update)
 			}
-			output, _ := update.RawOutput.(map[string]any)
+			output := acpjson.Object(update.RawOutput)
 			if output["action"] != tt.action {
 				t.Fatalf("terminal output=%v, want action %q", output, tt.action)
 			}

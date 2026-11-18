@@ -50,6 +50,25 @@ func mcpConfigJSON(servers []acp.McpServer) string {
 	return string(b)
 }
 
+// The native CLI accepts either inline JSON or a file. A private file works
+// with older user-installed CLIs and keeps MCP credentials out of process lists.
+func writeMCPConfig(config string) (string, error) {
+	file, err := os.CreateTemp("", "wingman-claude-mcp-*.json")
+	if err != nil {
+		return "", err
+	}
+	_, err = file.WriteString(config)
+	closeErr := file.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(file.Name())
+		return "", err
+	}
+	return file.Name(), nil
+}
+
 // Any tier counts, project ones included: the setting can only take a permission away.
 func bypassDisabledBySettings(cwd string, env []string) bool {
 	for _, path := range settingsPaths(cwd, env) {

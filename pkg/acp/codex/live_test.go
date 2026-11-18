@@ -13,10 +13,13 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/pkg/acp/internal/acptest"
 )
 
 type liveClient struct {
+	acptest.NoElicitation
+
 	mu         sync.Mutex
 	text       strings.Builder
 	toolTitles []string
@@ -186,11 +189,11 @@ func TestLiveCodexUnpromptedSessionLifecycle(t *testing.T) {
 		t.Fatalf("load unprompted session: %v", err)
 	}
 	for range 2 {
-		if _, err := cc.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: ns.SessionId}); err != nil {
+		if _, err := cc.DeleteSession(ctx, acp.DeleteSessionRequest{SessionId: ns.SessionId}); err != nil {
 			t.Fatalf("delete unprompted session: %v", err)
 		}
 	}
-	if _, err := cc.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: "not-a-codex-thread"}); err != nil {
+	if _, err := cc.DeleteSession(ctx, acp.DeleteSessionRequest{SessionId: "not-a-codex-thread"}); err != nil {
 		t.Fatalf("delete unknown session: %v", err)
 	}
 }
@@ -206,7 +209,7 @@ func TestLiveCodexMCPStartupAwait(t *testing.T) {
 			Name: "acplive", Command: helper, Args: []string{},
 			Env: []acp.EnvVariable{{Name: helperEnv, Value: "1"}},
 		}}},
-		Meta: map[string]any{"mcpStartupAwaitTimeoutMs": 30000},
+		Meta: acpjson.Metadata(map[string]any{"mcpStartupAwaitTimeoutMs": 30000}),
 	})
 	if err != nil {
 		t.Fatalf("new session awaiting MCP startup: %v", err)

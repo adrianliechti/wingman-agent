@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
@@ -161,15 +163,19 @@ func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elici
 		return elicitationFallback(req), nil
 	}
 
-	params := acpsdk.NewUnstableCreateElicitationRequestForm(elicitationSchema(req))
-	// The SDK does not yet expose top-level sessionId for form requests.
-	params.Form.Meta = map[string]any{"sessionId": code.SessionIDFromContext(ctx)}
-	params.Form.Message = req.Message
+	schema, err := elicitationSchema(req)
+	if err != nil {
+		return tool.ElicitResult{Action: tool.ElicitCancel}, err
+	}
+	params := acpsdk.CreateElicitationRequest{Form: &acpsdk.CreateElicitationForm{
+		Mode: "form", RequestedSchema: schema, Message: req.Message,
+		Session: &acpsdk.ElicitationSessionScope{SessionId: acpsdk.SessionId(code.SessionIDFromContext(ctx))},
+	}}
 	if params.Form.Message == "" {
 		params.Form.Message = "Additional input is needed."
 	}
-	response, err := acp.Call(ctx, func() (acpsdk.UnstableCreateElicitationResponse, error) {
-		return s.conn.UnstableCreateElicitation(ctx, params)
+	response, err := acp.Call(ctx, func() (acpsdk.CreateElicitationResponse, error) {
+		return s.conn.CreateElicitation(ctx, params)
 	})
 	if err != nil {
 		// The client advertised form support, so an RPC failure is not evidence
@@ -183,7 +189,7 @@ func (s *Server) Elicit(ctx context.Context, req tool.ElicitRequest) (tool.Elici
 	}
 	switch {
 	case response.Accept != nil:
-		return tool.ElicitResult{Action: tool.ElicitAccept, Content: response.Accept.Content}, nil
+		return elicitationAnswers(req, acpjson.Object(response.Accept.Content)), nil
 	case response.Decline != nil:
 		return tool.ElicitResult{Action: tool.ElicitDecline}, nil
 	default:
@@ -227,8 +233,9 @@ func elicitationFallback(req tool.ElicitRequest) tool.ElicitResult {
 	return tool.ElicitResult{Action: tool.ElicitAccept, Content: content}
 }
 
-func elicitationSchema(req tool.ElicitRequest) acpsdk.UnstableElicitationSchema {
-	properties := make(map[string]any, len(req.Fields))
+func elicitationSchema(req tool.ElicitRequest) (acpsdk.ElicitationSchema, error) {
+	companions := customAnswerFields(req)
+	properties := make(map[string]any, len(req.Fields)+len(companions))
 	var required []string
 	for _, field := range req.Fields {
 		property := map[string]any{}
@@ -248,7 +255,7 @@ func elicitationSchema(req tool.ElicitRequest) acpsdk.UnstableElicitationSchema 
 		if field.Title != "" {
 			property["title"] = field.Title
 		}
-		if field.Description != "" {
+		if field.Description != "" && property["description"] == nil {
 			property["description"] = field.Description
 		}
 		if field.Default != nil {
@@ -262,45 +269,83 @@ func elicitationSchema(req tool.ElicitRequest) acpsdk.UnstableElicitationSchema 
 			}
 		}
 		properties[field.Name] = property
-		if field.Required {
+		if companion, ok := companions[field.Name]; ok {
+			properties[companion] = map[string]any{"type": "string", "title": "Other (" + field.Name + ")", "description": "Enter an additional answer."}
+		} else if field.Required {
 			required = append(required, field.Name)
 		}
 	}
 
-	return acpsdk.UnstableElicitationSchema{
-		Type:       acpsdk.UnstableElicitationSchemaTypeObject,
-		Properties: properties,
-		Required:   required,
+	fields, err := acpjson.Properties(properties)
+	if err != nil {
+		return acpsdk.ElicitationSchema{}, err
 	}
+	return acpsdk.ElicitationSchema{Type: acpsdk.ElicitationSchemaTypeObject, Properties: fields, Required: required}, nil
+}
+
+// ACP multi-select items are a closed set. Present a separate text field
+// for additional answers and fold it back into the tool's array on acceptance.
+func customAnswerFields(req tool.ElicitRequest) map[string]string {
+	used := make(map[string]bool)
+	for _, field := range req.Fields {
+		used[field.Name] = true
+	}
+	companions := make(map[string]string)
+	for _, field := range req.Fields {
+		if field.Multiple && !field.Strict && len(field.Enum) > 0 {
+			name := field.Name + "_custom"
+			for used[name] {
+				name += "_"
+			}
+			used[name] = true
+			companions[field.Name] = name
+		}
+	}
+	return companions
+}
+
+func elicitationAnswers(req tool.ElicitRequest, content map[string]any) tool.ElicitResult {
+	for name, companion := range customAnswerFields(req) {
+		custom, _ := content[companion].(string)
+		delete(content, companion)
+		if custom != "" {
+			selected, _ := content[name].([]any)
+			content[name] = append(selected, custom)
+		}
+	}
+	for _, field := range req.Fields {
+		if field.Required && content[field.Name] == nil {
+			return tool.ElicitResult{Action: tool.ElicitCancel}
+		}
+	}
+	return tool.ElicitResult{Action: tool.ElicitAccept, Content: content}
 }
 
 func addElicitationEnum(schema map[string]any, describedKey string, field tool.ElicitField) {
 	if len(field.Enum) == 0 {
 		return
 	}
-	described := false
-	choices := make([]map[string]any, 0, len(field.Enum))
+	var choices []map[string]any
+	var suggestions []string
 	for i, value := range field.Enum {
 		choice := map[string]any{"const": value, "title": value}
+		suggestion := value
 		if i < len(field.EnumDescriptions) && field.EnumDescriptions[i] != "" {
 			choice["description"] = field.EnumDescriptions[i]
-			described = true
+			suggestion += " (" + field.EnumDescriptions[i] + ")"
 		}
 		choices = append(choices, choice)
+		suggestions = append(suggestions, suggestion)
 	}
-	if !field.Strict {
-		// Built-in elicit options are suggestions. A closed enum/oneOf would
-		// reject free text even though the tool promises an Other answer.
-		fieldType := field.Type
-		if fieldType == "" {
-			fieldType = "string"
+	if !field.Multiple && !field.Strict {
+		schema["description"] = strings.TrimSpace(field.Description + " Suggested answers: " + strings.Join(suggestions, ", ") + ".")
+	} else if len(field.EnumDescriptions) > 0 {
+		if field.Multiple {
+			delete(schema, "type")
 		}
-		choices = append(choices, map[string]any{"type": fieldType, "title": "Other"})
-		schema["anyOf"] = choices
-	} else if described {
 		schema[describedKey] = choices
 	} else {
-		schema["enum"] = slices.Clone(field.Enum)
+		schema["enum"] = field.Enum
 	}
 }
 
@@ -330,9 +375,9 @@ func (s *Server) Confirm(ctx context.Context, message string) (bool, error) {
 			SessionId: acpsdk.SessionId(sid),
 			ToolCall: acpsdk.ToolCallUpdate{
 				ToolCallId: toolCallID,
-				Title:      new(message),
-				Kind:       acpsdk.Ptr(acpsdk.ToolKindOther),
-				Status:     acpsdk.Ptr(acpsdk.ToolCallStatusPending),
+				Title:      acpsdk.PatchSet(message),
+				Kind:       acpsdk.PatchSet(acpsdk.ToolKindOther),
+				Status:     acpsdk.PatchSet(acpsdk.ToolCallStatusPending),
 			},
 			Options: []acpsdk.PermissionOption{
 				{Kind: acpsdk.PermissionOptionKindAllowOnce, Name: "Allow", OptionId: allow},
@@ -653,9 +698,7 @@ func (s *Server) CloseSession(_ context.Context, params acpsdk.CloseSessionReque
 	return acpsdk.CloseSessionResponse{}, nil
 }
 
-// UnstableDeleteSession implements the stable session/delete wire method. The
-// v0.13.5 Go SDK still uses the Unstable prefix for its generated Go symbols.
-func (s *Server) UnstableDeleteSession(ctx context.Context, params acpsdk.UnstableDeleteSessionRequest) (acpsdk.UnstableDeleteSessionResponse, error) {
+func (s *Server) DeleteSession(ctx context.Context, params acpsdk.DeleteSessionRequest) (acpsdk.DeleteSessionResponse, error) {
 	s.mu.Lock()
 	sess := s.sessions[params.SessionId]
 	dir := s.sessionDirs[params.SessionId]
@@ -688,13 +731,13 @@ func (s *Server) UnstableDeleteSession(ctx context.Context, params acpsdk.Unstab
 		s.releaseWorkspace(sess.workspace)
 	}
 	if err != nil && !os.IsNotExist(err) {
-		return acpsdk.UnstableDeleteSessionResponse{}, err
+		return acpsdk.DeleteSessionResponse{}, err
 	}
 
 	s.mu.Lock()
 	delete(s.sessionDirs, params.SessionId)
 	s.mu.Unlock()
-	return acpsdk.UnstableDeleteSessionResponse{}, nil
+	return acpsdk.DeleteSessionResponse{}, nil
 }
 
 func (s *Server) lookupSession(id acpsdk.SessionId) *sessionEntry {
@@ -717,7 +760,7 @@ func (s *Server) retainSession(ctx context.Context, id acpsdk.SessionId, cancel 
 		sess := s.sessions[id]
 		if sess == nil {
 			s.mu.Unlock()
-			return nil, nil, fmt.Errorf("session %s not found", id)
+			return nil, nil, acp.SessionNotFound(id)
 		}
 		if sess.closing {
 			s.mu.Unlock()
@@ -775,17 +818,10 @@ func (s *Server) Cancel(_ context.Context, params acpsdk.CancelNotification) err
 	return nil
 }
 
-// newSessionCommandsDelay gives the client time to register a session ID it
-// learns from the response. Clients drop updates for sessions they do not know
-// yet, so a new or forked session must not be announced ahead of its response.
-const newSessionCommandsDelay = 200 * time.Millisecond
-
-// pushAvailableCommandsAfterResponse publishes the command list for a session
-// the client is only now being told about. Loaded and resumed sessions are
-// already known to the client and publish directly.
+// V1 needs a follow-up notification once the client knows the new ID. V2
+// collects this update synchronously into its session/new or session/fork result.
 func (s *Server) pushAvailableCommandsAfterResponse(ctx context.Context, sid acpsdk.SessionId, ag *agent.Agent) {
-	ctx = context.WithoutCancel(ctx)
-	time.AfterFunc(newSessionCommandsDelay, func() {
+	announce := func() {
 		s.mu.Lock()
 		_, live := s.sessions[sid]
 		live = live && !s.closing
@@ -793,7 +829,11 @@ func (s *Server) pushAvailableCommandsAfterResponse(ctx context.Context, sid acp
 		if live {
 			s.pushAvailableCommands(ctx, sid, ag)
 		}
-	})
+	}
+	if conn, ok := s.conn.(*acp.AgentConnection); ok && conn.AfterV1SessionResponse(sid, announce) {
+		return
+	}
+	announce()
 }
 
 func (s *Server) pushAvailableCommands(ctx context.Context, sid acpsdk.SessionId, ag *agent.Agent) {
@@ -819,12 +859,7 @@ func (s *Server) pushAvailableCommands(ctx context.Context, sid acpsdk.SessionId
 	}
 	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
-	_ = acp.Notify(sendCtx, s.conn, sid, acpsdk.SessionUpdate{
-		AvailableCommandsUpdate: &acpsdk.SessionAvailableCommandsUpdate{
-			SessionUpdate:     "available_commands_update",
-			AvailableCommands: available,
-		},
-	})
+	_ = acp.Notify(sendCtx, s.conn, sid, acp.UpdateAvailableCommands(available))
 }
 
 // pushSessionInfo reports the title the agent derived for this session, so the
@@ -843,10 +878,10 @@ func (s *Server) pushSessionInfo(ctx context.Context, sess *sessionEntry) {
 	sess.lastTitle = info.Title
 
 	title := info.Title
-	update := acpsdk.SessionSessionInfoUpdate{SessionUpdate: "session_info_update", Title: &title}
+	update := acpsdk.SessionSessionInfoUpdate{SessionUpdate: "session_info_update", Title: acpsdk.PatchSet(title)}
 	if !info.UpdatedAt.IsZero() {
 		u := info.UpdatedAt.UTC().Format(time.RFC3339)
-		update.UpdatedAt = &u
+		update.UpdatedAt = acpsdk.PatchSet(u)
 	}
 	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
@@ -870,7 +905,7 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (respo
 		// Cancellation can reach setup, a notification write, or inference.
 		// All three are the same terminal outcome for an accepted prompt.
 		if errors.Is(err, context.Canceled) {
-			response = promptResponse(sess, acpsdk.StopReasonCancelled, params.MessageId)
+			response = promptResponse(sess, acpsdk.StopReasonCancelled)
 			err = nil
 		}
 	}()
@@ -904,9 +939,6 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (respo
 	// ACP agent_message_chunk updates cannot be retracted. Deliberately leave
 	// Reset unsupported so a recoverable error after visible output terminates
 	// the attempt instead of duplicating it with an invisible retry.
-	if params.MessageId != nil {
-		ctx = harness.WithInputID(ctx, *params.MessageId)
-	}
 	input := acp.ContentFromBlocks(params.Prompt)
 	// Background results that arrived while no turn was running could not
 	// start one. They reach the model with this prompt instead.
@@ -936,10 +968,10 @@ func (s *Server) Prompt(ctx context.Context, params acpsdk.PromptRequest) (respo
 	if notifyErr != nil {
 		return acpsdk.PromptResponse{}, notifyErr
 	}
-	return promptResponse(sess, acpsdk.StopReasonEndTurn, params.MessageId), nil
+	return promptResponse(sess, acpsdk.StopReasonEndTurn), nil
 }
 
-func promptResponse(sess *sessionEntry, reason acpsdk.StopReason, messageID *string) acpsdk.PromptResponse {
+func promptResponse(sess *sessionEntry, reason acpsdk.StopReason) acpsdk.PromptResponse {
 	u := sess.agent.Usage(string(sess.id))
 	input := tokenCount(u.InputTokens)
 	cacheRead := min(tokenCount(u.CacheReadInputTokens), input)
@@ -947,20 +979,20 @@ func promptResponse(sess *sessionEntry, reason acpsdk.StopReason, messageID *str
 	output := tokenCount(u.OutputTokens)
 	reasoning := min(tokenCount(u.ReasoningTokens), output)
 	usage := &acpsdk.Usage{
-		InputTokens:  input - cacheRead - cacheWrite,
-		OutputTokens: output - reasoning,
-		TotalTokens:  addTokenCounts(input, output),
+		InputTokens:  int64(input - cacheRead - cacheWrite),
+		OutputTokens: int64(output - reasoning),
+		TotalTokens:  int64(addTokenCounts(input, output)),
 	}
 	if cacheRead > 0 {
-		usage.CachedReadTokens = &cacheRead
+		usage.CachedReadTokens = new(int64(cacheRead))
 	}
 	if cacheWrite > 0 {
-		usage.CachedWriteTokens = &cacheWrite
+		usage.CachedWriteTokens = new(int64(cacheWrite))
 	}
 	if reasoning > 0 {
-		usage.ThoughtTokens = &reasoning
+		usage.ThoughtTokens = new(int64(reasoning))
 	}
-	return acpsdk.PromptResponse{StopReason: reason, Usage: usage, UserMessageId: messageID}
+	return acpsdk.PromptResponse{StopReason: reason, Usage: usage}
 }
 
 func tokenCount(n int64) int {
@@ -983,6 +1015,12 @@ func addTokenCounts(a, b int) int {
 }
 
 func (s *Server) ListSessions(_ context.Context, params acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
+	if params.Cursor != nil {
+		return acpsdk.ListSessionsResponse{}, acpsdk.NewInvalidParams("unknown session list cursor")
+	}
+	if params.Cwd != nil && !filepath.IsAbs(*params.Cwd) {
+		return acpsdk.ListSessionsResponse{}, acpsdk.NewInvalidParams("cwd must be absolute")
+	}
 	if params.Cwd == nil || *params.Cwd == "" {
 		return acpsdk.ListSessionsResponse{Sessions: []acpsdk.SessionInfo{}}, nil
 	}
@@ -1039,8 +1077,8 @@ func (s *Server) UnstableForkSession(ctx context.Context, params acpsdk.Unstable
 	if err != nil {
 		return acpsdk.UnstableForkSessionResponse{}, err
 	}
-	servers, err := acp.StableMCPServers(params.McpServers, serverMCPCapabilities)
-	if err != nil {
+	servers := params.McpServers
+	if err := acp.ValidateMCPServers(servers, serverMCPCapabilities); err != nil {
 		return acpsdk.UnstableForkSessionResponse{}, err
 	}
 	w, err := s.acquireWorkspace(ctx, cwd, servers)
@@ -1064,7 +1102,7 @@ func (s *Server) UnstableForkSession(ctx context.Context, params acpsdk.Unstable
 	return acpsdk.UnstableForkSessionResponse{
 		SessionId:     acpSid,
 		Modes:         modeState(w.agent, sid),
-		ConfigOptions: acp.UnstableConfigOptions(sessionConfigOptions(w.agent, sid)),
+		ConfigOptions: sessionConfigOptions(w.agent, sid),
 	}, nil
 }
 
@@ -1111,7 +1149,7 @@ func (s *Server) replayMessages(ctx context.Context, sid acpsdk.SessionId, messa
 	for _, m := range messages {
 		notify := func(u acpsdk.SessionUpdate) {
 			if u.UserMessageChunk != nil && m.InputID != "" {
-				u.UserMessageChunk.MessageId = new(m.InputID)
+				u.UserMessageChunk.MessageId = new(acpsdk.MessageId(m.InputID))
 			}
 			if notifyErr == nil {
 				notifyErr = acp.Notify(ctx, s.conn, sid, u)
@@ -1160,6 +1198,7 @@ func notifyContent(notify func(acpsdk.SessionUpdate), role harness.MessageRole, 
 		rawInput := parseRawInput(presentation.Args)
 		locations := sdkToolLocations(presentation.Locations)
 		opts := []acpsdk.ToolCallStartOpt{
+			acpsdk.WithStartName(c.ToolCall.Name),
 			acpsdk.WithStartKind(kind),
 			acpsdk.WithStartStatus(acpsdk.ToolCallStatusInProgress),
 		}
@@ -1213,12 +1252,18 @@ func notifyContent(notify func(acpsdk.SessionUpdate), role harness.MessageRole, 
 
 func (s *Server) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSessionConfigOptionRequest) (acpsdk.SetSessionConfigOptionResponse, error) {
 	if params.ValueId == nil {
-		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("expected select value")
+		return acpsdk.SetSessionConfigOptionResponse{}, acpsdk.NewInvalidParams("expected select value")
 	}
 	p := params.ValueId
 	sess := s.lookupSession(p.SessionId)
 	if sess == nil {
-		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("session %s not found", p.SessionId)
+		return acpsdk.SetSessionConfigOptionResponse{}, acp.SessionNotFound(p.SessionId)
+	}
+	for _, option := range sessionConfigOptions(sess.agent, string(p.SessionId)) {
+		selectOption := option.Select
+		if selectOption != nil && selectOption.Id == p.ConfigId && selectOption.Options.Ungrouped != nil && !slices.ContainsFunc(*selectOption.Options.Ungrouped, func(o acpsdk.SessionConfigSelectOption) bool { return o.Value == p.Value }) {
+			return acpsdk.SetSessionConfigOptionResponse{}, acpsdk.NewInvalidParams("unknown config value")
+		}
 	}
 	switch string(p.ConfigId) {
 	case "model":
@@ -1237,7 +1282,7 @@ func (s *Server) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSe
 			return acpsdk.SetSessionConfigOptionResponse{}, err
 		}
 	default:
-		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown config id: %s", p.ConfigId)
+		return acpsdk.SetSessionConfigOptionResponse{}, acpsdk.NewInvalidParams(fmt.Sprintf("unknown config id: %s", p.ConfigId))
 	}
 
 	return acpsdk.SetSessionConfigOptionResponse{
@@ -1248,10 +1293,10 @@ func (s *Server) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSe
 func (s *Server) SetSessionMode(ctx context.Context, params acpsdk.SetSessionModeRequest) (acpsdk.SetSessionModeResponse, error) {
 	sess := s.lookupSession(params.SessionId)
 	if sess == nil {
-		return acpsdk.SetSessionModeResponse{}, fmt.Errorf("session %s not found", params.SessionId)
+		return acpsdk.SetSessionModeResponse{}, acp.SessionNotFound(params.SessionId)
 	}
 	if err := sess.agent.SetMode(ctx, string(params.SessionId), string(params.ModeId)); err != nil {
-		return acpsdk.SetSessionModeResponse{}, err
+		return acpsdk.SetSessionModeResponse{}, acpsdk.NewInvalidParams(err.Error())
 	}
 	return acpsdk.SetSessionModeResponse{}, nil
 }
@@ -1280,9 +1325,8 @@ func parseRawInput(args string) any {
 	if args == "" {
 		return nil
 	}
-	var v any
-	if err := json.Unmarshal([]byte(args), &v); err == nil {
-		return v
+	if json.Valid([]byte(args)) {
+		return json.RawMessage(args)
 	}
 	return args
 }
@@ -1314,14 +1358,7 @@ func modelConfigOption(a *agent.Agent, sid string) acpsdk.SessionConfigOption {
 			Name:  current,
 		})
 	}
-	return acpsdk.SessionConfigOption{
-		Select: &acpsdk.SessionConfigOptionSelect{
-			Id:           "model",
-			Name:         "Model",
-			CurrentValue: acpsdk.SessionConfigValueId(current),
-			Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &opts},
-		},
-	}
+	return acp.SelectConfigOption("model", "Model", current, opts)
 }
 
 func effortConfigOption(a *agent.Agent, sid string) acpsdk.SessionConfigOption {
@@ -1333,14 +1370,7 @@ func effortConfigOption(a *agent.Agent, sid string) acpsdk.SessionConfigOption {
 			Name:  acp.TitleCase(v),
 		})
 	}
-	return acpsdk.SessionConfigOption{
-		Select: &acpsdk.SessionConfigOptionSelect{
-			Id:           "effort",
-			Name:         "Effort",
-			CurrentValue: acpsdk.SessionConfigValueId(current),
-			Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &opts},
-		},
-	}
+	return acp.SelectConfigOption("effort", "Effort", current, opts)
 }
 
 func unattendedConfigOption(a *agent.Agent, sid string) acpsdk.SessionConfigOption {
@@ -1352,13 +1382,7 @@ func unattendedConfigOption(a *agent.Agent, sid string) acpsdk.SessionConfigOpti
 		{Value: "off", Name: "Off"},
 		{Value: "on", Name: "On"},
 	}
-	return acpsdk.SessionConfigOption{
-		Select: &acpsdk.SessionConfigOptionSelect{
-			Id: "unattended", Name: "Unattended",
-			CurrentValue: acpsdk.SessionConfigValueId(current),
-			Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &opts},
-		},
-	}
+	return acp.SelectConfigOption("unattended", "Unattended", current, opts)
 }
 
 func sdkToolLocations(locations []harness.ToolLocation) []acpsdk.ToolCallLocation {
@@ -1369,7 +1393,7 @@ func sdkToolLocations(locations []harness.ToolLocation) []acpsdk.ToolCallLocatio
 		}
 		mapped := acpsdk.ToolCallLocation{Path: location.Path}
 		if location.Line > 0 {
-			mapped.Line = new(location.Line)
+			mapped.Line = new(int64(location.Line))
 		}
 		result = append(result, mapped)
 	}
@@ -1377,7 +1401,7 @@ func sdkToolLocations(locations []harness.ToolLocation) []acpsdk.ToolCallLocatio
 }
 
 func sessionNotFound(id acpsdk.SessionId) *acpsdk.RequestError {
-	return &acpsdk.RequestError{Code: -32002, Message: "Resource not found", Data: map[string]any{"sessionId": string(id)}}
+	return &acpsdk.RequestError{Code: -32002, Message: "Resource not found", Data: acpjson.Raw(map[string]any{"sessionId": string(id)})}
 }
 
 func (s *Server) SetClientConnection(conn acp.ClientConnection) { s.conn = conn }

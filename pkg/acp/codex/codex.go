@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 type notificationHandler func(threadID, method string, params json.RawMessage)
@@ -635,7 +637,7 @@ func (c *codexClient) threadResumeOrRead(ctx context.Context, p threadResumePara
 		return resp, true, &acp.RequestError{
 			Code:    -32600,
 			Message: "This Codex session is in use by another Codex client (the Codex app, the CLI or an IDE extension). Close the session there or quit that client, then try again.",
-			Data:    map[string]any{"reason": "thread_active_writer", "threadId": p.ThreadID, "details": err.Error()},
+			Data:    acpjson.Raw(map[string]any{"reason": "thread_active_writer", "threadId": p.ThreadID, "details": err.Error()}),
 		}
 	}
 	if err == nil || !isMissingRolloutError(err) {

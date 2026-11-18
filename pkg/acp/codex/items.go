@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 // imageView -------------------------------------------------------------------
@@ -29,7 +31,7 @@ func imageViewToolCall(raw json.RawMessage) (acp.SessionUpdate, bool) {
 		opts = appendDisplayLocations(opts, []acp.ToolCallLocation{{Path: it.Path}})
 	}
 	u := acp.StartToolCall(acp.ToolCallId(it.ID), "View image", opts...)
-	u.ToolCall.Meta = toolNameMeta("view_image")
+	u.ToolCall.Name = new("view_image")
 	return u, true
 }
 
@@ -229,7 +231,7 @@ func compactionStartToolCall(id string) acp.SessionUpdate {
 		acp.WithStartKind(acp.ToolKindThink),
 		acp.WithStartStatus(acp.ToolCallStatusInProgress),
 	)
-	u.ToolCall.Meta = contextCompactionMeta()
+	u.ToolCall.Meta = acpjson.Metadata(contextCompactionMeta())
 	return u
 }
 
@@ -238,7 +240,7 @@ func compactionCompleteToolCall(id string) acp.SessionUpdate {
 		acp.WithUpdateTitle("Compact conversation"),
 		acp.WithUpdateStatus(acp.ToolCallStatusCompleted),
 	)
-	u.ToolCallUpdate.Meta = contextCompactionMeta()
+	u.ToolCallUpdate.Meta = acp.PatchSet(acpjson.Metadata(contextCompactionMeta()))
 	return u
 }
 
@@ -247,7 +249,7 @@ func completedCompactionToolCall(id string) acp.SessionUpdate {
 		acp.WithStartKind(acp.ToolKindThink),
 		acp.WithStartStatus(acp.ToolCallStatusCompleted),
 	)
-	u.ToolCall.Meta = contextCompactionMeta()
+	u.ToolCall.Meta = acpjson.Metadata(contextCompactionMeta())
 	return u
 }
 
@@ -535,7 +537,9 @@ func itemToolCallStart(raw json.RawMessage, id string, kind string, status acp.T
 				acp.WithStartRawInput(commandRawInput(command, it.Cwd)),
 			)
 		}
-		u.ToolCall.Meta = toolNameMeta(commandToolName(it.Source))
+		if name := commandToolName(it.Source); name != "" {
+			u.ToolCall.Name = &name
+		}
 		return u, true
 
 	case "mcpToolCall":
@@ -567,18 +571,12 @@ func itemToolCallStart(raw json.RawMessage, id string, kind string, status acp.T
 			acp.WithStartStatus(status),
 			acp.WithStartRawInput(args),
 		)
-		u.ToolCall.Meta = toolNameMeta(functionToolName(it.Tool, it.Namespace))
+		if name := functionToolName(it.Tool, it.Namespace); name != "" {
+			u.ToolCall.Name = &name
+		}
 		return u, true
 	}
 	return acp.SessionUpdate{}, false
-}
-
-// ACP v1 tool calls have no name field; Codex's model-facing tool name travels in _meta.
-func toolNameMeta(name string) map[string]any {
-	if name == "" {
-		return nil
-	}
-	return map[string]any{"codex": map[string]any{"toolName": name}}
 }
 
 func functionToolName(name, namespace string) string {
@@ -598,10 +596,4 @@ func commandToolName(source string) string {
 		// agent and userShell commands do not identify a unique model tool.
 		return ""
 	}
-}
-
-func toolNameFromMeta(meta map[string]any) string {
-	codex, _ := meta["codex"].(map[string]any)
-	name, _ := codex["toolName"].(string)
-	return name
 }

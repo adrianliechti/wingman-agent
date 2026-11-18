@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -98,8 +100,8 @@ func piOK(id string, data any) map[string]any {
 func titleValues(updates []*acp.SessionSessionInfoUpdate) []string {
 	var out []string
 	for _, u := range updates {
-		if u.Title != nil {
-			out = append(out, *u.Title)
+		if u.Title.Ptr() != nil {
+			out = append(out, *u.Title.Ptr())
 		}
 	}
 	return out
@@ -169,7 +171,7 @@ func TestFirstPromptNamesSession(t *testing.T) {
 				t.Fatalf("titles = %q, want %q", got, tc.wantTitles)
 			}
 			for _, u := range titles {
-				if u.UpdatedAt == nil {
+				if u.UpdatedAt.Ptr() == nil {
 					t.Fatal("live title change carried no updatedAt")
 				}
 			}
@@ -246,22 +248,37 @@ func TestTurnReportsContextUsageBeforeResponse(t *testing.T) {
 }
 
 func TestContextUsageWaitIsBounded(t *testing.T) {
-	proc := fakePiProcess(t, func(req piRequest, send func(any)) {})
-	start := time.Now()
-	if _, err := proc.getSessionStats(context.Background(), 50*time.Millisecond); err == nil {
-		t.Fatal("unanswered stats request succeeded")
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("stats wait took %s", elapsed)
-	}
-	if err := proc.writeLine(map[string]any{"type": "prompt"}); err != nil {
-		t.Fatalf("timed-out stats wait retired the transport: %v", err)
-	}
-	proc.mu.Lock()
-	defer proc.mu.Unlock()
-	if len(proc.pending) != 0 {
-		t.Fatalf("leaked %d pending requests", len(proc.pending))
-	}
+	synctest.Test(t, func(t *testing.T) {
+		var late string
+		proc := fakePiProcess(t, func(req piRequest, send func(any)) {
+			switch req.Type {
+			case "get_session_stats":
+				late = req.ID
+			case "get_state":
+				send(piOK(late, "expired stats"))
+				// A normal RPC may take longer than the usage deadline.
+				time.Sleep(3 * time.Second)
+				send(piOK(req.ID, "current session state"))
+			}
+		})
+		start := time.Now()
+		if _, err := proc.getSessionStats(t.Context(), 50*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("unanswered stats request: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed != 50*time.Millisecond {
+			t.Fatalf("stats wait took %s", elapsed)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		if state, err := proc.getState(ctx); err != nil || string(state) != `"current session state"` {
+			t.Fatalf("ordinary RPC after late stats: state %s, err %v", state, err)
+		}
+		proc.mu.Lock()
+		defer proc.mu.Unlock()
+		if len(proc.pending) != 0 {
+			t.Fatalf("leaked %d pending requests", len(proc.pending))
+		}
+	})
 }
 
 func TestParseContextUsage(t *testing.T) {
@@ -387,7 +404,7 @@ func TestLoadSessionRestoresTitleWithoutActivity(t *testing.T) {
 		t.Fatal(err)
 	}
 	titles := client.titles()
-	if len(titles) != 1 || titles[0].Title == nil || *titles[0].Title != "Saved title" || titles[0].UpdatedAt != nil {
+	if len(titles) != 1 || titles[0].Title.Ptr() == nil || *titles[0].Title.Ptr() != "Saved title" || titles[0].UpdatedAt.Ptr() != nil {
 		t.Fatalf("restored titles = %+v", titles)
 	}
 	if usage := client.last().UsageUpdate; usage == nil || usage.Used != 42 || usage.Size != 1000 {

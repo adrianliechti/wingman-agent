@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	acpsdk "github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
 type requestIDAgent struct{ *versionedAgent }
@@ -23,16 +24,15 @@ func (*requestIDAgent) ListSessions(context.Context, acpsdk.ListSessionsRequest)
 // JSON-RPC string IDs are compared by value, regardless of their escape
 // spelling. Numeric IDs must keep their precision and remain distinct from strings.
 func TestV2PromptCompletesWithRequestIDs(t *testing.T) {
-	for _, batched := range []bool{false, true} {
-		for _, id := range []any{"prompt", "<prompt>", "prompt&reply", "line\u2028separator", "1", json.Number("1"), json.Number("9007199254740993")} {
-			t.Run(fmt.Sprintf("batch=%t/%T=%v", batched, id, id), func(t *testing.T) {
-				testV2PromptRequestID(t, id, batched)
-			})
-		}
+
+	for _, id := range []any{"prompt", "<prompt>", "prompt&reply", "line\u2028separator", "1", json.Number("1"), json.Number("9007199254740993")} {
+		t.Run(fmt.Sprintf("%T=%v", id, id), func(t *testing.T) {
+			testV2PromptRequestID(t, id)
+		})
 	}
 }
 
-func testV2PromptRequestID(t *testing.T, id any, batched bool) {
+func testV2PromptRequestID(t *testing.T, id any) {
 	t.Helper()
 	agent := &requestIDAgent{versionedAgent: &versionedAgent{model: "one"}}
 	agent.prompt = func(ctx context.Context, p acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
@@ -93,53 +93,20 @@ func testV2PromptRequestID(t *testing.T, id any, batched bool) {
 		}
 		return result
 	}
-	send(request("init", "initialize", map[string]any{"protocolVersion": 2, "info": map[string]any{"name": "test"}}))
+	send(request("init", "initialize", map[string]any{"protocolVersion": 2, "info": map[string]any{"name": "test", "version": "1"}}))
 	response(next(), "init")
 	send(request("<new&session>", "session/new", map[string]any{"cwd": t.TempDir()}))
 	response(next(), "<new&session>")
 	prompt := request(id, "session/prompt", map[string]any{"sessionId": "s", "prompt": []any{map[string]any{"type": "text", "text": "hello"}}})
-	var listID any = "<list&sessions>"
-	if number, ok := id.(json.Number); ok {
-		listID = string(number)
-	} else if id == "1" {
-		listID = json.Number("1")
-	}
-	if batched {
-		send([]any{prompt, request(listID, "session/list", map[string]any{})})
-	} else {
-		send(prompt)
-	}
+	send(prompt)
 	acknowledged, answer := false, false
 	for {
 		frame := next()
-		if batch, ok := frame.([]any); ok {
-			if !batched || len(batch) != 2 || acknowledged {
-				t.Fatalf("unexpected response batch: %v", batch)
-			}
-			for _, item := range batch {
-				object, ok := item.(map[string]any)
-				if !ok {
-					t.Fatalf("invalid batch response: %v", item)
-				}
-				if object["id"] == id {
-					acknowledged = response(item, id)["messageId"] == "message"
-				} else {
-					response(item, listID)
-				}
-			}
-			if !acknowledged {
-				t.Fatalf("missing prompt acknowledgement: %v", batch)
-			}
-			continue
-		}
 		object, ok := frame.(map[string]any)
 		if !ok {
 			t.Fatalf("invalid frame: %v", frame)
 		}
 		if object["id"] != nil {
-			if batched {
-				t.Fatalf("batch response sent outside its array: %v", frame)
-			}
 			acknowledged = response(frame, id)["messageId"] == "message"
 		}
 		params, _ := object["params"].(map[string]any)

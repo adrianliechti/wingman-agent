@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/internal/process"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
@@ -244,8 +246,8 @@ func (s *session) pushTitleUpdate(ctx context.Context) {
 		SessionId: s.id,
 		Update: acpsdk.SessionUpdate{SessionInfoUpdate: &acpsdk.SessionSessionInfoUpdate{
 			SessionUpdate: "session_info_update",
-			Title:         &t,
-			UpdatedAt:     &updatedAt,
+			Title:         acpsdk.PatchSet(t),
+			UpdatedAt:     acpsdk.PatchSet(updatedAt),
 		}},
 	})
 }
@@ -268,6 +270,20 @@ func (s *session) ensureProc() (*claudeProc, error) {
 	}
 
 	args := s.cliArgsLocked()
+	var configPath string
+	if config := mcpConfigJSON(s.mcpServers); config != "" {
+		path, err := writeMCPConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("prepare Claude MCP config: %w", err)
+		}
+		configPath = path
+		args = append(args, "--mcp-config", path)
+		defer func() {
+			if configPath != "" {
+				_ = os.Remove(configPath)
+			}
+		}()
+	}
 	procCtx, kill := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(procCtx, a.path, args...)
 	cmd.WaitDelay = 2 * time.Second
@@ -299,6 +315,7 @@ func (s *session) ensureProc() (*claudeProc, error) {
 		sig:             sig,
 		kill:            kill,
 		cwd:             s.cwd,
+		mcpConfigPath:   configPath,
 		session:         s,
 		models:          append([]ModelEntry(nil), a.models...),
 		tools:           toolUseCache{},
@@ -308,6 +325,7 @@ func (s *session) ensureProc() (*claudeProc, error) {
 		results:         make(chan turnResult, 1),
 		dead:            make(chan struct{}),
 	}
+	configPath = "" // The reader now removes the file on first output or EOF.
 	go p.read(procCtx, a.conn, s.id, stdout)
 
 	s.started = true
@@ -337,6 +355,7 @@ type claudeProc struct {
 	sig             string
 	kill            context.CancelFunc
 	cwd             string
+	mcpConfigPath   string
 	session         *session
 	models          []ModelEntry
 	tools           toolUseCache
@@ -476,6 +495,16 @@ func (p *claudeProc) shutdown() {
 
 func (p *claudeProc) read(ctx context.Context, conn acp.ClientConnection, sid acpsdk.SessionId, r io.Reader) {
 	defer close(p.dead)
+	// Claude parses its command line before emitting protocol messages.
+	// Also clean up on EOF when startup failed before the first message.
+	removeConfig := func() {
+		if p.mcpConfigPath != "" {
+			if err := os.Remove(p.mcpConfigPath); err == nil || os.IsNotExist(err) {
+				p.mcpConfigPath = ""
+			}
+		}
+	}
+	defer removeConfig()
 	defer p.finishTurn()
 	stderr := p.session.agent.stderr
 	p.session.mu.Lock()
@@ -499,6 +528,7 @@ func (p *claudeProc) read(ctx context.Context, conn acp.ClientConnection, sid ac
 			fmt.Fprintf(stderr, "claude-acp: skipping non-JSON line: %s\n", line)
 			continue
 		}
+		removeConfig()
 		switch env.Type {
 		case "stream_event":
 			if env.ParentToolUseID != "" || env.ParentAgentID != "" {
@@ -803,7 +833,7 @@ func (p *claudeProc) handleSystem(ctx context.Context, conn acp.ClientConnection
 			text = "**" + strings.ToUpper(env.Level[:1]) + env.Level[1:] + ":** " + content
 		}
 		update := acpsdk.UpdateAgentMessageText(text)
-		update.AgentMessageChunk.Meta = map[string]any{"claudeCode": map[string]any{"kind": "informational", "level": env.Level}}
+		update.AgentMessageChunk.Meta = acpjson.Metadata(map[string]any{"claudeCode": map[string]any{"kind": "informational", "level": env.Level}})
 		p.markTurnOutput(true, false)
 		_ = acp.Notify(ctx, conn, sid, update)
 
@@ -944,7 +974,7 @@ func (p *claudeProc) handleToolProgress(ctx context.Context, conn acp.ClientConn
 		claudeMeta["toolResponse"].(map[string]any)["subagentRetry"] = env.SubagentRetry
 	}
 	if update.ToolCallUpdate != nil {
-		update.ToolCallUpdate.Meta = map[string]any{"claudeCode": claudeMeta}
+		update.ToolCallUpdate.Meta = acpsdk.PatchSet(acpjson.Metadata(map[string]any{"claudeCode": claudeMeta}))
 	}
 	return acp.Notify(ctx, conn, sid, update)
 }
@@ -1060,11 +1090,11 @@ func resultUsage(r cliResult) *acpsdk.Usage {
 	u := *r.Usage
 	cacheRead, cacheWrite := u.CacheReadInputTokens, u.CacheCreationInputTokens
 	return &acpsdk.Usage{
-		InputTokens:       u.InputTokens,
-		OutputTokens:      u.OutputTokens,
-		CachedReadTokens:  &cacheRead,
-		CachedWriteTokens: &cacheWrite,
-		TotalTokens:       u.InputTokens + u.OutputTokens + cacheRead + cacheWrite,
+		InputTokens:       int64(u.InputTokens),
+		OutputTokens:      int64(u.OutputTokens),
+		CachedReadTokens:  new(int64(cacheRead)),
+		CachedWriteTokens: new(int64(cacheWrite)),
+		TotalTokens:       int64(u.InputTokens + u.OutputTokens + cacheRead + cacheWrite),
 	}
 }
 
@@ -1132,9 +1162,6 @@ func (s *session) cliArgsLocked() []string {
 	}
 	for _, d := range s.additionalDirs {
 		args = append(args, "--add-dir", d)
-	}
-	if cfg := mcpConfigJSON(s.mcpServers); cfg != "" {
-		args = append(args, "--mcp-config", cfg)
 	}
 	if s.modelID != "" && s.modelID != "default" && (s.resumeFrom == "" || s.modelOverride) {
 		args = append(args, "--model", s.modelID)

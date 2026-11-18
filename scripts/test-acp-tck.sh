@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Pin the experimental suite so CI and local results use the same requirements.
-revision=b7f40fb3c003c45926547be5a1f7e2b374035815
+revision=ee2af8ad15822c12042631210647d5abbcfa516e
 root=$(cd "$(dirname "$0")/.." && pwd)
 live=false
 if [[ ${1:-} == --live ]]; then

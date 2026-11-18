@@ -27,7 +27,7 @@ func TestCancelIgnoresLateAssistantAfterEagerToolStart(t *testing.T) {
 		}
 		synctest.Wait()
 		updates := readTranscriptUpdates(t, wire.Bytes())
-		if len(updates) != 2 || updates[0].ToolCall == nil || updates[1].ToolCallUpdate == nil || updates[1].ToolCallUpdate.Status == nil || *updates[1].ToolCallUpdate.Status != acp.ToolCallStatusFailed {
+		if len(updates) != 2 || updates[0].ToolCall == nil || updates[1].ToolCallUpdate == nil || updates[1].ToolCallUpdate.Status.Ptr() == nil || *updates[1].ToolCallUpdate.Status.Ptr() != acp.ToolCallStatusFailed {
 			t.Fatalf("updates = %+v, want one start and one cancellation failure", updates)
 		}
 	})
@@ -71,7 +71,7 @@ func TestCancelClosesBackgroundCallsWhenResultAndEOFReady(t *testing.T) {
 			}
 			synctest.Wait()
 			updates := readTranscriptUpdates(t, wire.Bytes())
-			if p.emitted.has("bg-bash") || len(updates) != 2 || updates[1].ToolCallUpdate == nil || updates[1].ToolCallUpdate.Status == nil || *updates[1].ToolCallUpdate.Status != acp.ToolCallStatusFailed {
+			if p.emitted.has("bg-bash") || len(updates) != 2 || updates[1].ToolCallUpdate == nil || updates[1].ToolCallUpdate.Status.Ptr() == nil || *updates[1].ToolCallUpdate.Status.Ptr() != acp.ToolCallStatusFailed {
 				t.Fatalf("iteration %d: background call did not end exactly once: %+v", i, updates)
 			}
 		}

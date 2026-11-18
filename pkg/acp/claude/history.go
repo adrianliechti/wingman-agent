@@ -435,7 +435,7 @@ func replayUserMessage(ctx context.Context, conn acp.ClientConnection, sid acpsd
 	userText := func(text string) acpsdk.SessionUpdate {
 		update := acpsdk.UpdateUserMessageText(text)
 		if messageID != "" {
-			update.UserMessageChunk.MessageId = new(messageID)
+			update.UserMessageChunk.MessageId = new(acpsdk.MessageId(messageID))
 		}
 		return update
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -12,6 +11,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
 
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 	"github.com/adrianliechti/wingman-agent/pkg/acp"
 )
 
@@ -43,7 +43,7 @@ type approvalChoice struct {
 func permissionOption(id acpsdk.PermissionOptionId, name string, kind acpsdk.PermissionOptionKind, changes ...map[string]any) acpsdk.PermissionOption {
 	option := acpsdk.PermissionOption{OptionId: id, Name: name, Kind: kind}
 	if len(changes) > 0 {
-		option.Meta = map[string]any{"permission": map[string]any{"version": 1, "changes": changes}}
+		option.Meta = acpjson.Metadata(map[string]any{"permission": map[string]any{"version": 1, "changes": changes}})
 	}
 	return option
 }
@@ -75,7 +75,7 @@ func (a *approver) forRequest(requestCtx context.Context) (*approver, func()) {
 
 func pendingToolCall(id string, kind acpsdk.ToolKind) acpsdk.ToolCallUpdate {
 	status := acpsdk.ToolCallStatusPending
-	return acpsdk.ToolCallUpdate{ToolCallId: acpsdk.ToolCallId(id), Kind: &kind, Status: &status}
+	return acpsdk.ToolCallUpdate{ToolCallId: acpsdk.ToolCallId(id), Kind: acpsdk.PatchSet(kind), Status: acpsdk.PatchSet(status)}
 }
 
 func (a *approver) ask(tc acpsdk.ToolCallUpdate) (id acpsdk.PermissionOptionId, ok bool) {
@@ -109,17 +109,19 @@ func (a *approver) handleExec(p execApprovalParams, toolName string) execApprova
 		toolCallID = "approval:" + approvalID
 	}
 	tc := pendingToolCall(toolCallID, acpsdk.ToolKindExecute)
-	tc.Title = &title
-	tc.Meta = toolNameMeta(toolName)
+	tc.Title = acpsdk.PatchSet(title)
+	if toolName != "" {
+		tc.Name = acpsdk.PatchSet(toolName)
+	}
 	if p.Reason != "" {
-		tc.Content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(p.Reason))}
+		tc.Content = acpsdk.PatchSet([]acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(p.Reason))})
 	}
 	if p.Command != "" {
 		command := stripShellPrefix(p.Command)
 		if command == "" {
 			command = p.Command
 		}
-		tc.RawInput = commandRawInput(command, p.Cwd)
+		tc.RawInput = acpsdk.PatchSet(acpjson.Raw(commandRawInput(command, p.Cwd)))
 	}
 
 	response := execApprovalResponse{Decision: "cancel"}
@@ -159,9 +161,9 @@ func unmatchedCommandDecision(choices []approvalChoice) any {
 
 func (a *approver) handleFile(p fileApprovalParams) fileApprovalResponse {
 	tc := pendingToolCall(p.ItemID, acpsdk.ToolKindEdit)
-	tc.Title = new("Edit files")
+	tc.Title = acpsdk.PatchSet("Edit files")
 	if p.Reason != "" {
-		tc.Content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(p.Reason))}
+		tc.Content = acpsdk.PatchSet([]acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(p.Reason))})
 	}
 
 	choices := fileApprovalChoices(p)
@@ -201,15 +203,15 @@ func (a *approver) handlePermissions(p permissionsApprovalParams) permissionsApp
 
 func permissionsToolCall(p permissionsApprovalParams) acpsdk.ToolCallUpdate {
 	tc := pendingToolCall(p.ItemID, acpsdk.ToolKindOther)
-	tc.Title = new("Permissions request")
-	tc.Meta = toolNameMeta("request_permissions")
+	tc.Title = acpsdk.PatchSet("Permissions request")
+	tc.Name = acpsdk.PatchSet("request_permissions")
 	if content := formatRequestedPermissions(p.Permissions); content != "" {
 		if p.Reason != "" {
 			content = p.Reason + "\n\n" + content
 		}
-		tc.Content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(content))}
+		tc.Content = acpsdk.PatchSet([]acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(content))})
 	} else if p.Reason != "" {
-		tc.Content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(p.Reason))}
+		tc.Content = acpsdk.PatchSet([]acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(p.Reason))})
 	}
 	return tc
 }
@@ -483,9 +485,9 @@ func (a *approver) handleElicitation(p elicitationParams) elicitationResponse {
 		title = fmt.Sprintf("%s: %s", p.ServerName, title)
 	}
 	tc := pendingToolCall("mcp-elicitation:"+uuid.NewString(), acpsdk.ToolKindOther)
-	tc.Title = &title
+	tc.Title = acpsdk.PatchSet(title)
 	if p.Message != "" {
-		tc.Content = []acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(p.Message))}
+		tc.Content = acpsdk.PatchSet([]acpsdk.ToolCallContent{acpsdk.ToolContent(acpsdk.TextBlock(p.Message))})
 	}
 
 	response := elicitationResponse{Action: "cancel"}
@@ -531,33 +533,24 @@ func isMessageOnlyElicitation(p elicitationParams) bool {
 	return json.Unmarshal(propertiesRaw, &properties) == nil && len(properties) == 0
 }
 
-func (a *approver) elicitationMeta(meta map[string]any) map[string]any {
-	out := make(map[string]any, len(meta)+1)
-	maps.Copy(out, meta)
-	// acp-go-sdk v0.13.5 does not yet expose the request's top-level session
-	// scope. Preserve it in metadata until the generated type catches up.
-	out["sessionId"] = string(a.sessionID)
-	return out
-}
-
 func (a *approver) handleFormElicitation(p elicitationParams) elicitationResponse {
-	var schema acpsdk.UnstableElicitationSchema
+	var schema acpsdk.ElicitationSchema
 	if len(p.RequestedSchema) > 0 {
 		if err := json.Unmarshal(p.RequestedSchema, &schema); err != nil {
 			return elicitationResponse{Action: "cancel", Content: nil, Meta: nil}
 		}
 	}
 	if schema.Type == "" {
-		schema.Type = acpsdk.UnstableElicitationSchemaTypeObject
+		schema.Type = acpsdk.ElicitationSchemaTypeObject
 	}
 	if schema.Properties == nil {
-		schema.Properties = map[string]any{}
+		schema.Properties = map[string]acpsdk.ElicitationPropertySchema{}
 	}
 
-	resp, err := callClient(a.ctx, a.conn, func() (acpsdk.UnstableCreateElicitationResponse, error) {
-		return a.conn.UnstableCreateElicitation(a.ctx, acpsdk.UnstableCreateElicitationRequest{
-			Form: &acpsdk.UnstableCreateElicitationForm{
-				Meta:            a.elicitationMeta(p.Meta),
+	resp, err := callClient(a.ctx, a.conn, func() (acpsdk.CreateElicitationResponse, error) {
+		return a.conn.CreateElicitation(a.ctx, acpsdk.CreateElicitationRequest{
+			Form: &acpsdk.CreateElicitationForm{
+				Session: &acpsdk.ElicitationSessionScope{SessionId: a.sessionID}, Meta: acpjson.Metadata(p.Meta),
 				Message:         p.Message,
 				Mode:            "form",
 				RequestedSchema: schema,
@@ -582,11 +575,11 @@ func (a *approver) handleURLElicitation(p elicitationParams) elicitationResponse
 	}
 	// MCP servers can reuse their own IDs across sessions. ACP requires each
 	// outstanding URL interaction to have a unique ID on the client connection.
-	id := acpsdk.UnstableElicitationId(uuid.NewString())
-	resp, err := callClient(a.ctx, a.conn, func() (acpsdk.UnstableCreateElicitationResponse, error) {
-		return a.conn.UnstableCreateElicitation(a.ctx, acpsdk.UnstableCreateElicitationRequest{
-			Url: &acpsdk.UnstableCreateElicitationUrl{
-				Meta:          a.elicitationMeta(p.Meta),
+	id := acpsdk.ElicitationId(uuid.NewString())
+	resp, err := callClient(a.ctx, a.conn, func() (acpsdk.CreateElicitationResponse, error) {
+		return a.conn.CreateElicitation(a.ctx, acpsdk.CreateElicitationRequest{
+			Url: &acpsdk.CreateElicitationUrl{
+				Session: &acpsdk.ElicitationSessionScope{SessionId: a.sessionID}, Meta: acpjson.Metadata(p.Meta),
 				ElicitationId: id,
 				Message:       p.Message,
 				Mode:          "url",

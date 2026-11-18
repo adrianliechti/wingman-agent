@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 // scriptedAgent answers app-server requests with handle and records every
@@ -328,7 +330,7 @@ func TestUnmaterializedThreadCanBeResumedLoadedAndDeleted(t *testing.T) {
 			ctx := context.Background()
 			resumed, err := agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: "thread-1", Cwd: workCwd})
 			if !known {
-				if err == nil || !strings.Contains(err.Error(), "no rollout found") {
+				if rpc, ok := err.(*acp.RequestError); !ok || rpc.Code != -32002 || !strings.Contains(string(rpc.Data), "thread-1") {
 					t.Fatalf("unknown thread resume = %v", err)
 				}
 				if _, err := agent.LoadSession(ctx, acp.LoadSessionRequest{SessionId: "thread-1", Cwd: workCwd, McpServers: []acp.McpServer{}}); err == nil {
@@ -358,7 +360,7 @@ func TestUnmaterializedThreadCanBeResumedLoadedAndDeleted(t *testing.T) {
 					}
 					s.respond(req, map[string]any{})
 				})
-				if _, err := agent.UnstableDeleteSession(ctx, acp.UnstableDeleteSessionRequest{SessionId: "not-a-uuid"}); err != nil {
+				if _, err := agent.DeleteSession(ctx, acp.DeleteSessionRequest{SessionId: "not-a-uuid"}); err != nil {
 					t.Fatalf("delete with %q: %v", message, err)
 				}
 			}
@@ -371,7 +373,7 @@ func TestUnmaterializedThreadCanBeResumedLoadedAndDeleted(t *testing.T) {
 		}
 		s.respond(req, map[string]any{})
 	})
-	if _, err := agent.UnstableDeleteSession(context.Background(), acp.UnstableDeleteSessionRequest{SessionId: "thread-1"}); err == nil {
+	if _, err := agent.DeleteSession(context.Background(), acp.DeleteSessionRequest{SessionId: "thread-1"}); err == nil {
 		t.Fatal("archive failure was hidden")
 	}
 }
@@ -409,7 +411,7 @@ func TestMCPStartupAwaitTimeout(t *testing.T) {
 				// A state from before the request must not satisfy this wait.
 				agent.codex.recordMCPStartup(json.RawMessage(`{"threadId":"thread-1","name":"docs","status":"ready"}`))
 				start := time.Now()
-				if _, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: workCwd, McpServers: servers, Meta: tt.meta}); err != nil {
+				if _, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: workCwd, McpServers: servers, Meta: acpjson.Metadata(tt.meta)}); err != nil {
 					t.Fatal(err)
 				}
 				if waited := time.Since(start); waited != tt.wantWait {
@@ -423,7 +425,7 @@ func TestMCPStartupAwaitTimeout(t *testing.T) {
 			s.respond(req, map[string]any{"thread": map[string]any{"id": "thread-1"}, "model": "m"})
 			_ = s.conn.Close()
 		})
-		_, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: workCwd, McpServers: servers, Meta: map[string]any{"mcpStartupAwaitTimeoutMs": float64(5000)}})
+		_, err := agent.NewSession(context.Background(), acp.NewSessionRequest{Cwd: workCwd, McpServers: servers, Meta: acpjson.Metadata(map[string]any{"mcpStartupAwaitTimeoutMs": float64(5000)})})
 		if err == nil || !strings.Contains(err.Error(), "MCP server startup") {
 			t.Fatalf("backend exit during MCP startup = %v", err)
 		}
@@ -463,12 +465,12 @@ func TestMCPStartupWaitsForRequestedThread(t *testing.T) {
 					var err error
 					switch operation {
 					case "new":
-						_, err = agent.NewSession(ctx, acp.NewSessionRequest{Cwd: workCwd, McpServers: servers, Meta: meta})
+						_, err = agent.NewSession(ctx, acp.NewSessionRequest{Cwd: workCwd, McpServers: servers, Meta: acpjson.Metadata(meta)})
 					case "resume":
-						_, err = agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: "thread-1", Cwd: workCwd, McpServers: servers, Meta: meta})
+						_, err = agent.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: "thread-1", Cwd: workCwd, McpServers: servers, Meta: acpjson.Metadata(meta)})
 					case "fork":
 						_, err = agent.UnstableForkSession(ctx, acp.UnstableForkSessionRequest{
-							SessionId: "thread-1", Cwd: workCwd, McpServers: []acp.UnstableMcpServer{{Stdio: server}}, Meta: meta,
+							SessionId: "thread-1", Cwd: workCwd, McpServers: []acp.McpServer{{Stdio: server}}, Meta: acpjson.Metadata(meta),
 						})
 					}
 					if err != nil {
@@ -520,7 +522,7 @@ func TestCommandApprovalCarriesCodexToolName(t *testing.T) {
 	named := 0
 	for {
 		frame := peer.next(t)
-		if strings.Contains(string(frame.Params), `"toolName":"exec_command"`) {
+		if strings.Contains(string(frame.Params), `"name":"exec_command"`) {
 			named++
 		}
 		switch frame.Method {
@@ -574,7 +576,7 @@ func TestWriteStdinApprovalKeepsRunningCommand(t *testing.T) {
 						t.Fatal(err)
 					}
 					tc := request.ToolCall
-					if tc.ToolCallId != "approval:stdin-1" || tc.Title == nil || *tc.Title != "Send input to terminal" || toolNameFromMeta(tc.Meta) != "write_stdin" {
+					if tc.ToolCallId != "approval:stdin-1" || tc.Title.Ptr() == nil || *tc.Title.Ptr() != "Send input to terminal" || tc.Name.Ptr() == nil || *tc.Name.Ptr() != "write_stdin" {
 						t.Fatalf("permission tool call = %s", frame.Params)
 					}
 					if len(request.Options) != 2 || request.Options[0].OptionId != optionAllowOnce || request.Options[1].OptionId != optionCancel {
@@ -595,10 +597,10 @@ func TestWriteStdinApprovalKeepsRunningCommand(t *testing.T) {
 					var n acp.SessionNotification
 					_ = json.Unmarshal(frame.Params, &n)
 					if u := n.Update.ToolCallUpdate; u != nil {
-						if u.ToolCallId == "cmd" && (u.Status != nil && *u.Status == acp.ToolCallStatusPending || u.Title != nil || u.RawInput != nil) {
+						if u.ToolCallId == "cmd" && (u.Status.Ptr() != nil && *u.Status.Ptr() == acp.ToolCallStatusPending || u.Title.Ptr() != nil || u.RawInput.Ptr() != nil) {
 							t.Fatalf("input approval clobbered the running command: %s", frame.Params)
 						}
-						if u.ToolCallId == "approval:stdin-1" && u.Status != nil && *u.Status == acp.ToolCallStatusFailed {
+						if u.ToolCallId == "approval:stdin-1" && u.Status.Ptr() != nil && *u.Status.Ptr() == acp.ToolCallStatusFailed {
 							approvalFinished = true
 						}
 					}

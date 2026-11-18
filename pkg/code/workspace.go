@@ -49,6 +49,23 @@ type UI interface {
 	Confirm(ctx context.Context, message string) (bool, error)
 }
 
+// Notice is a live session advisory, displayed separately from model messages.
+type Notice struct {
+	Severity string
+	Message  string
+}
+
+func (n Notice) String() string {
+	switch n.Severity {
+	case "warning":
+		return "Warning: " + n.Message
+	case "error":
+		return "Error: " + n.Message
+	default:
+		return n.Message
+	}
+}
+
 type sessionCtxKey struct{}
 
 func WithSessionID(ctx context.Context, sid string) context.Context {

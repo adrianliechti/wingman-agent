@@ -22,7 +22,7 @@ func TestACPContract(t *testing.T) {
 func newContractAgent(t *testing.T) acptest.Agent {
 	t.Helper()
 	agentIO, serverIO := net.Pipe()
-	server := &contractAppServer{conn: serverIO}
+	server := &contractAppServer{conn: serverIO, threads: map[string]bool{}}
 	go server.run()
 	t.Cleanup(func() {
 		_ = serverIO.Close()
@@ -39,6 +39,7 @@ type contractAppServer struct {
 	conn        net.Conn
 	mu          sync.Mutex
 	initialized bool
+	threads     map[string]bool
 }
 
 func (s *contractAppServer) run() {
@@ -64,7 +65,7 @@ func (s *contractAppServer) run() {
 
 func (s *contractAppServer) handle(msg rpcMessage) {
 	switch msg.Method {
-	case "initialize", "thread/unsubscribe", "thread/archive", "thread/settings/update":
+	case "initialize", "thread/unsubscribe", "thread/settings/update":
 		s.respond(msg, map[string]any{})
 	case "model/list":
 		if !s.initialized {
@@ -76,14 +77,11 @@ func (s *contractAppServer) handle(msg rpcMessage) {
 			"supportedReasoningEfforts": []any{map[string]any{"reasoningEffort": "medium", "description": "Balanced"}},
 			"isDefault":                 true,
 		}}})
-	case "thread/start":
+	case "thread/start", "thread/fork":
+		id := uuid.NewString()
+		s.threads[id] = true
 		s.respond(msg, map[string]any{
-			"thread": map[string]any{"id": uuid.NewString(), "cwd": "/contract"},
-			"model":  "contract-model", "reasoningEffort": "medium",
-		})
-	case "thread/fork":
-		s.respond(msg, map[string]any{
-			"thread": map[string]any{"id": uuid.NewString(), "cwd": "/contract"},
+			"thread": map[string]any{"id": id, "cwd": "/contract"},
 			"model":  "contract-model", "reasoningEffort": "medium",
 		})
 	case "turn/start":
@@ -119,13 +117,28 @@ func (s *contractAppServer) handle(msg rpcMessage) {
 	case "turn/interrupt":
 		s.respond(msg, map[string]any{})
 	case "thread/list":
+		var list threadListParams
+		_ = json.Unmarshal(msg.Params, &list)
+		if list.Cursor != nil {
+			s.respondError(msg, -32602, "invalid list cursor")
+			return
+		}
 		s.respond(msg, map[string]any{"data": []any{}})
 	case "config/read":
 		s.respond(msg, map[string]any{"config": map[string]any{"model_provider": "contract"}})
-	case "thread/resume":
-		s.respond(msg, map[string]any{"thread": map[string]any{"id": uuid.NewString(), "cwd": "/contract"}, "model": "contract-model", "reasoningEffort": "medium"})
-	case "thread/read":
-		s.respond(msg, map[string]any{"thread": map[string]any{"id": uuid.NewString(), "cwd": "/contract", "turns": []any{}}})
+	case "thread/archive", "thread/resume", "thread/read":
+		var thread struct{ ThreadID string }
+		_ = json.Unmarshal(msg.Params, &thread)
+		if !s.threads[thread.ThreadID] {
+			s.respondError(msg, -32602, "thread not found")
+			return
+		}
+		if msg.Method == "thread/archive" {
+			delete(s.threads, thread.ThreadID)
+			s.respond(msg, map[string]any{})
+			return
+		}
+		s.respond(msg, map[string]any{"thread": map[string]any{"id": thread.ThreadID, "cwd": "/contract", "turns": []any{}}, "model": "contract-model", "reasoningEffort": "medium"})
 	default:
 		s.respondError(msg, -32601, "method not found")
 	}

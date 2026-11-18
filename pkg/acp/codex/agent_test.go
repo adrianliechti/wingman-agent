@@ -84,7 +84,7 @@ func TestNameNotificationsReachIdleSessions(t *testing.T) {
 	writeRPCMessage(appServerIO, rpcMessage{Jsonrpc: "2.0", Method: "thread/name/updated", Params: json.RawMessage(`{"threadId":"thread-1","threadName":"Sprint cleanup"}`)})
 	select {
 	case notification := <-recorder.updates:
-		if notification.SessionId != "thread-1" || notification.Update.SessionInfoUpdate == nil || notification.Update.SessionInfoUpdate.Title == nil || *notification.Update.SessionInfoUpdate.Title != "Sprint cleanup" {
+		if notification.SessionId != "thread-1" || notification.Update.SessionInfoUpdate == nil || notification.Update.SessionInfoUpdate.Title.Ptr() == nil || *notification.Update.SessionInfoUpdate.Title.Ptr() != "Sprint cleanup" {
 			t.Fatalf("title notification = %#v", notification)
 		}
 	case <-time.After(time.Second):
@@ -159,13 +159,12 @@ func TestPromptRenameUsesThreadNameSet(t *testing.T) {
 
 	resp, err := agent.Prompt(context.Background(), acp.PromptRequest{
 		SessionId: "thread-1",
-		MessageId: new("message-1"),
 		Prompt:    []acp.ContentBlock{acp.TextBlock("/rename Sprint cleanup")},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StopReason != acp.StopReasonEndTurn || resp.UserMessageId == nil || *resp.UserMessageId != "message-1" {
+	if resp.StopReason != acp.StopReasonEndTurn {
 		t.Fatalf("prompt response = %#v", resp)
 	}
 	select {

@@ -8,6 +8,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,7 +89,7 @@ func (a *Agent) Initialize(context.Context, acpsdk.InitializeRequest) (acpsdk.In
 				Close:  &acpsdk.SessionCloseCapabilities{},
 				Resume: a.resumeCapability(),
 				Fork:   a.forkCapability(),
-				List:   a.listCapability(),
+				List:   &acpsdk.SessionListCapabilities{},
 				Delete: a.deleteCapability(),
 			},
 		},
@@ -108,13 +110,6 @@ func (a *Agent) forkCapability() *acpsdk.SessionForkCapabilities {
 	return &acpsdk.SessionForkCapabilities{}
 }
 
-func (a *Agent) listCapability() *acpsdk.SessionListCapabilities {
-	if a.opts.SessionsDir == "" {
-		return nil
-	}
-	return &acpsdk.SessionListCapabilities{}
-}
-
 func (a *Agent) deleteCapability() *acpsdk.SessionDeleteCapabilities {
 	if a.opts.SessionsDir == "" {
 		return nil
@@ -122,18 +117,21 @@ func (a *Agent) deleteCapability() *acpsdk.SessionDeleteCapabilities {
 	return &acpsdk.SessionDeleteCapabilities{}
 }
 
-// UnstableDeleteSession is idempotent per the ACP session/delete semantics:
+// DeleteSession is idempotent per the ACP session/delete semantics:
 // deleting a session that does not exist (or is already gone) succeeds.
-func (a *Agent) UnstableDeleteSession(_ context.Context, params acpsdk.UnstableDeleteSessionRequest) (acpsdk.UnstableDeleteSessionResponse, error) {
+func (a *Agent) DeleteSession(_ context.Context, params acpsdk.DeleteSessionRequest) (acpsdk.DeleteSessionResponse, error) {
+	if a.opts.SessionsDir == "" {
+		return acpsdk.DeleteSessionResponse{}, acpsdk.NewMethodNotFound("session/delete")
+	}
 	a.disposeSession(params.SessionId)
 	if a.opts.SessionsDir != "" {
 		if file, ok := findSessionFile(a.opts.SessionsDir, string(params.SessionId)); ok {
 			if err := os.Remove(file.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return acpsdk.UnstableDeleteSessionResponse{}, err
+				return acpsdk.DeleteSessionResponse{}, err
 			}
 		}
 	}
-	return acpsdk.UnstableDeleteSessionResponse{}, nil
+	return acpsdk.DeleteSessionResponse{}, nil
 }
 
 func (a *Agent) Authenticate(context.Context, acpsdk.AuthenticateRequest) (acpsdk.AuthenticateResponse, error) {
@@ -202,23 +200,23 @@ func (a *Agent) NewSession(ctx context.Context, params acpsdk.NewSessionRequest)
 func (a *Agent) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
 	s := a.lookup(params.SessionId)
 	if s == nil {
-		return acpsdk.PromptResponse{}, fmt.Errorf("session %s not found", params.SessionId)
+		return acpsdk.PromptResponse{}, acp.SessionNotFound(params.SessionId)
 	}
 	if err := s.promptMu.Lock(ctx); err != nil {
 		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
 	}
 	defer s.promptMu.Unlock()
 	if s.isClosed() {
-		return acpsdk.PromptResponse{}, fmt.Errorf("session %s is closed", params.SessionId)
+		return acpsdk.PromptResponse{}, acp.SessionNotFound(params.SessionId)
 	}
 	if ctx.Err() != nil {
-		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled, UserMessageId: params.MessageId}, nil
+		return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonCancelled}, nil
 	}
 	stop, err := s.runTurn(ctx, a.conn, params.Prompt)
 	if err != nil {
 		return acpsdk.PromptResponse{}, err
 	}
-	return acpsdk.PromptResponse{StopReason: stop, UserMessageId: params.MessageId}, nil
+	return acpsdk.PromptResponse{StopReason: stop}, nil
 }
 
 func (a *Agent) Cancel(_ context.Context, params acpsdk.CancelNotification) error {
@@ -239,7 +237,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSes
 	v := params.ValueId
 	s := a.lookup(v.SessionId)
 	if s == nil {
-		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("session %s not found", v.SessionId)
+		return acpsdk.SetSessionConfigOptionResponse{}, acp.SessionNotFound(v.SessionId)
 	}
 	value := string(v.Value)
 
@@ -247,7 +245,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSes
 	case modelConfigID:
 		provider, modelID, ok := strings.Cut(value, "/")
 		if !ok {
-			return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("invalid model id %q", value)
+			return acpsdk.SetSessionConfigOptionResponse{}, acpsdk.NewInvalidParams(fmt.Sprintf("invalid model id %q", value))
 		}
 		if err := s.proc.setModel(ctx, provider, modelID); err != nil {
 			return acpsdk.SetSessionConfigOptionResponse{}, err
@@ -263,7 +261,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSes
 		valid := isThinkingLevel(s.thinkingLevels, value)
 		s.mu.Unlock()
 		if !valid {
-			return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown thinking level %q", value)
+			return acpsdk.SetSessionConfigOptionResponse{}, acpsdk.NewInvalidParams(fmt.Sprintf("unknown thinking level %q", value))
 		}
 		if err := s.proc.setThinkingLevel(ctx, value); err != nil {
 			return acpsdk.SetSessionConfigOptionResponse{}, err
@@ -273,7 +271,7 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSes
 		}
 
 	default:
-		return acpsdk.SetSessionConfigOptionResponse{}, fmt.Errorf("unknown configId %q", v.ConfigId)
+		return acpsdk.SetSessionConfigOptionResponse{}, acpsdk.NewInvalidParams(fmt.Sprintf("unknown configId %q", v.ConfigId))
 	}
 
 	return acpsdk.SetSessionConfigOptionResponse{ConfigOptions: s.configOptions()}, nil
@@ -307,12 +305,20 @@ func (a *Agent) storeSession(s *session) {
 const sessionPageSize = 50
 
 func (a *Agent) ListSessions(_ context.Context, params acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
-	if a.opts.SessionsDir == "" {
-		return acpsdk.ListSessionsResponse{Sessions: []acpsdk.SessionInfo{}}, nil
+	if params.Cwd != nil && !filepath.IsAbs(*params.Cwd) {
+		return acpsdk.ListSessionsResponse{}, acpsdk.NewInvalidParams("cwd must be absolute")
 	}
-
-	all := listSessionFiles(a.opts.SessionsDir)
-
+	var all []sessionFileInfo
+	if a.opts.SessionsDir != "" {
+		all = listSessionFiles(a.opts.SessionsDir)
+	} else {
+		a.mu.Lock()
+		for _, s := range a.sessions {
+			all = append(all, sessionFileInfo{ID: string(s.id), Cwd: s.cwd})
+		}
+		a.mu.Unlock()
+		slices.SortFunc(all, func(a, b sessionFileInfo) int { return strings.Compare(a.ID, b.ID) })
+	}
 	if params.Cwd != nil && *params.Cwd != "" {
 		// pi records its own symlink-resolved cwd (e.g. /private/var vs
 		// /var on macOS), so compare canonical forms.
@@ -328,9 +334,11 @@ func (a *Agent) ListSessions(_ context.Context, params acpsdk.ListSessionsReques
 
 	offset := 0
 	if params.Cursor != nil {
-		if n, err := strconv.Atoi(*params.Cursor); err == nil && n > 0 {
-			offset = n
+		n, err := strconv.Atoi(*params.Cursor)
+		if err != nil || n <= 0 || n > len(all) {
+			return acpsdk.ListSessionsResponse{}, acpsdk.NewInvalidParams("invalid session list cursor")
 		}
+		offset = n
 	}
 	if offset > len(all) {
 		offset = len(all)
@@ -361,11 +369,17 @@ func (a *Agent) ListSessions(_ context.Context, params acpsdk.ListSessionsReques
 }
 
 func (a *Agent) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionRequest) (acpsdk.ResumeSessionResponse, error) {
+	if a.opts.SessionsDir == "" && !acp.IsV2Request(ctx) {
+		return acpsdk.ResumeSessionResponse{}, acpsdk.NewMethodNotFound("session/resume")
+	}
 	response, err := a.loadSession(ctx, acpsdk.LoadSessionRequest{SessionId: params.SessionId, Cwd: params.Cwd, McpServers: params.McpServers}, false)
 	return acpsdk.ResumeSessionResponse{ConfigOptions: response.ConfigOptions}, err
 }
 
 func (a *Agent) LoadSession(ctx context.Context, params acpsdk.LoadSessionRequest) (acpsdk.LoadSessionResponse, error) {
+	if a.opts.SessionsDir == "" && !acp.IsV2Request(ctx) {
+		return acpsdk.LoadSessionResponse{}, acpsdk.NewMethodNotFound("session/load")
+	}
 	return a.loadSession(ctx, params, true)
 }
 
@@ -384,11 +398,11 @@ func (a *Agent) loadSession(ctx context.Context, params acpsdk.LoadSessionReques
 		return acpsdk.LoadSessionResponse{ConfigOptions: s.configOptions()}, nil
 	}
 	if a.opts.SessionsDir == "" {
-		return acpsdk.LoadSessionResponse{}, errors.ErrUnsupported
+		return acpsdk.LoadSessionResponse{}, acp.SessionNotFound(params.SessionId)
 	}
 	file, ok := findSessionFile(a.opts.SessionsDir, string(params.SessionId))
 	if !ok {
-		return acpsdk.LoadSessionResponse{}, fmt.Errorf("unknown session %s", params.SessionId)
+		return acpsdk.LoadSessionResponse{}, acp.SessionNotFound(params.SessionId)
 	}
 
 	proc, bridge, err := a.spawnSessionProcess(ctx, cwd, []string{"--session", file.Path}, params.McpServers)
@@ -486,14 +500,14 @@ func (a *Agent) spawnSessionProcess(ctx context.Context, cwd string, extraArgs [
 
 func (a *Agent) UnstableForkSession(ctx context.Context, params acpsdk.UnstableForkSessionRequest) (acpsdk.UnstableForkSessionResponse, error) {
 	if a.opts.SessionsDir == "" {
-		return acpsdk.UnstableForkSessionResponse{}, errors.ErrUnsupported
+		return acpsdk.UnstableForkSessionResponse{}, acpsdk.NewMethodNotFound("session/fork")
 	}
 	cwd, _, err := acp.NormalizeSessionRoots(params.Cwd, nil)
 	if err != nil {
 		return acpsdk.UnstableForkSessionResponse{}, err
 	}
-	servers, err := stableMCPServers(params.McpServers)
-	if err != nil {
+	servers := params.McpServers
+	if err := acp.ValidateMCPServers(servers, acpsdk.McpCapabilities{}); err != nil {
 		return acpsdk.UnstableForkSessionResponse{}, err
 	}
 	file, ok := findSessionFile(a.opts.SessionsDir, string(params.SessionId))
@@ -558,7 +572,7 @@ func (a *Agent) UnstableForkSession(ctx context.Context, params acpsdk.UnstableF
 
 	a.storeSession(s)
 	a.publishInitialUsage(s)
-	return acpsdk.UnstableForkSessionResponse{SessionId: id, ConfigOptions: acp.UnstableConfigOptions(s.configOptions())}, nil
+	return acpsdk.UnstableForkSessionResponse{SessionId: id, ConfigOptions: s.configOptions()}, nil
 }
 
 // Pi does not create a session file until the first assistant message. An empty
@@ -566,7 +580,7 @@ func (a *Agent) UnstableForkSession(ctx context.Context, params acpsdk.UnstableF
 func (a *Agent) forkUnpersistedSession(ctx context.Context, id acpsdk.SessionId, cwd string, servers []acpsdk.McpServer) (acpsdk.UnstableForkSessionResponse, error) {
 	source := a.lookup(id)
 	if source == nil || source.isClosed() {
-		return acpsdk.UnstableForkSessionResponse{}, fmt.Errorf("unknown session %s", id)
+		return acpsdk.UnstableForkSessionResponse{}, acp.SessionNotFound(id)
 	}
 	if err := source.promptMu.Lock(ctx); err != nil {
 		return acpsdk.UnstableForkSessionResponse{}, err
@@ -603,11 +617,7 @@ func (a *Agent) forkUnpersistedSession(ctx context.Context, id acpsdk.SessionId,
 		a.disposeSession(s.id)
 		return acpsdk.UnstableForkSessionResponse{}, err
 	}
-	return acpsdk.UnstableForkSessionResponse{SessionId: s.id, ConfigOptions: acp.UnstableConfigOptions(s.configOptions())}, nil
-}
-
-func stableMCPServers(servers []acpsdk.UnstableMcpServer) ([]acpsdk.McpServer, error) {
-	return acp.StableMCPServers(servers, acpsdk.McpCapabilities{})
+	return acpsdk.UnstableForkSessionResponse{SessionId: s.id, ConfigOptions: s.configOptions()}, nil
 }
 
 func (a *Agent) SetAgentConnection(conn *acpsdk.AgentSideConnection) { a.SetClientConnection(conn) }

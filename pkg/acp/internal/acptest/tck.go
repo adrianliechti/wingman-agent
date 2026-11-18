@@ -21,13 +21,6 @@ func ServeTCK(t *testing.T, factory Factory) {
 	if c, ok := agent.(closer); ok {
 		t.Cleanup(func() { _ = c.Close() })
 	}
-	connected, ok := agent.(interface {
-		Agent
-		SetClientConnection(acp.ClientConnection)
-	})
-	if !ok {
-		t.Fatalf("contract agent %T cannot receive its ACP connection", agent)
-	}
-	conn := acp.NewAgentConnection(connected, stdout, os.Stdin)
+	conn := acp.NewAgentConnection(agent, stdout, os.Stdin)
 	<-conn.Done()
 }

@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/adrianliechti/wingman-agent/internal/acpjson"
 )
 
 type bufferWriteCloser struct{ bytes.Buffer }
@@ -132,7 +134,7 @@ func TestPresentToolKeepsPathOnlyAsLocation(t *testing.T) {
 	}
 
 	update := acp.StartToolCall("read-1", presentation.title, startToolOptions(presentation, acp.ToolCallStatusPending)...)
-	if _, duplicated := update.ToolCall.RawInput.(map[string]any)["path"]; duplicated {
+	if _, duplicated := acpjson.Object(update.ToolCall.RawInput)["path"]; duplicated {
 		t.Fatalf("SDK mirrored path into input: %#v", update.ToolCall.RawInput)
 	}
 }
@@ -185,16 +187,16 @@ func TestDeleteSessionIdempotent(t *testing.T) {
 	}
 
 	a := New(Options{SessionsDir: dir})
-	if _, err := a.UnstableDeleteSession(context.Background(), acp.UnstableDeleteSessionRequest{SessionId: "abc"}); err != nil {
+	if _, err := a.DeleteSession(context.Background(), acp.DeleteSessionRequest{SessionId: "abc"}); err != nil {
 		t.Fatalf("delete existing: %v", err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("session file should be removed, stat err = %v", err)
 	}
-	if _, err := a.UnstableDeleteSession(context.Background(), acp.UnstableDeleteSessionRequest{SessionId: "abc"}); err != nil {
+	if _, err := a.DeleteSession(context.Background(), acp.DeleteSessionRequest{SessionId: "abc"}); err != nil {
 		t.Fatalf("delete missing should be idempotent: %v", err)
 	}
-	if _, err := a.UnstableDeleteSession(context.Background(), acp.UnstableDeleteSessionRequest{SessionId: "never-existed"}); err != nil {
+	if _, err := a.DeleteSession(context.Background(), acp.DeleteSessionRequest{SessionId: "never-existed"}); err != nil {
 		t.Fatalf("delete unknown should be idempotent: %v", err)
 	}
 }
