@@ -66,14 +66,30 @@ export function projectHref(
 		: "/";
 	return `${path}?project=${encodeURIComponent(project)}`;
 }
-export async function fetchWorkspace(): Promise<WorkspaceInfo & Bootstrap> {
-	const project = windowProject();
+/** Asks the host for a project's window, which opens the project there. */
+async function requestWorkspace(project: string | null): Promise<Response> {
 	const response = await fetch(
 		project
 			? `/api/workspace?project=${encodeURIComponent(project)}`
 			: "/api/workspace",
 	);
-	if (!response.ok) throw new APIError(await response.text(), response.status);
+	if (response.ok) return response;
+	const text = (await response.text()).trim();
+	throw new APIError(
+		// The host's own words for a missing folder are a system call's.
+		response.status === 404 && project
+			? "Its folder no longer exists."
+			: text || `HTTP ${response.status}`,
+		response.status,
+	);
+}
+/** Opens a project on the host before a window moves there: one that cannot
+ * open, such as a folder that is gone, leaves the window where it is. */
+export async function openProject(project: string): Promise<void> {
+	await requestWorkspace(project);
+}
+export async function fetchWorkspace(): Promise<WorkspaceInfo & Bootstrap> {
+	const response = await requestWorkspace(windowProject());
 	const scope = (await response.json()) as WorkspaceInfo;
 	if (
 		scope.protocol !== 2 ||

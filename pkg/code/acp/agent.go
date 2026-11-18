@@ -326,6 +326,11 @@ func NewInProcess(
 	}); ok {
 		a.steer = s.Steer
 	}
+	// An adapter that reads its agent's own store knows whether it lists
+	// every folder's sessions.
+	if s, ok := serverAgent.(interface{ ListsAllSessions() bool }); ok {
+		a.def.AllFolders = s.ListsAllSessions()
+	}
 
 	serverWriter := acp.NewConnectionWriter(serverW, 0)
 	srvConn := acpsdk.NewAgentSideConnection(serverAgent, serverWriter, serverR)
@@ -550,6 +555,13 @@ func (s *sessionState) applyModes(modes *acpsdk.SessionModeState) {
 func (a *Agent) ListSessions(ctx context.Context) ([]code.SessionInfo, error) {
 	cwd := a.workspace.RootPath
 	return a.listSessions(ctx, &cwd)
+}
+
+// ListsAllSessions reports whether the agent, asked without a folder, lists
+// the sessions of every folder. Only agents known to do so are asked: another
+// may answer with its own folder's sessions, or with none.
+func (a *Agent) ListsAllSessions() bool {
+	return a.def.AllFolders && a.caps.SessionCapabilities.List != nil
 }
 
 // ListAllSessions lists the sessions of every folder, each with its own.

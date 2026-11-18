@@ -170,8 +170,12 @@ func (p *Project) aliasDirectory() (string, error) {
 	return layout.WingmanPath("ahp", p.scope.WorkspaceID)
 }
 
-func (p *Project) saveAlias(alias sessionAlias) error {
-	dir, err := p.aliasDirectory()
+func (p *Project) saveAlias(alias sessionAlias) error { return writeAlias(p.scope, alias) }
+
+// writeAlias saves what the host keeps of a session of the project with scope,
+// which need not be open.
+func writeAlias(scope WorkspaceScope, alias sessionAlias) error {
+	dir, err := layout.WingmanPath("ahp", scope.WorkspaceID)
 	if err != nil {
 		return err
 	}

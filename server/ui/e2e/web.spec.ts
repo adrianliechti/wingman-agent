@@ -6926,5 +6926,61 @@ test.describe("session list across projects", () => {
 			sessionsPanel(page).getByRole("button", { name: /^Open project / }),
 		).toBeVisible();
 		await expect(sessionRow(page, "fleet-elsewhere")).toBeVisible();
+		// The list looks as the window left it: the project it came from is
+		// still open in it.
+		await expect(sessionRow(page, "fleet-here")).toBeVisible();
+	});
+
+	test("a busy session names its project, and one that cannot open leaves the window here", async ({
+		page,
+	}) => {
+		const fixture = await ahpFixture(page);
+		const IN_PROGRESS = 8;
+		// A project the host does not know stands for a folder that is gone.
+		fixture.add("wingman", {
+			id: "fleet-gone",
+			title: "Work in a removed folder",
+			updated_at: ago(1),
+		}).listed = {
+			status: IN_PROGRESS | READ,
+			project: {
+				uri: pathToFileURL("/wingman-e2e/removed-project").href,
+				displayName: "removed-project",
+			},
+		};
+		await composer(page);
+		await openSessions(page);
+		// What it does shows beside where it does it.
+		const row = sessionRow(page, "fleet-gone");
+		await expect(row).toContainText("Working…");
+		await expect(row.locator("[data-session-origin]")).toHaveText(
+			"removed-project",
+		);
+		await row.click();
+		await expect(
+			page
+				.getByRole("alert")
+				.filter({ hasText: "Could not open removed-project" }),
+		).toBeVisible();
+		await expect(page).not.toHaveURL(/[?&]project=/);
+		await expect(
+			page.getByPlaceholder("Message Wingman…").filter({ visible: true }),
+		).toBeVisible();
+	});
+
+	test("a link to a project that cannot open offers the way back", async ({
+		page,
+	}) => {
+		await ahpFixture(page);
+		await page.goto(
+			`/?project=${encodeURIComponent("/wingman-e2e/removed-project")}`,
+		);
+		const notice = page.getByRole("alert", { name: "Project unavailable" });
+		await expect(notice).toContainText("removed-project could not be opened");
+		await notice.getByRole("button", { name: "Back to start" }).click();
+		await expect(page).not.toHaveURL(/[?&]project=/);
+		await expect(
+			page.getByPlaceholder("Message Wingman…").filter({ visible: true }),
+		).toBeVisible();
 	});
 });

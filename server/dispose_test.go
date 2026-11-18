@@ -33,6 +33,8 @@ type deletingFleetAgent struct {
 	sessions []code.SessionInfo
 }
 
+func (a *deletingFleetAgent) ListsAllSessions() bool { return true }
+
 func (a *deletingFleetAgent) ListAllSessions(context.Context) ([]code.SessionInfo, error) {
 	return a.sessions, nil
 }

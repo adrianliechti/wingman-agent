@@ -19,18 +19,22 @@ conversation. The list stays at the left whatever the window shows, resizes
 like the side panel, and the window remembers it open and how wide. It holds
 the sessions of every agent, including
 those made in an agent's own CLI: opening the list starts each installed agent
-so that it can list them. Agents that know the sessions of every folder, such
-as Claude and Codex, list all of them, each under its folder, as their CLIs'
-resume lists do. A session its agent no longer has, such as one that never got
-a message, leaves the list when you open it. Deleting a session does not open
-it, so it works for a folder that is gone too. An agent you have not logged in to
-says how to log in, such as Copilot's `copilot login`.
+so that it can list them. Agents that know the sessions of every folder
+(Claude, Codex, Copilot and Pi) list all of them, each under its folder, as
+their CLIs' resume lists do, and run once for that however many windows are
+open. Any other agent is asked in each open project; set `"allFolders": true`
+on its entry in `agents.json` if it lists every folder's sessions when asked
+without one. A session its agent no longer has, such as one that never got
+a message, leaves the list when you open it. Deleting, archiving or marking a
+session does not open it, so it works for a folder that is gone too. An agent
+you have not logged in to says how to log in, such as Copilot's `copilot login`.
 
 - **Needs you** comes first: sessions that wait for an approval or an answer.
   An approval can be allowed or denied right in the list; a question opens its
   session.
 - **Working** lists the sessions that run a turn, with what each does now, such
-  as the command it runs.
+  as the command it runs. A session of another project names that project
+  beside it, so an approval is given knowing where it applies.
 - The rest follow by day. A blue dot marks a session that finished or failed
   since you last looked at it, and `+12 −3` shows the lines its turns changed.
 
@@ -39,7 +43,11 @@ group by project: the window's own first, open, and the others closed, with
 **Open** to show that project in the window. Opening a session of another
 project moves the window there, with its files, changes and terminals; the
 agents of both projects keep running, and approvals in the list work for any
-project. A browser window shows one project at a time, named in its address,
+project. The list keeps its filter, search and open groups through the move,
+and the project you left stays open in it. A project that cannot open, such as
+a folder that is gone, leaves the window where it is and says why. Searching
+the list opens the groups that hold what it found.
+A browser window shows one project at a time, named in its address,
 so several tabs can show several projects. A window opens only projects you
 already used: ones with sessions, or folders the desktop app opened. In the
 desktop app, **Open Folder** adds the folder to the same list.

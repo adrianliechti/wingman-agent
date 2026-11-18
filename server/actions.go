@@ -34,6 +34,9 @@ func (c *connection) dispatch(raw json.RawMessage) {
 	var err error
 	if t := h.terminal(p.Channel); t != nil {
 		err = c.executeTerminalAction(t, p)
+	} else if h.flagUnopened(p, pending.origin) {
+		// A session nobody has open is marked without loading it.
+		return
 	} else if a, ch, err = h.ensureSession(p.Channel); err == nil {
 		h.mu.Lock()
 		if ack, ok := a.acks[pending.origin]; ok && ack.key == key {

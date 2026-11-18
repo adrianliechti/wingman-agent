@@ -125,10 +125,12 @@ export class SessionCatalog {
 				.request("resolveSessionConfig", {
 					channel: "ahp-root://",
 					provider,
-					// It starts in the window's project, whose own sessions it then lists.
+					// It starts in the window's project, whose own sessions it then
+					// lists; an agent that lists every folder's runs once for the host.
 					...(this.ahp.directory
 						? { workingDirectory: this.ahp.directory }
 						: {}),
+					_meta: { "wingman.listing": true },
 				})
 				.then(() => {
 					if (this.included.get(provider) === started) return this.reload();

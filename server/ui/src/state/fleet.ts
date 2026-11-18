@@ -107,6 +107,71 @@ export function fleetSession(summary: SessionSummary): FleetSession {
 }
 
 export type FleetFilter = "all" | "needs-input" | "running" | "archived";
+const FLEET_FILTERS: readonly FleetFilter[] = [
+	"all",
+	"needs-input",
+	"running",
+	"archived",
+];
+/** What a session list shows of the sessions: its filter, its search, and the
+ * project groups the user opened or closed, by group id. */
+export type FleetView = {
+	filter: FleetFilter;
+	provider: string;
+	search: string;
+	searching: boolean;
+	expanded: Readonly<Record<string, boolean>>;
+};
+export const DEFAULT_FLEET_VIEW: FleetView = {
+	filter: "all",
+	provider: "",
+	search: "",
+	searching: false,
+	expanded: {},
+};
+/** The group of the window's own project, whichever project that is. */
+const HERE_GROUP = "project:";
+
+/** A list's view as a window that moves to another project finds it again.
+ * Groups are kept by their project, since the window's own changes: the
+ * project it leaves stays open in the list, as it was while the window
+ * showed it. */
+export function storeFleetView(view: FleetView, here?: string): string {
+	const groups: Record<string, boolean> = {};
+	for (const [id, open] of Object.entries(view.expanded)) {
+		if (id !== HERE_GROUP) groups[id.slice(HERE_GROUP.length)] = open;
+	}
+	if (here) groups[here] = view.expanded[HERE_GROUP] ?? true;
+	return JSON.stringify({ ...view, expanded: groups });
+}
+
+/** Reads a stored view in the window of the project `here`. */
+export function restoreFleetView(
+	stored: string | null,
+	here?: string,
+): FleetView {
+	let saved: Partial<Record<keyof FleetView, unknown>>;
+	try {
+		saved = JSON.parse(stored ?? "") ?? {};
+	} catch {
+		return DEFAULT_FLEET_VIEW;
+	}
+	if (typeof saved !== "object") return DEFAULT_FLEET_VIEW;
+	const expanded: Record<string, boolean> = {};
+	if (saved.expanded && typeof saved.expanded === "object")
+		for (const [project, open] of Object.entries(saved.expanded)) {
+			if (typeof open !== "boolean") continue;
+			expanded[project === here ? HERE_GROUP : HERE_GROUP + project] = open;
+		}
+	const search = typeof saved.search === "string" ? saved.search : "";
+	return {
+		filter: FLEET_FILTERS.find((filter) => filter === saved.filter) ?? "all",
+		provider: typeof saved.provider === "string" ? saved.provider : "",
+		search,
+		searching: saved.searching === true || !!search,
+		expanded,
+	};
+}
 export interface FleetGroup {
 	id: string;
 	label: string;

@@ -72,36 +72,42 @@ func (h *Host) disposeUnopened(resource string) (bool, error) {
 }
 
 func (h *Host) checkListedSession(backend, id, dir string) error {
+	_, err := h.listedSession(backend, id, dir)
+	return err
+}
+
+// listedSession finds a native session of a folder as its agent lists it.
+func (h *Host) listedSession(backend, id, dir string) (code.SessionInfo, error) {
 	if sessions, ok := h.listEverywhere([]types.AgentInfo{{Provider: backend}})[backend]; ok {
-		if slices.ContainsFunc(sessions, func(s code.SessionInfo) bool {
+		if i := slices.IndexFunc(sessions, func(s code.SessionInfo) bool {
 			return s.ID == id && s.Dir == dir
-		}) {
-			return nil
+		}); i >= 0 {
+			return sessions[i], nil
 		}
-		return errUnknownSession
+		return code.SessionInfo{}, errUnknownSession
 	}
 	p, err := h.projectAt(dir)
 	if err != nil {
-		return err
+		return code.SessionInfo{}, err
 	}
 	b, err := p.backend(backend)
 	if err != nil {
-		return err
+		return code.SessionInfo{}, err
 	}
 	if !p.beginOperation() {
-		return errWorkspaceClosed
+		return code.SessionInfo{}, errWorkspaceClosed
 	}
 	defer p.operations.Done()
 	sessions, err := b.agent.ListSessions(p.ctx)
 	if err != nil {
-		return err
+		return code.SessionInfo{}, err
 	}
-	if slices.ContainsFunc(sessions, func(s code.SessionInfo) bool {
+	if i := slices.IndexFunc(sessions, func(s code.SessionInfo) bool {
 		return s.ID == id && (s.Dir == "" || canonicalPath(s.Dir) == dir)
-	}) {
-		return nil
+	}); i >= 0 {
+		return sessions[i], nil
 	}
-	return errUnknownSession
+	return code.SessionInfo{}, errUnknownSession
 }
 
 // deleteNative deletes an agent's session by its id. An ACP agent deletes it
@@ -127,7 +133,7 @@ func (h *Host) deleteNative(alias sessionAlias) error {
 		if backend != code.BuiltinAgentName {
 			b = startedBackend(h.loaded(), backend)
 			if b != nil && !gone {
-				if _, global := b.agent.(code.AllSessionsLister); !global {
+				if _, global := everyFolderLister(b.agent); !global {
 					b = nil
 				}
 			}

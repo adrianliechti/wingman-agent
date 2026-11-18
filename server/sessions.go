@@ -161,7 +161,7 @@ func (p *Project) loadController(alias sessionAlias) (*sessionController, error)
 	if err != nil {
 		return nil, err
 	}
-	if _, global := b.agent.(code.AllSessionsLister); global && alias.Resource == "" {
+	if _, global := everyFolderLister(b.agent); global && alias.Resource == "" {
 		if err := p.host.checkListedSession(alias.Backend, id, p.dir); err != nil {
 			return nil, err
 		}

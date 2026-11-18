@@ -27,6 +27,9 @@ type Registration struct {
 	ID          string
 	Name        string
 	Constructor Constructor
+	// AllFolders says that one running agent lists the sessions of every
+	// folder, so a host need not start it in each project to list them.
+	AllFolders bool
 }
 
 func ID(name string) string {
@@ -81,7 +84,7 @@ func detected() []Registration {
 
 	if _, err := exec.LookPath(claudecli.BinPath()); err == nil {
 		out = append(out, Registration{
-			ID: "claude", Name: "Claude",
+			ID: "claude", Name: "Claude", AllFolders: true,
 			Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
 				srv := claude.New(nativeClaudeOptions(ws.RootPath, os.Environ()))
 				return wrapInProcess(ctx, ws, "claude", srv)
@@ -91,7 +94,7 @@ func detected() []Registration {
 
 	if _, err := exec.LookPath(codexcli.BinPath()); err == nil {
 		out = append(out, Registration{
-			ID: "codex", Name: "Codex",
+			ID: "codex", Name: "Codex", AllFolders: true,
 			Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
 				srv, err := codex.Spawn(ctx, nativeCodexOptions(ws.RootPath, os.Environ()))
 				if err != nil {
@@ -103,7 +106,8 @@ func detected() []Registration {
 	}
 
 	for _, def := range []code.AgentDef{
-		{Name: "copilot", Command: external.LookupPath("copilot", "copilot"), Args: []string{"--acp", "--stdio"}},
+		// Copilot lists every folder's sessions when asked without one.
+		{Name: "copilot", Command: external.LookupPath("copilot", "copilot"), Args: []string{"--acp", "--stdio"}, AllFolders: true},
 		{Name: "opencode", Command: external.LookupPath("opencode", "opencode"), Args: []string{"acp"}},
 	} {
 		path, err := exec.LookPath(def.Command)
@@ -113,7 +117,7 @@ func detected() []Registration {
 		def.Command = path
 		name := def.Name
 		out = append(out, Registration{
-			ID: ID(name), Name: name,
+			ID: ID(name), Name: name, AllFolders: def.AllFolders,
 			Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
 				return newExternal(ctx, ws, def)
 			},
@@ -122,7 +126,7 @@ func detected() []Registration {
 
 	if _, err := exec.LookPath(picli.BinPath()); err == nil {
 		out = append(out, Registration{
-			ID: "pi", Name: "Pi",
+			ID: "pi", Name: "Pi", AllFolders: true,
 			Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
 				srv := pi.New(nativePiOptions(os.Environ()))
 				return wrapInProcess(ctx, ws, "pi", srv)
@@ -147,7 +151,7 @@ func configured() ([]Registration, error) {
 		name := def.Name
 		def.Name = id
 		out = append(out, Registration{
-			ID: id, Name: name,
+			ID: id, Name: name, AllFolders: def.AllFolders,
 			Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
 				return newExternal(ctx, ws, def)
 			},
@@ -185,6 +189,22 @@ func names(registrations []Registration) []string {
 		names = append(names, r.ID)
 	}
 	return names
+}
+
+// ListsAllFolders reports whether an agent, once it runs anywhere, lists the
+// sessions of every folder.
+func ListsAllFolders(name string) bool {
+	name = ID(name)
+	available, err := Available()
+	if err != nil {
+		return false
+	}
+	for _, r := range available {
+		if r.ID == name {
+			return r.AllFolders
+		}
+	}
+	return false
 }
 
 // NewExternal constructs a detected/configured ACP agent. Hosts construct the

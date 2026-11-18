@@ -15,28 +15,31 @@ import {
 	fleetCounts,
 	fleetEvents,
 	fleetSession,
+	restoreFleetView,
+	storeFleetView,
 	type FleetEvent,
-	type FleetFilter,
 	type FleetSession,
 	type FleetState,
+	type FleetView,
 } from "../state/fleet.ts";
 
-export type FleetView = {
-	filter: FleetFilter;
-	provider: string;
-	search: string;
-	searching: boolean;
-	/** Project groups the user opened or closed; others' groups start closed. */
-	expanded: Readonly<Record<string, boolean>>;
-};
-// The list moves to each chat it opens; what it shows travels with it.
-let fleetView: FleetView = {
-	filter: "all",
-	provider: "",
-	search: "",
-	searching: false,
-	expanded: {},
-};
+export type { FleetView };
+// The list moves to each chat it opens, and the window to each project: what
+// the list shows travels with it, through the reload that shows the project.
+const FLEET_VIEW_KEY = "wingman.fleetView";
+let fleetView: FleetView | undefined;
+function currentFleetView(): FleetView {
+	if (!fleetView) {
+		let stored: string | null = null;
+		try {
+			stored = sessionStorage.getItem(FLEET_VIEW_KEY);
+		} catch {
+			// A browser without storage starts each window's list afresh.
+		}
+		fleetView = restoreFleetView(stored, workspaceClient().scope.project);
+	}
+	return fleetView;
+}
 const fleetViewListeners = new Set<() => void>();
 function subscribeFleetView(listener: () => void) {
 	fleetViewListeners.add(listener);
@@ -44,13 +47,26 @@ function subscribeFleetView(listener: () => void) {
 		fleetViewListeners.delete(listener);
 	};
 }
+/** Keeps the list's view for the window's next page, such as the project it
+ * moves to, where the project it leaves is listed open as it was shown. */
+export function keepFleetView() {
+	try {
+		sessionStorage.setItem(
+			FLEET_VIEW_KEY,
+			storeFleetView(currentFleetView(), workspaceClient().scope.project),
+		);
+	} catch {
+		// The view still holds for this page.
+	}
+}
 function setFleetView(patch: Partial<FleetView>) {
-	fleetView = { ...fleetView, ...patch };
+	fleetView = { ...currentFleetView(), ...patch };
+	keepFleetView();
 	for (const listener of fleetViewListeners) listener();
 }
 /** The session list's filter and search, shared by every place that shows the list. */
 export function useFleetView() {
-	const view = useSyncExternalStore(subscribeFleetView, () => fleetView);
+	const view = useSyncExternalStore(subscribeFleetView, currentFleetView);
 	return [view, setFleetView] as const;
 }
 

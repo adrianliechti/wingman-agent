@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/server/ahp"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
@@ -261,4 +265,97 @@ func (c *sessionController) refreshChanges() {
 	if ch.project.host.chats[ch.chat.Resource] == ch {
 		ch.refreshChangesLocked()
 	}
+}
+
+// flagUnopened sets the read or archived flag of a session no client has open
+// in what the host saved of it, and reports whether it did. Loading the
+// session for it would open its project and resume its agent's thread, once
+// for every session a user archives, and fails where the folder is gone.
+func (h *Host) flagUnopened(p types.DispatchActionParams, origin types.ActionOrigin) bool {
+	var apply func(alias *sessionAlias)
+	switch action := p.Action.Value.(type) {
+	case *types.SessionIsReadChangedAction:
+		apply = func(alias *sessionAlias) {
+			alias.Unread = !action.IsRead
+			alias.Status = withRead(alias.Status, action.IsRead)
+		}
+	case *types.SessionIsArchivedChangedAction:
+		apply = func(alias *sessionAlias) {
+			if action.IsArchived {
+				alias.Status |= types.SessionStatusIsArchived
+			} else {
+				alias.Status &^= types.SessionStatusIsArchived
+			}
+		}
+	default:
+		return false
+	}
+	resource := p.Channel
+	if !ahp.ValidSessionURI(resource) {
+		return false
+	}
+	// Loading, creation and deletion wait at the same gate.
+	defer h.creation(resource)()
+	h.mu.Lock()
+	_, open := h.sessions[resource]
+	alias, saved := h.aliases[resource]
+	h.mu.Unlock()
+	if open || saved && alias.CreationError != "" {
+		return false
+	}
+	if !saved {
+		// A session of an agent's own CLI is kept by the host from now on.
+		var ok bool
+		if alias, ok = h.listedAlias(resource); !ok {
+			return false
+		}
+	}
+	apply(&alias)
+	// A project opening concurrently must read the metadata after this change.
+	h.projectMu.Lock()
+	defer h.projectMu.Unlock()
+	h.mu.Lock()
+	alias = h.rememberAliasLocked(alias)
+	project := h.projects[alias.Project]
+	if project != nil {
+		project.stageAliasLocked(alias, false)
+	}
+	status := types.SessionStatusIdle | alias.flags()
+	h.notifyRoot("root/sessionSummaryChanged", types.SessionSummaryChangedParams{Channel: types.RootResourceURI, Session: resource, Changes: types.PartialSessionSummary{Status: &status}})
+	h.publish(p.Channel, p.Action, &origin, nil)
+	h.mu.Unlock()
+	var err error
+	if project != nil {
+		err = project.flushAliases()
+	} else {
+		err = writeAlias(workspaceScope(alias.Project), alias)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "session metadata warning: %v\n", err)
+	}
+	return true
+}
+
+// listedAlias describes a session the host never saved, which its agent
+// lists in a folder the host serves, by the canonical URI the list gave it.
+func (h *Host) listedAlias(resource string) (sessionAlias, bool) {
+	backend, id, dir, err := parseCanonicalURI(resource)
+	if err != nil || dir == "" {
+		return sessionAlias{}, false
+	}
+	dir = canonicalPath(dir)
+	if !filepath.IsAbs(dir) || !h.serves(dir) || resource != canonicalSessionURI(backend, id, dir) {
+		return sessionAlias{}, false
+	}
+	h.mu.Lock()
+	_, mapped := h.savedIndexLocked()[nativeSessionKey(dir, backend, id)]
+	h.mu.Unlock()
+	if mapped {
+		return sessionAlias{}, false
+	}
+	info, err := h.listedSession(backend, id, dir)
+	if err != nil {
+		return sessionAlias{}, false
+	}
+	return sessionAlias{Resource: resource, Project: dir, Backend: backend, Session: id, Title: info.Title, Created: info.UpdatedAt, Modified: info.UpdatedAt}, true
 }

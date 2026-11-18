@@ -306,6 +306,10 @@ func (a *Agent) storeSession(s *session) {
 
 const sessionPageSize = 50
 
+// ListsAllSessions tells the host that a list without a folder holds the
+// sessions of every folder.
+func (a *Agent) ListsAllSessions() bool { return true }
+
 func (a *Agent) ListSessions(_ context.Context, params acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
 	if a.opts.SessionsDir == "" {
 		return acpsdk.ListSessionsResponse{Sessions: []acpsdk.SessionInfo{}}, nil

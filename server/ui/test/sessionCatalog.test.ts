@@ -222,6 +222,8 @@ test("including a provider starts it once per connection and lists again", async
 		started.map((r) => r.params.provider),
 		["codex"],
 	);
+	// The host starts an agent that lists every folder only once for the list.
+	assert.deepEqual(started[0].params._meta, { "wingman.listing": true });
 	assert.equal(host.listed(), 2);
 	catalog.forget("ahp-session:/one");
 	assert.deepEqual(titles(catalog), []);

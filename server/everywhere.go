@@ -32,7 +32,7 @@ func (h *Host) listEverywhere(agents []types.AgentInfo) map[string][]code.Sessio
 		if b == nil {
 			continue
 		}
-		lister, ok := b.agent.(code.AllSessionsLister)
+		lister, ok := everyFolderLister(b.agent)
 		if !ok {
 			continue
 		}
@@ -61,6 +61,13 @@ func (h *Host) listEverywhere(agents []types.AgentInfo) map[string][]code.Sessio
 		h.everywhereMu.Unlock()
 	}
 	return out
+}
+
+// everyFolderLister is an agent's list of every folder's sessions, when it
+// keeps one. An agent that does not has its sessions listed by each project.
+func everyFolderLister(agent code.Agent) (code.AllSessionsLister, bool) {
+	lister, ok := agent.(code.AllSessionsLister)
+	return lister, ok && lister.ListsAllSessions()
 }
 
 func listSessionFolders(p *Project, lister code.AllSessionsLister) ([]code.SessionInfo, error) {

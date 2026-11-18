@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -154,6 +157,84 @@ func TestArchivingNativeSessionSurvivesRestart(t *testing.T) {
 	restarted, _, _ := newProtocolServer(t)
 	if !statusListed(t, restarted.Project.host, resource).Status.Has(types.SessionStatusIsArchived) {
 		t.Fatal("a native session lost its archive flag on restart")
+	}
+}
+
+// Archiving or marking a session no window has open changes what the host
+// saved of it. Loading it would open its project and resume its agent's
+// thread for every session a user tidies away, and its folder may be gone.
+func TestMarkingASessionNoWindowOpenedLoadsNothing(t *testing.T) {
+	s, _, agent, endpoint := protocolTestServer(t)
+	h := s.Project.host
+	gone := filepath.Join(t.TempDir(), "gone")
+	alias := sessionAlias{Resource: "ahp-session:/elsewhere", Project: gone, Backend: "one", Session: "native", Title: "Elsewhere", Created: time.Now()}
+	file := saveTestAlias(t, s, alias)
+	client := protocolTestClient(t, endpoint, "tidy")
+	saved := func() sessionAlias {
+		var stored sessionAlias
+		data, err := os.ReadFile(file)
+		if err != nil || json.Unmarshal(data, &stored) != nil {
+			t.Fatalf("the saved session: %v", err)
+		}
+		return stored
+	}
+
+	reviewSessionsDispatch(t, client, alias.Resource, 1, &types.SessionIsArchivedChangedAction{Type: types.ActionTypeSessionIsArchivedChanged, IsArchived: true})
+	waitProtocol(t, func() bool { return statusListed(t, h, alias.Resource).Status.Has(types.SessionStatusIsArchived) })
+	if !saved().Status.Has(types.SessionStatusIsArchived) {
+		t.Fatal("the archive flag was not saved")
+	}
+	reviewSessionsDispatch(t, client, alias.Resource, 2, &types.SessionIsReadChangedAction{Type: types.ActionTypeSessionIsReadChanged, IsRead: false})
+	waitProtocol(t, func() bool { return !statusListed(t, h, alias.Resource).Status.Has(types.SessionStatusIsRead) })
+	if stored := saved(); !stored.Unread || !stored.Status.Has(types.SessionStatusIsArchived) {
+		t.Fatalf("the saved flags: %+v", stored)
+	}
+	reviewSessionsDispatch(t, client, alias.Resource, 3, &types.SessionIsReadChangedAction{Type: types.ActionTypeSessionIsReadChanged, IsRead: true})
+	waitProtocol(t, func() bool { return statusListed(t, h, alias.Resource).Status.Has(types.SessionStatusIsRead) })
+
+	if agent.loaded.Load() != 0 {
+		t.Fatal("marking loaded the session")
+	}
+	h.mu.Lock()
+	_, open := h.sessions[alias.Resource]
+	_, project := h.projects[gone]
+	h.mu.Unlock()
+	if open || project {
+		t.Fatalf("marking opened the session (%v) or its project (%v)", open, project)
+	}
+}
+
+// A session made in an agent's own CLI, which the host never saved, is kept
+// by the host once it is archived, under the title its agent lists.
+func TestArchivingAListedSessionOfAnotherFolderLoadsNothing(t *testing.T) {
+	s, _, _, endpoint := protocolTestServer(t)
+	h := s.Project.host
+	root := canonicalPath(t.TempDir())
+	h.mu.Lock()
+	h.roots = []string{root, s.Project.dir}
+	h.mu.Unlock()
+	dir := filepath.Join(root, "other")
+	updated := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	fleet := &deletingFleetAgent{&deletingAgent{protocolAgent: &protocolAgent{}}, []code.SessionInfo{{ID: "cli", Title: "Made in the CLI", Dir: dir, UpdatedAt: updated}}}
+	b := s.Project.bindBackend("two", fleet)
+	s.Project.backends[b.id] = &backendEntry{runtime: b}
+	resource := canonicalSessionURI("two", "cli", dir)
+	client := protocolTestClient(t, endpoint, "tidy")
+
+	reviewSessionsDispatch(t, client, resource, 1, &types.SessionIsArchivedChangedAction{Type: types.ActionTypeSessionIsArchivedChanged, IsArchived: true})
+	waitProtocol(t, func() bool { return statusListed(t, h, resource).Status.Has(types.SessionStatusIsArchived) })
+	item := statusListed(t, h, resource)
+	if item.Title != "Made in the CLI" || !item.Status.Has(types.SessionStatusIsRead) || item.ModifiedAt != updated.Format(time.RFC3339Nano) {
+		t.Fatalf("the archived session: %+v", item)
+	}
+	if fleet.loaded.Load() != 0 {
+		t.Fatal("archiving loaded the session")
+	}
+	h.mu.Lock()
+	_, project := h.projects[dir]
+	h.mu.Unlock()
+	if project {
+		t.Fatal("archiving opened the session's project")
 	}
 }
 

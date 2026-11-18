@@ -26,6 +26,10 @@ type SessionInfo struct {
 // AllSessionsLister lists the sessions of every folder an agent keeps, each
 // with its directory, as its CLI's resume list does.
 type AllSessionsLister interface {
+	// ListsAllSessions reports whether the agent keeps one list for every
+	// folder. One that does not may answer with its own folder's sessions, or
+	// with none, so its sessions are listed folder by folder instead.
+	ListsAllSessions() bool
 	ListAllSessions(ctx context.Context) ([]SessionInfo, error)
 }
 

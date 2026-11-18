@@ -137,8 +137,10 @@ export function SessionsPanel({
 	);
 	const otherProject = (session: FleetSession) =>
 		here(session) ? undefined : session.project?.displayName;
+	// A search shows what it found in every project; the groups return to how
+	// the user left them when it ends.
 	const expanded = (group: FleetGroup) =>
-		view.expanded[group.id] ?? group.project?.here ?? true;
+		!!search.trim() || (view.expanded[group.id] ?? group.project?.here ?? true);
 	const act = async (operation: () => Promise<unknown>, failure: string) => {
 		try {
 			await operation();
@@ -726,6 +728,7 @@ function SessionRow({
 		: session.state === "failed"
 			? "Failed"
 			: undefined;
+	const origin = [agent, project].filter(Boolean).join(" · ");
 	return (
 		<div
 			className="mx-1.5"
@@ -759,11 +762,20 @@ function SessionRow({
 							{detail}
 						</span>
 					) : (
-						<span className="min-w-0 truncate">
-							{[agent, project].filter(Boolean).join(" · ")}
-						</span>
+						<span className="min-w-0 truncate">{origin}</span>
 					)}
 					<span className="flex-1" />
+					{/* What a session does must not hide where it does it: an
+					    approval in the list is given for a project. */}
+					{detail && origin && (
+						<span
+							className="max-w-[45%] shrink-0 truncate"
+							title={origin}
+							data-session-origin
+						>
+							{project ?? agent}
+						</span>
+					)}
 					{!busy && <ChangeCount changes={session.changes} />}
 				</div>
 			</ChatRow>

@@ -10,6 +10,9 @@ import {
 	groupFleet,
 	nextAttention,
 	relativeTime,
+	restoreFleetView,
+	storeFleetView,
+	DEFAULT_FLEET_VIEW,
 	type FleetState,
 } from "../src/state/fleet.ts";
 
@@ -297,4 +300,59 @@ test("relative times stay short", () => {
 	assert.equal(relativeTime("2026-11-14T12:00:00Z", now), "3d");
 	assert.equal(relativeTime("", now), "");
 	assert.equal(relativeTime("not a date", now), "");
+});
+
+test("the list's view follows the window to another project", () => {
+	const a = "file:///work/a";
+	const b = "file:///work/b";
+	const c = "file:///work/c";
+	// In project a: its own group open as it starts, b opened, c closed again.
+	const stored = storeFleetView(
+		{
+			filter: "needs-input",
+			provider: "codex",
+			search: "",
+			searching: false,
+			expanded: { [`project:${b}`]: true, [`project:${c}`]: false },
+		},
+		a,
+	);
+	// In project b the group of b is the window's own, and a stays open.
+	assert.deepEqual(restoreFleetView(stored, b), {
+		filter: "needs-input",
+		provider: "codex",
+		search: "",
+		searching: false,
+		expanded: {
+			"project:": true,
+			[`project:${a}`]: true,
+			[`project:${c}`]: false,
+		},
+	});
+	// A group the user closed in its own window stays closed from elsewhere.
+	const closed = storeFleetView(
+		{ ...DEFAULT_FLEET_VIEW, expanded: { "project:": false } },
+		a,
+	);
+	assert.deepEqual(restoreFleetView(closed, b).expanded, {
+		[`project:${a}`]: false,
+	});
+	assert.deepEqual(restoreFleetView(closed, a).expanded, { "project:": false });
+});
+
+test("a search travels with its field open, and a damaged view starts afresh", () => {
+	const stored = storeFleetView({ ...DEFAULT_FLEET_VIEW, search: "deploy" });
+	assert.deepEqual(restoreFleetView(stored), {
+		...DEFAULT_FLEET_VIEW,
+		search: "deploy",
+		searching: true,
+	});
+	for (const damaged of [null, "", "{", "null", "7", '"text"'])
+		assert.deepEqual(restoreFleetView(damaged), DEFAULT_FLEET_VIEW);
+	assert.deepEqual(
+		restoreFleetView(
+			'{"filter":"bogus","provider":3,"expanded":{"file:///x":"yes"}}',
+		),
+		DEFAULT_FLEET_VIEW,
+	);
 });

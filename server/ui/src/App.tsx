@@ -11,7 +11,11 @@ import {
 } from "./state/workspaceContext.ts";
 import { composerDrafts as getComposerDrafts } from "./state/composerDrafts.ts";
 import { canonicalChatURI, draftKey, isDraft } from "./state/sessionStore.ts";
-import { projectHref, workspaceClient } from "./state/workspaceClient.ts";
+import {
+	openProject,
+	projectHref,
+	workspaceClient,
+} from "./state/workspaceClient.ts";
 import {
 	type QueryClient,
 	useQuery,
@@ -158,6 +162,7 @@ import {
 import { FloatingMenu, FloatingSurface } from "./components/ui/Floating";
 import { SessionsPanel } from "./components/SessionsPanel";
 import {
+	keepFleetView,
 	useFleet,
 	useFleetNotifications,
 	useHere,
@@ -1895,10 +1900,37 @@ export default function App() {
 		selectBackend(client.backendOf(id));
 		openChatTab(id, disposition);
 	};
-	/** Shows another project in this window; its agents and these keep running. */
-	const switchProject = (href: string, name: string) => {
-		if (dirtyPaths.size > 0) setProjectSwitch({ href, name });
-		else window.location.assign(href);
+	/** Shows another project in this window; its agents and these keep running.
+	 * The host opens the project first, so the window finds it ready, and one
+	 * that cannot open, such as a folder that is gone, leaves the window here. */
+	const switchProject = async (
+		project: string,
+		name: string,
+		chat?: { backend: string; id: string },
+	) => {
+		if (workspaceSwitching) return;
+		setWorkspaceSwitching(true);
+		// A project that takes a moment to open says so.
+		const slow = setTimeout(() => toast({ title: `Opening ${name}…` }), 400);
+		try {
+			await openProject(project);
+		} catch (error) {
+			setWorkspaceSwitching(false);
+			toast({
+				title: `Could not open ${name}`,
+				description: errorText(error),
+				tone: "error",
+			});
+			return;
+		} finally {
+			clearTimeout(slow);
+		}
+		keepFleetView();
+		const href = projectHref(project, chat);
+		if (dirtyPaths.size > 0) {
+			setWorkspaceSwitching(false);
+			setProjectSwitch({ href, name });
+		} else window.location.assign(href);
 	};
 	/** The listed session that holds a chat, as its default chat or a fork. */
 	const listedSession = (id: string) =>
@@ -1915,10 +1947,10 @@ export default function App() {
 		session = listedSession(id),
 	) => {
 		if (session?.project && !here(session)) {
-			switchProject(
-				projectHref(session.project.uri, { backend: session.provider, id }),
-				session.project.displayName,
-			);
+			void switchProject(session.project.uri, session.project.displayName, {
+				backend: session.provider,
+				id,
+			});
 			return false;
 		}
 		handleSessionSelect(id, disposition);
@@ -3303,7 +3335,7 @@ export default function App() {
 						}
 						onSessionDelete={(id, title) => setSessionDelete({ id, title })}
 						onSessionFork={(id) => void handleSessionFork(id)}
-						onOpenProject={(uri, name) => switchProject(projectHref(uri), name)}
+						onOpenProject={(uri, name) => void switchProject(uri, name)}
 					/>
 				</aside>
 			)}
@@ -3463,7 +3495,7 @@ export default function App() {
 					onSelectSession={(id) => void openSession(id, "keep")}
 					onDeleteSession={(id, title) => setSessionDelete({ id, title })}
 					onForkSession={(id) => void handleSessionFork(id)}
-					onOpenProject={(uri, name) => switchProject(projectHref(uri), name)}
+					onOpenProject={(uri, name) => void switchProject(uri, name)}
 					onNewSession={() => void handleNewSession()}
 					onBackToChat={activeTab.type === "chat" ? undefined : focusChat}
 				/>

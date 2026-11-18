@@ -542,6 +542,14 @@ func modelInfo(provider string, m model.Model) types.SessionModelInfo {
 	return info
 }
 
+// listingMeta marks a resolveSessionConfig request of a client that wants the
+// provider's sessions listed, not a session configured.
+const listingMeta = "wingman.listing"
+
+// listsAllFolders reports whether one running agent of a provider lists the
+// sessions of every folder; tests replace it.
+var listsAllFolders = agents.ListsAllFolders
+
 func (c *connection) request(req ahp.Request) (any, error) {
 	if req.Method == "ping" {
 		return nil, nil
@@ -619,7 +627,14 @@ func (c *connection) request(req ahp.Request) (any, error) {
 		if p.Provider != nil {
 			provider = *p.Provider
 		}
-		project, err := h.workingProject(p.WorkingDirectory)
+		directory := p.WorkingDirectory
+		// A session list starts each agent so that it lists its sessions. One
+		// that lists every folder's runs once for that, in the project that
+		// stays open, not in the project of every window.
+		if _, listing := p.Meta[listingMeta]; listing && listsAllFolders(provider) {
+			directory = nil
+		}
+		project, err := h.workingProject(directory)
 		if err != nil {
 			return nil, err
 		}
