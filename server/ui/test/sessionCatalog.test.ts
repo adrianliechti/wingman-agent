@@ -71,6 +71,8 @@ function fakeHost(items: SessionSummary[]) {
 	};
 }
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+/** Lets pending work run where a test holds the timers. */
+const turn = () => new Promise((resolve) => setImmediate(resolve));
 const titles = (catalog: SessionCatalog) =>
 	catalog
 		.getSnapshot()
@@ -195,18 +197,67 @@ test("a reconnect starts the included providers again", async () => {
 	);
 });
 
-test("a provider that is still starting is reported until its sessions are listed", async () => {
+test("a provider that is still starting is reported until its sessions are listed", async (t) => {
 	const host = fakeHost([summary("one")]);
 	const catalog = new SessionCatalog(host.ahp);
 	catalog.subscribe(() => {});
 	await settle();
+	t.mock.timers.enable({ apis: ["setTimeout"] });
 	host.hold();
 	const included = catalog.include("codex");
 	assert.deepEqual(catalog.getSnapshot().starting, ["codex"]);
-	await settle();
+	// Its sessions are listed a moment after it started.
+	await turn();
+	assert.equal(host.listed(), 1);
+	t.mock.timers.tick(250);
+	await turn();
+	assert.equal(host.listed(), 2);
+	assert.deepEqual(catalog.getSnapshot().starting, ["codex"]);
 	host.release();
 	await included;
 	assert.deepEqual(catalog.getSnapshot().starting, []);
+});
+
+test("providers that start close together are listed together", async (t) => {
+	const host = fakeHost([summary("one")]);
+	const catalog = new SessionCatalog(host.ahp);
+	catalog.subscribe(() => {});
+	await settle();
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const included = Promise.all([
+		catalog.include("codex"),
+		catalog.include("claude"),
+	]);
+	await turn();
+	assert.deepEqual(catalog.getSnapshot().starting, ["codex", "claude"]);
+	t.mock.timers.tick(250);
+	await included;
+	assert.equal(host.listed(), 2, "one list for both");
+	assert.deepEqual(catalog.getSnapshot().starting, []);
+});
+
+test("the list is a new array only when a session changed", async (t) => {
+	const host = fakeHost([summary("one"), summary("two")]);
+	const catalog = new SessionCatalog(host.ahp);
+	catalog.subscribe(() => {});
+	await settle();
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const listed = catalog.getSnapshot().sessions;
+	const two = listed.find((s) => s.resource === "ahp-session:/two");
+	// A provider that starts changes what the catalogue reports, not its sessions.
+	void catalog.include("codex").catch(() => {});
+	assert.deepEqual(catalog.getSnapshot().starting, ["codex"]);
+	assert.equal(catalog.getSnapshot().sessions, listed);
+	host.notify("root/sessionRemoved", { session: "ahp-session:/unknown" });
+	assert.equal(catalog.getSnapshot().sessions, listed);
+	host.notify("root/sessionSummaryChanged", {
+		session: "ahp-session:/one",
+		changes: { title: "renamed" },
+	});
+	assert.notEqual(catalog.getSnapshot().sessions, listed);
+	assert.deepEqual(titles(catalog), ["renamed", "two"]);
+	// A session that did not change keeps its summary.
+	assert.ok(catalog.getSnapshot().sessions.includes(two!));
 });
 
 test("including a provider starts it once per connection and lists again", async () => {

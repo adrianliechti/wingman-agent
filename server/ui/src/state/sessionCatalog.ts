@@ -4,6 +4,7 @@ import type {
 	SessionSummary,
 	SessionSummaryChangedParams,
 } from "@microsoft/agent-host-protocol";
+import { errorText } from "../utils/errorText.ts";
 import type { AHPConnection } from "./ahpConnection.ts";
 
 export type CatalogState = {
@@ -27,6 +28,8 @@ const EMPTY: CatalogState = {
  * with its first subscriber and reloads after every reconnect. */
 export class SessionCatalog {
 	private sessions = new Map<string, SessionSummary>();
+	/** A session changed since the list was last published. */
+	private changed = false;
 	private state: CatalogState = EMPTY;
 	private listeners = new Set<() => void>();
 	private started = false;
@@ -35,7 +38,8 @@ export class SessionCatalog {
 	private queued?: Promise<void>;
 	/** Notifications that arrive while a list is in flight apply on top of it. */
 	private buffered: { method: string; params: unknown }[] | undefined;
-	private reloadTimer?: ReturnType<typeof setTimeout>;
+	/** A list that starts in a moment, for all who ask for one until then. */
+	private scheduled?: Promise<void>;
 	/** Providers started on this connection so that they list their sessions. */
 	private included = new Map<string, Promise<unknown>>();
 	/** Providers to start again on every connection. */
@@ -105,9 +109,10 @@ export class SessionCatalog {
 			this.sessions = new Map(
 				result.items.map((summary) => [summary.resource, summary]),
 			);
+			this.changed = true;
 			for (const summary of result.items) this.onSummary(summary);
 		} catch (error) {
-			change = { error: String(error) };
+			change = { error: errorText(error) };
 			throw error;
 		} finally {
 			this.buffered = undefined;
@@ -133,7 +138,9 @@ export class SessionCatalog {
 					_meta: { "wingman.listing": true },
 				})
 				.then(() => {
-					if (this.included.get(provider) === started) return this.reload();
+					// Agents that start close together are listed together.
+					if (this.included.get(provider) === started)
+						return this.scheduleReload();
 				})
 				.finally(() => {
 					if (this.included.get(provider) === started)
@@ -162,27 +169,34 @@ export class SessionCatalog {
 		if (method === "root/sessionAdded") {
 			const { summary } = params as SessionAddedParams;
 			this.sessions.set(summary.resource, summary);
+			this.changed = true;
 			this.onSummary(summary);
 		} else if (method === "root/sessionRemoved") {
-			this.sessions.delete((params as SessionRemovedParams).session);
+			if (this.sessions.delete((params as SessionRemovedParams).session))
+				this.changed = true;
 		} else if (method === "root/sessionSummaryChanged") {
 			const { session, changes } = params as SessionSummaryChangedParams;
 			const current = this.sessions.get(session);
 			// A session the list never named is listed again rather than guessed.
 			if (!current) {
-				this.scheduleReload();
+				void this.scheduleReload().catch(() => {});
 				return;
 			}
 			const next = { ...current, ...changes } as SessionSummary;
 			this.sessions.set(session, next);
+			this.changed = true;
 			this.onSummary(next);
 		}
 	}
-	private scheduleReload() {
-		this.reloadTimer ??= setTimeout(() => {
-			this.reloadTimer = undefined;
-			void this.reload().catch(() => {});
-		}, 250);
+	/** Lists the sessions again in a moment; it settles once they are listed. */
+	private scheduleReload(): Promise<void> {
+		this.scheduled ??= new Promise<void>((resolve, reject) => {
+			setTimeout(() => {
+				this.scheduled = undefined;
+				this.reload().then(resolve, reject);
+			}, 250);
+		});
+		return this.scheduled;
 	}
 	/** The summary of a listed session. */
 	summary(session: string): SessionSummary | undefined {
@@ -191,14 +205,17 @@ export class SessionCatalog {
 	/** Removes a session the client disposed before the host confirms it. */
 	forget(session: string) {
 		if (!this.sessions.delete(session)) return;
+		this.changed = true;
 		this.publish({});
 	}
 	private publish(change: Partial<CatalogState>) {
-		this.state = {
-			...this.state,
-			...change,
-			sessions: [...this.sessions.values()],
-		};
+		// The list is a new array only when a session changed: what the list
+		// shows is derived once per array.
+		const sessions = this.changed
+			? [...this.sessions.values()]
+			: this.state.sessions;
+		this.changed = false;
+		this.state = { ...this.state, ...change, sessions };
 		for (const listener of this.listeners) listener();
 	}
 }

@@ -29,7 +29,7 @@ var publicFS embed.FS
 type App struct {
 	host         atomic.Pointer[hostClient]
 	openMu       sync.Mutex // one open or reconnect at a time
-	projects     []string   // folders picked in this process, guarded by openMu
+	projects     []string   // folders opened in this process, which a reconnect shows again; guarded by openMu
 	reconnecting atomic.Bool
 
 	launcher http.Handler
@@ -182,12 +182,10 @@ func (a *App) handleOpenWorkspace(w http.ResponseWriter, r *http.Request) {
 	// keep running; the window then shows the folder by naming it.
 	a.openMu.Lock()
 	defer a.openMu.Unlock()
-	client, err := a.attach(path)
-	if err != nil {
+	if err := a.attach(path); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.host.Store(client)
 	if !slices.Contains(a.projects, path) {
 		a.projects = append(a.projects, path)
 	}

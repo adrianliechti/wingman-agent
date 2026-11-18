@@ -54,10 +54,9 @@ var selfVersion = buildVersion()
 
 // hostInfo is the state file through which windows find the running host.
 type hostInfo struct {
-	PID     int    `json:"pid"`
-	URL     string `json:"url"`
-	Token   string `json:"token"`
-	Version string `json:"version"`
+	PID   int    `json:"pid"`
+	URL   string `json:"url"`
+	Token string `json:"token"`
 }
 
 func hostStatePath() (string, error) { return layout.WingmanPath("app", "host.json") }
@@ -145,7 +144,8 @@ func runHost(args []string) error {
 func serveHost(ctx context.Context, project string, ready func(hostInfo), timing hostTiming) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	srv, err := server.New(ctx, project, &server.ServerOptions{NoBrowser: true})
+	// The desktop app's windows open any folder and list every project's sessions.
+	srv, err := server.New(ctx, project, &server.ServerOptions{NoBrowser: true, Projects: true})
 	if err != nil {
 		return err
 	}
@@ -162,7 +162,7 @@ func serveHost(ctx context.Context, project string, ready func(hostInfo), timing
 	handler.touch()
 	httpServer := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = httpServer.Serve(listener) }()
-	info := hostInfo{PID: os.Getpid(), URL: "http://" + listener.Addr().String(), Token: token, Version: handler.version}
+	info := hostInfo{PID: os.Getpid(), URL: "http://" + listener.Addr().String(), Token: token}
 	if err := writeHostInfo(info); err != nil {
 		_ = httpServer.Close()
 		return err
@@ -231,7 +231,7 @@ func (h *hostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/__wingman/host":
-		writeJSON(w, map[string]any{"pid": os.Getpid(), "version": h.version})
+		writeJSON(w, map[string]any{"version": h.version})
 		return
 	case "/__wingman/stop":
 		// A host of another build makes way for a window's own, unless it is in use.
@@ -244,22 +244,6 @@ func (h *hostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.touch()
-	if r.URL.Path == "/__wingman/open" {
-		var request struct {
-			Path     string   `json:"path"`
-			Previous []string `json:"previous,omitempty"`
-		}
-		if r.Method != http.MethodPost || json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&request) != nil || request.Path == "" {
-			http.Error(w, "path is required", http.StatusBadRequest)
-			return
-		}
-		if err := h.srv.Open(request.Path, request.Previous...); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
 	r.Header.Del(hostTokenHeader)
 	h.srv.ServeHTTP(w, r)
 }
@@ -356,13 +340,14 @@ func (c *hostClient) serving() bool {
 	return err == nil
 }
 
-// open opens a folder on the host, which a window may then show.
-func (c *hostClient) open(dir string, previous []string) error {
-	status, data, err := c.call(http.MethodPost, "/__wingman/open", map[string]any{"path": dir, "previous": previous}, 2*time.Minute)
+// open opens a folder on the host as the page of its window does, so that the
+// window finds its project there.
+func (c *hostClient) open(dir string) error {
+	status, data, err := c.call(http.MethodGet, "/api/workspace?project="+url.QueryEscape(dir), nil, 2*time.Minute)
 	if err != nil {
 		return err
 	}
-	if status != http.StatusNoContent {
+	if status != http.StatusOK {
 		return errors.New(strings.TrimSpace(string(data)))
 	}
 	return nil
@@ -418,30 +403,56 @@ func spawnHost(dir string) (hostInfo, error) {
 	}
 }
 
-// attach opens dir on the shared host, after finding or starting the host if
-// the window has none yet or its host stopped. It holds the state lock
-// throughout, so that the host cannot retire in between.
-func (a *App) attach(dir string) (*hostClient, error) {
+// attach opens dir on the shared host, which the window then uses, after
+// finding or starting the host if the window has none yet or its host
+// stopped. It holds the state lock throughout, so that the host cannot retire
+// in between.
+func (a *App) attach(dir string) error {
 	if !filepath.IsAbs(dir) {
-		return nil, errors.New("project must be an absolute directory")
+		return errors.New("project must be an absolute directory")
 	}
 	unlock, err := lockHostState(true)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer unlock()
 	client := a.host.Load()
-	var previous []string
 	if client == nil || !client.serving() {
 		if client, err = a.connect(dir); err != nil {
-			return nil, err
+			return err
 		}
-		previous = a.projects
 	}
-	if err := client.open(dir, previous); err != nil {
+	if err := client.open(dir); err != nil {
+		return err
+	}
+	a.host.Store(client)
+	return nil
+}
+
+// lockHostState takes the lock under which windows find or start the shared
+// host and the host retires. Without wait, it fails while someone holds it.
+// The system releases it when its process dies.
+func lockHostState(wait bool) (func(), error) {
+	path, err := layout.WingmanPath("app", "host.lock")
+	if err != nil {
 		return nil, err
 	}
-	return client, nil
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := lockFile(file, wait)
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	return func() {
+		unlock()
+		file.Close()
+	}, nil
 }
 
 // connect finds the running host, or starts one with dir as its first project.
@@ -498,12 +509,9 @@ func (a *App) lost(error) {
 			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 				continue
 			}
-			client, err := a.attach(dir)
-			if err != nil {
+			if err := a.attach(dir); err != nil {
 				log.Printf("reconnect to the Wingman host: %v", err)
-				return
 			}
-			a.host.Store(client)
 			return
 		}
 	}()

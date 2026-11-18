@@ -160,7 +160,7 @@ func (a *Chat) syncLocked(c *sessionController, changes []SessionChange) {
 	a.project.host.mu.Lock()
 	defer func() {
 		a.project.host.mu.Unlock()
-		a.project.saveAliases()
+		a.project.host.saveAliases()
 	}()
 	if !a.project.availableLocked() || a.project.host.chats[a.chat.Resource] != a {
 		return

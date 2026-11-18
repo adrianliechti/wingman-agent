@@ -1,4 +1,5 @@
 import type { Page, WebSocketRoute } from "@playwright/test";
+import { SessionStatus } from "../src/state/ahpValues.ts";
 import {
 	canonicalChatURI,
 	chatToSession,
@@ -102,7 +103,8 @@ export class AHPFixture {
 	}
 	summary(session: FixtureSession) {
 		// Idle and read, as the host lists a session no client left unread.
-		const status = session.listed?.status ?? 1 | 32;
+		const status =
+			session.listed?.status ?? SessionStatus.Idle | SessionStatus.IsRead;
 		return {
 			resource: session.resource,
 			provider: session.backend,

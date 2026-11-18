@@ -58,23 +58,23 @@ same-origin Web UI.
 
 ## One host for every project
 
-`wingman host` serves any project: a session names its working directory and
-the host opens that project when the session is created or reopened.
-`wingman server` is the same host with a web UI. It serves the directory it was
-started in and every project in the home directory; its windows show one
-project each (see [windows for every project](#windows-for-every-project)).
+`wingman host` serves any project in any folder: a session names its working
+directory and the host opens that project when the session is created or
+reopened. The desktop app's host does the same; its windows show one project
+each (see [windows for every project](#windows-for-every-project)).
+`wingman server` is the same host with a web UI, for the directory it was
+started in and no other: it opens no second project, lists that directory's
+sessions, and refuses sessions and file access outside it with AHP
+`PermissionDenied`.
 
 ```bash
-wingman host --root ~/Projects --token "$(openssl rand -hex 16)"
+wingman host --token "$(openssl rand -hex 16)"
 ```
 
 The host prints its address, normally `ws://localhost:9100/ahp`, and has no
 web UI. Add it in VS Code like any other host and choose a folder per session;
-the folder picker starts in the host's root.
+the folder picker starts in the home directory.
 
-- `--root PATH` limits the directories the host serves; the default is the
-  home directory. Sessions and file access outside it are refused with AHP
-  `PermissionDenied`.
 - `--token TOKEN` (or `WINGMAN_HOST_TOKEN`) is required from every client as
   the `tkn` query parameter, which VS Code sends from a host entry's
   `connectionToken`. Without a token the endpoint is open to local clients,
@@ -108,10 +108,16 @@ chats of other projects.
 
 ### Sessions of every folder
 
-`listSessions` asks each started ACP agent once for the sessions of every
-folder (`session/list` without `cwd`) and lists each in its own folder, with
-the canonical URI of that folder's project; other agents list the sessions of
-the open projects. Folders outside the host's roots are left out. The host
+`listSessions` asks each started agent that keeps one list for every folder
+(Claude, Codex, Copilot and Pi, and agents marked `"allFolders": true` in
+`agents.json`) once for the sessions of every folder (`session/list` without
+`cwd`) and lists each in its own folder, with the canonical URI of that
+folder's project; other agents list the sessions of the open projects.
+Folders the host does not serve are left out, and a `wingman server` asks
+only for its own folder. A client that starts an agent just to have its
+sessions listed says so with `_meta["wingman.listing"]` on
+`resolveSessionConfig`; an agent that lists every folder then runs once, in
+the host's start project, however many windows ask. The host
 reuses an agent's list for 30 seconds and forgets it when it deletes a
 session. An agent answers a session it does not have with ACP's "resource not
 found" (`-32002`); the host then forgets the saved session, tells clients with
@@ -121,19 +127,22 @@ required" (`-32000`) on creating or loading a session makes the host call
 takes up a login the user made since, and try once more; otherwise the error
 says how to log in. `disposeSession` of a session no client has open deletes it
 without loading it: an ACP agent deletes it by its id from any folder, and
-Wingman's own agent from where it kept it when the folder is gone.
+Wingman's own agent from where it kept it, so its folder may be gone. The
+`session/isReadChanged` and `session/isArchivedChanged` actions of such a
+session change what the host saved of it, without loading it either.
 
 ### Windows for every project
 
-The web server keeps one window server per project a window shows, on the same
-host, so switching projects stops no agent. A window names its project once,
-when it asks for its workspace: `GET /api/workspace?project=<directory or file
-URI>` opens the project, within the host's roots, and answers its scope.
+The desktop app's server keeps one window server per project a window shows,
+on the same host, so switching projects stops no agent. A window names its
+project once, when it asks for its workspace: `GET /api/workspace?project=<directory or file
+URI>` opens the project and answers its scope; the launcher sends the same
+request when a window opens a folder.
 Without `project` the answer is the start directory's. Any website can send a
-browser to a window's address, and opening a project starts tools such as
-language servers that may run its code, so a window opens only a project the
-user used: one that is open, has saved sessions, holds sessions an agent
-listed, or that the desktop app opened; others are refused with 403. Every later request carries the
+browser to the address of a `wingman server`, and opening a project starts
+tools such as language servers that may run its code, so that server opens
+its own directory only and refuses any other with 403; the desktop app's host
+answers only its windows, which hold its token. Every later request carries the
 project's instance (`X-Wingman-Instance`, or `instance` on WebSockets, content
 and preview URLs), and the server routes it to that project's window server;
 an instance it does not know is answered with 409, as for a replaced
@@ -145,13 +154,13 @@ resolves session configuration (`workingDirectory`) and opens terminals
 sessions name it. `GET /api/workspace/terminals` lists the terminals of the
 window's project, since the root lists those of every project. Browser
 preferences belong to the server and apply to all windows. In the desktop app,
-**Open Folder** opens the folder on the running host, even outside the home
-directory, and moves the window there.
+**Open Folder** opens the folder on the running host and moves the window
+there.
 
 Every launch of the desktop app is a process of its own, but all of them share
 one host. The first window that opens a folder starts the host in the
 background, from the same executable (`--background-host`), and the host
-announces its loopback address, a random token and its build in
+announces its loopback address and a random token in
 `WINGMAN_HOME/app/host.json` (0600). A window forwards its page, API and
 WebSocket requests to that address with the token; the host refuses requests
 without it. Windows find or start the host under a lock (`host.lock`), so two

@@ -100,20 +100,16 @@ func TestAgentThatListsItsOwnFolderIsListedByProject(t *testing.T) {
 
 // An agent's sessions of every folder are listed, each in its own folder, so
 // the list holds what the agent's CLI would resume; a window may show their
-// folders. Folders the host cannot open are left out.
+// folders. A session that names no folder is left out.
 func TestAgentSessionsOfEveryFolderAreListedByFolder(t *testing.T) {
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, _, _ := newProtocolServer(t)
 	h := s.Project.host
 	root := canonicalPath(t.TempDir())
 	other := filepath.Join(root, "other")
-	h.mu.Lock()
-	h.roots = []string{root, s.Project.dir}
-	h.mu.Unlock()
 	agent := &everywhereAgent{protocolAgent: &protocolAgent{}, sessions: []code.SessionInfo{
 		{ID: "here", Title: "In this project", Dir: s.Project.dir},
 		{ID: "there", Title: "In another folder", Dir: other},
-		{ID: "away", Title: "Outside the roots", Dir: canonicalPath(t.TempDir())},
 		{ID: "nowhere", Title: "Without a folder"},
 	}}
 	b := s.Project.bindBackend("two", agent)
@@ -138,13 +134,8 @@ func TestAgentSessionsOfEveryFolderAreListedByFolder(t *testing.T) {
 	if !ok || there.Resource != canonicalSessionURI("two", "there", other) || there.Project == nil || there.Project.Uri != fileuri.FromPath(other) {
 		t.Fatalf("a session of another folder: %+v", there)
 	}
-	for _, title := range []string{"Outside the roots", "Without a folder"} {
-		if _, ok := items[title]; ok {
-			t.Fatalf("%q is listed", title)
-		}
-	}
-	if !h.known(other) {
-		t.Fatal("a window may not show the folder of a listed session")
+	if _, ok := items["Without a folder"]; ok {
+		t.Fatal("a session without a folder is listed")
 	}
 	if agent.here.Load() != 0 {
 		t.Fatal("the agent's sessions were listed by project as well")
@@ -172,9 +163,6 @@ func TestListingStartsAnAgentOfEveryFolderOnce(t *testing.T) {
 	if err := os.Mkdir(other, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	h.mu.Lock()
-	h.roots = []string{root, s.Project.dir}
-	h.mu.Unlock()
 	agent := &everywhereAgent{protocolAgent: &protocolAgent{}}
 	b := s.Project.bindBackend("two", agent)
 	s.Project.backends[b.id] = &backendEntry{runtime: b}

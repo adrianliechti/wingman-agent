@@ -652,10 +652,6 @@ func (a *Agent) UnstableDeleteSession(ctx context.Context, params acpsdk.Unstabl
 	return acpsdk.UnstableDeleteSessionResponse{}, nil
 }
 
-// ListsAllSessions tells the host that a list without a folder holds the
-// sessions of every folder.
-func (a *Agent) ListsAllSessions() bool { return true }
-
 func (a *Agent) ListSessions(ctx context.Context, params acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
 	lp := threadListParams{
 		Cursor: params.Cursor,

@@ -672,9 +672,7 @@ func isUnknownThreadError(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "no rollout found") || strings.Contains(msg, "thread not loaded:") ||
-		strings.Contains(msg, "invalid thread id:") || strings.Contains(msg, "invalid session id:") ||
-		strings.Contains(strings.ToLower(msg), "not found")
+	return isMissingThreadError(err) || strings.Contains(msg, "thread not loaded:") || strings.Contains(strings.ToLower(msg), "not found")
 }
 
 func (c *codexClient) threadReadWithHistory(ctx context.Context, threadID string) (threadReadResponse, error) {

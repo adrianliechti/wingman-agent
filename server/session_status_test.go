@@ -209,11 +209,7 @@ func TestMarkingASessionNoWindowOpenedLoadsNothing(t *testing.T) {
 func TestArchivingAListedSessionOfAnotherFolderLoadsNothing(t *testing.T) {
 	s, _, _, endpoint := protocolTestServer(t)
 	h := s.Project.host
-	root := canonicalPath(t.TempDir())
-	h.mu.Lock()
-	h.roots = []string{root, s.Project.dir}
-	h.mu.Unlock()
-	dir := filepath.Join(root, "other")
+	dir := filepath.Join(canonicalPath(t.TempDir()), "other")
 	updated := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
 	fleet := &deletingFleetAgent{&deletingAgent{protocolAgent: &protocolAgent{}}, []code.SessionInfo{{ID: "cli", Title: "Made in the CLI", Dir: dir, UpdatedAt: updated}}}
 	b := s.Project.bindBackend("two", fleet)

@@ -20,16 +20,25 @@ import (
 	"github.com/microsoft/agent-host-protocol/clients/go/ahpws"
 )
 
-// hostTestStart serves a host for the projects below root.
+// hostTestStart serves a host whose clients start choosing a folder in root,
+// as a user's host does in the home directory.
 func hostTestStart(t *testing.T, root, token string) (*Host, string) {
 	t.Helper()
-	host, err := NewHost(t.Context(), &HostOptions{Roots: []string{root}, Token: token, disableManagedTools: true})
+	host, err := NewHost(t.Context(), hostTestOptions(t, root, token))
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(host)
 	t.Cleanup(func() { server.Close(); host.Close() })
 	return host, "ws" + strings.TrimPrefix(server.URL, "http") + "/ahp"
+}
+
+// hostTestOptions are those of a host whose user's home directory is root.
+func hostTestOptions(t *testing.T, root, token string) *HostOptions {
+	t.Helper()
+	t.Setenv("HOME", root)
+	t.Setenv("USERPROFILE", root)
+	return &HostOptions{Token: token, disableManagedTools: true}
 }
 
 func hostTestProject(t *testing.T, root, name string) (dir, uri string) {
@@ -70,9 +79,9 @@ func hostTestSession(t *testing.T, client *sdk.Client, uri, directory string) *t
 	return result.Snapshot.State.Session
 }
 
-func TestHostRejectsAMissingRoot(t *testing.T) {
-	if _, err := NewHost(t.Context(), &HostOptions{Roots: []string{filepath.Join(t.TempDir(), "missing")}, disableManagedTools: true}); err == nil {
-		t.Fatal("a host started for a root that does not exist")
+func TestHostRejectsAMissingFolder(t *testing.T) {
+	if _, err := NewHost(t.Context(), &HostOptions{folder: filepath.Join(t.TempDir(), "missing"), disableManagedTools: true}); err == nil {
+		t.Fatal("a host started for a folder that does not exist")
 	}
 }
 
@@ -131,7 +140,7 @@ func TestHostServesSeveralProjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A client starts choosing a directory where the host may serve one.
+	// A client starts choosing a directory in the home directory.
 	if hello.DefaultDirectory == nil || *hello.DefaultDirectory != fileuri.FromPath(root) {
 		t.Fatalf("default directory: %v", hello.DefaultDirectory)
 	}
@@ -154,12 +163,11 @@ func TestHostServesSeveralProjects(t *testing.T) {
 	}
 	err = client.Request(ctx, "resourceWrite", types.ResourceWriteParams{Channel: types.RootResourceURI, Uri: readme, Data: "changed", Encoding: types.ContentEncodingUtf8}, nil)
 	hostTestCode(t, err, types.ErrorCodeInvalidParams)
-	err = client.Request(ctx, "resourceList", types.ResourceListParams{Channel: types.RootResourceURI, Uri: fileuri.FromPath(filepath.Dir(root))}, &listing)
-	hostTestCode(t, err, types.ErrorCodePermissionDenied)
+	// Every folder can be chosen, also one outside the home directory.
+	if err := client.Request(ctx, "resourceList", types.ResourceListParams{Channel: types.RootResourceURI, Uri: fileuri.FromPath(filepath.Dir(root))}, &listing); err != nil {
+		t.Fatalf("browse outside the home directory: %v", err)
+	}
 
-	// A session's directory opens its project; other directories stay closed.
-	err = client.Request(ctx, "createSession", types.CreateSessionParams{Channel: "ahp-session:/outside", Provider: new("wingman"), WorkingDirectories: []string{fileuri.FromPath(filepath.Dir(root))}}, nil)
-	hostTestCode(t, err, types.ErrorCodePermissionDenied)
 	// The protocol makes the directory optional; the host's default one is used.
 	if err := client.Request(ctx, "createSession", types.CreateSessionParams{Channel: "ahp-session:/default", Provider: new("wingman")}, nil); err != nil {
 		t.Fatal(err)

@@ -4,7 +4,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { fileQueries, type FileHit } from "../api/files";
 import type { SettingsPatch } from "../state/workspaceContext.ts";
 import type { SessionSettings } from "../state/sessionStore.ts";
-import { newestFirst } from "../state/fleet.ts";
+import { newestSessions } from "../state/fleet.ts";
 import { useFleet } from "../hooks/useFleet.ts";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useChatCommands } from "../hooks/useChatCommands";
@@ -61,10 +61,6 @@ export function CommandPalette({
 	const listRef = useRef<HTMLDivElement>(null);
 	const skills = useChatCommands(sessionId, true);
 	const fleet = useFleet().sessions;
-	const sessionList = useMemo(
-		() => fleet.filter((session) => !session.archived).sort(newestFirst),
-		[fleet],
-	);
 	const models = settings.models;
 	const currentModel = settings.model;
 	const debouncedQuery = useDebouncedValue(query.trim(), 80);
@@ -135,8 +131,10 @@ export function CommandPalette({
 				run: () => onRunSkill(s),
 			});
 		}
-		const sessions = sessionList.filter((s) => match(s.title, s.id));
-		for (const s of sessions.slice(0, q ? sessions.length : 6)) {
+		// The newest sessions; a search among thousands shows its first hits.
+		let sessionHits = q ? 50 : 6;
+		for (const s of newestSessions(fleet)) {
+			if (s.archived || !match(s.title, s.id)) continue;
 			out.push({
 				key: `session:${s.id}`,
 				group: "Sessions",
@@ -145,6 +143,7 @@ export function CommandPalette({
 				icon: <MessageSquare size={12} className="text-fg-dim shrink-0" />,
 				run: () => onSelectSession(s.id),
 			});
+			if (--sessionHits === 0) break;
 		}
 		for (const f of files) {
 			out.push({
@@ -161,7 +160,7 @@ export function CommandPalette({
 		query,
 		actions,
 		skills,
-		sessionList,
+		fleet,
 		files,
 		models,
 		currentModel,

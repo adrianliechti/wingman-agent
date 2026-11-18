@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/settings"
 )
@@ -58,7 +58,7 @@ func TestServerShowsOtherProjectsInWindowsOfOneHost(t *testing.T) {
 	if err := os.Mkdir(other, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, Projects: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,13 +67,6 @@ func TestServerShowsOtherProjectsInWindowsOfOneHost(t *testing.T) {
 	start := windowOpen(t, s, dir)
 	if start.InstanceID != s.InstanceID() || start.Host != s.Project.host.id || start.Directory != fileuri.FromPath(dir) {
 		t.Fatalf("the start folder's window: %+v", start)
-	}
-	// A window opens only a project the user already used.
-	if recorder := windowRequest(t, s, http.MethodGet, "/api/workspace?project="+url.QueryEscape(other), "", ""); recorder.Code != http.StatusForbidden {
-		t.Fatalf("a folder nobody opened: %d %s", recorder.Code, recorder.Body.String())
-	}
-	if err := s.Open(other); err != nil {
-		t.Fatal(err)
 	}
 	window := windowOpen(t, s, other)
 	if window.Path != other || window.InstanceID == s.InstanceID() || window.Host != start.Host || window.Directory != fileuri.FromPath(other) || window.Namespace == start.Namespace {
@@ -148,40 +141,19 @@ func TestServerShowsOtherProjectsInWindowsOfOneHost(t *testing.T) {
 	}
 }
 
-func TestServerWindowsOpenOnlyProjectsTheUserUsed(t *testing.T) {
+// The desktop app's server opens any folder a window names, but only as the
+// first request of a window on the host it was meant for.
+func TestServerOfEveryProjectOpensAnyFolderAfterItsChecks(t *testing.T) {
 	testenv.WingmanHome(t)
 	protocolTestGateway(t)
 	dir := canonicalPath(t.TempDir())
 	outside := canonicalPath(t.TempDir())
-	used := filepath.Join(dir, "used")
-	if err := os.Mkdir(used, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, Projects: true, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	refused := func(project string, code int) {
-		t.Helper()
-		if recorder := windowRequest(t, s, http.MethodGet, "/api/workspace?project="+url.QueryEscape(project), "", ""); recorder.Code != code {
-			t.Fatalf("%s: %d %s", project, recorder.Code, recorder.Body.String())
-		}
-	}
-	// Any website can send a browser to a window's address; it opens no folder of its choice.
-	refused(outside, http.StatusForbidden)
-	refused(filepath.Join(dir, "missing"), http.StatusForbidden)
-	refused("relative", http.StatusBadRequest)
-	// A project with sessions is one the user used.
-	if err := s.Project.storeAlias(sessionAlias{Resource: "ahp-session:/used", Backend: "wingman", Session: "used", Created: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	s.Project.host.mu.Lock()
-	alias := s.Project.host.aliases["ahp-session:/used"]
-	alias.Project = used
-	s.Project.host.rememberAliasLocked(alias)
-	s.Project.host.mu.Unlock()
-	target := "/api/workspace?project=" + url.QueryEscape(used)
+	target := "/api/workspace?project=" + url.QueryEscape(outside)
 	request := httptest.NewRequest(http.MethodGet, "http://unrecognized.invalid"+target, nil)
 	response := httptest.NewRecorder()
 	s.ServeHTTP(response, request)
@@ -194,14 +166,59 @@ func TestServerWindowsOpenOnlyProjectsTheUserUsed(t *testing.T) {
 	if rec := windowRequest(t, s, http.MethodPost, target, "", ""); rec.Code != http.StatusMethodNotAllowed || len(s.Project.host.loaded()) != 1 {
 		t.Fatal("a method other than GET opened a project")
 	}
-	if window := windowOpen(t, s, used); window.Path != used {
-		t.Fatalf("the used project's window: %+v", window)
+	for project, code := range map[string]int{"relative": http.StatusBadRequest, filepath.Join(dir, "missing"): http.StatusNotFound} {
+		if rec := windowRequest(t, s, http.MethodGet, "/api/workspace?project="+url.QueryEscape(project), "", ""); rec.Code != code {
+			t.Fatalf("%s: %d %s", project, rec.Code, rec.Body.String())
+		}
 	}
-	// A folder the user picked opens, even outside the roots.
-	if err := s.Open(outside); err != nil {
+	// A folder outside the one the server started in opens too.
+	if window := windowOpen(t, s, outside); window.Path != outside {
+		t.Fatalf("the other folder's window: %+v", window)
+	}
+}
+
+// A server started for one folder, as `wingman server` is, shows that folder
+// and no other: a browser, or a phone through the relay, reaches it, and any
+// website can send a browser to its address.
+func TestServerOfOneFolderShowsNoOtherProject(t *testing.T) {
+	testenv.WingmanHome(t)
+	protocolTestGateway(t)
+	dir := canonicalPath(t.TempDir())
+	nested := filepath.Join(dir, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if window := windowOpen(t, s, outside); window.Path != outside {
-		t.Fatalf("the picked folder's window: %+v", window)
+	s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	h := s.Project.host
+	for _, project := range []string{nested, canonicalPath(t.TempDir()), filepath.Join(dir, "missing")} {
+		if rec := windowRequest(t, s, http.MethodGet, "/api/workspace?project="+url.QueryEscape(project), "", ""); rec.Code != http.StatusForbidden {
+			t.Fatalf("%s: %d %s", project, rec.Code, rec.Body.String())
+		}
+	}
+	if len(h.loaded()) != 1 {
+		t.Fatal("a window opened another project")
+	}
+	// Its own folder is the window it shows anyway.
+	if window := windowOpen(t, s, dir); window.InstanceID != s.InstanceID() {
+		t.Fatalf("the start folder's window: %+v", window)
+	}
+	// Its list holds its own folder's sessions: an agent that keeps the
+	// sessions of every folder is asked for this one alone.
+	agent := &everywhereAgent{protocolAgent: &protocolAgent{}, sessions: []code.SessionInfo{{ID: "nested", Dir: nested}}}
+	b := s.Project.bindBackend("two", agent)
+	s.Project.backendsMu.Lock()
+	s.Project.backends[b.id] = &backendEntry{runtime: b}
+	s.Project.backendsMu.Unlock()
+	for _, item := range reviewHostCatalog(t, h) {
+		if item.Provider == "two" {
+			t.Fatalf("a session of another folder is listed: %+v", item)
+		}
+	}
+	if agent.everywhere.Load() != 0 || agent.here.Load() != 1 {
+		t.Fatalf("listed every folder %d times and the project %d times", agent.everywhere.Load(), agent.here.Load())
 	}
 }

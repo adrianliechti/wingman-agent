@@ -1664,6 +1664,25 @@ func SessionsDir(workingDir string) string {
 	return filepath.Join(projectStateDir(workingDir), "sessions")
 }
 
+// SessionStores lists the sessions directory of every project that has state.
+func SessionStores() ([]string, error) {
+	projects, err := layout.WingmanPath("projects")
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(projects)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	var stores []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			stores = append(stores, filepath.Join(projects, entry.Name(), "sessions"))
+		}
+	}
+	return stores, nil
+}
+
 func findCanonicalGitRoot(dir string) string {
 	cur := filepath.Clean(dir)
 	for {

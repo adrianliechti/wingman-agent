@@ -60,7 +60,7 @@ func (a *protocolAgent) NewSession(context.Context) (string, error) {
 func (a *protocolAgent) LoadSession(_ context.Context, id string) error {
 	a.loaded.Add(1)
 	if id == "missing" {
-		return errors.New("session not found")
+		return code.ErrSessionNotFound
 	}
 	return nil
 }

@@ -14,77 +14,48 @@ import { isDraft } from "../state/sessionStore.ts";
 import {
 	fleetCounts,
 	fleetEvents,
-	fleetSession,
-	restoreFleetView,
-	storeFleetView,
+	fleetSessions,
 	type FleetEvent,
 	type FleetSession,
 	type FleetState,
-	type FleetView,
 } from "../state/fleet.ts";
+import { readStored, writeStored } from "../utils/storage.ts";
 
-export type { FleetView };
-// The list moves to each chat it opens, and the window to each project: what
-// the list shows travels with it, through the reload that shows the project.
-const FLEET_VIEW_KEY = "wingman.fleetView";
-let fleetView: FleetView | undefined;
-function currentFleetView(): FleetView {
-	if (!fleetView) {
-		let stored: string | null = null;
-		try {
-			stored = sessionStorage.getItem(FLEET_VIEW_KEY);
-		} catch {
-			// A browser without storage starts each window's list afresh.
-		}
-		fleetView = restoreFleetView(stored, workspaceClient().scope.project);
-	}
-	return fleetView;
-}
-const fleetViewListeners = new Set<() => void>();
-function subscribeFleetView(listener: () => void) {
-	fleetViewListeners.add(listener);
-	return () => {
-		fleetViewListeners.delete(listener);
-	};
-}
-/** Keeps the list's view for the window's next page, such as the project it
- * moves to, where the project it leaves is listed open as it was shown. */
-export function keepFleetView() {
-	try {
-		sessionStorage.setItem(
-			FLEET_VIEW_KEY,
-			storeFleetView(currentFleetView(), workspaceClient().scope.project),
-		);
-	} catch {
-		// The view still holds for this page.
-	}
-}
-function setFleetView(patch: Partial<FleetView>) {
-	fleetView = { ...currentFleetView(), ...patch };
-	keepFleetView();
-	for (const listener of fleetViewListeners) listener();
-}
 /** The session list's filter and search, shared by every place that shows the list. */
 export function useFleetView() {
-	const view = useSyncExternalStore(subscribeFleetView, currentFleetView);
-	return [view, setFleetView] as const;
+	const store = workspaceClient().fleetView;
+	const view = useSyncExternalStore(store.subscribe, store.getSnapshot);
+	return [view, store.set] as const;
 }
 
 /** The host's sessions as the session list shows them. */
 export function useFleet() {
 	const catalog = workspaceClient().catalog;
 	const state = useSyncExternalStore(catalog.subscribe, catalog.getSnapshot);
-	const sessions = useMemo(
-		() => state.sessions.map(fleetSession),
-		[state.sessions],
-	);
+	// Derived once per list, for every place that shows it.
+	const sessions = fleetSessions(state.sessions);
 	return {
 		sessions,
 		loaded: state.loaded,
 		error: state.error,
 		starting: state.starting,
-		counts: useMemo(() => fleetCounts(sessions), [sessions]),
+		counts: fleetCounts(sessions),
 	};
+}
+
+/** The listed sessions as they are now, for what looks one up when it runs. */
+export function currentFleet(): readonly FleetSession[] {
+	return fleetSessions(workspaceClient().catalog.getSnapshot().sessions);
+}
+
+/** How many sessions wait for the user. Its caller renders again when the
+ * number changes, not with every session that does. */
+export function useNeedsInputCount(): number {
+	const catalog = workspaceClient().catalog;
+	return useSyncExternalStore(
+		catalog.subscribe,
+		() => fleetCounts(fleetSessions(catalog.getSnapshot().sessions)).needsInput,
+	);
 }
 
 /** Whether a session belongs to the window's project, whichever way the host spells it. */
@@ -100,26 +71,27 @@ export function useHere(): (session: FleetSession) => boolean {
 
 const NO_REQUESTS: readonly SessionInputRequest[] = [];
 
-/** The requests a session waits on, while it waits on any. */
-export function useSessionInputNeeded(session: string, waiting: boolean) {
+/** The requests a session waits on. */
+export function useSessionInputNeeded(session: string) {
 	const client = workspaceClient();
 	const [requests, setRequests] = useState({
 		session: "",
 		items: NO_REQUESTS,
 	});
-	useEffect(() => {
-		if (!waiting) return;
-		return client.ahp.watch(
-			session,
-			(update) =>
-				setRequests({
-					session,
-					items: (update.state as SessionState).inputNeeded ?? NO_REQUESTS,
-				}),
-			() => setRequests({ session, items: NO_REQUESTS }),
-		);
-	}, [client, session, waiting]);
-	return waiting && requests.session === session ? requests.items : NO_REQUESTS;
+	useEffect(
+		() =>
+			client.ahp.watch(
+				session,
+				(update) =>
+					setRequests({
+						session,
+						items: (update.state as SessionState).inputNeeded ?? NO_REQUESTS,
+					}),
+				() => setRequests({ session, items: NO_REQUESTS }),
+			),
+		[client, session],
+	);
+	return requests.session === session ? requests.items : NO_REQUESTS;
 }
 
 export function useNow(interval = 60_000) {
@@ -212,18 +184,12 @@ export function useTitleCount(count: number, project?: string) {
 const NOTIFICATIONS = "wingman.notifications";
 /** System notifications work in browsers; the desktop app's web view exposes
  * the API but never grants it, and has no settings to allow it in. */
-export function notificationsSupported() {
+function notificationsSupported() {
 	return (
 		typeof window !== "undefined" && "Notification" in window && !window.shell
 	);
 }
-function notificationsWanted() {
-	try {
-		return localStorage.getItem(NOTIFICATIONS) === "on";
-	} catch {
-		return false;
-	}
-}
+const notificationsWanted = () => readStored("local", NOTIFICATIONS) === "on";
 function subscribeNotifications(listener: () => void) {
 	window.addEventListener("storage", listener);
 	window.addEventListener("wingman:notifications", listener);
@@ -245,12 +211,7 @@ export function useNotificationSetting() {
 			const permission = await Notification.requestPermission();
 			if (permission !== "granted") return false;
 		}
-		try {
-			if (on) localStorage.setItem(NOTIFICATIONS, "on");
-			else localStorage.removeItem(NOTIFICATIONS);
-		} catch {
-			return false;
-		}
+		if (!writeStored("local", NOTIFICATIONS, on ? "on" : null)) return false;
 		window.dispatchEvent(new Event("wingman:notifications"));
 		return true;
 	};

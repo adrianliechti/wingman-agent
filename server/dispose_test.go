@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
-	"github.com/adrianliechti/wingman-agent/pkg/layout"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
 )
 
@@ -43,16 +41,14 @@ func TestDisposeUsesListedProjectAndSessionIdentity(t *testing.T) {
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, _, _ := newProtocolServer(t)
 	h := s.Project.host
-	root := canonicalPath(t.TempDir())
-	h.roots = []string{root, s.Project.dir}
-	dir := filepath.Join(root, "listed")
+	dir := filepath.Join(canonicalPath(t.TempDir()), "listed")
 	agent := &deletingFleetAgent{&deletingAgent{protocolAgent: &protocolAgent{}}, []code.SessionInfo{{ID: "saved", Dir: dir}}}
 	b := s.Project.bindBackend("two", agent)
 	s.Project.backends[b.id] = &backendEntry{runtime: b}
 	if _, _, err := h.ensureSession(s.Project.canonicalURI("two", "saved")); !errors.Is(err, errUnknownSession) || agent.loaded.Load() != 0 {
 		t.Fatalf("resuming a session under another project: %v, %d loads", err, agent.loaded.Load())
 	}
-	for _, path := range []string{canonicalPath(t.TempDir()), filepath.Join(root, "other")} {
+	for _, path := range []string{canonicalPath(t.TempDir()), filepath.Join(filepath.Dir(dir), "other")} {
 		if _, err := h.disposeUnopened(canonicalSessionURI("two", "saved", path)); err == nil {
 			t.Fatalf("accepted a session identity from %s", path)
 		}
@@ -77,33 +73,22 @@ func (a *deletingAgent) DeleteSession(_ context.Context, id string) error {
 
 func listed(t *testing.T, h *Host, resource string) bool {
 	t.Helper()
-	result, err := h.listSessions(json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return slices.ContainsFunc(result.(types.ListSessionsResult).Items, func(item types.SessionSummary) bool { return item.Resource == resource })
+	return slices.ContainsFunc(reviewHostCatalog(t, h), func(item types.SessionSummary) bool { return item.Resource == resource })
 }
 
 // saveTestAlias saves a session as its folder's project would.
 func saveTestAlias(t *testing.T, s *Server, alias sessionAlias) string {
 	t.Helper()
-	dir, err := layout.WingmanPath("ahp", workspaceScope(alias.Project).WorkspaceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(alias)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(aliasPath(dir, alias), data, 0o600); err != nil {
+	if err := writeAlias(alias); err != nil {
 		t.Fatal(err)
 	}
 	s.Project.host.mu.Lock()
 	s.Project.host.rememberAliasLocked(alias)
 	s.Project.host.mu.Unlock()
+	dir, err := aliasDirectory(alias.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return aliasPath(dir, alias)
 }
 
@@ -162,7 +147,7 @@ func TestDeletingAWingmanSessionOfAFolderThatIsGone(t *testing.T) {
 		return path
 	}
 	journal, duplicate := writeJournal(), writeJournal()
-	if _, err := removedProjectStore(alias); err == nil {
+	if _, err := builtinStore(alias); err == nil {
 		t.Fatal("selected a store for an ambiguous session ID")
 	}
 	if err := os.Remove(duplicate); err != nil {

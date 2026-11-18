@@ -2,7 +2,6 @@ import type {
 	SessionChatInputRequest,
 	SessionInputRequest,
 	SessionToolConfirmationRequest,
-	StringOrMarkdown,
 } from "@microsoft/agent-host-protocol";
 import {
 	Archive,
@@ -26,7 +25,15 @@ import {
 	Trash2,
 	X,
 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+	memo,
+	type ReactNode,
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import { useAgents } from "../hooks/useAgents.ts";
 import {
 	keepUnread,
@@ -37,6 +44,8 @@ import {
 	useNow,
 	useSessionInputNeeded,
 } from "../hooks/useFleet.ts";
+import { useSessionAction } from "../hooks/useSessions.ts";
+import { display } from "../state/ahpSession.ts";
 import {
 	type FleetChanges,
 	type FleetChat,
@@ -76,7 +85,6 @@ const FILTERS: { id: FleetFilter; label: string; empty: string }[] = [
 type Menu = {
 	chat: FleetChat;
 	session: FleetSession;
-	fork: boolean;
 	x: number;
 	y: number;
 };
@@ -92,6 +100,7 @@ export function SessionsPanel({
 }: Props) {
 	const client = workspaceClient();
 	const toast = useToast();
+	const act = useSessionAction();
 	const { backend } = useWorkspace();
 	const agents = useAgents();
 	const { sessions, loaded, error, starting, counts } = useFleet();
@@ -112,8 +121,12 @@ export function SessionsPanel({
 	useEffect(() => {
 		if (searching) searchInput.current?.focus();
 	}, [searching]);
-	const agentName = (id: string) =>
-		formatAgentName(id, agents.find((agent) => agent.id === id)?.name);
+	const agentName = useMemo(() => {
+		const names = new Map(
+			agents.map((agent) => [agent.id, formatAgentName(agent.id, agent.name)]),
+		);
+		return (id: string) => names.get(id) ?? formatAgentName(id);
+	}, [agents]);
 	// An agent lists the sessions of its own CLI only once it runs, so the list
 	// starts the agents it shows: every agent, or the one it is filtered to.
 	const agentIds = agents.map((agent) => agent.id).join("\n");
@@ -128,12 +141,12 @@ export function SessionsPanel({
 				filter,
 				search,
 				provider,
-				providerName: (id) =>
-					formatAgentName(id, agents.find((agent) => agent.id === id)?.name),
+				providerName: agentName,
 				here,
+				ownProject: client.scope.project,
 				now,
 			}),
-		[sessions, filter, search, provider, agents, here, now],
+		[sessions, filter, search, provider, agentName, here, client, now],
 	);
 	const otherProject = (session: FleetSession) =>
 		here(session) ? undefined : session.project?.displayName;
@@ -141,25 +154,26 @@ export function SessionsPanel({
 	// the user left them when it ends.
 	const expanded = (group: FleetGroup) =>
 		!!search.trim() || (view.expanded[group.id] ?? group.project?.here ?? true);
-	const act = async (operation: () => Promise<unknown>, failure: string) => {
-		try {
-			await operation();
-		} catch (error) {
-			toast({ title: failure, description: String(error), tone: "error" });
-		}
-	};
-	const openMenu = (
-		event: { clientX: number; clientY: number },
-		session: FleetSession,
-		chat: FleetChat,
-	) =>
-		setMenu({
-			session,
-			chat,
-			fork: chat.id !== session.id,
-			x: event.clientX,
-			y: event.clientY,
-		});
+	// A row renders again only when its session changes, so what the rows
+	// call keeps its identity while the panel renders.
+	const select = useRef(onSessionSelect);
+	useEffect(() => {
+		select.current = onSessionSelect;
+	});
+	const openChat = useCallback(
+		(id: string, disposition?: TabDisposition) =>
+			select.current(id, disposition),
+		[],
+	);
+	const openMenu = useCallback(
+		(
+			event: { clientX: number; clientY: number },
+			session: FleetSession,
+			chat: FleetChat,
+		) => setMenu({ session, chat, x: event.clientX, y: event.clientY }),
+		[],
+	);
+	const menuFork = !!menu && menu.chat.id !== menu.session.id;
 	const filtered = filter !== "all" || !!provider || !!search.trim();
 	const emptyText = search.trim()
 		? "No matching sessions"
@@ -360,7 +374,7 @@ export function SessionsPanel({
 										}
 										// A project's group names it already.
 										project={group.project ? undefined : otherProject(session)}
-										onOpen={onSessionSelect}
+										onOpen={openChat}
 										onMenu={openMenu}
 									/>
 								))}
@@ -408,7 +422,7 @@ export function SessionsPanel({
 							<MenuRadio
 								key={agent.id}
 								checked={provider === agent.id}
-								label={formatAgentName(agent.id, agent.name)}
+								label={agentName(agent.id)}
 								onSelect={() => {
 									setProvider(agent.id);
 									setFilterOpen(false);
@@ -428,7 +442,7 @@ export function SessionsPanel({
 				>
 					<MenuItem
 						icon={<MessageSquare size={12} />}
-						label={menu.fork ? "Open fork" : "Open session"}
+						label={menuFork ? "Open fork" : "Open session"}
 						onSelect={() => {
 							onSessionSelect(menu.chat.id, "keep");
 							setMenu(null);
@@ -438,20 +452,18 @@ export function SessionsPanel({
 						icon={menu.chat.unread ? <Eye size={12} /> : <EyeOff size={12} />}
 						label={menu.chat.unread ? "Mark as read" : "Mark as unread"}
 						onSelect={() => {
-							const { chat, session, fork } = menu;
+							const { chat, session } = menu;
 							setMenu(null);
 							if (!chat.unread) keepUnread(chat.id);
-							void act(
-								() =>
-									client.markRead(
-										fork ? chat.id : session.session,
-										chat.unread,
-									),
-								"Could not update session",
+							void act(() =>
+								client.markRead(
+									menuFork ? chat.id : session.session,
+									chat.unread,
+								),
 							);
 						}}
 					/>
-					{!menu.fork && (
+					{!menuFork && (
 						<MenuItem
 							icon={
 								menu.session.archived ? (
@@ -464,9 +476,8 @@ export function SessionsPanel({
 							onSelect={() => {
 								const { session } = menu;
 								setMenu(null);
-								void act(
-									() => client.archive(session.session, !session.archived),
-									"Could not update session",
+								void act(() =>
+									client.archive(session.session, !session.archived),
 								);
 							}}
 						/>
@@ -489,7 +500,7 @@ export function SessionsPanel({
 							<div className="my-1 border-t border-border-subtle" />
 							<MenuItem
 								icon={<Trash2 size={12} />}
-								label={menu.fork ? "Delete fork" : "Delete session"}
+								label={menuFork ? "Delete fork" : "Delete session"}
 								danger
 								onSelect={() => {
 									onSessionDelete(menu.chat.id, menu.chat.title);
@@ -698,7 +709,9 @@ function ChangeCount({ changes }: { changes?: FleetChanges }) {
 	);
 }
 
-function SessionRow({
+/** A session with its forks. The list holds thousands and the host reports
+ * every step of those that work: a row renders again when its own changes. */
+const SessionRow = memo(function SessionRow({
 	session,
 	current,
 	touch,
@@ -807,7 +820,7 @@ function SessionRow({
 			))}
 		</div>
 	);
-}
+});
 
 function ChatRow({
 	chat,
@@ -889,11 +902,6 @@ function ChatRow({
 	);
 }
 
-function text(value?: StringOrMarkdown): string {
-	if (!value) return "";
-	return typeof value === "string" ? value : value.markdown;
-}
-
 type Answerable = SessionToolConfirmationRequest | SessionChatInputRequest;
 /** Approvals and questions; tool runs and sign-ins are not the user's to answer here. */
 const answerable = (request: SessionInputRequest): request is Answerable =>
@@ -907,17 +915,15 @@ function SessionRequests({
 	session: FleetSession;
 	onOpen: (id: string, disposition?: TabDisposition) => void;
 }) {
-	const client = workspaceClient();
-	const toast = useToast();
-	const requests = useSessionInputNeeded(session.session, true).filter(
-		answerable,
-	);
+	const act = useSessionAction();
+	const requests = useSessionInputNeeded(session.session).filter(answerable);
 	const [busy, setBusy] = useState(false);
 	const request = requests[0];
 	if (!request) return null;
 	const message =
 		request.kind === "toolConfirmation"
-			? text(request.toolCall.invocationMessage) || request.toolCall.displayName
+			? display(request.toolCall.invocationMessage) ||
+				request.toolCall.displayName
 			: (request.request.message ?? "");
 	const options =
 		request.kind === "toolConfirmation" && "options" in request.toolCall
@@ -925,28 +931,17 @@ function SessionRequests({
 			: [];
 	const yesNo =
 		request.kind === "toolConfirmation" || !request.request.questions?.length;
+	// The client answers with the first option of the reply's kind.
 	const answer = async (approve: boolean) => {
-		const option = options.find(
-			(candidate) => candidate.kind === (approve ? "approve" : "deny"),
-		);
 		setBusy(true);
-		try {
-			await client.respond(
-				request.chat,
-				request.id,
-				approve
-					? { action: "accept", ...(option ? { option: option.id } : {}) }
-					: { action: "decline", ...(option ? { option: option.id } : {}) },
-			);
-		} catch (error) {
-			toast({
-				title: "The answer was not delivered",
-				description: String(error),
-				tone: "error",
-			});
-		} finally {
-			setBusy(false);
-		}
+		await act(
+			(client) =>
+				client.respond(request.chat, request.id, {
+					action: approve ? "accept" : "decline",
+				}),
+			"The answer was not delivered",
+		);
+		setBusy(false);
 	};
 	const button =
 		"min-h-6 rounded border px-2 text-[11px] transition-colors disabled:cursor-wait disabled:opacity-60";

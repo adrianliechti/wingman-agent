@@ -1,14 +1,11 @@
 package server
 
 import (
-	"maps"
 	"path/filepath"
-	"slices"
 	"sync"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
@@ -23,44 +20,64 @@ type everywhereListing struct {
 }
 
 // listEverywhere lists the sessions of every folder of each started agent that
-// can, as its CLI's resume list does, by provider.
+// can, as its CLI's resume list does, by provider. The agents are asked
+// together: each reads its own store.
 func (h *Host) listEverywhere(agents []types.AgentInfo) map[string][]code.SessionInfo {
 	out := map[string][]code.SessionInfo{}
-	projects := h.loaded()
+	var mu sync.Mutex
+	var asked sync.WaitGroup
 	for _, info := range agents {
-		b := startedBackend(projects, info.Provider)
-		if b == nil {
-			continue
-		}
-		lister, ok := everyFolderLister(b.agent)
-		if !ok {
-			continue
-		}
-		h.everywhereMu.Lock()
-		entry := h.everywhere[info.Provider]
-		if entry == nil || !entry.at.IsZero() && time.Since(entry.at) >= everywhereTTL {
-			entry = &everywhereListing{list: sync.OnceValues(func() ([]code.SessionInfo, error) {
-				return listSessionFolders(b.Project, lister)
-			})}
-			h.everywhere[info.Provider] = entry
-		}
-		h.everywhereMu.Unlock()
-		sessions, err := entry.list()
-		h.everywhereMu.Lock()
-		// A deletion during the listing invalidates the in-flight result too.
-		if h.everywhere[info.Provider] == entry {
-			if err != nil {
-				delete(h.everywhere, info.Provider)
-			} else {
-				if entry.at.IsZero() {
-					entry.at = time.Now()
-				}
+		asked.Go(func() {
+			if sessions, ok := h.everywhereOf(info.Provider); ok {
+				mu.Lock()
 				out[info.Provider] = sessions
+				mu.Unlock()
 			}
-		}
-		h.everywhereMu.Unlock()
+		})
 	}
+	asked.Wait()
 	return out
+}
+
+// everywhereOf lists the sessions of every folder of one agent; ok is false
+// for an agent that keeps no such list, is not started, or failed to list.
+func (h *Host) everywhereOf(provider string) (sessions []code.SessionInfo, ok bool) {
+	// A host of one folder lists that folder's sessions, project by project.
+	if h.folder != "" {
+		return nil, false
+	}
+	b := startedBackend(h.loaded(), provider)
+	if b == nil {
+		return nil, false
+	}
+	lister, ok := everyFolderLister(b.agent)
+	if !ok {
+		return nil, false
+	}
+	h.everywhereMu.Lock()
+	entry := h.everywhere[provider]
+	if entry == nil || !entry.at.IsZero() && time.Since(entry.at) >= everywhereTTL {
+		entry = &everywhereListing{list: sync.OnceValues(func() ([]code.SessionInfo, error) {
+			return listSessionFolders(b.Project, lister)
+		})}
+		h.everywhere[provider] = entry
+	}
+	h.everywhereMu.Unlock()
+	sessions, err := entry.list()
+	h.everywhereMu.Lock()
+	defer h.everywhereMu.Unlock()
+	// A deletion during the listing invalidates the in-flight result too.
+	if h.everywhere[provider] != entry {
+		return nil, false
+	}
+	if err != nil {
+		delete(h.everywhere, provider)
+		return nil, false
+	}
+	if entry.at.IsZero() {
+		entry.at = time.Now()
+	}
+	return sessions, true
 }
 
 // everyFolderLister is an agent's list of every folder's sessions, when it
@@ -102,36 +119,4 @@ func (h *Host) forgetEverywhere() {
 	h.everywhereMu.Lock()
 	clear(h.everywhere)
 	h.everywhereMu.Unlock()
-}
-
-// everywhereSessions describes the sessions agents listed for every folder,
-// each in its own folder. A folder outside the host's roots cannot open, so
-// its sessions are left out.
-func (h *Host) everywhereSessions(everywhere map[string][]code.SessionInfo, seen map[string]bool) []types.SessionSummary {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	items := []types.SessionSummary{}
-	saved := h.savedIndexLocked()
-	for _, provider := range slices.Sorted(maps.Keys(everywhere)) {
-		for _, session := range everywhere[provider] {
-			dir := session.Dir
-			if !h.servesLocked(dir) {
-				continue
-			}
-			if h.listed == nil {
-				h.listed = map[string]bool{}
-			}
-			h.listed[dir] = true
-			project, directory := projectInfo(dir), fileuri.FromPath(dir)
-			// A folder's open project names it as its windows do.
-			if p := h.projects[dir]; p != nil {
-				project, directory = p.info(), p.directoryURI()
-			}
-			key := nativeKey{dir, provider, session.ID}
-			if summary, ok := h.listedSummaryLocked(dir, project, directory, key, session, saved, seen); ok {
-				items = append(items, summary)
-			}
-		}
-	}
-	return items
 }

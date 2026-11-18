@@ -20,9 +20,8 @@ import (
 
 func reviewSaveHostAlias(t *testing.T, dir, resource, provider string) sessionAlias {
 	t.Helper()
-	p := &Project{scope: workspaceScope(dir), dir: dir, host: newHost(context.Background())}
 	a := sessionAlias{Resource: resource, Project: dir, Backend: provider, Session: "saved", Created: time.Now(), Title: "Private project title"}
-	if err := p.saveAlias(a); err != nil {
+	if err := writeAlias(a); err != nil {
 		t.Fatal(err)
 	}
 	return a
@@ -38,17 +37,17 @@ func reviewHostCatalog(t *testing.T, h *Host) []types.SessionSummary {
 	return result.(types.ListSessionsResult).Items
 }
 
-func TestReviewHostFiltersSavedRoots(t *testing.T) {
+func TestReviewHostOfOneFolderFiltersSavedSessions(t *testing.T) {
 	testenv.WingmanHome(t)
 	allowed, excluded := canonicalPath(t.TempDir()), canonicalPath(t.TempDir())
 	reviewSaveHostAlias(t, excluded, "ahp-session:/excluded", "wingman")
-	h, err := NewHost(t.Context(), &HostOptions{Roots: []string{allowed}, disableManagedTools: true})
+	h, err := NewHost(t.Context(), &HostOptions{folder: allowed, disableManagedTools: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
 	if items := reviewHostCatalog(t, h); len(items) != 0 {
-		t.Fatalf("catalog leaked sessions outside configured roots: %+v", items)
+		t.Fatalf("the host of one folder lists the sessions of another: %+v", items)
 	}
 }
 
@@ -56,7 +55,7 @@ func TestReviewHostRetainsDormantProviderSessions(t *testing.T) {
 	testenv.WingmanHome(t)
 	dir := canonicalPath(t.TempDir())
 	reviewSaveHostAlias(t, dir, "ahp-session:/external", "external")
-	h, err := NewHost(t.Context(), &HostOptions{Roots: []string{dir}, disableManagedTools: true})
+	h, err := NewHost(t.Context(), hostTestOptions(t, dir, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,9 +88,15 @@ func TestReviewHostScopesNativeSessionIDs(t *testing.T) {
 	}
 	a, b := makeProject(canonicalPath(t.TempDir())), makeProject(canonicalPath(t.TempDir()))
 	h.aliases["ahp-session:/a"] = sessionAlias{Resource: "ahp-session:/a", Project: a.dir, Backend: "one", Session: "saved"}
-	items := b.nativeSessions([]types.AgentInfo{{Provider: "one"}}, nil, map[string]bool{}, map[string]bool{})
-	if len(items) != 1 || items[0].Resource != b.canonicalURI("one", "saved") {
-		t.Fatalf("project B adopted project A's alias: %+v", items)
+	listed := b.nativeSessions([]types.AgentInfo{{Provider: "one"}}, nil, map[string]bool{})
+	if len(listed) != 1 {
+		t.Fatalf("project B listed %+v", listed)
+	}
+	h.mu.Lock()
+	item, ok := h.listedSummaryLocked(listed[0], h.savedIndexLocked(), map[string]bool{})
+	h.mu.Unlock()
+	if !ok || item.Resource != b.canonicalURI("one", "saved") {
+		t.Fatalf("project B adopted project A's alias: %+v", item)
 	}
 }
 
@@ -99,7 +104,7 @@ func TestReviewHostConcurrentOpening(t *testing.T) {
 	testenv.WingmanHome(t)
 	protocolTestGateway(t)
 	root := canonicalPath(t.TempDir())
-	h, err := NewHost(t.Context(), &HostOptions{Roots: []string{root}, disableManagedTools: true})
+	h, err := NewHost(t.Context(), hostTestOptions(t, root, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +142,7 @@ func TestReviewHostCreatesSessionViaSymlink(t *testing.T) {
 	if err := os.Symlink(dir, link); err != nil {
 		t.Fatal(err)
 	}
-	h, err := NewHost(t.Context(), &HostOptions{Roots: []string{root}, disableManagedTools: true})
+	h, err := NewHost(t.Context(), hostTestOptions(t, root, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +161,7 @@ func TestReviewHostTerminalNamesAreAtomic(t *testing.T) {
 	testenv.WingmanHome(t)
 	protocolTestGateway(t)
 	root := canonicalPath(t.TempDir())
-	h, err := NewHost(t.Context(), &HostOptions{Roots: []string{root}, disableManagedTools: true})
+	h, err := NewHost(t.Context(), hostTestOptions(t, root, ""))
 	if err != nil {
 		t.Fatal(err)
 	}

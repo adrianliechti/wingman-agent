@@ -22,6 +22,7 @@ import {
 } from "./ahpValues.ts";
 import { RpcError } from "@microsoft/agent-host-protocol/client";
 import { errorText } from "../utils/errorText.ts";
+import { readStored, writeStored } from "../utils/storage.ts";
 import { AHPConnection } from "./ahpConnection.ts";
 import {
 	AHPSessionProjection,
@@ -34,6 +35,7 @@ import {
 	setWorkspaceHTTP,
 } from "../api/http.ts";
 import type { PromptReply, ServerMessage } from "../types/protocol.ts";
+import { FleetViewStore } from "./fleet.ts";
 import { SessionCatalog } from "./sessionCatalog.ts";
 import {
 	SessionStore,
@@ -113,6 +115,8 @@ type Send = { request: SendRequest; pending?: Promise<void> };
 const same = (a: readonly unknown[], b: readonly unknown[]) =>
 	a.length === b.length && a.every((value, i) => value === b[i]);
 
+const FLEET_VIEW_KEY = "wingman.fleetView";
+
 export function chatPath(key: string): string {
 	return `/api/v2/chats/${encodeURIComponent(key)}`;
 }
@@ -134,6 +138,8 @@ export class WorkspaceClient {
 	readonly changesets: ChangesetClient;
 	/** The host's sessions, kept current from its root notifications. */
 	readonly catalog: SessionCatalog;
+	/** What the session list shows, kept for the window's next page. */
+	readonly fleetView: FleetViewStore;
 	private observed = new Map<string, { count: number; release: () => void }>();
 	/** Chat URI to the URI of the session that owns it. */
 	private sessions = new Map<string, string>();
@@ -155,6 +161,15 @@ export class WorkspaceClient {
 		this.scope = scope;
 		this.ahp = ahp;
 		this.catalog = new SessionCatalog(ahp, (summary) => this.remember(summary));
+		this.fleetView = new FleetViewStore(
+			{
+				// A browser without storage starts each window's list afresh, and
+				// a view it does not keep still holds for the page.
+				read: () => readStored("session", FLEET_VIEW_KEY),
+				write: (view) => void writeStored("session", FLEET_VIEW_KEY, view),
+			},
+			scope.project,
+		);
 		this.http = createWorkspaceHTTP(scope.instanceId);
 		ahp.subscribeConnection(() => {
 			if (ahp.getConnected()) return;

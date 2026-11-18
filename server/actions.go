@@ -100,7 +100,7 @@ func (c *connection) executeAction(a *Session, ch *Chat, p types.DispatchActionP
 	h.mu.Lock()
 	run, err := c.applyAction(a, ch, p)
 	h.mu.Unlock()
-	defer a.project.saveAliases()
+	defer h.saveAliases()
 	if err != nil {
 		return err
 	}

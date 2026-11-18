@@ -55,55 +55,14 @@ func (h *Host) loaded() []*Project {
 	return h.projectsLocked()
 }
 
-// serves reports whether projects may be opened in a directory.
+// serves reports whether projects may be opened in a directory: any, except
+// for the host of a server started in one folder, which shows no other.
 func (h *Host) serves(dir string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.servesLocked(dir)
-}
-
-// servesLocked is serves for a caller that holds mu.
-func (h *Host) servesLocked(dir string) bool {
-	return slices.ContainsFunc(h.roots, func(root string) bool {
-		_, ok := relative(root, dir)
-		return ok
-	})
-}
-
-// Allow lets projects open in a directory the host's roots do not cover, such
-// as a folder the user picked in the desktop app, and lets windows show it.
-func (h *Host) Allow(dir string) {
-	dir = canonicalPath(dir)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.picked == nil {
-		h.picked = map[string]bool{}
-	}
-	h.picked[dir] = true
-	if !h.servesLocked(dir) {
-		h.roots = append(h.roots, dir)
-	}
-}
-
-// known reports whether a browser window may open a project by naming it: one
-// that is open, that has saved sessions, or whose folder the user picked. Any
-// website can send a browser to a window's address, and opening a project
-// starts tools, such as language servers, that may run its code.
-func (h *Host) known(dir string) bool {
-	dir = canonicalPath(dir)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.projects[dir] != nil || h.picked[dir] || h.listed[dir] {
+	if h.folder == "" {
 		return true
 	}
-	for _, aliases := range []map[string]sessionAlias{h.aliases, h.chatAliases} {
-		for _, alias := range aliases {
-			if alias.Project == dir {
-				return true
-			}
-		}
-	}
-	return false
+	rel, ok := relative(h.folder, dir)
+	return ok && rel == "."
 }
 
 // projectAt opens the project of a directory unless it is open already.
@@ -181,10 +140,7 @@ func (h *Host) workingProject(uri *string) (*Project, error) {
 		if p := h.webProject(); p != nil {
 			return p, nil
 		}
-		h.mu.Lock()
-		root := h.roots[0]
-		h.mu.Unlock()
-		return h.projectAt(root)
+		return h.projectAt(h.home)
 	}
 	path, err := ahp.FilePath(*uri)
 	if err != nil {

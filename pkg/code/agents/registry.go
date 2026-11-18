@@ -70,39 +70,44 @@ func newExternal(ctx context.Context, ws *code.Workspace, def code.AgentDef) (co
 	return a, nil
 }
 
-func wrapInProcess(ctx context.Context, ws *code.Workspace, name string, srv inProcessAgent) (code.Agent, error) {
-	a, err := acp.NewInProcess(ctx, ws, name, srv, srv.SetAgentConnection, srv.Close)
-	if err != nil {
-		_ = srv.Close()
-		return nil, err
+// inProcess registers an agent whose adapter runs in this process. Each of
+// them reads its agent's own store, which holds the sessions of every folder.
+func inProcess(id, name string, start func(context.Context, *code.Workspace) (inProcessAgent, error)) Registration {
+	def := code.AgentDef{Name: id, AllFolders: true}
+	return Registration{
+		ID: id, Name: name, AllFolders: def.AllFolders,
+		Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
+			srv, err := start(ctx, ws)
+			if err != nil {
+				return nil, err
+			}
+			a, err := acp.NewInProcess(ctx, ws, def, srv, srv.SetAgentConnection, srv.Close)
+			if err != nil {
+				_ = srv.Close()
+				return nil, err
+			}
+			return a, nil
+		},
 	}
-	return a, nil
 }
 
 func detected() []Registration {
 	var out []Registration
 
 	if _, err := exec.LookPath(claudecli.BinPath()); err == nil {
-		out = append(out, Registration{
-			ID: "claude", Name: "Claude", AllFolders: true,
-			Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
-				srv := claude.New(nativeClaudeOptions(ws.RootPath, os.Environ()))
-				return wrapInProcess(ctx, ws, "claude", srv)
-			},
-		})
+		out = append(out, inProcess("claude", "Claude", func(_ context.Context, ws *code.Workspace) (inProcessAgent, error) {
+			return claude.New(nativeClaudeOptions(ws.RootPath, os.Environ())), nil
+		}))
 	}
 
 	if _, err := exec.LookPath(codexcli.BinPath()); err == nil {
-		out = append(out, Registration{
-			ID: "codex", Name: "Codex", AllFolders: true,
-			Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
-				srv, err := codex.Spawn(ctx, nativeCodexOptions(ws.RootPath, os.Environ()))
-				if err != nil {
-					return nil, fmt.Errorf("codex spawn: %w", err)
-				}
-				return wrapInProcess(ctx, ws, "codex", srv)
-			},
-		})
+		out = append(out, inProcess("codex", "Codex", func(ctx context.Context, ws *code.Workspace) (inProcessAgent, error) {
+			srv, err := codex.Spawn(ctx, nativeCodexOptions(ws.RootPath, os.Environ()))
+			if err != nil {
+				return nil, fmt.Errorf("codex spawn: %w", err)
+			}
+			return srv, nil
+		}))
 	}
 
 	for _, def := range []code.AgentDef{
@@ -125,13 +130,9 @@ func detected() []Registration {
 	}
 
 	if _, err := exec.LookPath(picli.BinPath()); err == nil {
-		out = append(out, Registration{
-			ID: "pi", Name: "Pi", AllFolders: true,
-			Constructor: func(ctx context.Context, ws *code.Workspace) (code.Agent, error) {
-				srv := pi.New(nativePiOptions(os.Environ()))
-				return wrapInProcess(ctx, ws, "pi", srv)
-			},
-		})
+		out = append(out, inProcess("pi", "Pi", func(context.Context, *code.Workspace) (inProcessAgent, error) {
+			return pi.New(nativePiOptions(os.Environ())), nil
+		}))
 	}
 
 	return out

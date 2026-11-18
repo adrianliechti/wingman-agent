@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionSummary } from "@microsoft/agent-host-protocol";
+import { SessionStatus } from "../src/state/ahpValues.ts";
 import {
 	attentionQueue,
 	fleetCounts,
 	fleetEvents,
 	fleetSession,
+	fleetSessions,
 	fleetState,
+	FleetViewStore,
 	groupFleet,
+	newestSessions,
 	nextAttention,
 	relativeTime,
 	restoreFleetView,
@@ -16,12 +20,14 @@ import {
 	type FleetState,
 } from "../src/state/fleet.ts";
 
-const IDLE = 1,
-	ERROR = 2,
-	IN_PROGRESS = 8,
-	INPUT_NEEDED = 24,
-	READ = 32,
-	ARCHIVED = 64;
+const {
+	Idle: IDLE,
+	Error: ERROR,
+	InProgress: IN_PROGRESS,
+	InputNeeded: INPUT_NEEDED,
+	IsRead: READ,
+	IsArchived: ARCHIVED,
+} = SessionStatus;
 const now = new Date("2026-11-17T12:00:00Z");
 
 function summary(
@@ -220,12 +226,57 @@ test("the sessions of several projects group by project, the window's first", ()
 			["web", false, ["web"]],
 		],
 	);
+	// A project's group is named by its URI, the window's own by the window's:
+	// the same project is the same group in whichever window lists it.
+	const ids = (ownProject?: string) =>
+		groupFleet(sessions, { filter: "all", here, ownProject, now })
+			.filter((group) => group.project)
+			.map((group) => group.id);
+	assert.deepEqual(ids("file:///work/here"), [
+		"project:file:///work/here",
+		"project:file:///work/api",
+		"project:file:///work/web",
+	]);
+	// A window whose host names no project keeps the bare key for its own.
+	assert.equal(ids()[0], "project:");
 	// One project's sessions keep their days.
 	assert.deepEqual(
 		groupFleet(sessions.filter(here), { filter: "all", here, now }).map(
 			(group) => group.label,
 		),
 		["Today", "This week"],
+	);
+});
+
+test("a list derives its sessions once, and an unchanged summary keeps its session", () => {
+	const one = summary("one", IDLE | READ, "2026-11-17T09:00:00Z");
+	const two = summary("two", IN_PROGRESS, "2026-11-17T10:00:00Z");
+	const list = [one, two];
+	const sessions = fleetSessions(list);
+	assert.equal(fleetSessions(list), sessions);
+	assert.equal(fleetCounts(sessions), fleetCounts(sessions));
+	assert.equal(newestSessions(sessions), newestSessions(sessions));
+	assert.deepEqual(
+		newestSessions(sessions).map((session) => session.title),
+		["two", "one"],
+	);
+	assert.deepEqual(
+		sessions.map((session) => session.title),
+		["one", "two"],
+		"the list keeps the host's order",
+	);
+	// The host replaces the summary of a session that changes.
+	const next = fleetSessions([one, { ...two, status: INPUT_NEEDED }]);
+	assert.equal(next[0], sessions[0]);
+	assert.notEqual(next[1], sessions[1]);
+	assert.deepEqual(fleetCounts(next), { needsInput: 1, working: 0 });
+	assert.deepEqual(fleetCounts(sessions), { needsInput: 0, working: 1 });
+	// A session without a date sorts last.
+	assert.deepEqual(
+		newestSessions(
+			[summary("undated", IDLE, ""), summary("dated", IDLE)].map(fleetSession),
+		).map((session) => session.title),
+		["dated", "undated"],
 	);
 });
 
@@ -317,27 +368,26 @@ test("the list's view follows the window to another project", () => {
 		},
 		a,
 	);
-	// In project b the group of b is the window's own, and a stays open.
-	assert.deepEqual(restoreFleetView(stored, b), {
+	// In project b the list is as the window left it, and a stays open.
+	assert.deepEqual(restoreFleetView(stored), {
 		filter: "needs-input",
 		provider: "codex",
 		search: "",
 		searching: false,
 		expanded: {
-			"project:": true,
 			[`project:${a}`]: true,
+			[`project:${b}`]: true,
 			[`project:${c}`]: false,
 		},
 	});
 	// A group the user closed in its own window stays closed from elsewhere.
 	const closed = storeFleetView(
-		{ ...DEFAULT_FLEET_VIEW, expanded: { "project:": false } },
+		{ ...DEFAULT_FLEET_VIEW, expanded: { [`project:${a}`]: false } },
 		a,
 	);
-	assert.deepEqual(restoreFleetView(closed, b).expanded, {
+	assert.deepEqual(restoreFleetView(closed).expanded, {
 		[`project:${a}`]: false,
 	});
-	assert.deepEqual(restoreFleetView(closed, a).expanded, { "project:": false });
 });
 
 test("a search travels with its field open, and a damaged view starts afresh", () => {
@@ -351,8 +401,71 @@ test("a search travels with its field open, and a damaged view starts afresh", (
 		assert.deepEqual(restoreFleetView(damaged), DEFAULT_FLEET_VIEW);
 	assert.deepEqual(
 		restoreFleetView(
-			'{"filter":"bogus","provider":3,"expanded":{"file:///x":"yes"}}',
+			'{"filter":"bogus","provider":3,"expanded":{"project:file:///x":"yes"}}',
 		),
+		DEFAULT_FLEET_VIEW,
+	);
+});
+
+/** A window's storage, which the page that follows reads again. */
+function windowStorage(works = true) {
+	let stored: string | null = null;
+	return {
+		read: () => stored,
+		write: (view: string) => {
+			if (works) stored = view;
+		},
+	};
+}
+
+test("the view store shares one view and keeps it for the window's next page", () => {
+	const a = "file:///work/a";
+	const b = "file:///work/b";
+	const storage = windowStorage();
+	const store = new FleetViewStore(storage, a);
+	assert.deepEqual(store.getSnapshot(), DEFAULT_FLEET_VIEW);
+	let changes = 0;
+	const release = store.subscribe(() => changes++);
+	store.set({ filter: "running" });
+	store.set({ expanded: { [`project:${b}`]: true } });
+	assert.equal(changes, 2);
+	assert.equal(store.getSnapshot().filter, "running");
+	assert.equal(store.getSnapshot(), store.getSnapshot());
+	release();
+	store.set({ search: "deploy" });
+	assert.equal(changes, 2);
+	// The page of project b reads the view that the page of a left.
+	assert.deepEqual(new FleetViewStore(storage, b).getSnapshot(), {
+		filter: "running",
+		provider: "",
+		search: "deploy",
+		searching: true,
+		expanded: { [`project:${a}`]: true, [`project:${b}`]: true },
+	});
+});
+
+test("a window that leaves its project keeps it open in the list, with or without storage", () => {
+	const a = "file:///work/a";
+	const storage = windowStorage();
+	// A list the user never touched is kept as the window moves on.
+	new FleetViewStore(storage, a).keep();
+	assert.deepEqual(new FleetViewStore(storage).getSnapshot().expanded, {
+		[`project:${a}`]: true,
+	});
+	// A host that names no project has no group to record.
+	const unnamed = windowStorage();
+	new FleetViewStore(unnamed).keep();
+	assert.deepEqual(
+		new FleetViewStore(unnamed).getSnapshot(),
+		DEFAULT_FLEET_VIEW,
+	);
+	// Where the browser keeps nothing the view still holds for the page.
+	const none = windowStorage(false);
+	const store = new FleetViewStore(none, a);
+	store.set({ filter: "archived" });
+	assert.equal(store.getSnapshot().filter, "archived");
+	assert.deepEqual(
+		new FleetViewStore(none, a).getSnapshot(),
 		DEFAULT_FLEET_VIEW,
 	);
 });

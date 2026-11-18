@@ -30,7 +30,7 @@ func (p *lifecyclePeer) Cancel(context.Context, acpsdk.CancelNotification) error
 
 func newLifecycleClient(t *testing.T, peer *lifecyclePeer) *Agent {
 	t.Helper()
-	a, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, "test", peer,
+	a, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, code.AgentDef{Name: "test"}, peer,
 		func(conn *acpsdk.AgentSideConnection) { peer.conn = conn }, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -371,7 +371,7 @@ func (*zeroVersionPeer) Initialize(context.Context, acpsdk.InitializeRequest) (a
 }
 
 func TestInitializeRejectsUnimplementedOlderMajorVersion(t *testing.T) {
-	a, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, "old", &zeroVersionPeer{}, nil, nil)
+	a, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, code.AgentDef{Name: "old"}, &zeroVersionPeer{}, nil, nil)
 	if a != nil {
 		_ = a.Close()
 	}

@@ -5,6 +5,7 @@ import {
 	type WorkspaceClient,
 } from "../state/workspaceClient.ts";
 import type { TurnInputIntent } from "../types/protocol.ts";
+import { errorText } from "../utils/errorText.ts";
 import { useToast } from "../components/ui/Feedback.tsx";
 
 // React bindings only. Transport, delivery receipts, and the ordered session
@@ -27,21 +28,7 @@ export function useSessions() {
 			{ ...view, error: dismissed[key] === view.error ? null : view.error },
 		]),
 	);
-	const act = async (
-		operation: (client: WorkspaceClient) => Promise<unknown>,
-	) => {
-		try {
-			await operation(client);
-			return true;
-		} catch (error) {
-			toast({
-				title: "Could not update session",
-				description: String(error),
-				tone: "error",
-			});
-			return false;
-		}
-	};
+	const act = useSessionAction();
 	return {
 		connected,
 		sessions,
@@ -76,5 +63,24 @@ export function useSessions() {
 				...current,
 				[key]: client.store.getSnapshot()[key]?.error,
 			})),
+	};
+}
+
+/** Runs an action on the host. One that fails is told in a toast, under the
+ * given title, and reported as false. */
+export function useSessionAction() {
+	const client = workspaceClient();
+	const toast = useToast();
+	return async (
+		operation: (client: WorkspaceClient) => Promise<unknown>,
+		failure = "Could not update session",
+	) => {
+		try {
+			await operation(client);
+			return true;
+		} catch (error) {
+			toast({ title: failure, description: errorText(error), tone: "error" });
+			return false;
+		}
 	};
 }

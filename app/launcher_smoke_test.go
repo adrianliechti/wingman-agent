@@ -339,7 +339,7 @@ func TestHostAnswersOnlyItsWindows(t *testing.T) {
 		}
 	}
 	state, err := readHostInfo()
-	if err != nil || state.URL != info.URL || state.Version != selfVersion {
+	if err != nil || state.URL != info.URL || state.PID != os.Getpid() {
 		t.Fatalf("the host does not announce itself: %+v %v", state, err)
 	}
 }

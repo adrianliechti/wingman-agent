@@ -55,10 +55,9 @@ type Project struct {
 	managedTools atomic.Pointer[managedToolsStatus] // immutable published snapshot
 
 	host             *Host
-	onDiagnostics    func() // optional web subscriber, protected by host.mu
-	dir              string // the project's identity: its directory with links resolved
-	namespace        string // prefix of the channels this project names itself
-	aliases          aliasStore
+	onDiagnostics    func()    // optional web subscriber, protected by host.mu
+	dir              string    // the project's identity: its directory with links resolved
+	namespace        string    // prefix of the channels this project names itself
 	used             time.Time // when a client last reached the project; protected by host.mu
 	terminalOnce     sync.Once
 	terminalChannels map[string]*terminalChannel
@@ -67,6 +66,7 @@ type Project struct {
 	changesMu        sync.Mutex
 	changesOnce      sync.Once
 	changesets       map[string]*changeset
+	storageRoot      string  // the repository that keeps its builtin journals, while its folder tells
 	window           *Server // web adapter for a secondary project, published under host.mu
 	windowRequests   int     // open scoped HTTP requests and WebSockets, protected by host.mu
 }
@@ -226,7 +226,7 @@ func (s *Project) close() {
 		}
 		s.background.Wait()
 		if s.host != nil {
-			s.saveAliases()
+			s.host.saveAliases()
 			if s.window != nil {
 				s.window.preview.Close()
 			}
@@ -252,14 +252,18 @@ func (h *Host) attach(p *Project) *Project {
 	if p.workspace != nil {
 		p.dir = canonicalPath(p.workspace.RootPath)
 	}
+	p.storageRoot = sessionAlias{Backend: code.BuiltinAgentName, Project: p.dir}.rooted().StorageRoot
 	var saved []sessionAlias
 	if dir, err := p.aliasDirectory(); err == nil {
 		saved = readAliases(dir)
 	}
+	for i := range saved {
+		saved[i].Project = p.dir
+		saved[i] = saved[i].rooted()
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, alias := range saved {
-		alias.Project = p.dir
 		h.rememberAliasLocked(alias)
 	}
 	return p

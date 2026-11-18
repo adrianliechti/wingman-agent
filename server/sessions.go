@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"os"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -123,8 +123,12 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 	p.host.mu.Unlock()
 	c, err := p.loadController(alias)
 	if err != nil {
+		// A session its agent no longer has leaves the list.
 		if errors.Is(err, errUnknownSession) {
-			p.forgetSavedSession(resource)
+			p.host.mu.Lock()
+			p.host.forgetSessionLocked(resource)
+			p.host.mu.Unlock()
+			p.host.saveAliases()
 		}
 		return nil, err
 	}
@@ -140,9 +144,9 @@ func (p *Project) loadSession(resource string, chat bool) (*Session, error) {
 		var rpc *ahp.Error
 		if errors.As(err, &rpc) && rpc.Code == int(types.ErrorCodeSessionNotFound) {
 			p.host.mu.Lock()
-			p.forgetChatAlias(fork.Chat)
+			p.host.forgetChatAliasLocked(fork.Chat)
 			p.host.mu.Unlock()
-			p.saveAliases()
+			p.host.saveAliases()
 			continue
 		}
 		// A chat that does not load stays saved; its session opens without it.
@@ -162,7 +166,7 @@ func (p *Project) loadController(alias sessionAlias) (*sessionController, error)
 		return nil, err
 	}
 	if _, global := everyFolderLister(b.agent); global && alias.Resource == "" {
-		if err := p.host.checkListedSession(alias.Backend, id, p.dir); err != nil {
+		if _, err := p.host.listedSession(alias.Backend, id, p.dir); err != nil {
 			return nil, err
 		}
 	}
@@ -176,7 +180,7 @@ func (p *Project) loadController(alias sessionAlias) (*sessionController, error)
 	c.opMu.Unlock()
 	if err != nil {
 		b.discard(id, c)
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, code.ErrSessionNotFound) || err.Error() == "session not found" || errors.Is(err, errSessionDeleted) {
+		if sessionGone(err) || errors.Is(err, errSessionDeleted) {
 			return nil, errUnknownSession
 		}
 		return nil, err
@@ -184,15 +188,20 @@ func (p *Project) loadController(alias sessionAlias) (*sessionController, error)
 	return c, nil
 }
 
+// listSessions asks the agent for the sessions of its project's folder.
+func (b *backendRuntime) listSessions() ([]code.SessionInfo, error) {
+	if !b.Project.beginOperation() {
+		return nil, errWorkspaceClosed
+	}
+	defer b.Project.operations.Done()
+	return b.agent.ListSessions(b.Project.ctx)
+}
+
 // listing is a native session's title and last change as its agent lists them.
 func (b *backendRuntime) listing(id string) (string, time.Time) {
 	// Attaching must not make an old session look recently modified.
 	title, updated := "", time.Now()
-	if !b.Project.beginOperation() {
-		return title, updated
-	}
-	defer b.Project.operations.Done()
-	if sessions, err := b.agent.ListSessions(b.Project.ctx); err == nil {
+	if sessions, err := b.listSessions(); err == nil {
 		if i := slices.IndexFunc(sessions, func(info code.SessionInfo) bool { return info.ID == id }); i >= 0 {
 			title, updated = sessions[i].Title, sessions[i].UpdatedAt
 		}
@@ -478,17 +487,29 @@ func (h *Host) listSessions(raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	items := []types.SessionSummary{}
-	seen := map[string]bool{}
-	// Agents that list every folder's sessions have them listed by folder,
-	// so the others' are listed by the projects that are open.
+	// The agents are asked first, without the host's lock. Those that list
+	// every folder's sessions have them listed by folder, so the others' are
+	// listed by the projects that are open.
 	everywhere := h.listEverywhere(root.Agents)
+	var listed []listedNative
 	builtinStores := map[string]bool{}
 	for _, project := range h.loaded() {
-		items = append(items, project.nativeSessions(root.Agents, everywhere, builtinStores, seen)...)
+		listed = append(listed, project.nativeSessions(root.Agents, everywhere, builtinStores)...)
 	}
-	items = append(items, h.everywhereSessions(everywhere, seen)...)
+	for _, provider := range slices.Sorted(maps.Keys(everywhere)) {
+		for _, info := range everywhere[provider] {
+			listed = append(listed, listedNative{info.Dir, nativeKey{info.Dir, provider, info.ID}, info})
+		}
+	}
+	items := []types.SessionSummary{}
+	seen := map[string]bool{}
 	h.mu.Lock()
+	saved := h.savedIndexLocked()
+	for _, native := range listed {
+		if summary, ok := h.listedSummaryLocked(native, saved, seen); ok {
+			items = append(items, summary)
+		}
+	}
 	for _, a := range h.sessions {
 		if !seen[a.resource] {
 			items = append(items, a.summary())
@@ -525,63 +546,55 @@ func (h *Host) chatSummariesLocked(resource, chat string) []types.SessionChatSum
 	return chats
 }
 
-// nativeSessions lists the sessions of this project's started agents, except
-// those of agents that listed every folder's.
-func (p *Project) nativeSessions(agents []types.AgentInfo, everywhere map[string][]code.SessionInfo, builtinStores, seen map[string]bool) []types.SessionSummary {
-	type listing struct {
-		root, backend string
-		sessions      []code.SessionInfo
-	}
-	var listings []listing
+// listedNative is a session as its agent lists it in a folder.
+type listedNative struct {
+	dir  string
+	key  nativeKey
+	info code.SessionInfo
+}
+
+// nativeSessions asks this project's started agents for its sessions, except
+// those that listed every folder's.
+func (p *Project) nativeSessions(agents []types.AgentInfo, everywhere map[string][]code.SessionInfo, builtinStores map[string]bool) []listedNative {
+	var listed []listedNative
 	for _, info := range agents {
-		if _, listed := everywhere[info.Provider]; listed {
+		if _, done := everywhere[info.Provider]; done {
 			continue
 		}
 		root := p.dir
 		if info.Provider == code.BuiltinAgentName {
-			root = code.SessionStorageRoot(p.dir)
-			if builtinStores[root] {
+			// Worktrees share their repository's journals, which one project lists.
+			if root = cmp.Or(p.storageRoot, p.dir); builtinStores[root] {
 				continue
 			}
 		}
 		// Listing must not launch every installed external CLI. An external
 		// backend becomes available here after first use/config discovery.
 		b := p.startedBackend(info.Provider)
-		if b == nil || !b.Project.beginOperation() {
+		if b == nil {
 			continue
 		}
-		sessions, err := b.agent.ListSessions(b.Project.ctx)
-		b.Project.operations.Done()
 		// An agent that cannot list its sessions has its saved ones listed.
-		if err == nil {
-			listings = append(listings, listing{root, b.id, sessions})
-			if b.id == code.BuiltinAgentName {
-				builtinStores[root] = true
-			}
+		sessions, err := b.listSessions()
+		if err != nil {
+			continue
+		}
+		if b.id == code.BuiltinAgentName {
+			builtinStores[root] = true
+		}
+		for _, session := range sessions {
+			listed = append(listed, listedNative{p.dir, nativeKey{root, b.id, session.ID}, session})
 		}
 	}
-	h := p.host
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	saved := h.savedIndexLocked()
-	items := []types.SessionSummary{}
-	for _, l := range listings {
-		for _, session := range l.sessions {
-			key := nativeKey{l.root, l.backend, session.ID}
-			if summary, ok := h.listedSummaryLocked(p.dir, p.info(), p.directoryURI(), key, session, saved, seen); ok {
-				items = append(items, summary)
-			}
-		}
-	}
-	return items
+	return listed
 }
 
-// listedSummaryLocked describes a session an agent listed in dir: as the host
-// holds it, as it was saved, or as the agent knows it.
-func (h *Host) listedSummaryLocked(dir string, project *types.ProjectInfo, directory string, key nativeKey, session code.SessionInfo, saved map[nativeKey]sessionAlias, seen map[string]bool) (types.SessionSummary, bool) {
-	backend := key.backend
+// listedSummaryLocked describes a session an agent listed in a folder: as the
+// host holds it, as it was saved, or as the agent knows it.
+func (h *Host) listedSummaryLocked(native listedNative, saved map[nativeKey]sessionAlias, seen map[string]bool) (types.SessionSummary, bool) {
+	dir, backend, session := native.dir, native.key.backend, native.info
 	resource := canonicalSessionURI(backend, session.ID, dir)
-	alias, ok := saved[key]
+	alias, ok := saved[native.key]
 	if ok {
 		// Forked chats are listed with their session.
 		if alias.Chat != "" {
@@ -609,6 +622,11 @@ func (h *Host) listedSummaryLocked(dir string, project *types.ProjectInfo, direc
 	stamp := session.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	chat := ahp.ChatURI(resource)
 	seen[resource] = true
+	project, directory := projectInfo(dir), fileuri.FromPath(dir)
+	// A folder's open project names it as its windows do.
+	if p := h.projects[dir]; p != nil {
+		project, directory = p.info(), p.directoryURI()
+	}
 	// No client has followed a session the host never saved, so it holds nothing new.
 	return types.SessionSummary{Resource: resource, Provider: backend, Title: session.Title, Status: types.SessionStatusIdle | types.SessionStatusIsRead, CreatedAt: stamp, ModifiedAt: stamp, Project: project, WorkingDirectories: []string{directory}, DefaultChat: &chat, Chats: h.chatSummariesLocked(resource, chat)}, true
 }

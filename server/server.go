@@ -13,7 +13,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,15 +35,20 @@ var StaticFS, _ = fs.Sub(staticFiles, "static")
 const DefaultPort = 9000
 
 type ServerOptions struct {
-	NoBrowser           bool
-	RemoteURL           string
-	RemoteToken         string
+	NoBrowser   bool
+	RemoteURL   string
+	RemoteToken string
+	// Projects makes the server show every project of the machine, as the
+	// desktop app does: its windows open any folder and its session list holds
+	// the sessions of every folder. Without it the server shows the folder it
+	// started in and no other.
+	Projects            bool
 	disableManagedTools bool
 }
 
 // Server serves the web UI and HTTP adapters for one project of its host. The
-// server New returns shows the project it started in and fronts a window
-// server for each other project that a browser window opens.
+// server New returns shows the project it started in and, when it shows every
+// project, fronts a window server for each other project a window opens.
 type Server struct {
 	Project          *Project
 	editor           editorState
@@ -60,17 +64,16 @@ type Server struct {
 	front *Server // the server whose host and preferences a window server shares
 }
 
-// New starts a host with a web UI for the project at workDir. Windows may
-// open any other project in the home directory too.
+// New starts a host with a web UI for the project at workDir.
 func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, error) {
 	if opts == nil {
 		opts = new(ServerOptions)
 	}
-	roots := []string{workDir}
-	if home, err := os.UserHomeDir(); err == nil {
-		roots = append(roots, home)
+	hostOptions := &HostOptions{disableManagedTools: opts.disableManagedTools}
+	if !opts.Projects {
+		hostOptions.folder = workDir
 	}
-	h, err := NewHost(ctx, &HostOptions{Roots: roots, disableManagedTools: opts.disableManagedTools})
+	h, err := NewHost(ctx, hostOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -155,33 +158,6 @@ func (s *Server) windowOf(instance string) *Server {
 	return nil
 }
 
-// Open opens the project at dir for a window, allowing its directory even
-// outside the host's roots, as for a folder the user picked.
-func (s *Server) Open(dir string, previous ...string) error {
-	if !filepath.IsAbs(dir) {
-		return ahp.InvalidParams("project must be an absolute directory")
-	}
-	if info, err := os.Stat(dir); err != nil {
-		return err
-	} else if !info.IsDir() {
-		return ahp.InvalidParams("project must be a directory")
-	}
-	s.Project.host.Allow(dir)
-	// Other native windows may reopen their picked folders on demand after
-	// a host restart. Grant those folders without starting their projects.
-	for _, path := range previous {
-		if filepath.IsAbs(path) {
-			s.Project.host.Allow(path)
-		}
-	}
-	p, err := s.Project.host.projectAt(dir)
-	if err != nil {
-		return err
-	}
-	_, err = s.window(p)
-	return err
-}
-
 // Close stops the web adapter and the host it owns.
 func (s *Server) Close() {
 	if s.preview != nil {
@@ -202,7 +178,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // routeWindow runs after the host and origin checks. Only initial discovery
-// can open a project. Later requests stay bound to the instance they name.
+// can open a project, and only one the host serves: every folder for the
+// desktop app, none but its own for a server of one folder. Later requests
+// stay bound to the instance they name.
 func (s *Server) routeWindow(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	instance := r.Header.Get(instanceHeader)
@@ -238,26 +216,11 @@ func (s *Server) openWindow(project string) (*Server, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, ahp.InvalidParams("project must be an absolute directory")
 	}
-	if !s.Project.host.known(dir) && !recentWorkspace(dir) {
-		return nil, &ahp.Error{Code: int(types.ErrorCodePermissionDenied), Message: "open this folder in the desktop app or start a session in it first"}
-	}
 	p, err := s.Project.host.projectAt(dir)
 	if err != nil {
 		return nil, err
 	}
 	return s.window(p)
-}
-
-// recentWorkspace reports whether the desktop app opened a folder before.
-func recentWorkspace(dir string) bool {
-	userSettings, err := settings.Load()
-	if err != nil {
-		return false
-	}
-	dir = canonicalPath(dir)
-	return slices.ContainsFunc(userSettings.Workspaces, func(path string) bool {
-		return canonicalPath(path) == dir
-	})
 }
 
 func windowStatus(err error) int {

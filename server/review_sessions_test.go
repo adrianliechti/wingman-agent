@@ -974,7 +974,7 @@ func TestReviewSessionsCorruptAliasFilesAreSkipped(t *testing.T) {
 	t.Setenv("WINGMAN_HOME", t.TempDir())
 	s, _, _ := newProtocolServer(t)
 	h := s.Project
-	if err := h.saveAlias(sessionAlias{Resource: "ahp-session:/kept", Backend: "one", Session: "saved"}); err != nil {
+	if err := writeAlias(sessionAlias{Resource: "ahp-session:/kept", Project: h.dir, Backend: "one", Session: "saved"}); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := h.aliasDirectory()

@@ -512,7 +512,7 @@ func (h *Host) defaultDirectoryLocked() string {
 	if h.web != nil {
 		return h.web.directoryURI()
 	}
-	return fileuri.FromPath(h.roots[0])
+	return fileuri.FromPath(h.home)
 }
 
 func modelInfo(provider string, m model.Model) types.SessionModelInfo {

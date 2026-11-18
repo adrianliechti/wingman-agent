@@ -2,10 +2,7 @@ package server
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"path"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -16,6 +13,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/server/ahp"
+	sdk "github.com/microsoft/agent-host-protocol/clients/go/ahp"
 	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
@@ -228,7 +226,7 @@ func (a *Chat) countChanges() {
 		a.changesStale = false
 		a.changesRunning = again
 		h.mu.Unlock()
-		a.project.saveAliases()
+		h.saveAliases()
 		if !again {
 			return
 		}
@@ -272,21 +270,8 @@ func (c *sessionController) refreshChanges() {
 // session for it would open its project and resume its agent's thread, once
 // for every session a user archives, and fails where the folder is gone.
 func (h *Host) flagUnopened(p types.DispatchActionParams, origin types.ActionOrigin) bool {
-	var apply func(alias *sessionAlias)
-	switch action := p.Action.Value.(type) {
-	case *types.SessionIsReadChangedAction:
-		apply = func(alias *sessionAlias) {
-			alias.Unread = !action.IsRead
-			alias.Status = withRead(alias.Status, action.IsRead)
-		}
-	case *types.SessionIsArchivedChangedAction:
-		apply = func(alias *sessionAlias) {
-			if action.IsArchived {
-				alias.Status |= types.SessionStatusIsArchived
-			} else {
-				alias.Status &^= types.SessionStatusIsArchived
-			}
-		}
+	switch p.Action.Value.(type) {
+	case *types.SessionIsReadChangedAction, *types.SessionIsArchivedChangedAction:
 	default:
 		return false
 	}
@@ -296,66 +281,27 @@ func (h *Host) flagUnopened(p types.DispatchActionParams, origin types.ActionOri
 	}
 	// Loading, creation and deletion wait at the same gate.
 	defer h.creation(resource)()
-	h.mu.Lock()
-	_, open := h.sessions[resource]
-	alias, saved := h.aliases[resource]
-	h.mu.Unlock()
-	if open || saved && alias.CreationError != "" {
+	alias, _, err := h.unopened(resource)
+	if err != nil {
 		return false
 	}
-	if !saved {
-		// A session of an agent's own CLI is kept by the host from now on.
-		var ok bool
-		if alias, ok = h.listedAlias(resource); !ok {
-			return false
-		}
-	}
-	apply(&alias)
-	// A project opening concurrently must read the metadata after this change.
+	// A session of an agent's own CLI is kept by the host from now on.
+	alias.Resource = resource
+	alias = alias.rooted()
+	state := types.SessionState{Status: alias.flags()}
+	sdk.ApplyActionToSession(&state, p.Action)
+	alias.Status, alias.Unread = state.Status&types.SessionStatusIsArchived, !state.Status.Has(types.SessionStatusIsRead)
+	// A project opening meanwhile reads its aliases from disk, so it waits
+	// until the change is written.
 	h.projectMu.Lock()
 	defer h.projectMu.Unlock()
 	h.mu.Lock()
-	alias = h.rememberAliasLocked(alias)
-	project := h.projects[alias.Project]
-	if project != nil {
-		project.stageAliasLocked(alias, false)
-	}
+	h.rememberAliasLocked(alias)
+	h.stageAliasLocked(alias, false)
 	status := types.SessionStatusIdle | alias.flags()
 	h.notifyRoot("root/sessionSummaryChanged", types.SessionSummaryChangedParams{Channel: types.RootResourceURI, Session: resource, Changes: types.PartialSessionSummary{Status: &status}})
 	h.publish(p.Channel, p.Action, &origin, nil)
 	h.mu.Unlock()
-	var err error
-	if project != nil {
-		err = project.flushAliases()
-	} else {
-		err = writeAlias(workspaceScope(alias.Project), alias)
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "session metadata warning: %v\n", err)
-	}
+	h.saveAliases()
 	return true
-}
-
-// listedAlias describes a session the host never saved, which its agent
-// lists in a folder the host serves, by the canonical URI the list gave it.
-func (h *Host) listedAlias(resource string) (sessionAlias, bool) {
-	backend, id, dir, err := parseCanonicalURI(resource)
-	if err != nil || dir == "" {
-		return sessionAlias{}, false
-	}
-	dir = canonicalPath(dir)
-	if !filepath.IsAbs(dir) || !h.serves(dir) || resource != canonicalSessionURI(backend, id, dir) {
-		return sessionAlias{}, false
-	}
-	h.mu.Lock()
-	_, mapped := h.savedIndexLocked()[nativeSessionKey(dir, backend, id)]
-	h.mu.Unlock()
-	if mapped {
-		return sessionAlias{}, false
-	}
-	info, err := h.listedSession(backend, id, dir)
-	if err != nil {
-		return sessionAlias{}, false
-	}
-	return sessionAlias{Resource: resource, Project: dir, Backend: backend, Session: id, Title: info.Title, Created: info.UpdatedAt, Modified: info.UpdatedAt}, true
 }

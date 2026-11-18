@@ -160,7 +160,7 @@ func TestConfigOptionIDsRemainSessionScoped(t *testing.T) {
 
 func newAdapterForTest(t *testing.T, remote acpsdk.Agent) *Agent {
 	t.Helper()
-	a, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, "test", remote, nil, nil)
+	a, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, code.AgentDef{Name: "test"}, remote, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestLoadSessionStreamReplaysAndCachesHistory(t *testing.T) {
 		return acpsdk.LoadSessionResponse{}, nil
 	}
 	a, err := NewInProcess(
-		context.Background(), &code.Workspace{RootPath: t.TempDir()}, "test", remote,
+		context.Background(), &code.Workspace{RootPath: t.TempDir()}, code.AgentDef{Name: "test"}, remote,
 		func(conn *acpsdk.AgentSideConnection) { serverConn = conn }, nil,
 	)
 	if err != nil {
@@ -284,7 +284,7 @@ func TestLongReplayDoesNotOverflowNotificationQueue(t *testing.T) {
 				return acpsdk.LoadSessionResponse{}, nil
 			}
 			a, err := NewInProcess(
-				context.Background(), &code.Workspace{RootPath: t.TempDir()}, "test", remote,
+				context.Background(), &code.Workspace{RootPath: t.TempDir()}, code.AgentDef{Name: "test"}, remote,
 				func(conn *acpsdk.AgentSideConnection) { serverConn = conn }, nil,
 			)
 			if err != nil {
@@ -327,7 +327,7 @@ func TestFailedLoadDoesNotRegisterSession(t *testing.T) {
 }
 
 func TestInitializationRejectsUnsupportedProtocolVersion(t *testing.T) {
-	_, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, "future", &adapterProtocolAgent{protocol: 2}, nil, nil)
+	_, err := NewInProcess(context.Background(), &code.Workspace{RootPath: t.TempDir()}, code.AgentDef{Name: "future"}, &adapterProtocolAgent{protocol: 2}, nil, nil)
 	if err == nil {
 		t.Fatal("unsupported protocol version was accepted")
 	}
@@ -510,7 +510,7 @@ func TestSendPreservesMixedInputAndACPStreamState(t *testing.T) {
 	}
 
 	a, err := NewInProcess(
-		context.Background(), &code.Workspace{RootPath: t.TempDir()}, "test", remote,
+		context.Background(), &code.Workspace{RootPath: t.TempDir()}, code.AgentDef{Name: "test"}, remote,
 		func(conn *acpsdk.AgentSideConnection) { serverConn = conn }, nil,
 	)
 	if err != nil {

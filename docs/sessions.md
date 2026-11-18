@@ -38,7 +38,10 @@ you have not logged in to says how to log in, such as Copilot's `copilot login`.
 - The rest follow by day. A blue dot marks a session that finished or failed
   since you last looked at it, and `+12 −3` shows the lines its turns changed.
 
-The list holds the sessions of every project too. With more than one, the rest
+`wingman server` shows the folder it started in: its list holds that folder's
+sessions and its window opens no other folder. The desktop app shows every
+project. Its list holds the sessions of all of them, in any folder on any
+drive. With more than one, the rest
 group by project: the window's own first, open, and the others closed, with
 **Open** to show that project in the window. Opening a session of another
 project moves the window there, with its files, changes and terminals; the
@@ -47,10 +50,8 @@ project. The list keeps its filter, search and open groups through the move,
 and the project you left stays open in it. A project that cannot open, such as
 a folder that is gone, leaves the window where it is and says why. Searching
 the list opens the groups that hold what it found.
-A browser window shows one project at a time, named in its address,
-so several tabs can show several projects. A window opens only projects you
-already used: ones with sessions, or folders the desktop app opened. In the
-desktop app, **Open Folder** adds the folder to the same list.
+A window shows one project at a time, named in its address; **Open Folder**
+moves it to any folder.
 
 All desktop app windows share one Wingman that runs in the background, so a
 session started in one window shows up in the lists of all, and closing a

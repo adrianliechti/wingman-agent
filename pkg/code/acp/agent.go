@@ -304,7 +304,7 @@ func New(ctx context.Context, ws *code.Workspace, def code.AgentDef) (*Agent, er
 func NewInProcess(
 	ctx context.Context,
 	ws *code.Workspace,
-	name string,
+	def code.AgentDef,
 	serverAgent acpsdk.Agent,
 	setupServer func(*acpsdk.AgentSideConnection),
 	cleanup func() error,
@@ -314,7 +314,7 @@ func NewInProcess(
 
 	a := &Agent{
 		workspace: ws,
-		def:       code.AgentDef{Name: name},
+		def:       def,
 		stdin:     acp.NewConnectionWriter(clientW, 0),
 		stdout:    clientR,
 		sessions:  map[string]*sessionState{},
@@ -325,11 +325,6 @@ func NewInProcess(
 		Steer(context.Context, acpsdk.SessionId, []acpsdk.ContentBlock, string) error
 	}); ok {
 		a.steer = s.Steer
-	}
-	// An adapter that reads its agent's own store knows whether it lists
-	// every folder's sessions.
-	if s, ok := serverAgent.(interface{ ListsAllSessions() bool }); ok {
-		a.def.AllFolders = s.ListsAllSessions()
 	}
 
 	serverWriter := acp.NewConnectionWriter(serverW, 0)
@@ -350,7 +345,7 @@ func NewInProcess(
 	resp, err := a.initialize(ctx)
 	if err != nil {
 		a.shutdown()
-		return nil, fmt.Errorf("agent %q: initialize: %w", name, err)
+		return nil, fmt.Errorf("agent %q: initialize: %w", def.Name, err)
 	}
 	a.caps = resp.AgentCapabilities
 	a.login, a.loginMethod = loginHint(resp.AuthMethods)

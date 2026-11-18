@@ -1,12 +1,9 @@
 import type { SessionSummary } from "@microsoft/agent-host-protocol";
+import { SessionStatus } from "./ahpValues.ts";
 import { sessionToChat } from "./sessionStore.ts";
 
-// SessionStatus bits; the SDK declares them as a const enum.
-const ERROR = 1 << 1;
-const IN_PROGRESS = 1 << 3;
-const INPUT_NEEDED = 1 << 4; // InputNeeded (24) also sets InProgress
-const IS_READ = 1 << 5;
-const IS_ARCHIVED = 1 << 6;
+// InputNeeded also sets InProgress: the bit of its own tells the two apart.
+const INPUT_NEEDED = SessionStatus.InputNeeded & ~SessionStatus.InProgress;
 
 /** What a session or chat does: wait for the user, work, or rest after a failure or success. */
 export type FleetState = "needs-input" | "working" | "failed" | "idle";
@@ -32,15 +29,33 @@ export interface FleetSession extends FleetChat {
 	activity?: string;
 	archived: boolean;
 	modifiedAt: string;
+	/** `modifiedAt` as the list sorts by it: milliseconds, 0 for no date. */
+	modified: number;
 	project?: { uri: string; displayName: string };
 	forks: FleetChat[];
 }
 
-export function fleetState(status = 1): FleetState {
+export function fleetState(status: number = SessionStatus.Idle): FleetState {
 	if (status & INPUT_NEEDED) return "needs-input";
-	if (status & IN_PROGRESS) return "working";
-	if (status & ERROR) return "failed";
+	if (status & SessionStatus.InProgress) return "working";
+	if (status & SessionStatus.Error) return "failed";
 	return "idle";
+}
+
+/** Derives a value from an object once. The host's summaries and the lists of
+ * them are replaced when they change, never changed: every place that shows
+ * the sessions shares what derives from them, and an unchanged session keeps
+ * its object. */
+function once<K extends object, V>(derive: (key: K) => V): (key: K) => V {
+	const derived = new WeakMap<K, V>();
+	return (key) => {
+		let value = derived.get(key);
+		if (value === undefined) {
+			value = derive(key);
+			derived.set(key, value);
+		}
+		return value;
+	};
 }
 
 const urgency: readonly FleetState[] = [
@@ -67,7 +82,7 @@ function changesOf(summary?: {
 	};
 }
 
-export function fleetSession(summary: SessionSummary): FleetSession {
+export const fleetSession = once((summary: SessionSummary): FleetSession => {
 	const defaultChat = summary.defaultChat ?? sessionToChat(summary.resource);
 	const chats = summary.chats ?? [];
 	const own = chats.find((chat) => chat.resource === defaultChat);
@@ -80,7 +95,8 @@ export function fleetSession(summary: SessionSummary): FleetSession {
 			id: chat.resource,
 			title: chat.title || `Fork of ${title}`,
 			state: fleetState(chat.status),
-			unread: chat.status !== undefined && (chat.status & IS_READ) === 0,
+			unread:
+				chat.status !== undefined && (chat.status & SessionStatus.IsRead) === 0,
 			changes: changesOf(chat.changes),
 		}));
 	return {
@@ -96,15 +112,28 @@ export function fleetSession(summary: SessionSummary): FleetSession {
 			fleetState(status),
 			...forks.map((fork) => fork.state),
 		]),
-		unread: (status & IS_READ) === 0,
-		archived: (summary.status & IS_ARCHIVED) !== 0,
+		unread: (status & SessionStatus.IsRead) === 0,
+		archived: (summary.status & SessionStatus.IsArchived) !== 0,
 		activity: summary.activity || undefined,
 		modifiedAt: summary.modifiedAt,
+		modified: new Date(summary.modifiedAt).getTime() || 0,
 		project: summary.project,
 		changes: changesOf(summary.changes ?? own?.changes),
 		forks,
 	};
-}
+});
+
+/** The host's list as sessions, in the host's order. */
+export const fleetSessions = once(
+	(summaries: readonly SessionSummary[]): readonly FleetSession[] =>
+		summaries.map(fleetSession),
+);
+
+/** A list's sessions, newest first. */
+export const newestSessions = once(
+	(sessions: readonly FleetSession[]): readonly FleetSession[] =>
+		[...sessions].sort((a, b) => b.modified - a.modified),
+);
 
 export type FleetFilter = "all" | "needs-input" | "running" | "archived";
 const FLEET_FILTERS: readonly FleetFilter[] = [
@@ -129,27 +158,23 @@ export const DEFAULT_FLEET_VIEW: FleetView = {
 	searching: false,
 	expanded: {},
 };
-/** The group of the window's own project, whichever project that is. */
-const HERE_GROUP = "project:";
+/** A project's group is named by the project's URI, in every window alike. */
+const projectGroup = (uri: string) => `project:${uri}`;
 
-/** A list's view as a window that moves to another project finds it again.
- * Groups are kept by their project, since the window's own changes: the
- * project it leaves stays open in the list, as it was while the window
- * showed it. */
-export function storeFleetView(view: FleetView, here?: string): string {
-	const groups: Record<string, boolean> = {};
-	for (const [id, open] of Object.entries(view.expanded)) {
-		if (id !== HERE_GROUP) groups[id.slice(HERE_GROUP.length)] = open;
-	}
-	if (here) groups[here] = view.expanded[HERE_GROUP] ?? true;
-	return JSON.stringify({ ...view, expanded: groups });
+/** A list's view as the window's next page finds it again. The window's own
+ * project is recorded open, as its group is until the user closes it: the
+ * list of a project the window moves to would start it closed. */
+export function storeFleetView(view: FleetView, project?: string): string {
+	if (!project) return JSON.stringify(view);
+	const own = projectGroup(project);
+	return JSON.stringify({
+		...view,
+		expanded: { ...view.expanded, [own]: view.expanded[own] ?? true },
+	});
 }
 
-/** Reads a stored view in the window of the project `here`. */
-export function restoreFleetView(
-	stored: string | null,
-	here?: string,
-): FleetView {
+/** Reads a stored view; one that is missing or damaged starts afresh. */
+export function restoreFleetView(stored: string | null): FleetView {
 	let saved: Partial<Record<keyof FleetView, unknown>>;
 	try {
 		saved = JSON.parse(stored ?? "") ?? {};
@@ -159,10 +184,8 @@ export function restoreFleetView(
 	if (typeof saved !== "object") return DEFAULT_FLEET_VIEW;
 	const expanded: Record<string, boolean> = {};
 	if (saved.expanded && typeof saved.expanded === "object")
-		for (const [project, open] of Object.entries(saved.expanded)) {
-			if (typeof open !== "boolean") continue;
-			expanded[project === here ? HERE_GROUP : HERE_GROUP + project] = open;
-		}
+		for (const [group, open] of Object.entries(saved.expanded))
+			if (typeof open === "boolean") expanded[group] = open;
 	const search = typeof saved.search === "string" ? saved.search : "";
 	return {
 		filter: FLEET_FILTERS.find((filter) => filter === saved.filter) ?? "all",
@@ -172,6 +195,47 @@ export function restoreFleetView(
 		expanded,
 	};
 }
+
+/** Where a list's view waits for the window's next page. */
+export interface FleetViewStorage {
+	read(): string | null;
+	write(view: string): void;
+}
+
+/** The session list's view, shared by every place that shows the list. The
+ * list moves to each chat it opens, and the window to each project: the view
+ * travels with it, through the reload that shows the project. */
+export class FleetViewStore {
+	private view?: FleetView;
+	private listeners = new Set<() => void>();
+	private readonly storage: FleetViewStorage;
+	/** The URI of the window's project. */
+	private readonly project?: string;
+	constructor(storage: FleetViewStorage, project?: string) {
+		this.storage = storage;
+		this.project = project;
+	}
+	// Read at first use: a client is also built where there is no browser.
+	readonly getSnapshot = (): FleetView =>
+		(this.view ??= restoreFleetView(this.storage.read()));
+	readonly subscribe = (listener: () => void) => {
+		this.listeners.add(listener);
+		return () => {
+			this.listeners.delete(listener);
+		};
+	};
+	readonly set = (patch: Partial<FleetView>) => {
+		this.view = { ...this.getSnapshot(), ...patch };
+		this.keep();
+		for (const listener of this.listeners) listener();
+	};
+	/** Keeps the view for the window's next page, such as the project it moves
+	 * to, where the project it leaves is listed open as it was shown. */
+	keep() {
+		this.storage.write(storeFleetView(this.getSnapshot(), this.project));
+	}
+}
+
 export interface FleetGroup {
 	id: string;
 	label: string;
@@ -187,15 +251,10 @@ export type FleetQuery = {
 	providerName?: (provider: string) => string;
 	/** Whether a session belongs to the window's project. */
 	here?: (session: FleetSession) => boolean;
+	/** The URI of the window's project, which names the group of its sessions. */
+	ownProject?: string;
 	now?: Date;
 };
-
-const time = (value: string) => {
-	const ms = new Date(value).getTime();
-	return Number.isNaN(ms) ? 0 : ms;
-};
-export const newestFirst = (a: FleetSession, b: FleetSession) =>
-	time(b.modifiedAt) - time(a.modifiedAt);
 
 function matches(session: FleetSession, query: FleetQuery): boolean {
 	if (query.provider && session.provider !== query.provider) return false;
@@ -216,27 +275,31 @@ export function groupFleet(
 	sessions: readonly FleetSession[],
 	query: FleetQuery,
 ): FleetGroup[] {
-	const listed = sessions.filter((session) => matches(session, query));
-	listed.sort(newestFirst);
-	// Archived sessions that need input also stay visible in the main list.
-	const waiting = listed.filter((s) => s.sessionState === "needs-input");
-	const working = listed.filter(
-		(s) => s.sessionState === "working" && !s.archived,
-	);
-	const rest = listed.filter(
-		(s) =>
-			s.sessionState !== "needs-input" &&
-			s.sessionState !== "working" &&
-			!s.archived,
-	);
+	const here = query.here ?? (() => true);
+	const own = query.ownProject ?? "";
+	const waiting: FleetSession[] = [];
+	const working: FleetSession[] = [];
+	const rest: FleetSession[] = [];
+	const archived: FleetSession[] = [];
+	const projects = new Set<string>();
+	// One pass over the list newest first, so each part of it is too.
+	for (const session of newestSessions(sessions)) {
+		if (!matches(session, query)) continue;
+		projects.add(projectKey(session, here, own));
+		if (session.archived) archived.push(session);
+		// Archived sessions that need input also stay visible in the main list.
+		if (session.sessionState === "needs-input") waiting.push(session);
+		else if (!session.archived) {
+			if (session.sessionState === "working") working.push(session);
+			else rest.push(session);
+		}
+	}
 	const section = (id: string, label: string, items: FleetSession[]) =>
 		items.length ? [{ id, label, sessions: items }] : [];
 	// The sessions of several projects group by project; one project's by day.
-	const here = query.here ?? (() => true);
-	const projects = new Set(listed.map((s) => projectKey(s, here)));
 	const settled = (items: FleetSession[]) =>
 		projects.size > 1
-			? byProject(items, here)
+			? byProject(items, here, own)
 			: byDay(items, query.now ?? new Date());
 	switch (query.filter) {
 		case "needs-input":
@@ -244,7 +307,7 @@ export function groupFleet(
 		case "running":
 			return section("working", "Working", working);
 		case "archived":
-			return settled(listed.filter((s) => s.archived));
+			return settled(archived);
 		default:
 			return [
 				...section("needs-input", "Needs you", waiting),
@@ -258,25 +321,27 @@ export function groupFleet(
 function projectKey(
 	session: FleetSession,
 	here: (session: FleetSession) => boolean,
+	own: string,
 ): string {
-	return here(session) ? "" : (session.project?.uri ?? "");
+	return here(session) ? own : (session.project?.uri ?? "");
 }
 
 function byProject(
 	sessions: FleetSession[],
 	here: (session: FleetSession) => boolean,
+	own: string,
 ): FleetGroup[] {
 	const groups = new Map<string, FleetGroup>();
 	// Newest first, so projects follow their latest session.
 	for (const session of sessions) {
-		const key = projectKey(session, here);
+		const key = projectKey(session, here, own);
 		let group = groups.get(key);
 		if (!group) {
 			group = {
-				id: `project:${key}`,
+				id: projectGroup(key),
 				label: session.project?.displayName ?? "Other",
 				sessions: [],
-				project: { uri: session.project?.uri ?? "", here: key === "" },
+				project: { uri: session.project?.uri ?? "", here: key === own },
 			};
 			groups.set(key, group);
 		}
@@ -316,7 +381,7 @@ function byDay(sessions: FleetSession[], now: Date): FleetGroup[] {
 	}));
 }
 
-export function fleetCounts(sessions: readonly FleetSession[]) {
+export const fleetCounts = once((sessions: readonly FleetSession[]) => {
 	let needsInput = 0;
 	let working = 0;
 	for (const session of sessions) {
@@ -324,12 +389,12 @@ export function fleetCounts(sessions: readonly FleetSession[]) {
 		else if (session.sessionState === "working" && !session.archived) working++;
 	}
 	return { needsInput, working };
-}
+});
 
 /** The chats that want the user, in the order a "next" command visits them:
  * those that wait for an answer, then those that finished or failed unseen. */
 export function attentionQueue(sessions: readonly FleetSession[]): string[] {
-	const ordered = [...sessions].sort(newestFirst);
+	const ordered = newestSessions(sessions);
 	const queue: string[] = [];
 	const chats = (session: FleetSession) => [session, ...session.forks];
 	for (const session of ordered) {

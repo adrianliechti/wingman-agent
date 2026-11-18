@@ -14,6 +14,7 @@ import {
 	changesetReducer,
 } from "@microsoft/agent-host-protocol";
 import { AHPConnection } from "../src/state/ahpConnection.ts";
+import { SessionStatus } from "../src/state/ahpValues.ts";
 import { WorkspaceClient } from "../src/state/workspaceClient.ts";
 import { setWorkspaceHTTP } from "../src/api/http.ts";
 import { streamWorkspaceSearch } from "../src/api/search.ts";
@@ -209,8 +210,8 @@ test(
 					listed[0].chats?.map((c) => c.resource),
 					[key],
 				);
-				// A session no client has left unread lists as read (SessionStatus.IsRead).
-				assert.ok(listed[0].status & 32);
+				// A session no client has left unread lists as read.
+				assert.ok(listed[0].status & SessionStatus.IsRead);
 				assert.equal(browser.backendOf(key), "one");
 			},
 		);

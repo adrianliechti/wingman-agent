@@ -103,6 +103,7 @@ import {
 	terminalQueries,
 } from "./api/terminals";
 import { errorText } from "./utils/errorText.ts";
+import { readStored, writeStored } from "./utils/storage.ts";
 import {
 	chooseWorkspaceFolder,
 	openNewWindow,
@@ -162,11 +163,12 @@ import {
 import { FloatingMenu, FloatingSurface } from "./components/ui/Floating";
 import { SessionsPanel } from "./components/SessionsPanel";
 import {
-	keepFleetView,
+	currentFleet,
 	useFleet,
 	useFleetNotifications,
 	useHere,
 	useMarkShownRead,
+	useNeedsInputCount,
 	useTitleCount,
 } from "./hooks/useFleet.ts";
 import { nextAttention } from "./state/fleet.ts";
@@ -214,7 +216,6 @@ const CompareTab = lazy(async () => {
 	return { default: (await import("./components/CompareTab")).CompareTab };
 });
 type WorkspaceTab = "changes" | "files" | "inspect";
-type ChatAuxiliaryView = "agents";
 type DebugContentView = "output" | "terminal";
 type CloseRequest = { kind: "file" | "terminal"; tab: CenterTab } | null;
 type SaveConflictRequest = { path: string; closeTabId?: string } | null;
@@ -226,6 +227,15 @@ type WorkspaceEditRequest = {
 	applying: boolean;
 } | null;
 type SessionDeleteRequest = { id: string; title: string } | null;
+/** A move away from the page, which the user confirms as it discards unsaved files. */
+type DiscardRequest = {
+	title: string;
+	/** What else to know, after the count of files that are discarded. */
+	description?: string;
+	/** The label of the button that discards them. */
+	confirm: string;
+	run: () => void;
+} | null;
 type FilePathRequest = {
 	path: string;
 	sourcePath: string;
@@ -252,7 +262,7 @@ type SessionsLayout = { open: boolean; width: number };
 /** How this browser last left the session list: open or not, and how wide. */
 function readSessionsLayout(): SessionsLayout {
 	try {
-		const saved = JSON.parse(localStorage.getItem(SESSIONS_LAYOUT_KEY) ?? "{}");
+		const saved = JSON.parse(readStored("local", SESSIONS_LAYOUT_KEY) ?? "{}");
 		const width = Math.round(Number(saved?.width));
 		return {
 			open: saved?.open === true,
@@ -479,16 +489,14 @@ export default function App() {
 	const sidebarPosition = sidebarLayout.position;
 	const sidebarOnRight = sidebarPosition === "right";
 	const SidePanelOpenIcon = sidebarOnRight ? PanelRightOpen : PanelLeftOpen;
-	const [chatAuxiliaryViews, setChatAuxiliaryViews] = useState<
-		Record<string, ChatAuxiliaryView | undefined>
-	>({});
+	// The chat tab beside which the agents show: one at a time.
+	const [agentsTab, setAgentsTab] = useState<string | null>(null);
 	// The session list belongs to the window, not to a tab: it stays at the
 	// left whatever the center shows. Phones have their own navigation.
 	const [savedSessions] = useState(readSessionsLayout);
 	const [sessionsOpen, setSessionsOpen] = useState(savedSessions.open);
 	const sessionsDocked = sessionsOpen && !mobile;
 	const sessionsPanelRef = usePanelRef();
-	const sessionsWidthRef = useRef(savedSessions.width);
 	const sessionsLayoutRef = useRef(savedSessions);
 	const workspaceTabsRef = useRef<HTMLDivElement>(null);
 	// The workspace tablist shares the title bar with the native window
@@ -589,11 +597,7 @@ export default function App() {
 		useState<SessionDeleteRequest>(null);
 	const [filePathRequest, setFilePathRequest] =
 		useState<FilePathRequest | null>(null);
-	const [openFolderRequest, setOpenFolderRequest] = useState(false);
-	const [projectSwitch, setProjectSwitch] = useState<{
-		href: string;
-		name: string;
-	} | null>(null);
+	const [discardRequest, setDiscardRequest] = useState<DiscardRequest>(null);
 	const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
 	const [debugLauncher, setDebugLauncher] = useState<DebugLauncherSeed | null>(
 		null,
@@ -887,17 +891,12 @@ export default function App() {
 		leftPool.find((tab) => tab.id === leftActiveId) ??
 		leftPool[0] ??
 		(activeTab.id ? activeTab : undefined);
-	const fleet = useFleet();
+	// The app renders for the count alone; `FleetWatch` follows every session.
+	const needsInput = useNeedsInputCount();
 	const here = useHere();
-	useTitleCount(fleet.counts.needsInput, workspace?.name);
-	useMarkShownRead(
-		[leftTab, mobile ? undefined : rightTab].flatMap((tab) =>
-			tab?.type === "chat" && tab.sessionId ? [tab.sessionId] : [],
-		),
-		fleet.sessions,
-	);
-	useFleetNotifications(fleet.sessions, fleet.loaded, (id) =>
-		openSession(id, "keep"),
+	useTitleCount(needsInput, workspace?.name);
+	const shownChats = [leftTab, mobile ? undefined : rightTab].flatMap((tab) =>
+		tab?.type === "chat" && tab.sessionId ? [tab.sessionId] : [],
 	);
 	const activeDocument =
 		activeTab.type === "file" && activeTab.path
@@ -976,10 +975,8 @@ export default function App() {
 			);
 		}
 	};
-	const toggleChatAuxiliary = (tabId: string, view: ChatAuxiliaryView) => {
-		setChatAuxiliaryViews((current) =>
-			current[tabId] === view ? {} : { [tabId]: view },
-		);
+	const toggleAgents = (tabId: string) => {
+		setAgentsTab((current) => (current === tabId ? null : tabId));
 	};
 	const keepTab = (id: string) => {
 		setTabs((current) =>
@@ -1300,12 +1297,7 @@ export default function App() {
 		const closing = tabs[idx];
 		if (closing.type === "file" && closing.path) closeDocument(closing.path);
 		setTabs((prev) => prev.filter((tab) => tab.id !== id));
-		setChatAuxiliaryViews((current) => {
-			if (!(id in current)) return current;
-			const next = { ...current };
-			delete next[id];
-			return next;
-		});
+		setAgentsTab((current) => (current === id ? null : current));
 		setFileViews((prev) => {
 			if (!(id in prev)) return prev;
 			const next = { ...prev };
@@ -1492,7 +1484,7 @@ export default function App() {
 			setWorkspaceSwitching(false);
 			toast({
 				title: "Could not open folder",
-				description: error instanceof Error ? error.message : String(error),
+				description: errorText(error),
 				tone: "error",
 			});
 		}
@@ -1520,7 +1512,12 @@ export default function App() {
 				openUntitledFile();
 				break;
 			case "open-folder":
-				if (dirtyPaths.size > 0) setOpenFolderRequest(true);
+				if (dirtyPaths.size > 0)
+					setDiscardRequest({
+						title: "Open another folder?",
+						confirm: "Discard and Open",
+						run: () => void openFolder(),
+					});
 				else void openFolder();
 				break;
 			case "new-window":
@@ -1925,22 +1922,27 @@ export default function App() {
 		} finally {
 			clearTimeout(slow);
 		}
-		keepFleetView();
+		client.fleetView.keep();
 		const href = projectHref(project, chat);
 		if (dirtyPaths.size > 0) {
 			setWorkspaceSwitching(false);
-			setProjectSwitch({ href, name });
+			setDiscardRequest({
+				title: `Switch to ${name}?`,
+				description: "Agents keep running in both projects.",
+				confirm: "Discard and Switch",
+				run: () => window.location.assign(href),
+			});
 		} else window.location.assign(href);
 	};
 	/** The listed session that holds a chat, as its default chat or a fork. */
 	const listedSession = (id: string) =>
-		fleet.sessions.find(
+		currentFleet().find(
 			(candidate) =>
 				candidate.id === id || candidate.forks.some((fork) => fork.id === id),
 		);
 	/** Opens a chat here, or moves the window to the project the chat belongs to.
 	 * The chat's session, when given, names the project of a chat the list does
-	 * not show yet. It reports whether the chat opened in this window. */
+	 * not show yet. */
 	const openSession = (
 		id: string,
 		disposition: TabDisposition = "keep",
@@ -1951,14 +1953,13 @@ export default function App() {
 				backend: session.provider,
 				id,
 			});
-			return false;
+			return;
 		}
 		handleSessionSelect(id, disposition);
-		return true;
 	};
 	/** Opens the next session that waits for the user or finished unseen. */
 	const goToNextAttention = () => {
-		const next = nextAttention(fleet.sessions, sessionId);
+		const next = nextAttention(currentFleet(), sessionId);
 		if (next) openSession(next, "keep");
 		else toast({ title: "No session needs you right now" });
 	};
@@ -2238,36 +2239,30 @@ export default function App() {
 	// The list's width follows a drag without rendering the app again.
 	const handleSessionsResize = ({ inPixels }: PanelSize) => {
 		const open = inPixels >= 1;
-		if (open) {
-			sessionsWidthRef.current = Math.round(inPixels);
-			appRef.current?.style.setProperty(
-				"--sessions-panel-width",
-				`${sessionsWidthRef.current}px`,
-			);
-		}
+		// A closed list keeps the width it had.
+		const width = open ? Math.round(inPixels) : sessionsLayoutRef.current.width;
+		if (open)
+			appRef.current?.style.setProperty("--sessions-panel-width", `${width}px`);
 		setSessionsOpen(open);
-		saveSessionsLayout(open);
+		saveSessionsLayout({ open, width });
 	};
 	/** Remembers the list for the next load; a drag reports many sizes. */
-	const saveSessionsLayout = (open: boolean) => {
-		const layout = { open, width: sessionsWidthRef.current };
+	const saveSessionsLayout = (layout: SessionsLayout) => {
 		const saved = sessionsLayoutRef.current;
 		if (saved.open === layout.open && saved.width === layout.width) return;
 		sessionsLayoutRef.current = layout;
-		try {
-			localStorage.setItem(SESSIONS_LAYOUT_KEY, JSON.stringify(layout));
-		} catch {
-			// The list opens closed where the browser keeps no storage.
-		}
+		// The list opens closed where the browser keeps no storage.
+		writeStored("local", SESSIONS_LAYOUT_KEY, JSON.stringify(layout));
 	};
 	const toggleSessions = () => {
 		const panel = sessionsPanelRef.current;
 		if (!panel) return;
 		const open = panel.isCollapsed();
-		if (open) panel.resize(`${sessionsWidthRef.current}px`);
+		if (open) panel.resize(`${sessionsLayoutRef.current.width}px`);
 		else panel.collapse();
 		setSessionsOpen(open);
-		saveSessionsLayout(open);
+		// A resize has reported the width the panel took.
+		saveSessionsLayout({ open, width: sessionsLayoutRef.current.width });
 	};
 	const toggleSidePanel = () => {
 		const panel = sidePanelRef.current;
@@ -2646,7 +2641,7 @@ export default function App() {
 				: undefined;
 			return (
 				<ChatTabLayout
-					view={chatAuxiliaryViews[tab.id]}
+					agents={agentsTab === tab.id}
 					sessionId={key}
 					running={runningSessionIds.has(key)}
 					onOpenTask={openTask}
@@ -2959,8 +2954,8 @@ export default function App() {
 			title={
 				sessionsDocked
 					? "Hide sessions"
-					: fleet.counts.needsInput
-						? `Show sessions · ${fleet.counts.needsInput} ${fleet.counts.needsInput === 1 ? "needs" : "need"} you`
+					: needsInput
+						? `Show sessions · ${needsInput} ${needsInput === 1 ? "needs" : "need"} you`
 						: "Show sessions"
 			}
 			aria-label={sessionsDocked ? "Hide sessions" : "Show sessions"}
@@ -2970,13 +2965,13 @@ export default function App() {
 			) : (
 				<PanelLeftOpen size={13} />
 			)}
-			{!sessionsDocked && fleet.counts.needsInput > 0 && (
+			{!sessionsDocked && needsInput > 0 && (
 				<span
-					data-needs-you={fleet.counts.needsInput}
+					data-needs-you={needsInput}
 					aria-hidden="true"
 					className="absolute top-0.5 right-0 min-w-[14px] rounded-full bg-warning px-1 text-center text-[9px] leading-[14px] font-semibold text-bg tabular-nums"
 				>
-					{fleet.counts.needsInput}
+					{needsInput}
 				</span>
 			)}
 		</button>
@@ -2995,8 +2990,7 @@ export default function App() {
 			{sessionsToggle}
 		</div>
 	);
-	const activeChatAuxiliary =
-		activeTab.type === "chat" ? chatAuxiliaryViews[activeTab.id] : undefined;
+	const agentsShown = activeTab.type === "chat" && agentsTab === activeTab.id;
 	const titlebarActions = (
 		<div
 			data-window-interactive
@@ -3018,15 +3012,11 @@ export default function App() {
 					{activeTaskActivity.available && (
 						<button
 							type="button"
-							className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors hover:text-fg-muted ${activeChatAuxiliary === "agents" ? "bg-bg-active text-fg" : "text-fg-muted hover:bg-bg-hover"}`}
-							onClick={() => toggleChatAuxiliary(activeTab.id, "agents")}
-							aria-pressed={activeChatAuxiliary === "agents"}
-							title={
-								activeChatAuxiliary === "agents" ? "Hide agents" : "Show agents"
-							}
-							aria-label={
-								activeChatAuxiliary === "agents" ? "Hide agents" : "Show agents"
-							}
+							className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors hover:text-fg-muted ${agentsShown ? "bg-bg-active text-fg" : "text-fg-muted hover:bg-bg-hover"}`}
+							onClick={() => toggleAgents(activeTab.id)}
+							aria-pressed={agentsShown}
+							title={agentsShown ? "Hide agents" : "Show agents"}
+							aria-label={agentsShown ? "Hide agents" : "Show agents"}
 						>
 							<Bot
 								size={13}
@@ -3330,9 +3320,7 @@ export default function App() {
 				>
 					<SessionsPanel
 						currentSessionId={sessionId}
-						onSessionSelect={(id, disposition) =>
-							void openSession(id, disposition)
-						}
+						onSessionSelect={(id, disposition) => openSession(id, disposition)}
 						onSessionDelete={(id, title) => setSessionDelete({ id, title })}
 						onSessionFork={(id) => void handleSessionFork(id)}
 						onOpenProject={(uri, name) => void switchProject(uri, name)}
@@ -3480,6 +3468,7 @@ export default function App() {
 				} as CSSProperties
 			}
 		>
+			<FleetWatch shown={shownChats} onOpen={(id) => openSession(id, "keep")} />
 			{mobile && (
 				<MobileNavigation
 					title={
@@ -3490,9 +3479,9 @@ export default function App() {
 					connected={connected}
 					running={phase !== "idle"}
 					currentSessionId={sessionId}
-					needsInput={fleet.counts.needsInput}
+					needsInput={needsInput}
 					onSelectBackend={handleBackendSelect}
-					onSelectSession={(id) => void openSession(id, "keep")}
+					onSelectSession={(id) => openSession(id, "keep")}
 					onDeleteSession={(id, title) => setSessionDelete({ id, title })}
 					onForkSession={(id) => void handleSessionFork(id)}
 					onOpenProject={(uri, name) => void switchProject(uri, name)}
@@ -3649,7 +3638,7 @@ export default function App() {
 					}}
 					actions={paletteActions}
 					onRunSkill={runSkill}
-					onSelectSession={(id) => void openSession(id, "keep")}
+					onSelectSession={(id) => openSession(id, "keep")}
 					onOpenFile={openFile}
 				/>
 			)}
@@ -3768,15 +3757,15 @@ export default function App() {
 			</Dialog>
 
 			<Dialog
-				open={openFolderRequest}
-				title="Open another folder?"
-				description={`${dirtyPaths.size} unsaved ${dirtyPaths.size === 1 ? "file" : "files"} will be discarded.`}
-				onClose={() => setOpenFolderRequest(false)}
+				open={!!discardRequest}
+				title={discardRequest?.title ?? ""}
+				description={`${dirtyPaths.size} unsaved ${dirtyPaths.size === 1 ? "file" : "files"} will be discarded.${discardRequest?.description ? ` ${discardRequest.description}` : ""}`}
+				onClose={() => setDiscardRequest(null)}
 			>
 				<button
 					type="button"
 					className={dialogButtonClass}
-					onClick={() => setOpenFolderRequest(false)}
+					onClick={() => setDiscardRequest(null)}
 				>
 					Cancel
 				</button>
@@ -3784,37 +3773,11 @@ export default function App() {
 					type="button"
 					className={`${dialogButtonClass} border-danger/40 text-danger hover:bg-danger/10`}
 					onClick={() => {
-						setOpenFolderRequest(false);
-						void openFolder();
+						setDiscardRequest(null);
+						discardRequest?.run();
 					}}
 				>
-					Discard and Open
-				</button>
-			</Dialog>
-
-			<Dialog
-				open={!!projectSwitch}
-				title={`Switch to ${projectSwitch?.name ?? "project"}?`}
-				description={`${dirtyPaths.size} unsaved ${dirtyPaths.size === 1 ? "file" : "files"} will be discarded. Agents keep running in both projects.`}
-				onClose={() => setProjectSwitch(null)}
-			>
-				<button
-					type="button"
-					className={dialogButtonClass}
-					onClick={() => setProjectSwitch(null)}
-				>
-					Cancel
-				</button>
-				<button
-					type="button"
-					className={`${dialogButtonClass} border-danger/40 text-danger hover:bg-danger/10`}
-					onClick={() => {
-						const href = projectSwitch?.href;
-						setProjectSwitch(null);
-						if (href) window.location.assign(href);
-					}}
-				>
-					Discard and Switch
+					{discardRequest?.confirm}
 				</button>
 			</Dialog>
 
@@ -4051,15 +4014,32 @@ function EmptyWorkspace() {
 	);
 }
 
+/** Follows every session for the window, so that the app renders for its own
+ * chats only: it marks the chats on screen read and tells the user of the
+ * sessions that want them. */
+function FleetWatch({
+	shown,
+	onOpen,
+}: {
+	shown: readonly string[];
+	onOpen: (id: string) => void;
+}) {
+	const { sessions, loaded } = useFleet();
+	useMarkShownRead(shown, sessions);
+	useFleetNotifications(sessions, loaded, onOpen);
+	return null;
+}
+
 function ChatTabLayout({
 	children,
-	view,
+	agents,
 	sessionId,
 	running,
 	onOpenTask,
 }: {
 	children: ReactNode;
-	view?: ChatAuxiliaryView;
+	/** Whether the chat's agents show beside it. */
+	agents: boolean;
 	sessionId: string;
 	running: boolean;
 	onOpenTask: (task: TaskEntry) => void;
@@ -4069,14 +4049,14 @@ function ChatTabLayout({
 			<div className="min-h-0 min-w-0 flex-1">{children}</div>
 			<aside
 				data-chat-auxiliary-panel
-				data-view={view ?? "closed"}
-				aria-label={view === "agents" ? "Agents" : "Chat details"}
-				inert={!view}
-				className={`h-full shrink-0 overflow-hidden transition-[width] duration-150 ${view ? "border-l border-border-subtle" : ""}`}
-				style={{ width: view ? RIGHT_PANEL_WIDTH : "0px" }}
+				data-view={agents ? "agents" : "closed"}
+				aria-label={agents ? "Agents" : "Chat details"}
+				inert={!agents}
+				className={`h-full shrink-0 overflow-hidden transition-[width] duration-150 ${agents ? "border-l border-border-subtle" : ""}`}
+				style={{ width: agents ? RIGHT_PANEL_WIDTH : "0px" }}
 			>
 				<div className="h-full w-full bg-bg">
-					<div className={view === "agents" ? "h-full" : "hidden"}>
+					<div className={agents ? "h-full" : "hidden"}>
 						<TasksPanel
 							sessionRunning={running}
 							sessionId={isDraft(sessionId) ? "" : sessionId}
