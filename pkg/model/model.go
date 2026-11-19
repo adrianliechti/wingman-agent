@@ -93,7 +93,7 @@ var nemotronEfforts = []string{"none", "medium", "high"}
 var nemotron3SuperEfforts = []string{"none", "low", "high"}
 var nemotronThinkingEfforts = []string{"none", "high"}
 var gemini4Efforts = []string{"low", "medium", "high"}
-var gemini4HydrogenEfforts = []string{"low", "medium", "high", "xhigh"}
+var gemini4NeonHydrogenEfforts = []string{"low", "medium", "high", "xhigh"}
 
 // Models is the picker order. Each provider lists the newest numbered
 // generation first, then large, medium, and small models within each generation.
@@ -618,6 +618,19 @@ var Models = []Model{
 		Efforts: gemini4Efforts,
 	},
 	{
+		ID:        "gemini-4-neon",
+		Namespace: "google",
+		Name:      "Gemini 4 Neon",
+		Class:     ClassMedium,
+
+		// Input, thinking, and output share one window.
+		Context:          1048576,
+		Output:           65536,
+		ContextThreshold: 200_000,
+
+		Efforts: gemini4NeonHydrogenEfforts,
+	},
+	{
 		ID:        "gemini-4-hydrogen",
 		Namespace: "google",
 		Name:      "Gemini 4 Hydrogen",
@@ -628,7 +641,7 @@ var Models = []Model{
 		Output:           65536,
 		ContextThreshold: 200_000,
 
-		Efforts: gemini4HydrogenEfforts,
+		Efforts: gemini4NeonHydrogenEfforts,
 	},
 
 	{

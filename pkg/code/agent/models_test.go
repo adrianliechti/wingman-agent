@@ -353,12 +353,17 @@ func TestGemini4CarbonModelSelectionAndEfforts(t *testing.T) {
 	}
 }
 
-func TestGemini4HydrogenModelSelectionAndEfforts(t *testing.T) {
-	for _, id := range []string{"gemini-4-hydrogen", "~google/GEMINI-4-HYDROGEN:latest"} {
+func TestGemini4NeonHydrogenModelSelectionAndEfforts(t *testing.T) {
+	for id, name := range map[string]string{
+		"gemini-4-neon":                    "Gemini 4 Neon",
+		"~google/GEMINI-4-NEON:latest":     "Gemini 4 Neon",
+		"gemini-4-hydrogen":                "Gemini 4 Hydrogen",
+		"~google/GEMINI-4-HYDROGEN:latest": "Gemini 4 Hydrogen",
+	} {
 		t.Run(id, func(t *testing.T) {
 			a := upstreamAgent(id)
 			models, current := a.Models("")
-			if current != id || len(models) != 1 || models[0].Name != "Gemini 4 Hydrogen" {
+			if current != id || len(models) != 1 || models[0].Name != name {
 				t.Fatalf("model selection = %q/%+v", current, models)
 			}
 			want := []string{"auto", "low", "medium", "high", "xhigh"}
@@ -393,6 +398,16 @@ func TestGemini4CarbonIsPreferredComplexModel(t *testing.T) {
 	}
 	if got := roleModelID(t, a, nil, "complex"); got != "google/gemini-4-carbon" {
 		t.Fatalf("complex model = %q, want Carbon ahead of Argon", got)
+	}
+}
+
+func TestGemini4NeonIsPreferredMainModel(t *testing.T) {
+	a := upstreamAgent("gemini-3.8-flash", "google/gemini-4-carbon", "google/gemini-4-hydrogen", "gemini-4-neon")
+	if got := roleModelID(t, a, nil, "main"); got != "gemini-4-neon" {
+		t.Fatalf("main model = %q, want Neon ahead of Hydrogen", got)
+	}
+	if got := roleModelID(t, a, nil, "complex"); got != "google/gemini-4-carbon" {
+		t.Fatalf("complex model = %q", got)
 	}
 }
 

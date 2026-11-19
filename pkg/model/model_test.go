@@ -20,6 +20,7 @@ func TestCurrentProviderModels(t *testing.T) {
 		{"gemini-3.7-flash", "Gemini 3.7 Flash", ClassMedium, 1_114_112, 65_536},
 		{"gemini-4-argon", "Gemini 4 Argon", ClassLarge, 1_048_576, 65_536},
 		{"gemini-4-carbon", "Gemini 4 Carbon", ClassLarge, 1_048_576, 65_536},
+		{"gemini-4-neon", "Gemini 4 Neon", ClassMedium, 1_048_576, 65_536},
 		{"gemini-4-hydrogen", "Gemini 4 Hydrogen", ClassMedium, 1_048_576, 65_536},
 		{"minimax-m3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
 		{"MiniMax-M3", "MiniMax M3", ClassLarge, 1_000_000, 128_000},
@@ -171,12 +172,15 @@ func TestGemini4LimitsAndEfforts(t *testing.T) {
 	}
 }
 
-func TestGemini4HydrogenSharedWindow(t *testing.T) {
+func TestGemini4NeonHydrogenSharedWindow(t *testing.T) {
 	t.Setenv("WINGMAN_CONTEXT_WINDOW_MODE", "full")
-	for _, id := range []string{"gemini-4-hydrogen", "~google/GEMINI-4-HYDROGEN:latest"} {
+	for _, id := range []string{"gemini-4-neon", "~google/GEMINI-4-NEON:latest", "gemini-4-hydrogen", "~google/GEMINI-4-HYDROGEN:latest"} {
 		m, ok := Find(id)
 		if !ok || m.InputTokens() != 983_040 || m.ContextTokens() != 1_048_576 || m.OutputTokens() != 65_536 {
-			t.Fatalf("unexpected Hydrogen limits: %+v", m)
+			t.Fatalf("unexpected limits for %s: %+v", id, m)
+		}
+		if want := []string{"low", "medium", "high", "xhigh"}; !slices.Equal(m.Efforts, want) {
+			t.Fatalf("Efforts for %s = %v, want %v", id, m.Efforts, want)
 		}
 	}
 }
@@ -186,6 +190,7 @@ func TestGemini4ModelAvailability(t *testing.T) {
 	available := Available(map[string]bool{
 		"gemini-4-argon":           true,
 		"google/gemini-4-hydrogen": true,
+		"gemini-4-neon":            true,
 		"google/gemini-4-carbon":   true,
 		"gemini-3.8-flash":         true,
 	})
@@ -193,7 +198,7 @@ func TestGemini4ModelAvailability(t *testing.T) {
 	for _, m := range available {
 		ids = append(ids, m.ID)
 	}
-	want := []string{"google/gemini-4-carbon", "gemini-4-argon", "google/gemini-4-hydrogen", "gemini-3.8-flash"}
+	want := []string{"google/gemini-4-carbon", "gemini-4-argon", "gemini-4-neon", "google/gemini-4-hydrogen", "gemini-3.8-flash"}
 	if !slices.Equal(ids, want) {
 		t.Fatalf("Available() ids = %v, want %v", ids, want)
 	}
@@ -359,6 +364,7 @@ func TestProviderPrefixedModelMapping(t *testing.T) {
 		"openai/gpt-6-luna":           "GPT 6 Luna",
 		"google/gemini-3.1-pro":       "Gemini 3.1 Pro",
 		"google/gemini-4-carbon":      "Gemini 4 Carbon",
+		"google/gemini-4-neon":        "Gemini 4 Neon",
 		"z-ai/glm-5.3":                "GLM 5.3",
 		"deepseek/deepseek-v4-pro":    "DeepSeek V4 Pro",
 		"mistralai/mistral-medium":    "Mistral Medium 3.5",
@@ -401,6 +407,7 @@ func TestCurrentProviderModelClassification(t *testing.T) {
 		{"~openai/GPT-6-ASTRA:latest", "gpt", ClassLarge},
 		{"google/gemini-3.7-flash", "gemini", ClassMedium},
 		{"google/gemini-4-carbon", "gemini", ClassLarge},
+		{"google/gemini-4-neon", "gemini", ClassMedium},
 		{"qwen/qwen3.8-27b:latest", "qwen3", ClassMedium},
 	}
 
