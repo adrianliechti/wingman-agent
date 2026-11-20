@@ -1020,6 +1020,32 @@ var Models = []Model{
 
 		Efforts: nemotronThinkingEfforts,
 	},
+
+	// Thinking Machines
+	// Reserve 128K of each shared window for output, as in wingman-vscode.
+
+	{
+		ID:        "inkling-2-small",
+		Namespace: "thinkingmachines",
+		Name:      "Inkling 2 Small",
+		Class:     ClassSmall,
+
+		Output:  131_072,
+		Context: 1_048_576,
+
+		Efforts: []string{"low", "medium", "high", "max"},
+	},
+	{
+		ID:        "inkling-2-mini",
+		Namespace: "thinkingmachines",
+		Name:      "Inkling 2 Mini",
+		Class:     ClassSmall,
+
+		Output:  131_072,
+		Context: 1_048_576,
+
+		Efforts: []string{"none", "low", "medium", "high", "xhigh", "max"},
+	},
 }
 
 // Available returns the catalog entries a backend serves, in preference order

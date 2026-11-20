@@ -15,6 +15,8 @@ func TestCurrentProviderModels(t *testing.T) {
 		context int
 		output  int
 	}{
+		{"thinkingmachines/Inkling-2-Small", "Inkling 2 Small", ClassSmall, 1_048_576, 131_072},
+		{"thinkingmachines/Inkling-2-Mini", "Inkling 2 Mini", ClassSmall, 1_048_576, 131_072},
 		{"kimi-k3", "Kimi K3", ClassLarge, 1_048_576, 131_072},
 		{"glm-5.3", "GLM 5.3", ClassMedium, 1_000_000, 131_072},
 		{"gemini-3.7-flash", "Gemini 3.7 Flash", ClassMedium, 1_114_112, 65_536},
@@ -75,6 +77,8 @@ func TestCurrentProviderModelAvailability(t *testing.T) {
 		"glm-5.3":            true,
 		"MiniMax-M3":         true,
 		"grok-4.6":           true,
+		"inkling-2-mini":     true,
+		"inkling-2-small":    true,
 	})
 
 	ids := make([]string, 0, len(available))
@@ -86,6 +90,7 @@ func TestCurrentProviderModelAvailability(t *testing.T) {
 		"gpt-6.2-astra", "openai/gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.1-terra",
 		"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5-mini",
 		"claude-sonnet-5-5", "glm-5.3", "kimi-k3", "MiniMax-M3", "grok-4.6",
+		"inkling-2-small", "inkling-2-mini",
 	}
 	if !slices.Equal(ids, want) {
 		t.Fatalf("Available() ids = %v, want %v", ids, want)

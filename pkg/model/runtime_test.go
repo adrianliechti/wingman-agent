@@ -57,6 +57,8 @@ func TestModelRuntimeFields(t *testing.T) {
 		{"minimax-m3", 512_000, nil},
 		{"grok-4.6", 200_000, nil},
 		{"qwen3.8", 262_144, qwen38Efforts},
+		{"inkling-2-small:latest", 1_048_576, []string{"low", "medium", "high", "max"}},
+		{"inkling-2-mini:latest", 1_048_576, []string{"none", "low", "medium", "high", "xhigh", "max"}},
 		{"some-unknown-model", 0, nil},
 		{"", 0, nil},
 	}
