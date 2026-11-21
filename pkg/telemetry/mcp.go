@@ -70,8 +70,7 @@ const (
 )
 
 // MCPOperation represents one MCP request or notification.
-// A tools/call operation reuses an active GenAI tool span when one is present,
-// as required by the MCP semantic-convention deduplication guidance.
+// A direct MCP tool call shares the span of the tool execution that issued it.
 type MCPOperation struct {
 	telemetry  *Telemetry
 	ctx        context.Context
@@ -87,7 +86,7 @@ type MCPOperation struct {
 type MCPClientOperation = MCPOperation
 
 // StartMCPClient starts a CLIENT span for an outbound MCP operation, or enriches
-// an active execute_tool span for tools/call. The returned context carries the
+// the matching execute_tool span for tools/call. The returned context carries the
 // span that should be propagated to the MCP peer.
 func (t *Telemetry) StartMCPClient(ctx context.Context, req MCPClientRequest) (context.Context, *MCPOperation) {
 	return t.startMCPOperation(ctx, req, mcpClientRole)
@@ -110,7 +109,7 @@ func (t *Telemetry) startMCPOperation(ctx context.Context, req MCPClientRequest,
 
 	var parentTool *ToolExecution
 	if role == mcpClientRole && req.Method == "tools/call" {
-		if execution, ok := ctx.Value(toolContextKey{}).(*ToolExecution); ok && execution != nil && execution.telemetry == t {
+		if execution, _ := ctx.Value(toolContextKey{}).(*ToolExecution); execution != nil && execution.mcpCall && execution.telemetry == t {
 			parentTool = execution
 			req.ToolName = execution.name
 		}
@@ -204,9 +203,13 @@ func (operation *MCPOperation) End(result MCPClientResult) {
 			operation.span.SetAttributes(endAttrs...)
 		}
 
-		description := strings.TrimSpace(result.StatusDescription)
-		if description == "" && outcome.Err != nil {
-			description = outcome.Err.Error()
+		description := ""
+		outcome = operation.telemetry.mcpSpanOutcome(outcome)
+		if operation.telemetry.captureSpanContent {
+			description = strings.TrimSpace(result.StatusDescription)
+			if description == "" && outcome.Err != nil {
+				description = outcome.Err.Error()
+			}
 		}
 		if operation.parentTool != nil {
 			operation.parentTool.rememberProtocolOutcome(outcome, description)
@@ -233,6 +236,14 @@ func (operation *MCPOperation) End(result MCPClientResult) {
 			operation.span.End(trace.WithTimestamp(ended))
 		}
 	})
+}
+
+// MCP error messages can include request arguments and server response data.
+func (t *Telemetry) mcpSpanOutcome(outcome Outcome) Outcome {
+	if t.captureSpanContent {
+		return outcome
+	}
+	return Outcome{ErrorType: outcome.errorType()}
 }
 
 func mcpServerNonErrorStatus(status string) bool {

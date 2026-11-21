@@ -134,9 +134,38 @@ func isSearchHost(host string) bool {
 	return host == "duckduckgo.com" || strings.HasSuffix(host, ".duckduckgo.com")
 }
 
-func formatResults(results []result) (tool.Result, error) {
+// Interleave by provider rank so a small result limit can cover several sites.
+func mergeResults(pages [][]result) []result {
+	if len(pages) == 1 {
+		return pages[0]
+	}
+	var results []result
+	seen := make(map[string]bool)
+	longest := 0
+	for _, page := range pages {
+		longest = max(longest, len(page))
+	}
+	for rank := range longest {
+		for _, page := range pages {
+			if rank >= len(page) || seen[page[rank].url] {
+				continue
+			}
+			r := page[rank]
+			results = append(results, r)
+			seen[r.url] = true
+		}
+	}
+	return results
+}
+
+func formatResults(results []result, limit int, unavailable []string) (tool.Result, error) {
 	var b strings.Builder
-	shown := 0
+	var notice string
+	if len(unavailable) > 0 {
+		notice = "\n[Search incomplete for " + strings.Join(unavailable, ", ") + ".]"
+	}
+	budget := tool.MaxInlineResultBytes - len(notice) - 256
+	shown, omitted := 0, 0
 	for _, r := range results {
 		entry := fmt.Sprintf("%d. %s\n   %s\n", shown+1, text.TruncateHead(r.title, 512), r.url)
 		if r.snippet != "" {
@@ -144,18 +173,23 @@ func formatResults(results []result) (tool.Result, error) {
 		}
 		// Keep URLs intact. Reserve space for an omission notice, and try later
 		// results if one unusually long URL cannot fit.
-		if b.Len()+len(entry) > tool.MaxInlineResultBytes-256 {
+		if b.Len()+len(entry) > budget {
+			omitted++
 			continue
 		}
 		b.WriteString(entry)
 		shown++
+		if shown == limit {
+			break
+		}
 	}
 	if shown == 0 {
 		return tool.Result{}, fmt.Errorf("web search: result URLs exceed the output size limit; narrow the query")
 	}
-	if shown < len(results) {
-		fmt.Fprintf(&b, "\n[%d results omitted to fit the output size limit.]\n", len(results)-shown)
+	if omitted > 0 {
+		fmt.Fprintf(&b, "\n[%d results omitted to fit the output size limit.]\n", omitted)
 	}
+	b.WriteString(notice)
 	return tool.Text(strings.TrimRight(b.String(), "\n")), nil
 }
 

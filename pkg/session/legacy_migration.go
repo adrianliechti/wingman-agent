@@ -21,6 +21,7 @@ import (
 type legacyRecord struct {
 	Type      string           `json:"type"`
 	ID        string           `json:"id,omitempty"`
+	Title     string           `json:"title,omitempty"`
 	CreatedAt *time.Time       `json:"created_at,omitempty"`
 	Message   *harness.Message `json:"message,omitempty"`
 	Usage     *harness.Usage   `json:"usage,omitempty"`
@@ -28,11 +29,8 @@ type legacyRecord struct {
 
 func ensureCurrentFormat(sessionsDir, id string) error {
 	path := sessionPath(sessionsDir, id)
-	if _, err := os.Stat(path); err == nil {
-		current, detectErr := isCurrentJournal(path)
-		if detectErr != nil {
-			return fmt.Errorf("detect session journal format: %w", detectErr)
-		}
+	current, err := isCurrentJournal(path)
+	if err == nil {
 		if current {
 			return nil
 		}
@@ -41,8 +39,8 @@ func ensureCurrentFormat(sessionsDir, id string) error {
 			return loadErr
 		}
 		return migrateLegacySession(path, legacy)
-	} else if !os.IsNotExist(err) {
-		return err
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("detect session journal format: %w", err)
 	}
 
 	legacyPath := filepath.Join(sessionsDir, id+".json")
@@ -82,6 +80,9 @@ func loadLegacyJSONL(path, fallbackID string) (Session, error) {
 		}
 		switch r.Type {
 		case "meta":
+			if r.Title != "" {
+				s.Title = r.Title
+			}
 			if r.ID != "" {
 				s.ID = r.ID
 			}
@@ -112,7 +113,9 @@ func loadLegacyJSONL(path, fallbackID string) (Session, error) {
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = s.UpdatedAt
 	}
-	s.Title = extractTitle(s.State.Messages)
+	if s.Title == "" {
+		s.Title = extractTitle(s.State.Messages)
+	}
 	return s, nil
 }
 
@@ -159,7 +162,7 @@ func migrateLegacySession(path string, legacy Session) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	if err := writeJournal(path, record{Type: "meta", Version: journalVersion, ID: id, CreatedAt: &created}, state.Events); err != nil {
+	if err := writeJournal(path, record{Type: "meta", Version: journalVersion, ID: id, CreatedAt: &created, Title: legacy.Title}, state.Events); err != nil {
 		return fmt.Errorf("migrate legacy session: %w", err)
 	}
 	return nil

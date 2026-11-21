@@ -421,7 +421,7 @@ func TestGenAISpansAndMetrics(t *testing.T) {
 		SessionID:    "mcp-session",
 	})
 	mcpOperation.End(MCPClientResult{ToolError: true})
-	mcpExecution.End(Outcome{ErrorType: "_OTHER"})
+	mcpExecution.End(Outcome{}) // The transport completed, but the MCP tool reported a failure.
 	invocation.End(Outcome{})
 
 	endedSpans := spanRecorder.Ended()
@@ -480,6 +480,9 @@ func TestGenAISpansAndMetrics(t *testing.T) {
 	assertSpanString(t, mcpSpan, "mcp.session.id", "mcp-session")
 	assertSpanString(t, mcpSpan, "network.transport", "pipe")
 	assertSpanString(t, mcpSpan, "error.type", "tool_error")
+	if mcpSpan.Status().Code != codes.Error {
+		t.Fatalf("MCP tool span status = %v, want error", mcpSpan.Status())
+	}
 	if toolSpan.Status().Code != codes.Error {
 		t.Fatalf("tool span status = %v, want error", toolSpan.Status().Code)
 	}
@@ -652,6 +655,60 @@ func TestToolContentCapture(t *testing.T) {
 	result, ok := spanAttribute(spans[0], "gen_ai.tool.call.result")
 	if !ok || result.Type() != attribute.MAP {
 		t.Fatalf("tool result = %v (present %v), want structured map", result, ok)
+	}
+}
+
+func TestMCPErrorSpansRespectContentCapture(t *testing.T) {
+	clearTelemetryEnvironment(t)
+	for _, mode := range []ContentCaptureMode{ContentCaptureNoContent, ContentCaptureSpanOnly} {
+		t.Run(string(mode), func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+			tel, err := New(t.Context(), Options{TracerProvider: provider, DisableMetrics: true, CaptureMessageContent: mode})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := MCPClientRequest{Method: "tools/call", ToolName: "lookup"}
+			failure := MCPClientResult{
+				Outcome:           Outcome{Err: errors.New("server response with private details"), ErrorType: "-32603"},
+				StatusCode:        "-32603",
+				StatusDescription: "server message with private details",
+			}
+			ctx, direct := tel.StartTool(t.Context(), ToolRequest{Name: "direct", MCPMethod: "tools/call"})
+			_, call := tel.StartMCPClient(ctx, request)
+			call.End(failure)
+			direct.End(Outcome{Err: errors.New("generic wrapper error")})
+
+			ctx, wrapper := tel.StartTool(t.Context(), ToolRequest{Name: "wrapper"})
+			_, nested := tel.StartMCPClient(ctx, request)
+			nested.End(failure)
+			wrapper.End(Outcome{}) // A local tool can recover from a nested MCP failure.
+
+			spans := recorder.Ended()
+			if len(spans) != 3 {
+				t.Fatalf("ended spans = %d, want direct call, nested call, and wrapper", len(spans))
+			}
+			if spans[2].Status().Code != codes.Unset || spans[1].Parent().SpanID() != spans[2].SpanContext().SpanID() {
+				t.Fatal("nested MCP failure changed the wrapper status or lost its parent")
+			}
+			for _, span := range spans[:2] {
+				assertSpanString(t, span, "rpc.response.status_code", failure.StatusCode)
+				assertSpanString(t, span, "error.type", failure.StatusCode)
+				description := failure.StatusCode
+				wantEvents := 0
+				if mode == ContentCaptureSpanOnly {
+					description = failure.StatusDescription
+					wantEvents = 1
+				}
+				if status := span.Status(); status.Code != codes.Error || status.Description != description {
+					t.Errorf("span %q status = %v, want error with %q", span.Name(), status, description)
+				}
+				if got := len(span.Events()); got != wantEvents {
+					t.Errorf("span %q has %d exception events in %s mode, want %d", span.Name(), got, mode, wantEvents)
+				}
+			}
+		})
 	}
 }
 

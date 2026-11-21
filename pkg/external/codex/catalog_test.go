@@ -112,6 +112,7 @@ func TestCatalogPreservesUpstreamConfiguration(t *testing.T) {
 		"~openai/GPT-6-ASTRA:latest": "gpt-6-astra",
 	} {
 		t.Run(id, func(t *testing.T) {
+			t.Parallel()
 			var original map[string]any
 			for _, entry := range upstream.Models {
 				if entry["slug"] == upstreamID {
@@ -142,6 +143,16 @@ func TestCatalogPreservesUpstreamConfiguration(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func BenchmarkBuildModelCatalog(b *testing.B) {
+	ids := []string{"gpt-6.2-sol", "openai/gpt-6.2-astra"}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := buildModelCatalog(ids); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

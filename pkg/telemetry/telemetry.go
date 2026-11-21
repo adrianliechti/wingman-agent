@@ -1117,6 +1117,7 @@ type ToolExecution struct {
 	ctx       context.Context
 	span      trace.Span
 	name      string
+	mcpCall   bool
 	started   time.Time
 	attrs     []attribute.KeyValue
 
@@ -1188,6 +1189,7 @@ func (t *Telemetry) StartTool(ctx context.Context, req ToolRequest) (context.Con
 		ctx:       ctx,
 		span:      span,
 		name:      req.Name,
+		mcpCall:   mcpMethod == "tools/call",
 		started:   started,
 		attrs:     metricAttrs,
 	}
@@ -1208,9 +1210,6 @@ func (execution *ToolExecution) SetResult(result any) {
 }
 
 func (execution *ToolExecution) rememberProtocolOutcome(outcome Outcome, description string) {
-	if execution == nil || outcome.errorType() == "" {
-		return
-	}
 	execution.outcomeMu.Lock()
 	execution.protocolOutcome = outcome
 	execution.statusDescription = description
@@ -1226,8 +1225,11 @@ func (execution *ToolExecution) End(outcome Outcome) {
 		ended := time.Now()
 		execution.outcomeMu.Lock()
 		description := ""
-		if outcome.ErrorType == "_OTHER" && execution.protocolOutcome.errorType() != "" {
-			outcome, description = execution.protocolOutcome, execution.statusDescription
+		if execution.mcpCall {
+			if kind := outcome.errorType(); (kind == "" || kind == "_OTHER") && execution.protocolOutcome.errorType() != "" {
+				outcome, description = execution.protocolOutcome, execution.statusDescription
+			}
+			outcome = execution.telemetry.mcpSpanOutcome(outcome)
 		}
 		result, resultSet := execution.result, execution.resultSet
 		execution.outcomeMu.Unlock()

@@ -411,6 +411,34 @@ func TestGemini4NeonIsPreferredMainModel(t *testing.T) {
 	}
 }
 
+func TestUnavailableSessionModelFallsBackToDefault(t *testing.T) {
+	a := upstreamAgent("google/gemini-4-carbon", "google/gemini-4-neon", "thinkingmachines/Inkling-2-Small")
+	a.sessions["sid"] = &sessionState{modelID: "retired-session-model"}
+	for _, tc := range []struct{ configured, want string }{
+		{"inkling-2-small", "thinkingmachines/Inkling-2-Small"},
+		{"retired-default", "google/gemini-4-neon"},
+	} {
+		a.modelID = tc.configured
+		if _, got := a.Models("sid"); got != tc.want {
+			t.Errorf("fallback with configured model %q = %q, want %q", tc.configured, got, tc.want)
+		}
+	}
+}
+
+func TestConfiguredModelKeepsCatalogDetailsWithEmptyDiscovery(t *testing.T) {
+	const id = "thinkingmachines/Inkling-2-Small:latest"
+	a := upstreamAgent()
+	a.modelID = id
+	options, current := a.Models("")
+	if len(options) != 1 || current != id {
+		t.Fatalf("model selection = %q/%+v", current, options)
+	}
+	m := options[0]
+	if m.ID != id || m.Namespace != "thinkingmachines" || m.Class != model.ClassSmall || m.InputTokens() != 917_504 {
+		t.Errorf("configured model lost catalog details: %+v", m)
+	}
+}
+
 func TestQwen38EffortDefaultsAndClampsOverrides(t *testing.T) {
 	a := upstreamAgent("qwen3.8:27b-mlx")
 	s := &sessionState{}

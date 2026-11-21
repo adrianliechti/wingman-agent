@@ -9,6 +9,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
@@ -544,7 +545,10 @@ func (h *Host) listSessions(raw json.RawMessage) (any, error) {
 		}
 	}
 	h.mu.Unlock()
-	slices.SortFunc(items, func(a, b types.SessionSummary) int { return strings.Compare(b.ModifiedAt, a.ModifiedAt) })
+	slices.SortFunc(items, func(a, b types.SessionSummary) int {
+		order := parseSessionTime(b.ModifiedAt).Compare(parseSessionTime(a.ModifiedAt))
+		return cmp.Or(order, strings.Compare(a.Resource, b.Resource))
+	})
 	// Full retained catalog is returned without a cursor; pagination is optional.
 	return types.ListSessionsResult{Items: items}, nil
 }
@@ -560,8 +564,9 @@ func findGoneFolders(folders map[string]bool) {
 	answers := make(chan answer, len(folders))
 	for dir := range folders {
 		go func() {
-			_, err := os.Stat(dir)
-			answers <- answer{dir, errors.Is(err, os.ErrNotExist)}
+			info, err := os.Stat(dir)
+			gone := errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || (err == nil && !info.IsDir())
+			answers <- answer{dir, gone}
 		}()
 	}
 	deadline := time.After(2 * time.Second)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"sync"
 
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
@@ -57,7 +58,9 @@ func PrepareModelCatalog(cfg *CodexConfig) (cleanup func(), err error) {
 	return cleanup, nil
 }
 
-func buildModelCatalog(modelIDs []string) ([]byte, error) {
+// Launches share the immutable upstream templates. Each runtime catalog
+// applies its overrides to a separate copy of the selected entries.
+var modelTemplates = sync.OnceValues(func() (map[string]map[string]any, error) {
 	templates := make(map[string]map[string]any)
 	for _, data := range [][]byte{legacyModelCatalog, embeddedModelCatalog} {
 		var catalog modelCatalog
@@ -72,7 +75,14 @@ func buildModelCatalog(modelIDs []string) ([]byte, error) {
 			templates[slug] = entry
 		}
 	}
+	return templates, nil
+})
 
+func buildModelCatalog(modelIDs []string) ([]byte, error) {
+	templates, err := modelTemplates()
+	if err != nil {
+		return nil, err
+	}
 	selected := make([]map[string]any, 0, len(modelIDs))
 	seen := make(map[string]bool, len(modelIDs))
 

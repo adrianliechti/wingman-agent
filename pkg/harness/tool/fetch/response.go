@@ -16,7 +16,7 @@ import (
 	"golang.org/x/net/html/charset"
 )
 
-func readResponse(ctx context.Context, resp *http.Response) (tool.Result, error) {
+func readResponse(ctx context.Context, resp *http.Response, view pageView) (tool.Result, error) {
 	reader := bufio.NewReader(resp.Body)
 	head, err := reader.Peek(512)
 	if err != nil && err != io.EOF {
@@ -24,6 +24,9 @@ func readResponse(ctx context.Context, resp *http.Response) (tool.Result, error)
 	}
 	finalURL := resp.Request.URL.Redacted()
 	if tool.ImageMIME(head) != "" {
+		if view != (pageView{}) {
+			return tool.Result{}, fmt.Errorf("find, offset, and limit require a text or document response")
+		}
 		if resp.ContentLength > tool.MaxImageSourceBytes {
 			return tool.Result{}, fmt.Errorf("image exceeds the %dMB source limit", tool.MaxImageSourceBytes/(1024*1024))
 		}
@@ -79,14 +82,9 @@ func readResponse(ctx context.Context, resp *http.Response) (tool.Result, error)
 	if err := ctx.Err(); err != nil {
 		return tool.Result{}, err
 	}
-	content = strings.TrimSpace(content)
-	if content == "" {
-		content = "[no readable text content in the fetched response]"
-	}
-	outputTruncated := len(content) > maxOutputBytes
-	if outputTruncated {
-		content = text.HeadLines(content, maxOutputBytes)
-		content += fmt.Sprintf("\n\n[truncated at %dKB]", maxOutputBytes/1024)
+	content, outputTruncated := view.render(content)
+	if err := ctx.Err(); err != nil {
+		return tool.Result{}, err
 	}
 	if bodyTruncated {
 		content += fmt.Sprintf("\n\n[truncated: response exceeded the %d MiB source limit; only the beginning was read]", maxReadBytes/(1024*1024))

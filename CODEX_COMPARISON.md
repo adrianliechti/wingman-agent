@@ -7,6 +7,16 @@ Compared repositories:
 
 ---
 
+## November 21 follow-up
+
+This review covers the local Codex checkout through its November 20 commit `cf8992e940`. The comparison below this update describes the November 12 revisions.
+
+- **Web research.** Codex exposes domain and recency filters, text lookup, and line navigation in `codex-api/src/search.rs`. Its routing change in `4360c5f813` puts provider choice in configuration. Wingman already controls search and fetch availability per session. Search now accepts up to four domains and DuckDuckGo’s day, week, month, or year filters. Fetch can locate a literal in the rendered page or document and return numbered lines beyond the initial preview. [Search implementation](pkg/harness/tool/websearch/websearch.go) · [Fetch implementation](pkg/harness/tool/fetch/view.go)
+- **Model catalogs.** Following `097558c1bd`, Wingman parses the bundled catalogs once per process and copies selected templates before applying deployment aliases and launch-specific overrides. On an Apple M4, the median of three two-model benchmark runs fell from 1.57 ms to 0.16 ms per build. [Catalog implementation](pkg/external/codex/catalog.go) · [Benchmark](pkg/external/codex/catalog_test.go)
+- **MCP telemetry.** Codex’s `1c0c806028` showed how a successful transport exchange can carry a failed tool result. Wingman now carries that failure into the direct tool span and its duration metric. By default, traces record the error class and any JSON-RPC status code. Recording the server’s error text requires span content capture. [MCP telemetry](pkg/telemetry/mcp.go)
+
+---
+
 ## Executive Summary
 
 Wingman (`wingman-agent`) is already near frontier parity—and in several core code-editing and multi-model areas, it **outperforms `codex-rs`**.

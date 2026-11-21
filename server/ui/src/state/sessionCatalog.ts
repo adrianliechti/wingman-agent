@@ -204,9 +204,11 @@ export class SessionCatalog {
 	}
 	/** Removes a session the client disposed before the host confirms it. */
 	forget(session: string) {
-		if (!this.sessions.delete(session)) return;
-		this.changed = true;
-		this.publish({});
+		const method = "root/sessionRemoved";
+		const params = { session };
+		this.buffered?.push({ method, params });
+		this.apply(method, params);
+		if (this.changed) this.publish({});
 	}
 	private publish(change: Partial<CatalogState>) {
 		// The list is a new array only when a session changed: what the list

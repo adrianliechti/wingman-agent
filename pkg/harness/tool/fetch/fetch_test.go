@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
@@ -140,6 +141,97 @@ func TestFetchTruncatesLongOutput(t *testing.T) {
 	}
 	if !strings.Contains(out, "[truncated at 47KB]") {
 		t.Fatal("missing truncation notice")
+	}
+	preview, _, _ := strings.Cut(out, "\n\n[truncated")
+	next := strings.Count(preview, "\n") + 2
+	if !strings.Contains(out, fmt.Sprintf("offset=%d", next)) {
+		t.Fatalf("preview should continue at line %d", next)
+	}
+}
+
+func TestFetchFindAndContinueBeyondPreview(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			t.Errorf("local find or line range sent to the source: %s", r.URL)
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, strings.Repeat("earlier documentation\r\n", 3000)+"Install [V2]\rNext step\r\nInstall [v2] again\nLast step")
+	}))
+	defer server.Close()
+	run := fetchTool(t)
+	first, err := run(map[string]any{"url": server.URL, "find": "install [v2]", "limit": 2})
+	if err != nil || !strings.Contains(first, "3001\tInstall [V2]\n3002\tNext step") || !strings.Contains(first, "offset=3003") {
+		t.Fatalf("matching excerpt = %q, %v", first, err)
+	}
+	for _, args := range []map[string]any{
+		{"url": server.URL, "offset": 3003},
+		{"url": server.URL, "offset": 3002, "find": "INSTALL [v2]"},
+	} {
+		next, err := run(args)
+		if err != nil || !strings.Contains(next, "3003\tInstall [v2] again\n3004\tLast step") || strings.Contains(next, "3002\t") {
+			t.Fatalf("continued excerpt = %q, %v", next, err)
+		}
+	}
+}
+
+func TestFetchFindReadsRenderedDocuments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/guide.pdf" {
+			w.Header().Set("Content-Type", "application/pdf")
+			w.Write(buildTestPDF("Document needle"))
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body><script>irrelevant text</script><p>See <a href="/next">linked guide</a>.</p></body></html>`)
+	}))
+	defer server.Close()
+	run := fetchTool(t)
+	for _, tc := range []struct{ path, find, want string }{
+		{"/guide.pdf", "document needle", "Document needle"},
+		{"/", "linked guide", "[linked guide](" + server.URL + "/next)"},
+		{"/", "irrelevant text", "No match"},
+	} {
+		got, err := run(map[string]any{"url": server.URL + tc.path, "find": tc.find})
+		if err != nil || !strings.Contains(got, tc.want) {
+			t.Errorf("find %q = %q, %v", tc.find, got, err)
+		}
+	}
+}
+
+func TestFetchNumbersBlankAndIndentedLines(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "\r\n  first\r\n\tsecond\r\n\r\n")
+	}))
+	defer server.Close()
+	run := fetchTool(t)
+	for _, tc := range []struct {
+		offset int
+		want   string
+	}{
+		{1, "1\t\n2\t  first\n3\t\tsecond\n4\t\n\n[Lines 1-4 of 4.]"},
+		{4, "4\t\n\n[Lines 4-4 of 4.]"},
+		{5, "No line 5 in the fetched text (4 lines)."},
+	} {
+		got, err := run(map[string]any{"url": server.URL, "offset": tc.offset})
+		if err != nil || got != tc.want {
+			t.Errorf("offset %d = %q, %v", tc.offset, got, err)
+		}
+	}
+}
+
+func TestFetchFindShowsMatchInLongLineAndReportsSourceLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, strings.Repeat("界", maxOutputBytes)+"Kelvin"+strings.Repeat("x", maxReadBytes))
+	}))
+	defer server.Close()
+	run := fetchTool(t)
+	for _, tc := range []struct{ find, want string }{{"kelvin", "Kelvin"}, {"missing", "No match"}} {
+		got, err := run(map[string]any{"url": server.URL, "find": tc.find})
+		if err != nil || !strings.Contains(got, tc.want) || !strings.Contains(got, "2 MiB") || len(got) > tool.MaxInlineResultBytes || !utf8.ValidString(got) {
+			t.Fatalf("find %q: got %d bytes ending %.120q, %v", tc.find, len(got), got[max(0, len(got)-120):], err)
+		}
 	}
 }
 

@@ -76,6 +76,9 @@ func TestSlashReviewRunsIsolatedReadOnlyChildAndRecordsSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.RequireFinish = func(string) bool { return false }
+	cfg.Model = func() string { return "inkling-2-mini" }
+	cfg.Effort = func() string { return "none" }
+	cfg.ComplexModel = "thinkingmachines/Inkling-2-Small"
 	a := New(ws, cfg, nil)
 	t.Cleanup(func() { _ = a.Close() })
 	id, err := a.NewSession(t.Context())
@@ -115,6 +118,16 @@ func TestSlashReviewRunsIsolatedReadOnlyChildAndRecordsSummary(t *testing.T) {
 	mu.Lock()
 	firstReq := bodies[0]
 	mu.Unlock()
+	var request struct {
+		Model     string
+		Reasoning struct{ Effort string }
+	}
+	if err := json.Unmarshal([]byte(firstReq), &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Model != cfg.ComplexModel || request.Reasoning.Effort != "low" {
+		t.Errorf("review used %q at %q effort, want %q at low", request.Model, request.Reasoning.Effort, cfg.ComplexModel)
+	}
 	if !strings.Contains(firstReq, "return a / 0") {
 		t.Fatalf("review request did not attach uncommitted git diff:\n%s", firstReq)
 	}

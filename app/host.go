@@ -239,8 +239,9 @@ func (h *hostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "the host is in use", http.StatusConflict)
 			return
 		}
-		h.stop()
 		w.WriteHeader(http.StatusNoContent)
+		_ = http.NewResponseController(w).Flush()
+		h.stop()
 		return
 	}
 	h.touch()
@@ -357,6 +358,10 @@ func (c *hostClient) open(dir string) error {
 func (c *hostClient) stop() error {
 	status, _, err := c.call(http.MethodPost, "/__wingman/stop", nil, 10*time.Second)
 	if err != nil {
+		// Older hosts can close their listener before the stop reply arrives.
+		if !c.serving() {
+			return nil
+		}
 		return err
 	}
 	if status != http.StatusNoContent {

@@ -227,6 +227,11 @@ func TestSearchInvalidInputBeforeApproval(t *testing.T) {
 		{"query": "test", "max_results": nil},
 		{"query": "test", "max_results": 1.5},
 		{"query": "test", "max_results": "2"},
+		{"query": "test", "domains": []any{"https://example.org/path"}},
+		{"query": "test", "domains": []any{"example.org", 7}},
+		{"query": "test", "domains": []string{}},
+		{"query": "test", "domains": []string{"a.test", "b.test", "c.test", "d.test", "e.test"}},
+		{"query": "test", "time_range": "yesterday"},
 	} {
 		if _, err := Tools(elicit)[0].Execute(t.Context(), args); err == nil {
 			t.Fatal("invalid input accepted")
@@ -234,6 +239,73 @@ func TestSearchInvalidInputBeforeApproval(t *testing.T) {
 	}
 	if prompts != 0 {
 		t.Fatalf("invalid input triggered %d approvals", prompts)
+	}
+}
+
+func TestFilteredSearchUsesProviderDatesAndReturnsOnlyRequestedSites(t *testing.T) {
+	var calls atomic.Int32
+	mockSearch(t, func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if r.URL.Query().Get("df") != "w" {
+			return nil, fmt.Errorf("expected a past-week search, got %v", r.URL.Query())
+		}
+		outside := resultHTML("Unrelated", "https://elsewhere.test/example.org", "") +
+			resultHTML("Similar hostname", "https://notexample.org/", "") +
+			resultHTML("Similar prefix", "https://example.org.elsewhere.test/", "")
+		switch r.URL.Query().Get("q") {
+		case "release site:example.org":
+			return searchResponse(200, outside+resultHTML("Docs", "/l/?uddg=https%3A%2F%2Fdocs.example.org%2Fguide", "")+resultHTML("More", "https://example.org/more", "")), nil
+		case "release site:second.test":
+			return searchResponse(200, resultHTML("Other", "https://second.test/notes", "")), nil
+		default:
+			return nil, fmt.Errorf("unexpected query %v", r.URL.Query())
+		}
+	})
+	result, err := Tools(nil)[0].Execute(t.Context(), map[string]any{
+		"query": "release", "domains": []any{"Example.ORG.", "second.test", "example.org"}, "time_range": "week", "max_results": 2,
+	})
+	want := "1. Docs\n   https://docs.example.org/guide\n2. Other\n   https://second.test/notes"
+	if err != nil || result.Content.Text() != want || calls.Load() != 2 {
+		t.Fatalf("scoped search = %q, %v (%d requests)", result.Content.Text(), err, calls.Load())
+	}
+}
+
+func TestScopedSearchDeduplicatesOverlappingDomains(t *testing.T) {
+	mockSearch(t, func(r *http.Request) (*http.Response, error) {
+		html := resultHTML("Guide", "https://docs.example.org/guide", "")
+		if r.URL.Query().Get("q") == "release site:docs.example.org" {
+			html += resultHTML("Notes", "https://docs.example.org/notes", "")
+		}
+		return searchResponse(200, html), nil
+	})
+	result, err := Tools(nil)[0].Execute(t.Context(), map[string]any{
+		"query": "release", "domains": []string{"example.org", "docs.example.org"}, "max_results": 2,
+	})
+	want := "1. Guide\n   https://docs.example.org/guide\n2. Notes\n   https://docs.example.org/notes"
+	if err != nil || result.Content.Text() != want {
+		t.Fatalf("overlapping sites = %q, %v", result.Content.Text(), err)
+	}
+}
+
+func TestScopedSearchReportsUnavailableDomains(t *testing.T) {
+	mockSearch(t, func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Query().Get("q") {
+		case "release site:busy.test":
+			return searchResponse(http.StatusServiceUnavailable, ""), nil
+		case "release site:works.test":
+			return searchResponse(200, resultHTML("Notes", "https://works.test/notes", "")), nil
+		default:
+			return searchResponse(200, `<div class="no-results"></div>`), nil
+		}
+	})
+	run := Tools(nil)[0].Execute
+	result, err := run(t.Context(), map[string]any{"query": "release", "domains": []string{"busy.test", "works.test"}})
+	if err != nil || !strings.Contains(result.Content.Text(), "https://works.test/notes") || !strings.Contains(result.Content.Text(), "[Search incomplete for busy.test.]") {
+		t.Fatalf("partial search = %q, %v", result.Content.Text(), err)
+	}
+	_, err = run(t.Context(), map[string]any{"query": "release", "domains": []string{"busy.test", "empty.test"}})
+	if err == nil || !strings.Contains(err.Error(), "busy.test") || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("incomplete empty search should report the provider failure, got %v", err)
 	}
 }
 
@@ -285,7 +357,7 @@ func TestSearchLongURLsStayCompleteOrAreOmitted(t *testing.T) {
 				page += resultHTML("Fits", "https://example.com/fits", "")
 			}
 			mockSearch(t, func(*http.Request) (*http.Response, error) { return searchResponse(200, page), nil })
-			result, err := Tools(nil)[0].Execute(t.Context(), map[string]any{"query": "test"})
+			result, err := Tools(nil)[0].Execute(t.Context(), map[string]any{"query": "test", "max_results": 1})
 			if !another {
 				if err == nil {
 					t.Fatal("unusable URL should return an error")

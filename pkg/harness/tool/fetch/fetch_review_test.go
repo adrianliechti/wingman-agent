@@ -38,6 +38,15 @@ func TestFetchValidatesBeforeApproval(t *testing.T) {
 		touched = true
 		return false, nil
 	}})[0]
+	for _, args := range []map[string]any{
+		{"find": ""}, {"find": "one\ntwo"}, {"find": strings.Repeat("x", maxFindRunes+1)},
+		{"offset": -1}, {"limit": 1.5},
+	} {
+		args["url"] = "https://example.test"
+		if _, err := tl.Execute(t.Context(), args); err == nil || touched {
+			t.Fatalf("invalid page view %v: approval=%v, err=%v", args, touched, err)
+		}
+	}
 	_, err := tl.Execute(ctx, map[string]any{"url": "https://example.test"})
 	if !errors.Is(err, context.Canceled) || touched {
 		t.Fatalf("cancelled request prompted: %v, %v", touched, err)

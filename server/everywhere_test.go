@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
@@ -111,10 +112,15 @@ func TestAgentSessionsOfEveryFolderAreListedByFolder(t *testing.T) {
 	if err := os.Mkdir(other, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	replaced := filepath.Join(root, "replaced")
+	if err := os.WriteFile(replaced, []byte("regular file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	agent := &everywhereAgent{protocolAgent: &protocolAgent{}, sessions: []code.SessionInfo{
 		{ID: "here", Title: "In this project", Dir: s.Project.dir},
 		{ID: "there", Title: "In another folder", Dir: other},
 		{ID: "removed", Title: "In a folder that is gone", Dir: filepath.Join(root, "removed")},
+		{ID: "replaced", Title: "In a folder replaced by a file", Dir: replaced},
 		{ID: "nowhere", Title: "Without a folder"},
 	}}
 	b := s.Project.bindBackend("two", agent)
@@ -139,7 +145,7 @@ func TestAgentSessionsOfEveryFolderAreListedByFolder(t *testing.T) {
 	if !ok || there.Resource != canonicalSessionURI("two", "there", other) || there.Project == nil || there.Project.Uri != fileuri.FromPath(other) {
 		t.Fatalf("a session of another folder: %+v", there)
 	}
-	for _, title := range []string{"In a folder that is gone", "Without a folder"} {
+	for _, title := range []string{"In a folder that is gone", "In a folder replaced by a file", "Without a folder"} {
 		if _, ok := items[title]; ok {
 			t.Fatalf("%q is listed", title)
 		}
@@ -156,6 +162,40 @@ func TestAgentSessionsOfEveryFolderAreListedByFolder(t *testing.T) {
 	list()
 	if got := agent.everywhere.Load(); got != 2 {
 		t.Fatalf("after a deletion the agent listed every folder %d times", got)
+	}
+}
+
+func TestSessionListOrdersFractionalSeconds(t *testing.T) {
+	t.Setenv("WINGMAN_HOME", t.TempDir())
+	s, _, _ := newProtocolServer(t)
+	h := everyProject(s)
+	start := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	agent := &everywhereAgent{protocolAgent: &protocolAgent{}, sessions: []code.SessionInfo{
+		{ID: "first", Dir: s.Project.dir, UpdatedAt: start},
+		{ID: "second", Dir: s.Project.dir, UpdatedAt: start.Add(100 * time.Millisecond)},
+		{ID: "third", Dir: s.Project.dir, UpdatedAt: start.Add(120 * time.Millisecond)},
+	}}
+	b := s.Project.bindBackend("two", agent)
+	s.Project.backends[b.id] = &backendEntry{runtime: b}
+	items := reviewHostCatalog(t, h)
+	if len(items) != 3 {
+		t.Fatalf("listed %d sessions, want 3", len(items))
+	}
+	for i, id := range []string{"third", "second", "first"} {
+		if items[i].Resource != s.Project.canonicalURI("two", id) {
+			t.Errorf("item %d modified at %s, want %s", i, items[i].ModifiedAt, id)
+		}
+	}
+}
+
+func TestSessionSummaryIncludesChatActivityWithinTheSameSecond(t *testing.T) {
+	const later = "2026-01-01T12:00:00.120Z"
+	session := &Session{
+		modified: "2026-01-01T12:00:00Z",
+		chats:    []*Chat{{chat: types.ChatState{ModifiedAt: later}}},
+	}
+	if got := session.summary().ModifiedAt; got != later {
+		t.Fatalf("session modification time = %s, want %s", got, later)
 	}
 }
 

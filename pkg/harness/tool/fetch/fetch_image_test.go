@@ -38,6 +38,10 @@ func TestFetchImagesByContent(t *testing.T) {
 			if result.Metadata["url"] != server.URL+"/image" || result.Metadata["width"] != tool.MaxImageDimension {
 				t.Fatalf("metadata = %v", result.Metadata)
 			}
+			_, err = Tools(nil)[0].Execute(t.Context(), map[string]any{"url": server.URL + "/image", "find": "caption"})
+			if err == nil || !strings.Contains(err.Error(), "require a text or document") {
+				t.Fatalf("find in image error = %v", err)
+			}
 		})
 	}
 }

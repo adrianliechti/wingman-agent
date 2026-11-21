@@ -22,18 +22,7 @@ type GooseConfig struct {
 func NewConfig(ctx context.Context, options *Options) (*GooseConfig, error) {
 	options = external.WithDefaults(options)
 
-	defaultModels, err := external.Models(ctx, options, &external.ModelOptions{
-		Kind: external.ModelDefault,
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	fastModels, err := external.Models(ctx, options, &external.ModelOptions{
-		Kind: external.ModelFast,
-	})
-
+	available, err := external.AvailableModels(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -45,17 +34,22 @@ func NewConfig(ctx context.Context, options *Options) (*GooseConfig, error) {
 		ContextLimit: 200000,
 	}
 
-	if len(defaultModels) > 0 {
-		cfg.Model = defaultModels[0]
-
-		if m, ok := model.Find(cfg.Model); ok {
-			cfg.ContextLimit = m.ContextTokens()
+	models := external.LauncherModels(available)
+	if len(models) == 0 {
+		return cfg, nil
+	}
+	main := models[0]
+	for _, m := range models {
+		if m.Class == model.ClassSmall {
+			if cfg.FastModel == "" {
+				cfg.FastModel = m.ID
+			}
+		} else if main.Class == model.ClassSmall {
+			main = m
 		}
 	}
-
-	if len(fastModels) > 0 {
-		cfg.FastModel = fastModels[0]
-	}
+	cfg.Model = main.ID
+	cfg.ContextLimit = main.ContextTokens()
 
 	return cfg, nil
 }
