@@ -32,6 +32,19 @@ type Tool struct {
 	Effect      func(args map[string]any) Effect
 	Telemetry   TelemetryMetadata
 
+	// OutputSchema is the JSON Schema of the tool's result, for tools whose
+	// text output is JSON of a declared shape.
+	OutputSchema map[string]any
+
+	// Composite marks a tool that acts only through the Toolbox. Mode
+	// restrictions apply to the calls it makes, not to the tool itself.
+	Composite bool
+
+	// Interactive marks a tool whose call is answered by a person or a
+	// connected client watching the conversation. A Toolbox does not offer
+	// it: they never see a nested call.
+	Interactive bool
+
 	// Timeout replaces the harness default tool timeout for this tool.
 	// An explicitly configured Config.ToolTimeout takes precedence; negative
 	// values disable the deadline.

@@ -88,6 +88,10 @@ var presentationSpecs = indexPresentationSpecs([]presentationSpec{
 		title: "Run command", kind: "execute", primary: []string{"command", "cmd"},
 	},
 	{
+		names: []string{"code", "Run script"},
+		title: "Run script", kind: "execute", primary: []string{"code"},
+	},
+	{
 		names: []string{"exec_session", "Continue command"},
 		title: "Continue command", kind: "execute",
 		omit: []string{"session_id", "input"}, derivedHint: "extract",

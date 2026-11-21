@@ -165,6 +165,11 @@ wingman exec "Generate release notes" > release-notes.md
 questions. Piped input becomes context for the prompt. The final response goes
 to stdout; add `--debug` for progress and tool details on stderr.
 
+`exec` connects your MCP servers before it starts. A server that cannot be
+reached is reported on stderr and to the model, and the run goes on without
+it. Servers from a project's `mcp.json` connect once you have opened the
+project in `wingman` and approved them.
+
 ```bash
 wingman exec --json "Extract project metadata"
 wingman exec --schema ./project.schema.json "Extract project metadata"
@@ -255,6 +260,9 @@ wingman mcp remove remote
 Add `--scope project` to save a server in the project's `mcp.json`. Personal
 servers are stored in `~/.wingman/mcp.json`. Servers that require OAuth open a
 browser for sign-in.
+
+The model can write a short Python script that calls its tools, MCP tools
+included, and get back only the result. See [code mode](docs/code-mode.md).
 
 See [configuration examples](examples/README.md) for ready-to-copy skills,
 plugins, custom agents, and MCP settings. Wingman stores its settings and sessions

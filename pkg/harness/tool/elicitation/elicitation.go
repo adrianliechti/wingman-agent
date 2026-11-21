@@ -33,6 +33,7 @@ func Tools(elicit *tool.Elicitation) []tool.Tool {
 		Name:        "elicit",
 		Description: description,
 		Effect:      tool.StaticEffect(tool.EffectReadOnly),
+		Interactive: true,
 
 		Parameters: map[string]any{
 			"type": "object",

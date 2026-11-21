@@ -166,28 +166,35 @@ func (m *Manager) Session(name string) *mcp.ClientSession {
 	return m.sessions[name]
 }
 
+// connectTimeout bounds one server's start and handshake.
+const connectTimeout = 30 * time.Second
+
 func (m *Manager) connect(ctx context.Context, name string, server ServerConfig) error {
 	client := m.newClient(name, server)
 
 	handler, err := m.oauthHandler(name, server)
 
 	if err != nil {
-		return fmt.Errorf("MCP server %s: %w", name, err)
+		return Redact(fmt.Errorf("MCP server %s: %w", name, err))
 	}
 
 	transport, err := createTransport(server, m.Dir, handler)
 
 	if err != nil {
-		return fmt.Errorf("MCP server %s: %w", name, err)
+		return Redact(fmt.Errorf("MCP server %s: %w", name, err))
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 
 	session, err := client.Connect(ctx, transport, nil)
 
 	if err != nil {
-		return fmt.Errorf("%s: %w", name, err)
+		if errors.Is(err, context.DeadlineExceeded) && parent.Err() == nil {
+			return Redact(fmt.Errorf("%s: no answer within %s: %w", name, connectTimeout, err))
+		}
+		return Redact(fmt.Errorf("%s: %w", name, err))
 	}
 
 	m.addSession(ctx, name, session, server)

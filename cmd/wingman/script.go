@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
@@ -33,7 +34,12 @@ type scriptOptions struct {
 	Debug     bool
 	Ephemeral bool
 	Resume    bool
+	// Context is a note for the model that is not part of the prompt.
+	Context string
 }
+
+// stdinNoticeDelay is how long exec reads stdin before saying that it does.
+const stdinNoticeDelay = 2 * time.Second
 
 func defaultScriptOptions() scriptOptions {
 	return scriptOptions{Agent: code.BuiltinAgentName}
@@ -125,7 +131,14 @@ func runScript(ctx context.Context, opts scriptOptions) (err error) {
 	if info, statErr := os.Stdin.Stat(); statErr == nil {
 		readStdin = info.Mode()&os.ModeCharDevice == 0
 	}
+	// A pipe a parent process left open never ends. Say what the wait is for.
+	waiting := time.AfterFunc(stdinNoticeDelay, func() {
+		if readStdin {
+			fmt.Fprintln(os.Stderr, "wingman exec: reading stdin until it closes; redirect it from /dev/null if nothing is piped in")
+		}
+	})
 	prompt, err := scriptPrompt(opts.Prompt, os.Stdin, readStdin, opts.Resume)
+	waiting.Stop()
 	if err != nil {
 		return err
 	}
@@ -151,7 +164,41 @@ func runScript(ctx context.Context, opts scriptOptions) (err error) {
 	stopToolUpdate := startManagedToolUpdate(ctx, host.workspace)
 	defer stopToolUpdate()
 
+	if host.builtin {
+		if opts.Context, err = connectMCP(ctx, host.workspace, os.Stderr); err != nil {
+			return err
+		}
+	}
 	return executeScript(ctx, host.agent, opts, prompt, os.Stdout, os.Stderr)
+}
+
+// connectMCP connects the workspace's MCP servers before the run: a script
+// has no startup phase in which they would connect, and one that appears
+// later is too late for it. A server that fails does not stop the run. The
+// person is told on errOut and the model through the returned note, so
+// neither counts on its tools. The error is the context's.
+func connectMCP(ctx context.Context, ws *code.Workspace, errOut io.Writer) (string, error) {
+	if ws == nil || ws.MCP == nil {
+		return "", nil
+	}
+	err := ws.InitMCP(ctx)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", ctxErr
+	}
+	if err == nil {
+		return "", nil
+	}
+	fmt.Fprintln(errOut, "warning: some MCP servers are unavailable:")
+	for _, line := range strings.Split(err.Error(), "\n") {
+		fmt.Fprintln(errOut, "  "+line)
+	}
+	approvals := len(ws.MCP.TrustRequired) > 0
+	if approvals {
+		fmt.Fprintln(errOut, "  A project's MCP servers are approved by opening the project in wingman once.")
+		// The agent retries these each turn and tells the model itself.
+		return "", nil
+	}
+	return "Some MCP servers are unavailable: " + err.Error(), nil
 }
 
 func scriptPrompt(prompt string, stdin io.Reader, readStdin, allowEmpty bool) (string, error) {
@@ -262,6 +309,10 @@ func executeScript(ctx context.Context, a code.Agent, opts scriptOptions, prompt
 			}
 			input = append(input, harness.Content{Text: block, Hidden: true})
 		}
+	}
+
+	if opts.Context != "" {
+		input = append(input, harness.Content{Text: opts.Context, Hidden: true})
 	}
 
 	reporter := newScriptReporter(opts.Debug, errOut)
