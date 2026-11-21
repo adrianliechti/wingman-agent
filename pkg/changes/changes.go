@@ -178,21 +178,13 @@ func (m *Manager) DiffsLayerIfChanged(ctx context.Context, layer DiffLayer, prev
 // The manager lock stays held while the status, HEAD tree, and file contents
 // are read so callers never mix snapshots.
 func (m *Manager) DiffsLayer(ctx context.Context, layer DiffLayer) ([]FileDiff, error) {
-	if err := m.ready(); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	if layer != DiffCombined && layer != DiffStaged && layer != DiffUnstaged {
 		return nil, errors.New("invalid diff layer")
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.closed {
-		return nil, ErrClosed
+	if err := m.lock(ctx); err != nil {
+		return nil, err
 	}
+	defer m.mu.Unlock()
 
 	entries, err := m.status()
 	if err != nil {
@@ -227,21 +219,13 @@ func (m *Manager) diffsLocked(ctx context.Context, entries []statusEntry, layer 
 }
 
 func (m *Manager) Diff(ctx context.Context, path string, layer DiffLayer) (FileDiff, error) {
-	if err := m.ready(); err != nil {
-		return FileDiff{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		return FileDiff{}, err
-	}
 	if layer != DiffCombined && layer != DiffStaged && layer != DiffUnstaged {
 		return FileDiff{}, errors.New("invalid diff layer")
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.closed {
-		return FileDiff{}, ErrClosed
+	if err := m.lock(ctx); err != nil {
+		return FileDiff{}, err
 	}
+	defer m.mu.Unlock()
 
 	entries, err := m.status()
 	if err != nil {
@@ -267,49 +251,31 @@ func (m *Manager) Diff(ctx context.Context, path string, layer DiffLayer) (FileD
 }
 
 func (m *Manager) Revert(ctx context.Context, path string) error {
-	if err := m.ready(); err != nil {
+	if err := m.lock(ctx); err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.closed {
-		return ErrClosed
-	}
 
 	entries, err := m.status()
 	if err != nil {
 		return err
 	}
-	var match *statusEntry
-	for i := range entries {
-		if entries[i].path == path {
-			match = &entries[i]
-			break
+	for _, entry := range entries {
+		if entry.path == path {
+			if entry.worktree == git.Unmodified {
+				return errors.New("path has no unstaged change")
+			}
+			return m.restoreWorktreeFromIndex(path)
 		}
 	}
-	if match == nil {
-		return errors.New("no change for path")
-	}
-	if match.worktree == git.Unmodified {
-		return errors.New("path has no unstaged change")
-	}
-	return m.restoreWorktreeFromIndex(match.path)
+	return errors.New("no change for path")
 }
 
 func (m *Manager) Fingerprint(ctx context.Context) uint64 {
-	if err := m.ready(); err != nil || ctx.Err() != nil {
+	if err := m.lock(ctx); err != nil {
 		return 0
 	}
-
-	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.closed {
-		return 0
-	}
 
 	entries, err := m.status()
 	if err != nil {
@@ -424,9 +390,6 @@ func (m *Manager) restoreWorktreeFromIndex(path string) error {
 	if err != nil {
 		return err
 	}
-	if !exists {
-		return m.remove(path)
-	}
 	if mode == filemode.Submodule {
 		return errors.New("discarding submodule changes is not supported")
 	}
@@ -436,8 +399,12 @@ func (m *Manager) restoreWorktreeFromIndex(path string) error {
 		return err
 	}
 	defer root.Close()
-	if err := root.RemoveAll(clean); err != nil {
+	// A tracked file may now be a directory containing other changes.
+	if err := root.Remove(clean); err != nil && !isMissingPathError(err) {
 		return fmt.Errorf("remove changed file: %w", err)
+	}
+	if !exists {
+		return nil
 	}
 	if err := root.MkdirAll(filepath.Dir(clean), 0o755); err != nil {
 		return fmt.Errorf("create parent directory: %w", err)
@@ -733,15 +700,6 @@ func repositoryRoot(start string) (string, error) {
 
 func (m *Manager) objectPath(path string) string {
 	return m.prefix + filepath.ToSlash(path)
-}
-
-func (m *Manager) remove(path string) error {
-	root, clean, err := m.openWorktreePath(path)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	return root.RemoveAll(clean)
 }
 
 type encodedPatch struct {

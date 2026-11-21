@@ -13,6 +13,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/model"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
 
@@ -172,17 +173,10 @@ func (s *sessionState) prepareIsolatedReview(ctx context.Context, rawInput []har
 	subCfg.FilterTools = nil
 
 	if opt, ok := s.parent.roleModel(s, "complex"); ok && opt.ID != "" {
-		modelID := opt.ID
-		subCfg.Model = func() string { return modelID }
-		if len(opt.Efforts) > 0 && subCfg.Effort != nil {
-			parentEffort := subCfg.Effort
-			efforts := slices.Clone(opt.Efforts)
+		subCfg.Model = func() string { return opt.ID }
+		if parentEffort := subCfg.Effort; parentEffort != nil && len(opt.Efforts) > 0 {
 			subCfg.Effort = func() string {
-				e := parentEffort()
-				if e == "" || slices.Contains(efforts, e) {
-					return e
-				}
-				return efforts[len(efforts)-1]
+				return model.ClampEffort(parentEffort(), opt.Efforts)
 			}
 		}
 	}

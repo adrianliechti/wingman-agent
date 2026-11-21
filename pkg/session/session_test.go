@@ -148,6 +148,7 @@ func TestLegacyMigration(t *testing.T) {
 
 	legacy := Session{
 		ID:        "old",
+		Title:     "Saved title",
 		CreatedAt: time.Now().Add(-time.Hour),
 		UpdatedAt: time.Now().Add(-time.Hour),
 		State: harness.State{
@@ -184,6 +185,9 @@ func TestLegacyMigration(t *testing.T) {
 	if len(migrated.State.Messages) != 2 {
 		t.Errorf("messages = %d", len(migrated.State.Messages))
 	}
+	if migrated.Title != legacy.Title {
+		t.Errorf("migrated title = %q, want %q", migrated.Title, legacy.Title)
+	}
 	if migrated.CreatedAt.Sub(legacy.CreatedAt).Abs() > time.Second {
 		t.Errorf("created_at not preserved: %v != %v", migrated.CreatedAt, legacy.CreatedAt)
 	}
@@ -201,7 +205,7 @@ func TestLegacyJSONLMigrationIsolatedAndOneWay(t *testing.T) {
 	message := userMsg("legacy jsonl")
 	usage := harness.Usage{InputTokens: 7}
 	for _, r := range []legacyRecord{
-		{Type: "meta", ID: "old-lines", CreatedAt: &created},
+		{Type: "meta", ID: "old-lines", Title: "Saved JSONL title", CreatedAt: &created},
 		{Type: "message", Message: &message},
 		{Type: "state", Usage: &usage},
 	} {
@@ -219,6 +223,9 @@ func TestLegacyJSONLMigrationIsolatedAndOneWay(t *testing.T) {
 	}
 	if len(loaded.State.Messages) != 1 || loaded.State.Usage.InputTokens != 7 {
 		t.Fatalf("migrated state = %#v", loaded.State)
+	}
+	if loaded.Title != "Saved JSONL title" {
+		t.Errorf("migrated title = %q", loaded.Title)
 	}
 	if loaded.CreatedAt.Sub(created).Abs() > time.Second {
 		t.Fatalf("created_at = %v, want %v", loaded.CreatedAt, created)
@@ -239,6 +246,69 @@ func TestLegacyJSONLMigrationIsolatedAndOneWay(t *testing.T) {
 		if r.Type != "event" || r.Event == nil {
 			t.Fatalf("legacy record survived migration: %#v", r)
 		}
+	}
+}
+
+func TestNewerJournalIsLeftIntact(t *testing.T) {
+	dir := t.TempDir()
+	path := sessionPath(dir, "future")
+	header := `{"type":"meta","version":` + strconv.Itoa(journalVersion+1) + `,"id":"future","created_at":"2025-09-16T12:00:00Z","title":"Saved title"}` + "\n"
+	if err := os.WriteFile(path, []byte(header), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if sessions, err := List(dir); err != nil || len(sessions) != 0 {
+		t.Errorf("listing unsupported journal = %v, %v", sessions, err)
+	}
+	if _, err := Load(dir, "future"); err == nil {
+		t.Error("loaded a newer journal")
+	}
+	if _, err := OpenJournal(dir, "future"); err == nil {
+		t.Error("opened a newer journal for writing")
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != header {
+		t.Errorf("journal after opening = %s, %v", data, err)
+	}
+}
+
+func TestConcurrentLegacySessionLoads(t *testing.T) {
+	dir := t.TempDir()
+	data, err := json.Marshal(Session{ID: "old", State: harness.State{Messages: []harness.Message{userMsg("first prompt")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "old.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	const readers = 8
+	start := make(chan struct{})
+	done := make(chan error, readers)
+	for range readers {
+		go func() {
+			<-start
+			_, err := Load(dir, "old")
+			done <- err
+		}()
+	}
+	close(start)
+	for range readers {
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func TestSessionTitleUsesVisibleTextAndWholeCharacters(t *testing.T) {
+	dir := t.TempDir()
+	message := harness.Message{Role: harness.RoleUser, Content: []harness.Content{
+		{Text: "Background context", Hidden: true}, {Text: strings.Repeat("界", 30)},
+	}}
+	if err := Save(dir, "chat", harness.State{Messages: []harness.Message{message}}); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := List(dir)
+	if err != nil || len(sessions) != 1 || sessions[0].Title != strings.Repeat("界", 25)+"..." {
+		t.Fatalf("listed sessions = %+v, %v", sessions, err)
 	}
 }
 
@@ -451,6 +521,18 @@ func TestForkTitleAndErrors(t *testing.T) {
 
 	if err := Fork(dir, "s1", "s2", ""); err == nil {
 		t.Fatal("fork overwrote an existing session")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "legacy.json"), []byte(`{"id":"legacy","title":"Original title"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Fork(dir, "s1", "legacy", ""); err == nil {
+		t.Fatal("fork replaced a legacy session")
+	}
+	if err := os.Mkdir(filepath.Join(dir, "pending.data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Fork(dir, "s1", "pending", ""); err == nil {
+		t.Fatal("fork reused another session's sidecars")
 	}
 	if err := Fork(dir, "missing", "s3", ""); err == nil {
 		t.Fatal("fork of a missing session succeeded")

@@ -501,6 +501,35 @@ func TestWindowReplacesAnUnusedHostOfAnotherBuild(t *testing.T) {
 	}
 }
 
+func TestWindowReplacesAnOldHostThatDropsTheStopReply(t *testing.T) {
+	testenv.UserHome(t)
+	testenv.WingmanHome(t)
+	testGateway(t)
+	old := httptest.NewUnstartedServer(nil)
+	old.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/__wingman/host":
+			writeJSON(w, map[string]string{"version": "older-build"})
+		case "/__wingman/stop":
+			_ = old.Listener.Close()
+			panic(http.ErrAbortHandler)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	old.Start()
+	t.Cleanup(old.Close)
+	if err := writeHostInfo(hostInfo{URL: old.URL, Token: "old-host"}); err != nil {
+		t.Fatal(err)
+	}
+	hosts := newTestHosts(t, hostsThatStay)
+	app := newTestApp(hosts)
+	openFolder(t, app, t.TempDir())
+	if hosts.started.Load() != 1 || app.host.Load().info.URL == old.URL {
+		t.Fatal("the folder did not open on a replacement host")
+	}
+}
+
 // The app runs its host as a process of its own, which outlives the window;
 // when the host dies, the window starts another.
 func TestWindowStartsTheHostInTheBackground(t *testing.T) {

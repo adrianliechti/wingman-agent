@@ -24,28 +24,32 @@ func (a *Agent) Models(sessionID string) ([]model.Model, string) {
 		if index >= 0 {
 			available[index].ID = current
 		} else {
-			available = append(available, model.Model{ID: current, Name: model.Name(current)})
+			m, ok := model.Find(current)
+			if !ok {
+				m = model.Model{ID: current, Name: current}
+			}
+			available = append(available, m)
 		}
 	}
-	for i := range available {
-		available[i].Efforts = slices.Clone(effortValuesFor(available[i].ID)[1:])
+	for i, m := range available {
+		available[i].Efforts = slices.Clone(supportedEfforts(m))
 	}
 	return available, current
 }
 
 func (a *Agent) selectedModelLocked(s *sessionState, available []model.Model) string {
-	current := a.modelID
-	if s != nil && s.modelID != "" {
-		current = s.modelID
+	if s != nil {
+		if id := a.availableModel(s.modelID, available); id != "" {
+			return id
+		}
 	}
-	if current == "" {
-		current = classModel(available, model.ClassMedium, "")
+	if id := a.availableModel(a.modelID, available); id != "" || len(available) == 0 {
+		return id
 	}
-	current = a.availableModel(current, available)
-	if current == "" && len(available) > 0 {
-		current = available[0].ID
+	if id := classModel(available, model.ClassMedium, ""); id != "" {
+		return id
 	}
-	return current
+	return available[0].ID
 }
 
 // Model roles are explicit delegation choices, independent of collaboration
@@ -174,12 +178,11 @@ func (a *Agent) FetchModels(ctx context.Context) error {
 	return nil
 }
 
-var effortValues = append([]string{"auto"}, model.EffortLevels()...)
+var effortValues = model.EffortLevels()
 
-func effortValuesFor(id string) []string {
-	m, _ := model.Find(id)
-	if supported := m.Efforts; len(supported) > 0 {
-		return append([]string{"auto"}, supported...)
+func supportedEfforts(m model.Model) []string {
+	if len(m.Efforts) > 0 {
+		return m.Efforts
 	}
 	return effortValues
 }
@@ -197,13 +200,13 @@ func (a *Agent) Effort(sessionID string) (string, []string) {
 	currentModel, _ := a.roleModelLocked(s, "")
 	current := a.requestedEffortLocked(s)
 	a.modelMu.Unlock()
+	m, _ := model.Find(currentModel)
 	if current == "" {
 		current = "auto"
 	} else {
-		m, _ := model.Find(currentModel)
 		current = model.ClampEffort(current, m.Efforts)
 	}
-	return current, slices.Clone(effortValuesFor(currentModel))
+	return current, append([]string{"auto"}, supportedEfforts(m)...)
 }
 
 func (a *Agent) effortFor(s *sessionState) string {

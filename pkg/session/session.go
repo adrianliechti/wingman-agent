@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
 const journalVersion = 2
@@ -231,15 +232,15 @@ func Truncate(sessionsDir, id, inputID string) (harness.State, error) {
 	if err := validateSessionID(id); err != nil {
 		return harness.State{}, err
 	}
-	if err := ensureCurrentFormat(sessionsDir, id); err != nil {
-		return harness.State{}, err
-	}
 	path := sessionPath(sessionsDir, id)
 	coord := journalCoord(path)
 	coord.mu.Lock()
 	defer coord.mu.Unlock()
 	if coord.deleted {
 		return harness.State{}, fmt.Errorf("session journal %s was deleted", id)
+	}
+	if err := ensureCurrentFormat(sessionsDir, id); err != nil {
+		return harness.State{}, err
 	}
 	loaded, err := loadCurrent(path, id, false)
 	if inputID == "" && errors.Is(err, os.ErrNotExist) {
@@ -307,27 +308,14 @@ func cutThrough(events []harness.RuntimeEvent, inputID string) ([]harness.Runtim
 }
 
 func fork(sessionsDir, id, newID, title, through string) error {
-	if sessionsDir == "" {
-		return fmt.Errorf("no sessions directory available")
-	}
-	if err := validateSessionID(id); err != nil {
-		return err
-	}
 	if err := validateSessionID(newID); err != nil {
 		return err
 	}
-	if err := ensureCurrentFormat(sessionsDir, id); err != nil {
-		return err
-	}
-	source := sessionPath(sessionsDir, id)
-	sourceCoord := journalCoord(source)
-	sourceCoord.mu.Lock()
-	loaded, err := loadCurrent(source, id, false)
-	sourceCoord.mu.Unlock()
+	source, err := Load(sessionsDir, id)
 	if err != nil {
 		return err
 	}
-	events := loaded.session.State.Events
+	events := source.State.Events
 	if through != "" {
 		var ok bool
 		if events, ok = cutThrough(events, through); !ok {
@@ -338,17 +326,20 @@ func fork(sessionsDir, id, newID, title, through string) error {
 		return fmt.Errorf("session %s has no history to fork", id)
 	}
 	if title == "" {
-		title = "Fork of " + cmp.Or(loaded.session.Title, "untitled session")
+		title = "Fork of " + cmp.Or(source.Title, "untitled session")
 	}
 
 	path := sessionPath(sessionsDir, newID)
 	coord := journalCoord(path)
 	coord.mu.Lock()
 	defer coord.mu.Unlock()
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("session %s already exists", newID)
-	} else if !os.IsNotExist(err) {
+	if coord.deleted {
+		return fmt.Errorf("session journal %s was deleted", newID)
+	}
+	if exists, err := Exists(sessionsDir, newID); err != nil {
 		return err
+	} else if exists {
+		return fmt.Errorf("session %s already exists", newID)
 	}
 
 	created := time.Now().UTC()
@@ -393,13 +384,22 @@ func Load(sessionsDir, id string) (Session, error) {
 	if sessionsDir == "" {
 		return Session{}, fmt.Errorf("no sessions directory available")
 	}
-	if err := validateSessionID(id); err != nil {
+	path := sessionPath(sessionsDir, id)
+	if exists, err := Exists(sessionsDir, id); err != nil {
 		return Session{}, err
+	} else if !exists {
+		return Session{}, &os.PathError{Op: "open", Path: path, Err: os.ErrNotExist}
+	}
+	coord := journalCoord(path)
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	if coord.deleted {
+		return Session{}, &os.PathError{Op: "open", Path: path, Err: os.ErrNotExist}
 	}
 	if err := ensureCurrentFormat(sessionsDir, id); err != nil {
 		return Session{}, err
 	}
-	loaded, err := loadCurrent(sessionPath(sessionsDir, id), id, false)
+	loaded, err := loadCurrent(path, id, false)
 	if err != nil {
 		return Session{}, err
 	}
@@ -429,8 +429,13 @@ func List(sessionsDir string) ([]Session, error) {
 			continue
 		}
 		path := filepath.Join(sessionsDir, entry.Name())
+		seen[id] = true
+		current, err := isCurrentJournal(path)
+		if err != nil {
+			continue
+		}
 		var s Session
-		if current, err := isCurrentJournal(path); err == nil && current {
+		if current {
 			loaded, err := loadCurrent(path, id, true)
 			if err != nil {
 				continue
@@ -444,7 +449,6 @@ func List(sessionsDir string) ([]Session, error) {
 			s = legacy
 			s.State = harness.State{}
 		}
-		seen[id] = true
 		sessions = append(sessions, s)
 	}
 	for _, entry := range entries {
@@ -475,7 +479,8 @@ func Exists(sessionsDir, id string) (bool, error) {
 	if err := validateSessionID(id); err != nil {
 		return false, err
 	}
-	for _, suffix := range []string{".jsonl", ".json", ".data"} {
+	// Migration publishes the journal before removing the old JSON file.
+	for _, suffix := range []string{".json", ".jsonl", ".data"} {
 		_, err := os.Lstat(filepath.Join(sessionsDir, id+suffix))
 		if err == nil {
 			return true, nil
@@ -724,7 +729,17 @@ func isCurrentJournal(path string) (bool, error) {
 		}
 		return false, err
 	}
-	return header.Type == "meta" && header.Version == journalVersion, nil
+	if header.Type != "meta" {
+		return false, nil
+	}
+	switch header.Version {
+	case 0, 1:
+		return false, nil
+	case journalVersion:
+		return true, nil
+	default:
+		return false, fmt.Errorf("unsupported session journal version %d", header.Version)
+	}
 }
 
 func messageTitle(m harness.Message) string {
@@ -732,7 +747,7 @@ func messageTitle(m harness.Message) string {
 		return ""
 	}
 	for _, c := range m.Content {
-		if c.Text == "" {
+		if c.Hidden || c.Text == "" {
 			continue
 		}
 		title := c.Text
@@ -751,7 +766,7 @@ func messageTitle(m harness.Message) string {
 		}
 		title = strings.TrimSpace(title)
 		if len(title) > 80 {
-			title = title[:77] + "..."
+			title = text.HeadBytes(title, 77) + "..."
 		}
 		if title != "" {
 			return title

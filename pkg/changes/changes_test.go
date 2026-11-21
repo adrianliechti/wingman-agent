@@ -210,6 +210,27 @@ func TestNativeRepositoryDiffsLayerReturnsConsistentIndexAndWorktreeSnapshots(t 
 	}
 }
 
+func TestRevertPreservesFilesInReplacementDirectory(t *testing.T) {
+	dir := t.TempDir()
+	repo := initRepository(t, dir)
+	writeFile(t, dir, "entry", "tracked\n")
+	stage(t, repo, "entry")
+	commit(t, repo, "initial")
+	if err := os.Remove(filepath.Join(dir, "entry")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "entry/notes.txt", "keep\n")
+
+	m := New(dir)
+	defer m.Close()
+	if err := m.Revert(t.Context(), "entry"); err == nil {
+		t.Error("discarding the tracked file succeeded over a nonempty directory")
+	}
+	if got := readFile(t, dir, "entry/notes.txt"); got != "keep\n" {
+		t.Errorf("notes after discard = %q", got)
+	}
+}
+
 func TestNativeRepositoryRevertRejectsStagedOnlyChange(t *testing.T) {
 	dir := t.TempDir()
 	repo := initRepository(t, dir)

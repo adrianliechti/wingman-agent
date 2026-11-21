@@ -115,12 +115,20 @@ func (a *Chat) summary() types.ChatSummary {
 	return types.ChatSummary{Resource: a.chat.Resource, Title: a.chat.Title, Status: a.chat.Status, ModifiedAt: a.chat.ModifiedAt, Changes: a.chat.Changes, Origin: a.chat.Origin}
 }
 
+func parseSessionTime(stamp string) time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, stamp)
+	return t
+}
+
 func (a *Session) summary() types.SessionSummary {
 	summary := types.SessionSummary{Resource: a.resource, Provider: a.state.Provider, Title: a.state.Title, Status: a.state.Status, Activity: a.state.Activity, CreatedAt: a.created, ModifiedAt: a.modified, Project: a.state.Project, WorkingDirectories: a.state.WorkingDirectories, DefaultChat: a.state.DefaultChat, Chats: []types.SessionChatSummary{}}
+	modified := parseSessionTime(a.modified)
 	for i, ch := range a.chats {
 		status := ch.chat.Status
 		summary.Chats = append(summary.Chats, types.SessionChatSummary{Resource: ch.chat.Resource, Title: ch.chat.Title, Status: &status, Changes: ch.chat.Changes})
-		summary.ModifiedAt = max(summary.ModifiedAt, ch.chat.ModifiedAt)
+		if stamp := parseSessionTime(ch.chat.ModifiedAt); stamp.After(modified) {
+			modified, summary.ModifiedAt = stamp, ch.chat.ModifiedAt
+		}
 		// The session's footprint is its default chat's; a fork's copied history would count twice.
 		if i == 0 {
 			summary.Changes = ch.chat.Changes
@@ -171,7 +179,7 @@ func (a *Session) sessionAction(action types.StateAction) {
 // files it changed. Caller holds host.mu.
 func (a *Session) keep(summary types.SessionSummary) {
 	alias, ok := a.project.host.aliases[a.resource]
-	modified, _ := time.Parse(time.RFC3339Nano, summary.ModifiedAt)
+	modified := parseSessionTime(summary.ModifiedAt)
 	archived := a.state.Status & types.SessionStatusIsArchived
 	unread := !a.state.Status.Has(types.SessionStatusIsRead)
 	if !ok {
@@ -181,7 +189,7 @@ func (a *Session) keep(summary types.SessionSummary) {
 		if !main.projected || a.resource != a.project.canonicalURI(a.state.Provider, main.controller.ref.SessionID) {
 			return
 		}
-		created, _ := time.Parse(time.RFC3339Nano, a.created)
+		created := parseSessionTime(a.created)
 		alias = sessionAlias{Resource: a.resource, Project: a.project.dir, Backend: a.state.Provider, Session: main.controller.ref.SessionID, Created: created}
 		if alias.Backend == code.BuiltinAgentName {
 			alias.StorageRoot = a.project.storageRoot

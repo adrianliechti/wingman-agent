@@ -180,6 +180,16 @@ func handle(m message) {
 		if !open {
 			text = "<closed>"
 		}
+		if flag("hold-hover") {
+			_ = os.WriteFile(filepath.Join(control, "hover-started"), nil, 0o644)
+			go func() {
+				for !flag("release-hover") {
+					time.Sleep(5 * time.Millisecond)
+				}
+				reply(map[string]any{"contents": map[string]any{"kind": "plaintext", "value": "text:" + text}})
+			}()
+			return
+		}
 		if strings.Contains(text, "SLOW") {
 			ch := make(chan struct{})
 			stateMu.Lock()
@@ -487,6 +497,40 @@ func TestReviewLSPRenameUsesTheRequestingConnectionsBuffer(t *testing.T) {
 	// The fake server's edit carries the text it computed the rename for.
 	if computed := change.Edits[0].NewText; !strings.Contains(computed, "fromB") {
 		t.Fatalf("an edit labeled with tab B's version 7 was computed for %q (tab A's buffer)", computed)
+	}
+}
+
+func TestLSPHoverRejectsChangesDuringRequest(t *testing.T) {
+	for _, action := range []string{"edit", "switch tab", "close"} {
+		t.Run(action, func(t *testing.T) {
+			control := reviewLSPInstallFake(t)
+			app, root := newLSPTestApp(t, map[string]string{"go.mod": reviewLSPGoMod, "main.go": "package main\n"})
+			a := reviewLSPDial(t, app, root, nil)
+			a.open("main.go", "package main // first\n", 1)
+			a.barrier(0)
+			reviewLSPFlag(t, control, "hold-hover")
+			a.request(1, "textDocument/hover", map[string]any{"textDocument": map[string]any{"uri": a.uri("main.go")}})
+			waitProtocol(t, func() bool {
+				_, err := os.Stat(filepath.Join(control, "hover-started"))
+				return err == nil
+			})
+			switch action {
+			case "edit":
+				a.change("main.go", "package main // amended\n", 2)
+				a.barrier(2)
+			case "switch tab":
+				b := reviewLSPDial(t, app, root, nil)
+				b.open("main.go", "package main // second tab\n", 1)
+				b.barrier(2)
+			case "close":
+				a.closeDocument("main.go")
+				a.barrier(2)
+			}
+			reviewLSPFlag(t, control, "release-hover")
+			if response, ok := a.response(1, 10*time.Second); !ok || reviewLSPErrorCode(response) != float64(-32801) {
+				t.Fatalf("hover after %s = %v, want ContentModified", action, response)
+			}
+		})
 	}
 }
 

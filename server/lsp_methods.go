@@ -46,19 +46,11 @@ type lspQuery struct {
 	line    int
 	column  int
 	buffers map[string]lspBuffer
-	// unchanged reports whether the language server still has this
-	// connection's buffer, so edits computed for another editor's are refused.
+	// unchanged reports whether the request's buffer is still current.
 	unchanged func() bool
 }
 
-var errLSPContentModified = &ahp.Error{Code: -32801, Message: "another editor changed the document"}
-
-func (q lspQuery) textEdits(edits []lsp.TextEdit, err error) ([]lsp.TextEdit, error) {
-	if err == nil && q.unchanged != nil && !q.unchanged() {
-		return nil, errLSPContentModified
-	}
-	return edits, err
-}
+var errLSPContentModified = &ahp.Error{Code: -32801, Message: "document changed during the request"}
 
 type lspMethod struct {
 	handle func(*lspConnection, context.Context, lspQuery) (any, error)
@@ -141,9 +133,9 @@ func (c *lspConnection) request(ctx context.Context, req ahp.Request, buffers ma
 	if method.empty != nil && !c.server.Project.workspace.HasLSPFor(q.path) {
 		return method.empty(q), nil
 	}
-	if doc, ok := buffers[q.uri]; ok {
+	if doc, ok := buffers[q.uri]; ok && req.Method != "wingman/documentCapabilities" {
 		q.content = &doc.text
-		if q.unchanged, err = c.claimDocument(ctx, q.path); err != nil {
+		if q.unchanged, err = c.claimDocument(ctx, q.uri, doc); err != nil {
 			return nil, err
 		}
 	}
@@ -151,7 +143,13 @@ func (c *lspConnection) request(ctx context.Context, req ahp.Request, buffers ma
 	if q.line < 0 || q.column < 0 {
 		return nil, ahp.InvalidParams("negative document position")
 	}
-	return method.handle(c, ctx, q)
+	result, err := method.handle(c, ctx, q)
+	// Commands check before applying each edit. A successful command may
+	// itself have changed the document and must keep its success response.
+	if err == nil && req.Method != "workspace/executeCommand" && q.unchanged != nil && !q.unchanged() {
+		return nil, errLSPContentModified
+	}
+	return result, err
 }
 
 // Resolve data is opaque to clients. It wraps rather than overwrites the
@@ -453,6 +451,9 @@ func (c *lspConnection) executeCommand(ctx context.Context, q lspQuery) (any, er
 	apply := func(requested lsp.CommandWorkspaceEdit) bool {
 		timer.Stop()
 		defer timer.Reset(2 * time.Minute)
+		if q.unchanged != nil && !q.unchanged() {
+			return false
+		}
 		edit, err := c.lspEdit(&requested.Edit, q)
 		if err != nil {
 			return false
@@ -465,15 +466,15 @@ func (c *lspConnection) executeCommand(ctx context.Context, q lspQuery) (any, er
 }
 
 func (c *lspConnection) formatting(ctx context.Context, q lspQuery) (any, error) {
-	return q.textEdits(c.server.Project.workspace.Formatting(ctx, q.path, q.content, q.params.Options))
+	return c.server.Project.workspace.Formatting(ctx, q.path, q.content, q.params.Options)
 }
 
 func (c *lspConnection) rangeFormatting(ctx context.Context, q lspQuery) (any, error) {
-	return q.textEdits(c.server.Project.workspace.RangeFormatting(ctx, q.path, q.content, q.params.Range, q.params.Options))
+	return c.server.Project.workspace.RangeFormatting(ctx, q.path, q.content, q.params.Range, q.params.Options)
 }
 
 func (c *lspConnection) onTypeFormatting(ctx context.Context, q lspQuery) (any, error) {
-	return q.textEdits(c.server.Project.workspace.OnTypeFormatting(ctx, q.path, q.content, q.line, q.column, q.params.Character, q.params.Options))
+	return c.server.Project.workspace.OnTypeFormatting(ctx, q.path, q.content, q.line, q.column, q.params.Character, q.params.Options)
 }
 
 func (c *lspConnection) inlayHints(ctx context.Context, q lspQuery) (any, error) {
@@ -505,9 +506,6 @@ func routeLSPItems(value any, uri, field string) (any, error) {
 func (c *lspConnection) lspEdit(edit *lsp.WorkspaceEdit, q lspQuery) (any, error) {
 	if edit == nil {
 		return nil, nil
-	}
-	if q.unchanged != nil && !q.unchanged() {
-		return nil, errLSPContentModified
 	}
 	documents, err := c.server.workspaceEditDocuments(edit)
 	if err != nil {

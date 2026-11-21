@@ -79,6 +79,20 @@ const titles = (catalog: SessionCatalog) =>
 		.sessions.map((session) => session.title)
 		.sort();
 
+test("a refresh cannot bring back a locally disposed session", async () => {
+	const host = fakeHost([summary("one"), summary("two")]);
+	const catalog = new SessionCatalog(host.ahp);
+	catalog.subscribe(() => {});
+	await catalog.read();
+	host.hold();
+	const refresh = catalog.reload();
+	catalog.forget("ahp-session:/one");
+	assert.deepEqual(titles(catalog), ["two"]);
+	host.release();
+	await refresh;
+	assert.deepEqual(titles(catalog), ["two"]);
+});
+
 test("a failed refresh preserves notifications received during the request", async () => {
 	const host = fakeHost([summary("one")]);
 	const catalog = new SessionCatalog(host.ahp);

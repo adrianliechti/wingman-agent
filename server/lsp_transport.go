@@ -36,7 +36,8 @@ type lspDocument struct {
 	mu      sync.Mutex
 	owners  map[*lspConnection]struct{} // guarded by editorState.lspDocumentsMu
 	writer  *lspConnection              // whose buffer the language server has
-	changes uint64                      // counts writer switches
+	buffer  lspBuffer
+	changes uint64 // counts changes of writer or buffer
 }
 
 // lspQueueLimit bounds the bytes waiting behind a slow document notification.
@@ -432,7 +433,7 @@ func (c *lspConnection) documentNotification(method string, raw json.RawMessage)
 	// server starts; only this document waits.
 	shared.mu.Lock()
 	defer shared.mu.Unlock()
-	return c.syncShared(c.ctx, shared, path)
+	return c.syncShared(c.ctx, shared, doc)
 }
 
 // buffer finds this connection's buffer of a file; c.mu must be held.
@@ -445,40 +446,41 @@ func (c *lspConnection) buffer(path string) (lspBuffer, bool) {
 	return lspBuffer{}, false
 }
 
-// syncShared gives the language server this connection's current buffer of
-// path; shared.mu must be held.
-func (c *lspConnection) syncShared(ctx context.Context, shared *lspDocument, path string) error {
-	c.mu.Lock()
-	doc, ok := c.buffer(path)
-	c.mu.Unlock()
-	if !ok {
-		return nil
-	}
-	if shared.writer != c {
-		shared.writer = c
+// syncShared sends the buffer to the language server with shared.mu held.
+func (c *lspConnection) syncShared(ctx context.Context, shared *lspDocument, doc lspBuffer) error {
+	if shared.writer != c || shared.buffer != doc {
 		shared.changes++
 	}
-	if err := c.server.Project.workspace.SyncEditorDocument(ctx, path, doc.text, doc.saved); err != nil {
+	if err := c.server.Project.workspace.SyncEditorDocument(ctx, doc.path, doc.text, doc.saved); err != nil {
 		shared.writer = nil
 		return err
 	}
+	shared.writer, shared.buffer = c, doc
 	return nil
 }
 
-// claimDocument makes the language server use this connection's buffer of path
-// for a request. The returned check reports whether it still does.
-func (c *lspConnection) claimDocument(ctx context.Context, path string) (func() bool, error) {
+// claimDocument selects the request's snapshot. Its check detects changes even
+// if another editor claimed the document and the original editor took it back.
+func (c *lspConnection) claimDocument(ctx context.Context, uri string, doc lspBuffer) (func() bool, error) {
 	s := c.server
 	s.editor.lspDocumentsMu.Lock()
-	shared := s.editor.lspDocuments[path]
+	shared := s.editor.lspDocuments[doc.path]
 	s.editor.lspDocumentsMu.Unlock()
 	if shared == nil {
-		return nil, nil
+		return nil, errLSPContentModified
+	}
+	current := func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.documents[uri] == doc
 	}
 	shared.mu.Lock()
 	defer shared.mu.Unlock()
-	if shared.writer != c {
-		if err := c.syncShared(ctx, shared, path); err != nil {
+	if !current() {
+		return nil, errLSPContentModified
+	}
+	if shared.writer != c || shared.buffer != doc {
+		if err := c.syncShared(ctx, shared, doc); err != nil {
 			return nil, err
 		}
 	}
@@ -486,7 +488,7 @@ func (c *lspConnection) claimDocument(ctx context.Context, path string) (func() 
 	return func() bool {
 		shared.mu.Lock()
 		defer shared.mu.Unlock()
-		return shared.changes == changes
+		return shared.writer == c && shared.changes == changes && current()
 	}, nil
 }
 
@@ -533,7 +535,10 @@ func (c *lspConnection) releaseDocument(path string) error {
 	defer shared.mu.Unlock()
 	s.editor.lspDocumentsMu.Lock()
 	delete(shared.owners, c)
-	_, current := shared.owners[shared.writer]
+	if _, current := shared.owners[shared.writer]; current {
+		s.editor.lspDocumentsMu.Unlock()
+		return nil
+	}
 	owners := make([]*lspConnection, 0, len(shared.owners))
 	for owner := range shared.owners {
 		owners = append(owners, owner)
@@ -543,13 +548,12 @@ func (c *lspConnection) releaseDocument(path string) error {
 	defer cancel()
 	if len(owners) > 0 {
 		for _, owner := range owners {
-			if current {
-				break
+			owner.mu.Lock()
+			doc, open := owner.buffer(path)
+			owner.mu.Unlock()
+			if open {
+				return owner.syncShared(ctx, shared, doc)
 			}
-			if err := owner.syncShared(ctx, shared, path); err != nil {
-				return err
-			}
-			current = shared.writer == owner
 		}
 		return nil
 	}
