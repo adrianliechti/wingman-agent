@@ -107,10 +107,11 @@ func convertTool(serverName string, session *sdkmcp.ClientSession, mcpTool sdkmc
 	}
 
 	return tool.Tool{
-		Name:        fmt.Sprintf("%s_%s", serverName, mcpTool.Name),
-		Description: text.TruncateHead(mcpTool.Description, maxDescriptionBytes),
-		Effect:      tool.StaticEffect(effect),
-		Parameters:  schemaToParams(serverName, mcpTool),
+		Name:         fmt.Sprintf("%s_%s", serverName, mcpTool.Name),
+		Description:  text.TruncateHead(mcpTool.Description, maxDescriptionBytes),
+		Effect:       tool.StaticEffect(effect),
+		Parameters:   schemaToParams(serverName, mcpTool),
+		OutputSchema: outputSchema(mcpTool),
 		Telemetry: tool.TelemetryMetadata{
 			ToolType:           "extension",
 			MCPMethod:          "tools/call",
@@ -210,6 +211,23 @@ func schemaToParams(serverName string, mcpTool sdkmcp.Tool) map[string]any {
 	return params
 }
 
+// outputSchema returns the schema of the tool's structured result, which
+// callTool hands on as JSON text; nil when the server declares none.
+func outputSchema(mcpTool sdkmcp.Tool) map[string]any {
+	if mcpTool.OutputSchema == nil {
+		return nil
+	}
+	raw, err := json.Marshal(mcpTool.OutputSchema)
+	if err != nil {
+		return nil
+	}
+	var schema map[string]any
+	if json.Unmarshal(raw, &schema) != nil {
+		return nil
+	}
+	return schema
+}
+
 func callTool(ctx context.Context, session *sdkmcp.ClientSession, name string, args map[string]any) (tool.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return tool.Result{}, err
@@ -223,7 +241,7 @@ func callTool(ctx context.Context, session *sdkmcp.ClientSession, name string, a
 	})
 
 	if err != nil {
-		return tool.Result{}, fmt.Errorf("MCP tool call failed: %w", err)
+		return tool.Result{}, mcp.Redact(fmt.Errorf("MCP tool call failed: %w", err))
 	}
 	if result == nil {
 		return tool.Text(""), nil

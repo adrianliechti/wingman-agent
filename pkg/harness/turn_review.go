@@ -72,106 +72,8 @@ func BuildTurnReviews(events []RuntimeEvent) []TurnReview {
 				review.InputID = event.Message.InputID
 			}
 			for _, content := range event.Message.Content {
-				result := content.ToolResult
-				if result == nil {
-					continue
-				}
-				position++
-				if result.Name == "agent" && result.Metadata[ChildReviewsMetadata] != nil {
-					data, err := json.Marshal(result.Metadata[ChildReviewsMetadata])
-					var children []TurnReview
-					if err != nil || json.Unmarshal(data, &children) != nil {
-						review.Uncertain = true
-						continue
-					}
-					for _, child := range children {
-						position++
-						review.Files = append(review.Files, child.Files...)
-						if len(child.Files) > 0 {
-							review.lastEdit = position
-						}
-						review.Uncertain = review.Uncertain || child.Uncertain
-						review.Untracked = review.Untracked || child.Untracked
-						for _, check := range child.Checks {
-							check.Sequence = position
-							if child.Validation == "outdated" && check.Outcome == "passed" {
-								check.Outcome = "outdated"
-							}
-							review.addCheck(check)
-						}
-					}
-					continue
-				}
-				if result.Name == "edit" {
-					if changes, err := tool.ResultFileChanges(result.Metadata); err != nil {
-						review.Uncertain = true
-					} else if len(changes) > 0 {
-						review.Files = append(review.Files, changes...)
-						review.lastEdit = position
-					}
-				}
-				var args map[string]any
-				_ = json.Unmarshal([]byte(result.Args), &args)
-				if result.Name == "exec" || result.Name == "exec_command" || result.Name == "exec_session" {
-					if changes, err := tool.ResultFileChanges(result.Metadata); err != nil {
-						review.Uncertain = true
-					} else if len(changes) > 0 {
-						review.Files = append(review.Files, changes...)
-						review.lastEdit = position
-					}
-					if complete, _ := result.Metadata["workspace_snapshot_complete"].(bool); !complete {
-						review.Untracked = true
-					}
-					sequence := position
-					id, known := tool.IntArg(result.Metadata, "session_id")
-					if result.Name == "exec" || result.Name == "exec_command" {
-						if known {
-							executions[id] = position
-						}
-					} else {
-						if !known {
-							id, _ = tool.IntArg(args, "session_id")
-						}
-						// Polling cannot make a pre-edit check current. Unknown
-						// launches conservatively predate this turn's edits.
-						sequence = executions[id]
-					}
-					validation, _ := args["validation"].(bool)
-					if marked, _ := result.Metadata["validation"].(bool); marked {
-						validation = true
-					}
-					if !validation {
-						continue
-					}
-					command, _ := args["command"].(string)
-					if value, _ := result.Metadata["command"].(string); value != "" {
-						command = value
-					}
-					workdir, _ := args["workdir"].(string)
-					if value, _ := result.Metadata["workdir"].(string); value != "" {
-						workdir = value
-					}
-					check := ValidationCheck{Command: command, WorkDir: workdir, Outcome: "not_confirmed", Sequence: sequence}
-					if result.IsError {
-						check.Outcome = "failed"
-					}
-					if value, ok := result.Metadata["exit_code"]; ok {
-						data, _ := json.Marshal(value)
-						var code *int
-						if json.Unmarshal(data, &code) == nil && code != nil {
-							check.ExitCode = code
-							check.Outcome = "passed"
-							if *code != 0 {
-								check.Outcome = "failed"
-							}
-						}
-					}
-					if check.Outcome == "passed" && sequence == 0 {
-						check.Outcome = "not_confirmed"
-					}
-					review.addCheck(check)
-				} else if result.Name != "edit" && result.Name != "read" && result.Name != "ls" && result.Name != "glob" && result.Name != "grep" {
-					review.Untracked = true
+				if result := content.ToolResult; result != nil {
+					review.addResult(result, &position, executions)
 				}
 			}
 		}
@@ -209,6 +111,121 @@ func BuildTurnReviews(events []RuntimeEvent) []TurnReview {
 		}
 	}
 	return reviews
+}
+
+// addResult accounts for one tool result. executions maps a command session
+// to the position it was started at.
+func (review *TurnReview) addResult(result *ToolResult, position *uint64, executions map[int]uint64) {
+	*position++
+	// A composite tool acts only through the calls it made, listed here.
+	if nested, ok := result.Metadata[NestedResultsMetadata]; ok {
+		data, err := json.Marshal(nested)
+		var results []NestedToolResult
+		if err != nil || json.Unmarshal(data, &results) != nil {
+			review.Uncertain = true
+			return
+		}
+		for _, r := range results {
+			review.addResult(&ToolResult{Name: r.Name, Args: r.Args, IsError: r.IsError, Metadata: r.Metadata}, position, executions)
+		}
+		return
+	}
+	if result.Name == "agent" && result.Metadata[ChildReviewsMetadata] != nil {
+		data, err := json.Marshal(result.Metadata[ChildReviewsMetadata])
+		var children []TurnReview
+		if err != nil || json.Unmarshal(data, &children) != nil {
+			review.Uncertain = true
+			return
+		}
+		for _, child := range children {
+			*position++
+			review.Files = append(review.Files, child.Files...)
+			if len(child.Files) > 0 {
+				review.lastEdit = *position
+			}
+			review.Uncertain = review.Uncertain || child.Uncertain
+			review.Untracked = review.Untracked || child.Untracked
+			for _, check := range child.Checks {
+				check.Sequence = *position
+				if child.Validation == "outdated" && check.Outcome == "passed" {
+					check.Outcome = "outdated"
+				}
+				review.addCheck(check)
+			}
+		}
+		return
+	}
+	if result.Name == "edit" {
+		if changes, err := tool.ResultFileChanges(result.Metadata); err != nil {
+			review.Uncertain = true
+		} else if len(changes) > 0 {
+			review.Files = append(review.Files, changes...)
+			review.lastEdit = *position
+		}
+	}
+	var args map[string]any
+	_ = json.Unmarshal([]byte(result.Args), &args)
+	if result.Name == "exec" || result.Name == "exec_command" || result.Name == "exec_session" {
+		if changes, err := tool.ResultFileChanges(result.Metadata); err != nil {
+			review.Uncertain = true
+		} else if len(changes) > 0 {
+			review.Files = append(review.Files, changes...)
+			review.lastEdit = *position
+		}
+		if complete, _ := result.Metadata["workspace_snapshot_complete"].(bool); !complete {
+			review.Untracked = true
+		}
+		sequence := *position
+		id, known := tool.IntArg(result.Metadata, "session_id")
+		if result.Name == "exec" || result.Name == "exec_command" {
+			if known {
+				executions[id] = *position
+			}
+		} else {
+			if !known {
+				id, _ = tool.IntArg(args, "session_id")
+			}
+			// Polling cannot make a pre-edit check current. Unknown
+			// launches conservatively predate this turn's edits.
+			sequence = executions[id]
+		}
+		validation, _ := args["validation"].(bool)
+		if marked, _ := result.Metadata["validation"].(bool); marked {
+			validation = true
+		}
+		if !validation {
+			return
+		}
+		command, _ := args["command"].(string)
+		if value, _ := result.Metadata["command"].(string); value != "" {
+			command = value
+		}
+		workdir, _ := args["workdir"].(string)
+		if value, _ := result.Metadata["workdir"].(string); value != "" {
+			workdir = value
+		}
+		check := ValidationCheck{Command: command, WorkDir: workdir, Outcome: "not_confirmed", Sequence: sequence}
+		if result.IsError {
+			check.Outcome = "failed"
+		}
+		if value, ok := result.Metadata["exit_code"]; ok {
+			data, _ := json.Marshal(value)
+			var code *int
+			if json.Unmarshal(data, &code) == nil && code != nil {
+				check.ExitCode = code
+				check.Outcome = "passed"
+				if *code != 0 {
+					check.Outcome = "failed"
+				}
+			}
+		}
+		if check.Outcome == "passed" && sequence == 0 {
+			check.Outcome = "not_confirmed"
+		}
+		review.addCheck(check)
+	} else if result.Name != "edit" && result.Name != "read" && result.Name != "ls" && result.Name != "glob" && result.Name != "grep" {
+		review.Untracked = true
+	}
 }
 
 // The latest attempt wins whether the command ran here or in an inline child.

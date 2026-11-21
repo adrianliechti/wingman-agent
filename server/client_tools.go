@@ -67,7 +67,8 @@ func (a *Chat) clientTool(def types.ToolDefinition) tool.Tool {
 	if def.Description != nil {
 		description = *def.Description
 	}
-	return tool.Tool{Name: def.Name, Description: description, Parameters: parameters, Effect: tool.StaticEffect(effect),
+	// The client completes the call it sees in the conversation, so it is Interactive.
+	return tool.Tool{Name: def.Name, Description: description, Parameters: parameters, Effect: tool.StaticEffect(effect), Interactive: true,
 		Execute: func(ctx context.Context, _ map[string]any) (tool.Result, error) {
 			return a.runClientTool(ctx, def.Name)
 		},

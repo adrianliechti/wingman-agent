@@ -634,7 +634,7 @@ func (w *Workspace) InitMCP(ctx context.Context, ui ...UI) error {
 		session := sessions[serverName]
 		tools, err := mcptool.ToolsForServer(ctx, serverName, session, approval)
 		if err != nil {
-			toolsErrs = append(toolsErrs, fmt.Errorf("list MCP tools from %s: %w", serverName, err))
+			toolsErrs = append(toolsErrs, mcp.Redact(fmt.Errorf("list MCP tools from %s: %w", serverName, err)))
 			continue
 		}
 		toolsByServer[serverName] = tools

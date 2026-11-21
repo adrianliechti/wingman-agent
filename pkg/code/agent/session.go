@@ -13,6 +13,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/codemode"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/elicitation"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fetch"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
@@ -213,6 +214,7 @@ func (s *sessionState) configureTools() error {
 	if !a.cfg.DisableWebSearch {
 		tools = append(tools, websearch.Tools(elicit)...)
 	}
+	tools = append(tools, codemode.Tools(nil)...)
 	subagentCfg := sessionCfg.Clone()
 	subagentCfg.Tools = s.catalogTools
 	subagentCfg.FilterTools = s.subagentFilterTools

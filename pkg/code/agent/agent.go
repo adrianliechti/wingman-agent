@@ -24,6 +24,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/codemode"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/shell"
@@ -923,7 +924,7 @@ func (s *sessionState) filterTools(tools []tool.Tool) []tool.Tool {
 		guarded[i] = s.guardModeTool(t)
 	}
 	slices.SortStableFunc(guarded, func(a, b tool.Tool) int { return cmp.Compare(a.Name, b.Name) })
-	return guarded
+	return codemode.Annotate(guarded)
 }
 
 func (s *sessionState) subagentFilterTools(tools []tool.Tool) []tool.Tool {
@@ -940,7 +941,7 @@ func (s *sessionState) subagentFilterTools(tools []tool.Tool) []tool.Tool {
 		cloned = slices.DeleteFunc(cloned, func(t tool.Tool) bool { return t.Name == "elicit" || t.Name == "ask" })
 	}
 	slices.SortStableFunc(cloned, func(a, b tool.Tool) int { return cmp.Compare(a.Name, b.Name) })
-	return cloned
+	return codemode.Annotate(cloned)
 }
 
 // guardModeTool keeps tool schemas invariant across Plan/Agent/Unattended mode
@@ -952,7 +953,7 @@ func (s *sessionState) guardModeTool(t tool.Tool) tool.Tool {
 		return t
 	}
 	t.Execute = func(ctx context.Context, args map[string]any) (tool.Result, error) {
-		if s.currentMode() == modePlan {
+		if s.currentMode() == modePlan && !t.Composite {
 			if t.Effect == nil || t.Effect(args) != tool.EffectReadOnly {
 				return tool.Result{}, fmt.Errorf("plan mode only allows read-only tool calls (%s is blocked in Plan mode)", t.Name)
 			}
@@ -968,6 +969,11 @@ func (s *sessionState) guardModeTool(t tool.Tool) tool.Tool {
 func planModeTools(tools []tool.Tool) []tool.Tool {
 	filtered := make([]tool.Tool, 0, len(tools))
 	for _, t := range tools {
+		// A composite tool can only reach the tools kept here.
+		if t.Composite {
+			filtered = append(filtered, t)
+			continue
+		}
 		if t.Effect == nil {
 			continue
 		}

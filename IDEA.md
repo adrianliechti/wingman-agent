@@ -14,7 +14,7 @@ Unmerged branch: `feature/browser` (90 commits behind `main`).
 4. **Worktree isolation** — per subagent and per session, `.worktreeinclude`, merge-back (all three).
 5. **`/goal`** — persisted objective, independent evaluator decides "done", token/time budget (all three).
 6. **Session ergonomics** — edit-earlier-message-and-fork, `/btw` side question, rename + content search (all three).
-7. **MCP context cost** — tool search / deferred schemas; forward image content (dropped today) (CC, Codex).
+7. **MCP context cost** — tool search / deferred schemas; forward image content (dropped today) (CC, Codex). Code mode ([docs](docs/code-mode.md)) keeps intermediate results out of context; next, drop MCP schemas from the tool list and let scripts look signatures up.
 8. **Commentable artifacts** — inline comments on plans, diffs, screenshots → "Proceed" or send all as one review (AG).
 9. **Browser agent** — revive `feature/browser`: screenshots, console, DOM, recordings (all three).
 
@@ -35,7 +35,8 @@ Unmerged branch: `feature/browser` (90 commits behind `main`).
 - **Plugins** — `wingman plugin add <git|url>`; read Claude Code marketplace format (Codex does).
 - **MCP** — resources and prompts; `/mcp` status.
 - **TUI** — vim mode, keybindings file, status-line script, Ctrl+G `$EDITOR`, Ctrl+R prompt history, OSC 9 notifications, turn undo.
-- **Later** — model-written orchestration scripts for large fan-out (CC workflows, Codex code mode); daemon so TUI/web/phone attach to the same sessions (Codex); critic/auditor verify pipeline against test gaming (AG teamwork, could be a skill).
+- **Code mode follow-ups** — variables that persist between `code` calls; show a script's nested calls in the UI; pass images through.
+- **Later** — model-written orchestration scripts for large fan-out (CC workflows; a code mode script can call `agent`, not yet measured); daemon so TUI/web/phone attach to the same sessions (Codex); critic/auditor verify pipeline against test gaming (AG teamwork, could be a skill).
 
 ## IDE mode
 

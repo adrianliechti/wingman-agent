@@ -16,6 +16,8 @@ import (
 type agentHost struct {
 	agent     code.Agent
 	workspace *code.Workspace
+	// builtin is false for another agent's CLI, which brings its own tools.
+	builtin   bool
 	telemetry *telemetry.Telemetry
 	closeOnce sync.Once
 	closeErr  error
@@ -32,6 +34,7 @@ func newAgentHost(ctx context.Context, workDir, name string) (*agentHost, error)
 		if cfg, err = agent.DefaultConfig(); err == nil {
 			host.telemetry = cfg.Telemetry
 			host.agent = agent.New(ws, cfg, nil)
+			host.builtin = true
 		}
 	} else {
 		host.agent, err = agents.NewExternal(ctx, ws, id)

@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/adrianliechti/go-extract v0.0.0-20261029154039-97b29af3f71f
+	github.com/adrianliechti/go-monty v0.0.0-20261121154152-726f5b2d4fd8
 	github.com/adrianliechti/go-shell v0.1.12
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/bmatcuk/doublestar/v4 v4.10.4
@@ -84,6 +85,7 @@ require (
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/skeema/knownhosts v1.3.3 // indirect
 	github.com/tc-hib/winres v0.3.1 // indirect
+	github.com/tetratelabs/wazero v1.12.0 // indirect
 	github.com/tidwall/gjson v1.20.2 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.3.0 // indirect

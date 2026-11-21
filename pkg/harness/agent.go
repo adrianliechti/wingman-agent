@@ -1104,28 +1104,9 @@ func (a *Agent) runSingleToolCallOutcomeMode(ctx context.Context, tc ToolCall, t
 func (a *Agent) executeToolOperation(ctx context.Context, tc ToolCall, tools []tool.Tool, deferCommit bool) toolCallOutcome {
 	operationID := uuid.NewString()
 	effect := a.toolEffect(tc, tools)
-	t := findTool(tc.Name, tools)
-	description := ""
-	toolType := "function"
-	mcpMethod := ""
-	mcpProtocolVersion := ""
-	if t != nil {
-		description = t.Description
-		if t.Telemetry.ToolType != "" {
-			toolType = t.Telemetry.ToolType
-		}
-		mcpMethod = t.Telemetry.MCPMethod
-		mcpProtocolVersion = t.Telemetry.MCPProtocolVersion
-	}
-	ctx, telemetryExecution := a.Telemetry.StartTool(ctx, telemetry.ToolRequest{
-		Name:               tc.Name,
-		Description:        description,
-		CallID:             tc.ID,
-		Type:               toolType,
-		MCPMethod:          mcpMethod,
-		MCPProtocolVersion: mcpProtocolVersion,
-		Arguments:          genericToolTelemetryValue(mcpMethod, tc.Args),
-	})
+	request := toolTelemetryRequest(tc, tools)
+	mcpMethod := request.MCPMethod
+	ctx, telemetryExecution := a.Telemetry.StartTool(ctx, request)
 	telemetryEnded := false
 	defer func() {
 		if !telemetryEnded {
@@ -1145,19 +1126,10 @@ func (a *Agent) executeToolOperation(ctx context.Context, tc ToolCall, tools []t
 	}
 
 	result := a.executeSingleToolCall(ctx, tc, tools)
-	toolOutcome := telemetry.Outcome{}
-	if result.IsError {
-		toolOutcome.ErrorType = "_OTHER"
-		if result.Content.Text() == interruptedToolResult || result.Content.Text() == interruptedWaitResult {
-			toolOutcome.ErrorType = "canceled"
-		} else if strings.Contains(result.Content.Text(), "time limit") || strings.Contains(result.Content.Text(), "deadline") {
-			toolOutcome.ErrorType = "timeout"
-		}
-	}
 	if mcpMethod == "" {
 		telemetryExecution.SetResult(genericToolResultTelemetryValue(result.Content.Text()))
 	}
-	telemetryExecution.End(toolOutcome)
+	telemetryExecution.End(toolTelemetryOutcome(result))
 	telemetryEnded = true
 	outcome := toolCallOutcome{
 		result: result,
@@ -1171,6 +1143,33 @@ func (a *Agent) executeToolOperation(ctx context.Context, tc ToolCall, tools []t
 		return outcome
 	}
 	return a.commitToolOutcome(tc, outcome)
+}
+
+func toolTelemetryRequest(tc ToolCall, tools []tool.Tool) telemetry.ToolRequest {
+	request := telemetry.ToolRequest{Name: tc.Name, CallID: tc.ID, Type: "function"}
+	if t := findTool(tc.Name, tools); t != nil {
+		request.Description = t.Description
+		if t.Telemetry.ToolType != "" {
+			request.Type = t.Telemetry.ToolType
+		}
+		request.MCPMethod = t.Telemetry.MCPMethod
+		request.MCPProtocolVersion = t.Telemetry.MCPProtocolVersion
+	}
+	request.Arguments = genericToolTelemetryValue(request.MCPMethod, tc.Args)
+	return request
+}
+
+func toolTelemetryOutcome(result tool.Result) telemetry.Outcome {
+	outcome := telemetry.Outcome{}
+	if result.IsError {
+		outcome.ErrorType = "_OTHER"
+		if result.Content.Text() == interruptedToolResult || result.Content.Text() == interruptedWaitResult {
+			outcome.ErrorType = "canceled"
+		} else if strings.Contains(result.Content.Text(), "time limit") || strings.Contains(result.Content.Text(), "deadline") {
+			outcome.ErrorType = "timeout"
+		}
+	}
+	return outcome
 }
 
 func (a *Agent) commitToolOutcome(tc ToolCall, outcome toolCallOutcome) toolCallOutcome {
@@ -1313,7 +1312,27 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 		return toolExecutionError(ctx, err, timeout, started)
 	}
 
-	ctx = tool.WithProgressCall(ctx, tc.ID)
+	// A nested call reports progress under the call that made it, and cannot
+	// nest further. The mark is cleared so an agent started below is not nested.
+	nested, _ := ctx.Value(nestedCallKey{}).(bool)
+	if nested {
+		ctx = context.WithValue(ctx, nestedCallKey{}, false)
+		ctx = tool.WithToolbox(ctx, nil)
+	} else {
+		ctx = tool.WithProgressCall(ctx, tc.ID)
+		if t != nil && t.Composite {
+			box := &toolbox{agent: a, parent: tc, tools: tools}
+			ctx = tool.WithToolbox(ctx, box)
+			// Its calls are not in the conversation; this is their record.
+			defer func() {
+				result.Metadata = maps.Clone(result.Metadata)
+				if result.Metadata == nil {
+					result.Metadata = map[string]any{}
+				}
+				result.Metadata[NestedResultsMetadata] = box.nested()
+			}()
+		}
+	}
 	var usageMu sync.Mutex
 	var usageErr error
 	ctx = tool.WithUsageSink(ctx, func(d tool.UsageDelta) {
@@ -1399,7 +1418,9 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc ToolCall, tools []
 	if len(hookContext) > 0 {
 		result.Content.AppendText("\n\n<hook-context>\n" + strings.Join(hookContext, "\n\n") + "\n</hook-context>")
 	}
-	if result.Content.Text() != "" {
+	// A nested result goes to the calling tool, not into the context: only the
+	// caller's own result is transformed and bounded.
+	if result.Content.Text() != "" && !nested {
 		for i, transform := range a.Hooks.TransformToolResult {
 			content, err := transform(ctx, hc, result.Content.Text())
 			if err != nil {

@@ -479,3 +479,79 @@ func (a *fakeScriptAgent) Send(ctx context.Context, _ string, input []harness.Co
 }
 func (a *fakeScriptAgent) Cancel(string) {}
 func (a *fakeScriptAgent) Close() error  { return nil }
+
+func scriptWorkspace(t *testing.T, global, project string) *code.Workspace {
+	t.Helper()
+	home, dir := t.TempDir(), t.TempDir()
+	t.Setenv("WINGMAN_HOME", home)
+	for path, config := range map[string]string{filepath.Join(home, "mcp.json"): global, filepath.Join(dir, "mcp.json"): project} {
+		if config != "" {
+			if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	ws, err := code.NewWorkspace(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ws.Close)
+	return ws
+}
+
+const missingMCPServer = `{"mcpServers": {"broken": {"command": "/nonexistent/mcp-server"}}}`
+
+func TestConnectMCPReportsAnUnavailableServerAndGoesOn(t *testing.T) {
+	var errOut bytes.Buffer
+	note, err := connectMCP(t.Context(), scriptWorkspace(t, missingMCPServer, ""), &errOut)
+	if err != nil {
+		t.Fatalf("an unavailable server stopped the run: %v", err)
+	}
+	if !strings.HasPrefix(note, "Some MCP servers are unavailable: broken: ") {
+		t.Fatalf("note for the model = %q", note)
+	}
+	if got := errOut.String(); !strings.HasPrefix(got, "warning: some MCP servers are unavailable:\n  broken: ") || strings.Contains(got, "approved") {
+		t.Fatalf("warning = %q", got)
+	}
+}
+
+func TestConnectMCPExplainsApprovalOnce(t *testing.T) {
+	var errOut bytes.Buffer
+	note, err := connectMCP(t.Context(), scriptWorkspace(t, "", missingMCPServer), &errOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The agent tells the model about a server awaiting approval at each turn.
+	if note != "" {
+		t.Fatalf("note repeats the agent's own: %q", note)
+	}
+	if got := errOut.String(); !strings.Contains(got, "broken needs approval of") || !strings.Contains(got, "opening the project in wingman once") {
+		t.Fatalf("warning = %q", got)
+	}
+}
+
+func TestConnectMCPIsQuietWithoutServersAndStopsWhenCancelled(t *testing.T) {
+	var errOut bytes.Buffer
+	if note, err := connectMCP(t.Context(), scriptWorkspace(t, "", ""), &errOut); err != nil || note != "" || errOut.Len() != 0 {
+		t.Fatalf("no servers: note=%q err=%v stderr=%q", note, err, errOut.String())
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := connectMCP(ctx, scriptWorkspace(t, missingMCPServer, ""), &errOut); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled: err=%v", err)
+	}
+}
+
+func TestExecuteScriptGivesTheModelItsContextNote(t *testing.T) {
+	a := newFakeScriptAgent()
+	a.response = "done"
+	opts := scriptOptions{Agent: "wingman", Prompt: "hello", Context: "Some MCP servers are unavailable: broken"}
+	var out, errOut bytes.Buffer
+	if err := executeScript(context.Background(), a, opts, "hello", &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	first := a.inputs[0]
+	if len(first) != 2 || first[0].Text != "hello" || first[0].Hidden || first[1].Text != opts.Context || !first[1].Hidden {
+		t.Fatalf("first turn = %#v", first)
+	}
+}

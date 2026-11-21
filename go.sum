@@ -17,6 +17,8 @@ github.com/abemedia/go-cfb v0.2.0 h1:amLvu7/DX65XtcmMuc0an/t09W36gMOrnYwLxGGmwX8
 github.com/abemedia/go-cfb v0.2.0/go.mod h1:ytSRuNKf2VMDQDs8TSZ/VmkVfS4giAdc4xl5XOnpKKA=
 github.com/adrianliechti/go-extract v0.0.0-20261029154039-97b29af3f71f h1:YosMo9d86cM65yZN8pUVKMjpUMNV2jBDTUx5z04eaRA=
 github.com/adrianliechti/go-extract v0.0.0-20261029154039-97b29af3f71f/go.mod h1:LZKkKLbEJucjbYH003wJSifMPs9lVWI7LGpCpyXo4q0=
+github.com/adrianliechti/go-monty v0.0.0-20261121154152-726f5b2d4fd8 h1:g2HHWBjDaa0z9m1h4rvoYRYM8TfTG4T7WWzoWoPeq48=
+github.com/adrianliechti/go-monty v0.0.0-20261121154152-726f5b2d4fd8/go.mod h1:PYWwD8FhhWYnxb6GgqcC/Gn75MD7U590kysL8TICTpE=
 github.com/adrianliechti/go-shell v0.1.12 h1:KZxGgv/n9ohB+g5gQDnvolp3WjdEsZ/gckYO0pmRlrM=
 github.com/adrianliechti/go-shell v0.1.12/go.mod h1:WwNDLx2RxEuyTc8kb90wyytIG21QfTL4yjnLyAtU9uo=
 github.com/alecthomas/assert/v2 v2.11.0 h1:2Q9r3ki8+JYXvGsDyBXwH3LcJ+WK5D0gc5E8vS6K3D0=
@@ -165,6 +167,8 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWD
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/tc-hib/winres v0.3.1 h1:CwRjEGrKdbi5CvZ4ID+iyVhgyfatxFoizjPhzez9Io4=
 github.com/tc-hib/winres v0.3.1/go.mod h1:C/JaNhH3KBvhNKVbvdlDWkbMDO9H4fKKDaN7/07SSuk=
+github.com/tetratelabs/wazero v1.12.0 h1:DuWcpNu/FzgEXgGBDp8J1Spc+CWOvvtvVyjKlaZopYU=
+github.com/tetratelabs/wazero v1.12.0/go.mod h1:LvKtzl2RqO4gyF27BiXU+nKAjcV8f38U+kP/q2vgxh0=
 github.com/tidwall/gjson v1.20.2 h1:Ag48cSOUCOq/sheSLXV3M4ZS0FOd4YMnY1N7FRoxGQY=
 github.com/tidwall/gjson v1.20.2/go.mod h1:jV1Xkr7LRLVFhesDFU/nInoQ+MjVlnuqkUreTWMveUo=
 github.com/tidwall/match v1.2.0 h1:0pt8FlkOwjN2fPt4bIl4BoNxb98gGHN2ObFEDkrfZnM=
