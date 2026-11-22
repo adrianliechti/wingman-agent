@@ -338,6 +338,7 @@ type workspaceResponse struct {
 	WindowSidebarPosition  settings.WindowSidebarPosition  `json:"window.sidebar.position"`
 	Platform               string                          `json:"platform"`
 	ManagedTools           *managedToolsStatus             `json:"managed_tools,omitempty"`
+	Temporary              bool                            `json:"temporary,omitempty"` // a temporary chat's, removed once no window shows it
 }
 
 func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
@@ -348,7 +349,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		Protocol:       2,
 		Directory:      s.Project.directoryURI(),
 		ProjectURI:     projectInfo(s.Project.dir).Uri,
-		Name:           filepath.Base(ws.RootPath),
+		Name:           projectName(ws.RootPath),
 		Path:           ws.RootPath,
 		Shells:         append([]terminal.Shell{}, terminal.Shells()...),
 		// As last found: a window does not wait for a look through the folder.
@@ -357,6 +358,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		WindowTerminalPosition: s.windowTerminalPosition(),
 		WindowSidebarPosition:  s.windowSidebarPosition(),
 		Platform:               runtime.GOOS,
+		Temporary:              s.Project.temporary != nil,
 	}
 	if s.Project.host != nil {
 		info.Host = s.Project.host.id

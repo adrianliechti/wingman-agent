@@ -133,6 +133,7 @@ func (a *App) newLauncher() http.Handler {
 	mux.HandleFunc("GET /app/workspaces", a.handleWorkspaces)
 	mux.HandleFunc("POST /app/workspaces/remove", a.handleRemoveWorkspace)
 	mux.HandleFunc("POST /app/workspaces/open", a.handleOpenWorkspace)
+	mux.HandleFunc("POST /app/temporary", a.handleTemporaryChat)
 	mux.HandleFunc("POST /app/folder", a.handleSelectFolder)
 	mux.HandleFunc("POST /app/window", a.handleNewWindow)
 
@@ -197,6 +198,23 @@ func (a *App) handleOpenWorkspace(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleTemporaryChat opens a temporary chat on the shared host, which
+// removes it once no window shows it. It is not a recent workspace.
+func (a *App) handleTemporaryChat(w http.ResponseWriter, r *http.Request) {
+	dir, err := server.NewTemporaryFolder()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.openMu.Lock()
+	defer a.openMu.Unlock()
+	if err := a.attach(dir); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"path": dir})
 }
 
 // handleNewWindow opens another window on the start page. Where a process has

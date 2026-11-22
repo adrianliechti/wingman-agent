@@ -39,7 +39,14 @@ func relative(dir, path string) (string, bool) {
 }
 
 func projectInfo(dir string) *types.ProjectInfo {
-	return &types.ProjectInfo{Uri: fileuri.FromPath(dir), DisplayName: filepath.Base(dir)}
+	return &types.ProjectInfo{Uri: fileuri.FromPath(dir), DisplayName: projectName(dir)}
+}
+
+func projectName(dir string) string {
+	if isTemporary(dir) {
+		return temporaryName
+	}
+	return filepath.Base(dir)
 }
 
 // Caller holds h.mu.
@@ -227,20 +234,31 @@ func (h *Host) subscribedLocked(p *Project) bool {
 }
 
 // closeIdle closes the projects that no client has reached for a while and
-// that have no work left. Their sessions stay listed and reopen them.
+// that have no work left. Their sessions stay listed and reopen them, except
+// a temporary chat's, which close sooner and are removed.
 func (h *Host) closeIdle(idle time.Duration) {
 	h.projectMu.Lock()
 	defer h.projectMu.Unlock()
 	closed := false
 	for _, p := range h.loaded() {
-		if p.busy() {
+		// A temporary chat waits for running work only: idle shells and schedules end with it.
+		wait := idle
+		if p.temporary != nil {
+			wait = min(idle, temporaryGrace)
+		}
+		if p.temporary != nil && p.working() || p.temporary == nil && p.busy() {
 			continue
 		}
 		h.mu.Lock()
 		// Any request that could start work reaches the project first, which counts as use.
-		if h.ctx.Err() != nil || h.projects[p.dir] != p || p == h.web || p.windowRequests > 0 || time.Since(p.used) < idle || h.subscribedLocked(p) {
+		if h.ctx.Err() != nil || h.projects[p.dir] != p || p == h.web && p.temporary == nil || p.windowRequests > 0 || time.Since(p.used) < wait || h.subscribedLocked(p) {
 			h.mu.Unlock()
 			continue
+		}
+		if p.temporary != nil {
+			h.mu.Unlock()
+			p.deleteAgentSessions()
+			h.mu.Lock()
 		}
 		p.detachLocked()
 		h.mu.Unlock()

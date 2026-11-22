@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/internal/filelock"
 	"github.com/adrianliechti/wingman-agent/internal/statefile"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
 	"github.com/adrianliechti/wingman-agent/server"
@@ -449,7 +450,7 @@ func lockHostState(wait bool) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	unlock, err := lockFile(file, wait)
+	unlock, err := filelock.Lock(file, wait)
 	if err != nil {
 		file.Close()
 		return nil, err

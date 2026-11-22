@@ -620,3 +620,40 @@ func TestNewWindowOpensTheStartPage(t *testing.T) {
 		t.Fatalf("a failed new window: %d", rec.Code)
 	}
 }
+
+// The start page opens a temporary chat on the shared host, starting it when
+// none runs. It is not a recent workspace.
+func TestStartPageOpensTemporaryChat(t *testing.T) {
+	testenv.UserHome(t)
+	testenv.WingmanHome(t)
+	testGateway(t)
+	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(name, t.TempDir())
+	}
+	app := newTestApp(newTestHosts(t, hostsThatStay))
+
+	if rec := serve(app, "GET", "/", ""); !strings.Contains(rec.Body.String(), `id="open-temporary"`) {
+		t.Fatal("start page offers no temporary chat")
+	}
+	rec := serve(app, "POST", "/app/temporary", "{}")
+	var created struct {
+		Path string `json:"path"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &created) != nil || created.Path == "" {
+		t.Fatalf("temporary chat: %d %q", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(created.Path); err != nil {
+		t.Fatalf("temporary chat has no folder: %v", err)
+	}
+	window := serve(app, "GET", "/api/workspace?project="+url.QueryEscape(created.Path), "")
+	var shown struct {
+		Name      string `json:"name"`
+		Temporary bool   `json:"temporary"`
+	}
+	if window.Code != http.StatusOK || json.Unmarshal(window.Body.Bytes(), &shown) != nil || !shown.Temporary || shown.Name != "Temporary Chat" {
+		t.Fatalf("temporary chat's window: %d %s", window.Code, window.Body.String())
+	}
+	if rec := serve(app, "GET", "/app/workspaces", ""); strings.TrimSpace(rec.Body.String()) != "null" {
+		t.Fatalf("temporary chat became a recent workspace: %s", rec.Body.String())
+	}
+}

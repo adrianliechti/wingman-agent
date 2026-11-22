@@ -1653,7 +1653,9 @@ func globalMCPConfigPath() string {
 	return mcp.GlobalConfigPath()
 }
 
-func projectStateDir(workingDir string) string {
+// ProjectStateDir holds what Wingman keeps of a folder: its memory, sessions,
+// trust decisions and plugin data.
+func ProjectStateDir(workingDir string) string {
 	path, err := layout.WingmanPath("projects", projectKey(workingDir))
 	if err == nil {
 		return path
@@ -1663,13 +1665,13 @@ func projectStateDir(workingDir string) string {
 }
 
 func projectMemoryDir(workingDir string) string {
-	return filepath.Join(projectStateDir(workingDir), "memory")
+	return filepath.Join(ProjectStateDir(workingDir), "memory")
 }
 
 // projectPluginDataDir holds PLUGIN_DATA for plugins installed in the project,
 // alongside that project's other state so it survives plugin updates.
 func projectPluginDataDir(workingDir string) string {
-	return filepath.Join(projectStateDir(workingDir), "plugin-data")
+	return filepath.Join(ProjectStateDir(workingDir), "plugin-data")
 }
 
 func personalPluginDataDir() string {
@@ -1678,7 +1680,7 @@ func personalPluginDataDir() string {
 }
 
 func SessionsDir(workingDir string) string {
-	return filepath.Join(projectStateDir(workingDir), "sessions")
+	return filepath.Join(ProjectStateDir(workingDir), "sessions")
 }
 
 // SessionStores lists the sessions directory of every project that has state.

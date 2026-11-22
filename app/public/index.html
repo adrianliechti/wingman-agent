@@ -473,6 +473,35 @@
         height: 14px;
       }
 
+      .temporary {
+        align-self: flex-start;
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        margin-top: 0.9rem;
+        padding: 0.3rem 0.55rem;
+        border: none;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--fg-muted);
+        font-size: 11.5px;
+        cursor: pointer;
+        transition:
+          background 0.1s ease,
+          color 0.1s ease;
+      }
+
+      .temporary:hover:not(:disabled) {
+        background: var(--bg-elevated);
+        color: var(--fg);
+      }
+
+      .temporary svg {
+        width: 13px;
+        height: 13px;
+        flex-shrink: 0;
+      }
+
       /* ============ Misc ============ */
 
       .error {
@@ -539,6 +568,12 @@
               </span>
             </button>
           </section>
+          <button id="open-temporary" class="temporary" type="button" title="A chat in a folder of its own, removed once no window shows it">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke-dasharray="3 2.5"></path>
+            </svg>
+            <span>Temporary Chat</span>
+          </button>
           <div class="error" id="error"></div>
         </main>
       </div>
@@ -568,17 +603,19 @@
       const OpenWorkspace = (path) => api("/app/workspaces/open", { path });
       const SelectFolder = async () => (await api("/app/folder", {}))?.path || "";
       const NewWindow = () => api("/app/window", {});
+      const TemporaryChat = async () => (await api("/app/temporary", {}))?.path || "";
 
       const layoutEl = document.getElementById("layout");
       const errEl = document.getElementById("error");
 
       const dropzoneBtn = document.getElementById("open-dropzone");
       const addBtn = document.getElementById("open-add");
+      const temporaryBtn = document.getElementById("open-temporary");
       const shellMenuBtn = document.getElementById("shell-menu-trigger");
       const shellMenuPopup = document.getElementById("shell-menu-popup");
       const shellMenuOpen = document.getElementById("shell-menu-open");
       const shellMenuWindow = document.getElementById("shell-menu-window");
-      const openButtons = [dropzoneBtn, addBtn];
+      const openButtons = [dropzoneBtn, addBtn, temporaryBtn];
 
       const workspacesListEl = document.getElementById("workspaces-list");
 
@@ -726,7 +763,23 @@
         }
       }
 
+      async function openTemporaryChat() {
+        if (isOpening) return;
+        isOpening = true;
+        setOpenDisabled(true);
+        errEl.textContent = "";
+        try {
+          const path = await TemporaryChat();
+          window.location.replace("/?project=" + encodeURIComponent(path));
+        } catch (e) {
+          errEl.textContent = String(e);
+          setOpenDisabled(false);
+          isOpening = false;
+        }
+      }
+
       dropzoneBtn.addEventListener("click", pickAndOpen);
+      temporaryBtn.addEventListener("click", openTemporaryChat);
       addBtn.addEventListener("click", pickAndOpen);
       shellMenuBtn.addEventListener("click", () => {
         const open = shellMenuPopup.hidden;

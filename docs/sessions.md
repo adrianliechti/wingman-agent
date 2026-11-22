@@ -68,6 +68,16 @@ turns and commands finish and stops a minute later.
 **File › New Window** (`⇧⌘N`, `Ctrl+Shift+N` on Windows) opens another window
 on the start page.
 
+**Temporary Chat** on the start page opens a chat in a new, empty folder of
+its own, which the window shows like any other, with its files, changes and
+terminals. It is not added to the start page's workspaces. Once no window has
+shown it for a minute and its turns, commands and tasks are done, Wingman
+ends its terminals and schedules and deletes its sessions, the folder and what
+it kept of them, and the chat leaves the session list. Other agents, such as Claude or Codex, delete
+their records of its sessions then. A temporary chat still open when Wingman
+stops is removed as it stops, without asking other agents; one left behind by
+a Wingman that did not stop cleanly is removed the next time Wingman starts.
+
 Right-click a session to mark it read or unread, archive it, fork it or delete
 it. Archived sessions leave the list until they need you again; the filter
 button shows them, or only one agent's sessions. Opening a session marks it

@@ -384,7 +384,7 @@ func TestWingmanHomeOwnsPersonalWorkspaceState(t *testing.T) {
 	}{
 		"agents config":     {agentsPath, filepath.Join(home, "agents.json")},
 		"global MCP config": {globalMCPConfigPath(), filepath.Join(home, "mcp.json")},
-		"project state":     {projectStateDir(workDir), projectDir},
+		"project state":     {ProjectStateDir(workDir), projectDir},
 		"memory":            {projectMemoryDir(workDir), filepath.Join(projectDir, "memory")},
 		"project plugins":   {projectPluginDataDir(workDir), filepath.Join(projectDir, "plugin-data")},
 		"personal plugins":  {personalPluginDataDir(), filepath.Join(home, "plugin-data")},
