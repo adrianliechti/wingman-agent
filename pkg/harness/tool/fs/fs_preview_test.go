@@ -102,14 +102,14 @@ func TestPrivatePreviewSnapshotsKeepAgentBaselinesSeparate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if freshness.staleContent(t.Context(), target, []byte("changed!")) {
+	if freshness.staleContent(t.Context(), target, []byte("changed!"), nil) {
 		t.Fatal("background preview changed the parent's baseline")
 	}
-	if !freshness.staleContent(background, target, []byte("changed!")) {
+	if !freshness.staleContent(background, target, []byte("changed!"), nil) {
 		t.Fatal("background snapshot not recorded")
 	}
 	freshness.record(t.Context(), target)
-	if !freshness.staleContent(background, target, []byte("changed!")) {
+	if !freshness.staleContent(background, target, []byte("changed!"), nil) {
 		t.Fatal("parent read erased background snapshot")
 	}
 }

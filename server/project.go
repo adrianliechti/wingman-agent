@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,6 +70,7 @@ type Project struct {
 	storageRoot      string  // the repository that keeps its builtin journals, while its folder tells
 	window           *Server // web adapter for a secondary project, published under host.mu
 	windowRequests   int     // open scoped HTTP requests and WebSockets, protected by host.mu
+	temporary        func()  // removes a temporary chat's folder as the project closes; nil for any other project
 }
 
 // newProject starts a project's resources under the host's lifetime.
@@ -89,6 +91,12 @@ func (h *Host) newProject(workDir string) (_ *Project, err error) {
 			s.close()
 		}
 	}()
+	if dir, err := filepath.Abs(workDir); err == nil && isTemporary(canonicalPath(dir)) {
+		workDir = canonicalPath(dir)
+		if s.temporary, err = claimTemporary(workDir); err != nil {
+			return nil, err
+		}
+	}
 	ws, err := code.NewWorkspace(workDir)
 	if err != nil {
 		return nil, err
@@ -247,6 +255,12 @@ func (s *Project) close() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = s.telemetry.Shutdown(shutdownCtx)
 		cancel()
+		if s.temporary != nil {
+			if s.host != nil {
+				s.host.forgetTemporary(s.dir)
+			}
+			s.temporary()
+		}
 	})
 }
 
@@ -313,6 +327,12 @@ func (p *Project) availableLocked() bool {
 // Caller holds host.mu.
 func (p *Project) detachLocked() {
 	p.stop()
+	p.unlistLocked()
+}
+
+// unlistLocked takes the project and its sessions out of the host, so that no
+// client reaches them, while its work keeps its context. Caller holds host.mu.
+func (p *Project) unlistLocked() {
 	if p.host.projects[p.dir] == p {
 		delete(p.host.projects, p.dir)
 	}

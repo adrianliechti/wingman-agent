@@ -445,6 +445,9 @@ func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nod
 		recorder.Close()
 		exchanges := recorder.snapshot()
 		summary := analyzeBehavior(exchanges, leadConversation(exchanges))
+		if count := result.asksBackCount(); count > 0 {
+			summary.Signals["asks_back"] = count
+		}
 		result.Behavior = &summary
 		if err := recorder.writeJSONL(recordPath); err != nil {
 			result.Error = appendBenchError(result.Error, "record: "+err.Error())
@@ -457,6 +460,7 @@ func runOne(ctx context.Context, binary, agentName, model, effort, scenario, nod
 		return result
 	}
 	defer os.RemoveAll(fixture)
+	defer os.RemoveAll(fixture + siblingSuffix)
 	script, scripted := scriptedScenarios[scenario]
 	if scripted {
 		err = script.fixture(fixture)

@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
+	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
@@ -34,9 +37,12 @@ func TestSessionContextDescribesConfiguredAccess(t *testing.T) {
 			s := a.session(id)
 			check := func(got string, hasExec, hasEdit bool) {
 				t.Helper()
+				if !strings.Contains(got, "File tools read and search ordinary local files") || strings.Contains(got, "File-tool readable roots:") {
+					t.Error("session context omits the read scope of the file tools")
+				}
 				for _, path := range []string{a.workspace.RootPath, s.resources.tempDir} {
-					if !strings.Contains(got, "`"+path+"`") {
-						t.Errorf("session context omits accessible path %q", path)
+					if strings.Contains(got, "`"+path+"`") != hasEdit {
+						t.Errorf("writable path %q does not follow available tools", path)
 					}
 				}
 				if strings.Contains(got, "- Shell sandbox:") != hasExec {
@@ -64,6 +70,113 @@ func TestSessionContextDescribesConfiguredAccess(t *testing.T) {
 			check(s.subagentContext(s.harness.AvailableTools()), !tc.options.DisableShell, true)
 			check(s.subagentContext([]tool.Tool{{Name: "read"}}), false, false)
 		})
+	}
+}
+
+// File tools read like the shell, any path; they write only to the workspace, memory, and the session's temp.
+func TestSessionFileToolsReadAnyPathAndWriteOnlyToTheirRoots(t *testing.T) {
+	a := New(newOptionsTestWorkspace(t), Config{Options: Options{DisableShell: true}}, nil)
+	t.Cleanup(func() { _ = a.Close() })
+	id, err := a.NewSession(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := a.session(id)
+	call := func(name string, args map[string]any) (string, error) {
+		t.Helper()
+		for _, candidate := range s.harness.AvailableTools() {
+			if candidate.Name == name {
+				result, err := candidate.Execute(t.Context(), args)
+				return result.Content.Text(), err
+			}
+		}
+		t.Fatalf("session has no %s tool", name)
+		return "", nil
+	}
+
+	sibling := t.TempDir()
+	notes := filepath.Join(sibling, "notes.md")
+	if err := os.WriteFile(notes, []byte("sibling notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var bundled string
+	for _, sk := range a.workspace.Skills() {
+		if sk.Bundled {
+			bundled = filepath.Join(sk.AbsoluteDir(a.workspace.RootPath), "SKILL.md")
+			break
+		}
+	}
+	if bundled == "" {
+		t.Fatal("workspace has no bundled skill to read")
+	}
+	for _, read := range []struct {
+		tool string
+		args map[string]any
+		want string
+	}{
+		{"read", map[string]any{"file_path": notes}, "sibling notes"},
+		{"grep", map[string]any{"path": sibling, "pattern": "sibling"}, notes},
+		{"glob", map[string]any{"path": sibling, "pattern": "*.md"}, notes},
+		{"read", map[string]any{"file_path": bundled}, "name:"},
+	} {
+		if got, err := call(read.tool, read.args); err != nil || !strings.Contains(got, read.want) {
+			t.Errorf("%s %v = %q, %v; want %q", read.tool, read.args, got, err, read.want)
+		}
+	}
+	for _, path := range []string{notes, bundled, filepath.Join(sibling, "new.md")} {
+		if got, err := call("edit", map[string]any{"edits": []any{map[string]any{"file_path": path, "old_string": "", "new_string": "changed"}}}); err == nil {
+			t.Errorf("edit of %s outside the writable roots = %q", path, got)
+		}
+	}
+	if _, err := call("delete", map[string]any{"file_paths": []any{notes}}); err == nil {
+		t.Errorf("delete of %s outside the writable roots succeeded", notes)
+	}
+	if data, err := os.ReadFile(notes); err != nil || string(data) != "sibling notes\n" {
+		t.Errorf("outside file = %q, %v", data, err)
+	}
+	scratch := filepath.Join(s.resources.tempDir, "scratch.md")
+	if got, err := call("edit", map[string]any{"edits": []any{map[string]any{"file_path": scratch, "old_string": "", "new_string": "draft"}}}); err != nil {
+		t.Errorf("edit in the session's temp = %q, %v", got, err)
+	}
+}
+
+func TestSessionReadRootsMatchToolsAndPrompt(t *testing.T) {
+	a := New(newOptionsTestWorkspace(t), Config{Options: Options{DisableShell: true}}, nil)
+	t.Cleanup(func() { _ = a.Close() })
+	allowed := t.TempDir()
+	s := &sessionState{id: "restricted", parent: a, harness: &harness.Agent{Config: a.cfg.Clone()}, fileReadRoots: []string{allowed}}
+	t.Cleanup(func() { _ = s.resources.Close() })
+	s.configureHarness()
+	if err := s.configureTools(); err != nil {
+		t.Fatal(err)
+	}
+	listed := "File-tool readable roots: `" + a.workspace.RootPath + "`, `" + allowed + "`."
+	if got := s.contextInstructions(); !strings.Contains(got, listed) {
+		t.Errorf("context missing %q", listed)
+	}
+	outside := t.TempDir()
+	for _, dir := range []string{allowed, outside} {
+		if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("hello"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, candidate := range s.harness.AvailableTools() {
+		for _, dir := range []string{allowed, outside} {
+			var args map[string]any
+			switch candidate.Name {
+			case "read":
+				args = map[string]any{"file_path": filepath.Join(dir, "note.txt")}
+			case "grep":
+				args = map[string]any{"path": dir, "pattern": "hello"}
+			case "glob":
+				args = map[string]any{"path": dir, "pattern": "*.txt"}
+			default:
+				continue
+			}
+			if _, err := candidate.Execute(t.Context(), args); (dir == allowed) != (err == nil) {
+				t.Errorf("%s in %s: %v", candidate.Name, dir, err)
+			}
+		}
 	}
 }
 

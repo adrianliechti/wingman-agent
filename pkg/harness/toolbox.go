@@ -45,7 +45,7 @@ func (b *toolbox) record(call ToolCall, result tool.Result) {
 	switch call.Name {
 	case "exec", "exec_command", "exec_session":
 		nested.Args, nested.Metadata = call.Args, maps.Clone(result.Metadata)
-	case "edit", "agent":
+	case "edit", "delete", "agent":
 		nested.Metadata = maps.Clone(result.Metadata)
 	}
 	b.mu.Lock()

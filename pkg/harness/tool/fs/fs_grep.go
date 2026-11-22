@@ -181,6 +181,7 @@ func parseGrepArgs(args map[string]any) (*grepArgs, error) {
 	}, nil
 }
 
+// GrepTool searches any path. Read roots confine it to the workspace and those roots.
 func GrepTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 	return tool.Tool{
 		Name:   "grep",
@@ -202,7 +203,7 @@ func GrepTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			"type": "object",
 			"properties": map[string]any{
 				"pattern": map[string]any{"type": "string", "description": "Regular expression to search file contents for."},
-				"path":    map[string]any{"type": "string", "description": "File or directory to search. Defaults to workspace."},
+				"path":    map[string]any{"type": "string", "description": "File or directory to search. Defaults to the workspace. " + readPathScope(allowedReadRoots)},
 				"glob":    map[string]any{"type": "string", "description": "Glob filters separated by commas or whitespace (e.g. `*.{ts,tsx},*.js`); prefix ! to exclude. Positive filters are ORed; exclusions take precedence."},
 				"type":    map[string]any{"type": "string", "description": "File type filter (js, py, rust, go, java, …)."},
 				"output_mode": map[string]any{

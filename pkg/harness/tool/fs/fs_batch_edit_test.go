@@ -182,8 +182,9 @@ func TestBatchEditToolRejectsOutsidePathBeforeWriting(t *testing.T) {
 		map[string]any{"file_path": "created.txt", "old_string": "", "new_string": "must not exist"},
 		map[string]any{"file_path": filepath.Join(outside, "escape.txt"), "old_string": "", "new_string": "escape"},
 	}})
-	if err == nil || !strings.Contains(err.Error(), "outside workspace") {
-		t.Fatalf("expected outside-workspace error, got %v", err)
+	// Inkling 2 Small took the workspace entry of such a batch as applied until the refusal said otherwise.
+	if err == nil || !strings.Contains(err.Error(), "outside workspace") || !strings.HasSuffix(err.Error(), "(no files changed)") {
+		t.Fatalf("expected an outside-workspace error that reports no files changed, got %v", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(workspace, "created.txt")); !os.IsNotExist(statErr) {
 		t.Fatalf("created file exists after rejected batch: %v", statErr)
@@ -210,6 +211,9 @@ func TestBatchEditToolReportsAllFailedEntriesInOneTurn(t *testing.T) {
 	}})
 	if err == nil {
 		t.Fatal("expected error")
+	}
+	if strings.Count(err.Error(), "(no files changed)") != 1 || !strings.HasSuffix(err.Error(), "(no files changed)") {
+		t.Fatalf("expected one outcome for the whole batch: %v", err)
 	}
 	for _, want := range []string{"edits[0] for a.txt", "edits[1] for b.txt"} {
 		if !strings.Contains(err.Error(), want) {

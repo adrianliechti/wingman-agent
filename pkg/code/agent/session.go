@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 
 	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
-	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
@@ -22,7 +21,6 @@ import (
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/subagent"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/websearch"
 	"github.com/adrianliechti/wingman-agent/pkg/session"
-	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
 
 type sessionLock struct {
@@ -154,7 +152,6 @@ func (s *sessionState) configureHarness() {
 func (s *sessionState) configureTools() error {
 	a, sessionCfg := s.parent, s.harness.Config
 	ws, elicit := a.workspace, a.prompts
-	allowedReadRoots, allowedWriteRoots := sessionFileRoots(ws)
 	if !a.cfg.DisableShell && !a.cfg.DisableSandbox {
 		if err := shell.CheckSandbox(ws.RootPath); err != nil {
 			return fmt.Errorf("sandbox unavailable (WINGMAN_SANDBOX=off explicitly disables isolation): %w", err)
@@ -192,14 +189,15 @@ func (s *sessionState) configureTools() error {
 		ReadCredentials:    a.cfg.SandboxCredentials,
 		ExtraWritableRoots: []string{ws.MemoryPath},
 	}
-	allowedReadRoots = append(allowedReadRoots, privateTemp)
-	allowedWriteRoots = append(allowedWriteRoots, privateTemp)
-	s.fileReadRoots, s.fileWriteRoots = allowedReadRoots, allowedWriteRoots
+	if ws.MemoryPath != "" {
+		s.fileWriteRoots = append(s.fileWriteRoots, ws.MemoryPath)
+	}
+	s.fileWriteRoots = append(s.fileWriteRoots, privateTemp)
 	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.cfg.DisableShell, Elicitation: elicit, Shell: shellOpts}
 
 	tools := ws.WithEditDiagnostics(fs.Tools(ws.Root, &fs.Options{
-		AllowedReadRoots:  allowedReadRoots,
-		AllowedWriteRoots: allowedWriteRoots,
+		AllowedReadRoots:  s.fileReadRoots,
+		AllowedWriteRoots: s.fileWriteRoots,
 		Freshness:         s.freshness,
 	}))
 	if !a.cfg.DisableShell {
@@ -225,29 +223,4 @@ func (s *sessionState) configureTools() error {
 		ParentMessages: s.harness.MessagesSnapshot,
 	})...)
 	return nil
-}
-
-func sessionFileRoots(ws *code.Workspace) (readRoots, writeRoots []string) {
-	readRoots = skill.DiscoveryRoots(ws.RootPath)
-	for _, sk := range ws.Skills() {
-		if sk.Bundled {
-			continue
-		}
-		if path := sk.AbsoluteDir(ws.RootPath); path != "" {
-			readRoots = append(readRoots, path)
-		}
-	}
-	// System skills live outside the workspace, but their references and scripts
-	// must remain readable. Deliberately do not add this root to write roots.
-	if ws.SystemSkillsPath != "" {
-		readRoots = append(readRoots, ws.SystemSkillsPath)
-	}
-	readRoots = append(readRoots, ws.ScratchPath)
-
-	if ws.MemoryPath != "" {
-		readRoots = append(readRoots, ws.MemoryPath)
-		writeRoots = append(writeRoots, ws.MemoryPath)
-	}
-
-	return readRoots, writeRoots
 }

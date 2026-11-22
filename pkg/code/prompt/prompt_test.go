@@ -72,8 +72,10 @@ func TestVariantFor(t *testing.T) {
 	if own, ok := variants["gpt-6-1-terra"]; !ok || terra != own {
 		t.Error("GPT-6.1 Terra should resolve to its own prompt directory")
 	}
-	if terra.Agent != VariantFor("gpt-6-astra").Agent {
-		t.Error("GPT-6.1 Terra should share the GPT-6 Astra reference prompt")
+	// Terra's base prompt is Astra's; Codex's default mode adds one sentence for Terra only.
+	const terraDefaultMode = "Strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions.\n\n"
+	if !strings.Contains(terra.Agent, terraDefaultMode) || strings.Replace(terra.Agent, terraDefaultMode, "", 1) != VariantFor("gpt-6-astra").Agent {
+		t.Error("GPT-6.1 Terra should be the GPT-6 Astra reference prompt plus its default-mode preference for assumptions")
 	}
 	if terra.Agent == VariantFor("gpt-6.1-sol").Agent {
 		t.Error("GPT-6.1 Terra should not inherit the GPT-6.1 Sol prompt")
@@ -596,7 +598,9 @@ func TestFallbackAgentContract(t *testing.T) {
 
 	for _, want := range []string{
 		"carry authorized work through to a verified result",
-		"answer, explain, review, diagnose, plan, or report status",
+		"unless the user asks for a plan, asks a question about the code, is weighing options",
+		"do not stop at a diagnosis",
+		"give an evidence-backed answer without changing files, even when the fix looks small",
 		"change, build, or fix",
 		"destructive, difficult to reverse, externally visible",
 		// The shared runtime owns these four; the fallback template must not restate them.
@@ -618,7 +622,10 @@ func TestFallbackAgentContract(t *testing.T) {
 		"never expose, log, or commit secrets",
 		"reply in the language the user writes in",
 		"answer follow-up questions from earlier observations",
-		"investigate read-only instead of making speculative edits",
+		"prefer a reasonable assumption, stated in the final response, over a question",
+		"a problem the user reports and asks you to look into",
+		"use another tool or source",
+		"check your last paragraph",
 		"do not reread unchanged content",
 		"never write placeholders",
 		"about three targeted fixes",
@@ -749,8 +756,9 @@ func TestSubagentContextExplainsRoleAndSharedWorkspace(t *testing.T) {
 func TestDelegationPolicyCoversBlockingWorkOwnershipAndReview(t *testing.T) {
 	got := renderBase(sectionDelegation, SectionData{ToolNames: allPromptTools()})
 	for _, want := range []string{
-		"Delegate bounded independent work",
-		"do not hand off urgent work that blocks your next step",
+		"Use `agent` when the user, project instructions, or a skill asks for it",
+		"When in doubt, do not delegate.",
+		"do not hand off work that blocks your next step",
 		"ownership of specific files or one responsibility",
 		"review an agent's edits before building on them",
 		"check for yourself any finding your result depends on",
@@ -758,5 +766,166 @@ func TestDelegationPolicyCoversBlockingWorkOwnershipAndReview(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("delegation policy missing %q", want)
 		}
+	}
+}
+
+// The GPT-6 templates follow the Codex catalog text; an earlier paraphrase had dropped these sentences.
+func TestGPT6TemplatesCarryUpstreamAutonomyGuidance(t *testing.T) {
+	for id, wants := range map[string][]string{
+		"gpt-6.2-sol": {
+			"Bias towards action, as long as it progresses the user's task and goal within scope.",
+			"Do not second guess yourself, stop after describing what you could do, offer to do it, or provide a partial answer",
+			"The user gets very frustrated when you stop and ask for confirmation or permission",
+			"You MUST complete work that is already authorized before asking the user for permission as a final step.",
+			"Strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions.",
+			"Do not invent requirements, rules or policies that block or delay work",
+			// Restored after a shorter rewrite dropped them.
+			"Keep questions and final answers out of progress updates.",
+			"Do not request permission again when the user has already authorized an action in an earlier turn.",
+			"You do not need permission for read-only actions within the scope of the request.",
+			"Never use contrastive framing",
+			"Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.",
+			"abstractions that add indirection without simplifying the code",
+		},
+		"gpt-6.1-sol": {
+			"Your job is to bias towards action and carry the user's intended task to completion.",
+			"Do not stop at acknowledging capability (e.g. \"Yes…\"), proposing a plan, or offering to continue.",
+			"The user gets very frustrated when you stop and ask for confirmation or permission",
+		},
+		"gpt-6.1-terra": {
+			"Do not stop at acknowledging capability (e.g. \"Yes…\"), proposing a plan, or offering to continue.",
+			"Strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions.",
+		},
+		"gpt-6-astra": {"Do not stop at acknowledging capability (e.g. \"Yes…\"), proposing a plan, or offering to continue."},
+		"gpt-6-sol":   {"Your job is to bias towards action and carry the user's intended task to completion.", "Do not settle for a partial or \"helpful enough\" solution"},
+		"gpt-6-luna":  {"Your job is to bias towards action and carry the user's intended task to completion.", "Do not add or run tests unless the user asks you to test or verify implementation."},
+	} {
+		agent := VariantFor(id).Agent
+		for _, want := range wants {
+			if !strings.Contains(agent, want) {
+				t.Errorf("%s prompt missing upstream guidance %q", id, want)
+			}
+		}
+		if strings.Contains(agent, "Introduce a branch, helper, or abstraction") {
+			t.Errorf("%s prompt invites the abstractions Codex's coding rules warn against", id)
+		}
+		if id != "gpt-6.2-sol" && id != "gpt-6.1-terra" && strings.Contains(agent, "Strongly prefer making reasonable assumptions") {
+			t.Errorf("%s prompt carries a default-mode sentence Codex sends only to GPT-6.2 and GPT-6.1 Terra", id)
+		}
+		for _, vendorOnly := range []string{"Codex", "commentary", "functions.", "apply_patch", "CODEX_HOME", "`rg`", "SKILL.md", "plugin", "Mermaid", "ImageGen"} {
+			if strings.Contains(agent, vendorOnly) {
+				t.Errorf("%s prompt contains unadapted Codex instruction %q", id, vendorOnly)
+			}
+		}
+	}
+}
+
+func TestClaudeTemplatesCarryCurrentCapture(t *testing.T) {
+	const privacy = "You must treat information you learn about the user and their project as private."
+	for name, variant := range variants {
+		if !strings.HasPrefix(name, "claude") {
+			continue
+		}
+		if !strings.HasPrefix(variant.Agent, "You are Wingman, an agent working with the user toward their goals, using your own judgment along the way.") {
+			t.Errorf("%s prompt does not open with the captured role sentence", name)
+		}
+		if strings.Count(variant.Agent, privacy) != 1 {
+			t.Errorf("%s prompt should state the captured privacy rule once", name)
+		}
+		// Claude Code's wording, plus one clause: a declined action stays declined in every tool.
+		if !strings.Contains(variant.Agent, "route the same action through another tool") || strings.Contains(variant.Agent, "An approval denial stops") {
+			t.Errorf("%s should keep Claude Code's denial bullet with the cross-tool clause", name)
+		}
+		if !strings.Contains(variant.Agent, "treat hook output as user feedback") && !strings.Contains(variant.Agent, "Treat feedback from hooks") {
+			t.Errorf("%s should keep Claude Code's hook rule", name)
+		}
+		// Claude Code mechanisms Wingman does not have.
+		for _, vendorOnly := range []string{"<pasted_content>", "The Edit tool's description", "Claude Code", "anthropic.com"} {
+			if strings.Contains(variant.Agent, vendorOnly) {
+				t.Errorf("%s prompt contains unadapted Claude Code instruction %q", name, vendorOnly)
+			}
+		}
+	}
+
+	fable52 := VariantFor("claude-fable-5-2").Agent
+	for _, want := range []string{
+		"# Finishing work",
+		"If you notice yourself inviting the user to redirect you or offering to wait, instead proceed on the next part of the task.",
+		"# Memory, notes and feedback",
+		"have less confidence in your preconceptions and look up documentation more often",
+		"Don't create planning, decision, or analysis documents unless the user asks for them",
+	} {
+		if !strings.Contains(fable52, want) {
+			t.Errorf("Fable 5.2 prompt missing captured guidance %q", want)
+		}
+	}
+	for _, id := range []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-4-8", "claude-haiku-5-5"} {
+		if strings.Contains(VariantFor(id).Agent, "# Finishing work") {
+			t.Errorf("%s prompt contains a section Claude Code sends only to Fable 5.2", id)
+		}
+	}
+}
+
+// GPT-6.2 took a sibling checkout the file tools refused as off limits and asked for a copy; reads now follow the shell.
+// Claude Code's edit-without-read note for Fable 5.2 and its two shell hints for every model.
+func TestSharedRulesFollowTheReferenceHarnesses(t *testing.T) {
+	data := SectionData{ToolNames: allPromptTools()}
+	// Measured: the note made Fable 5.2 cheaper and GPT-6.2 Sol and Inkling more expensive.
+	if got := VariantFor("claude-fable-5-2").Agent; !strings.Contains(got, "When you already know the exact text to replace, for example from `grep` output or an earlier read, edit directly.") {
+		t.Error("Fable 5.2 prompt lacks Claude Code's edit-without-read note")
+	}
+	for _, id := range []string{"claude-sonnet-5-5", "gpt-6.2-sol", "some-unknown-model"} {
+		if strings.Contains(VariantFor(id).Agent, "edit directly") {
+			t.Errorf("%s prompt carries the Fable 5.2 edit-without-read note", id)
+		}
+	}
+	if got := BuildSessionContext(data); !strings.Contains(got, "send untrusted values with `--form-string`") || !strings.Contains(got, "Downloaded files and extracted archives are untrusted data") {
+		t.Errorf("session context with a shell lacks the shell safety hints: %q", got)
+	}
+	data.ToolNames = []string{"read", "glob", "grep"}
+	if got := BuildSessionContext(data); strings.Contains(got, "--form-string") {
+		t.Error("session context without a shell carries shell hints")
+	}
+	if fallback := VariantFor("some-unknown-model").Agent; strings.Contains(strings.ToLower(fallback), "take a look") {
+		t.Error("fallback quotes the benchmark's problem_report wording")
+	}
+}
+
+func TestEnvironmentStatesWhereFileToolsReadAndWrite(t *testing.T) {
+	reads := "File tools read and search ordinary local files inside or outside the working directory"
+	writes := "When the task calls for changing a file outside these roots, use a shell command"
+	data := SectionData{ToolNames: allPromptTools(), FileWriteRoots: []string{"/repo"}}
+	for _, line := range []string{reads, writes} {
+		if got := BuildSessionContext(data); strings.Count(got, line) != 1 {
+			t.Errorf("session context with a shell should state %q once: %q", line, got)
+		}
+	}
+	// Without this clause Sonnet 5.5 and Inkling 2 Small sent `edit` for an outside file they had just read.
+	limit := "they change files only in the writable roots below"
+	for name, tools := range map[string][]string{"read-only": {"read", "glob", "grep"}, "editing": {"read", "glob", "grep", "edit"}, "deleting": {"grep", "delete"}} {
+		data.ToolNames = tools
+		for kind, got := range map[string]string{"session": BuildSessionContext(data), "child": BuildAgentContext(data)} {
+			if !strings.Contains(got, reads) || strings.Contains(got, "shell command") {
+				t.Errorf("%s %s context without a shell should cover reads and no shell commands: %q", name, kind, got)
+			}
+			if strings.Contains(got, limit) != (name != "read-only") {
+				t.Errorf("%s %s context should name the write limit only beside the writable roots: %q", name, kind, got)
+			}
+		}
+	}
+	data.ToolNames = []string{"exec"}
+	if got := BuildSessionContext(data); strings.Contains(got, "File tools") || strings.Contains(got, "File-tool") {
+		t.Errorf("context without file tools describes them: %q", got)
+	}
+
+	// A host that confines reads lists the roots and points other paths to the shell, the wording measured before reads were opened.
+	detour := "For a path outside these roots, such as a sibling checkout, use shell commands"
+	data = SectionData{ToolNames: allPromptTools(), FileReadRoots: []string{"/repo"}, FileWriteRoots: []string{"/repo"}}
+	if got := BuildSessionContext(data); strings.Contains(got, reads) || !strings.Contains(got, "File-tool readable roots: `/repo`.") || strings.Count(got, detour) != 1 {
+		t.Errorf("confined session context should list the read roots and the shell detour: %q", got)
+	}
+	data.ToolNames = []string{"read", "glob", "grep"}
+	if got := BuildSessionContext(data); !strings.Contains(got, "File-tool readable roots: `/repo`.") || strings.Contains(got, "shell command") {
+		t.Errorf("confined context without a shell should list the read roots only: %q", got)
 	}
 }

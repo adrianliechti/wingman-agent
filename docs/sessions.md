@@ -68,6 +68,18 @@ turns and commands finish and stops a minute later.
 **File › New Window** (`⇧⌘N`, `Ctrl+Shift+N` on Windows) opens another window
 on the start page.
 
+**Temporary Chat** on the start page opens a chat in a new, empty folder of
+its own. Its window works like any other, with files, changes and terminals,
+and the folder is not added to the start page's workspaces. Once no window has
+shown the chat for a minute and its turns, commands and tasks are done,
+Wingman ends its terminals and schedules, deletes its sessions, including
+those other agents such as Claude or Codex keep, and removes the folder and
+what Wingman kept of it. A chat that started Wingman's background host, as one
+does when no window has a folder open, lasts until that host stops, a minute
+after the last window closes. Wingman also removes temporary chats as it
+stops, without asking other agents, and any left behind by a Wingman that did
+not stop cleanly the next time it starts.
+
 Right-click a session to mark it read or unread, archive it, fork it or delete
 it. Archived sessions leave the list until they need you again; the filter
 button shows them, or only one agent's sessions. Opening a session marks it
@@ -209,9 +221,20 @@ approval is unavailable.
 The agent's shell commands and scheduled scripts use an OS sandbox by default:
 Seatbelt on macOS, bubblewrap (`bwrap`) with seccomp on Linux, and a native
 process security environment (PSEC) on Windows. Unavailable backends fail closed.
-Set `WINGMAN_SANDBOX=off` to explicitly disable shell OS isolation; file and
-search tools (`read`, `edit`, `glob`, `grep`) keep their workspace roots and
-protected-configuration checks regardless.
+Set `WINGMAN_SANDBOX=off` to explicitly disable shell OS isolation. With either
+setting, `read`, `glob`, and `grep` can reach ordinary files inside and outside
+the workspace by default. The file tools check opened files and directories
+before returning content, including through symlinks. They refuse
+credential stores such as SSH keys, package registry credentials, and host
+password databases. On Windows, reads outside the workspace use lettered drives.
+`edit` and `delete` can change files in the workspace, project memory, and the
+session’s private temporary directory, subject to protected-configuration checks.
+Content edits and deletions accept UTF-8 text up to 10 MiB. A pure move accepts
+regular files of any size, including binary files. For large or binary moves,
+the turn journal stores paths, permissions, size, and a SHA-256 digest. Undo
+checks the destination before restoring the original path. A move or deletion names
+a regular file directly. A file symlink is refused so the target and link both
+survive. An authorized edit can still update a file through an in-root symlink.
 
 - Commands can read your files, including credentials such as `~/.ssh` and
   `~/.aws`, and keep authentication environment variables such as GitHub and

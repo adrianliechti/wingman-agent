@@ -41,7 +41,7 @@ func (w *Workspace) approveMCP(ctx context.Context, manager *mcp.Manager, ui UI,
 		}
 		return fmt.Errorf("MCP server %s was not approved; restart the workspace to reconsider", name)
 	}
-	path := filepath.Join(projectStateDir(w.RootPath), "mcp-trust.json")
+	path := filepath.Join(ProjectStateDir(w.RootPath), "mcp-trust.json")
 	trusted, err := readTrustFile(path)
 	if err != nil {
 		return fmt.Errorf("read MCP approvals: %w", err)
@@ -89,7 +89,7 @@ func (w *Workspace) HookTrust() external.TrustStore {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.hookTrust == nil {
-		w.hookTrust = &trustFile{path: filepath.Join(projectStateDir(w.RootPath), "hook-trust.json")}
+		w.hookTrust = &trustFile{path: filepath.Join(ProjectStateDir(w.RootPath), "hook-trust.json")}
 	}
 	return w.hookTrust
 }

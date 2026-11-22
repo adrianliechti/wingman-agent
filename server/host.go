@@ -97,11 +97,12 @@ func NewHost(ctx context.Context, opts *HostOptions) (*Host, error) {
 		}
 		return h.newProject(dir)
 	}
+	sweepTemporary()
 	h.loadSavedSessions()
 
 	idle := cmp.Or(opts.Idle, 15*time.Minute)
 	h.background.Go(func() {
-		ticker := time.NewTicker(min(idle, time.Minute))
+		ticker := time.NewTicker(min(idle, temporaryGrace/2))
 		defer ticker.Stop()
 		for {
 			select {

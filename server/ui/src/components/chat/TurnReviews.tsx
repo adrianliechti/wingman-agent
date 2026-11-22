@@ -45,6 +45,7 @@ const fileStatus = {
 	A: "Added",
 	D: "Deleted",
 	M: "Modified",
+	R: "Renamed",
 };
 
 export function TurnReviewCard({
@@ -231,7 +232,14 @@ function ReviewFile({
 	onOpenFile?: (path: string) => void;
 }) {
 	const [open, setOpen] = useState(false);
-	const letter = !file.beforeExists ? "A" : !file.afterExists ? "D" : "M";
+	const content = file.afterRef ?? file.beforeRef;
+	const letter = file.movedFrom
+		? "R"
+		: !file.beforeExists
+			? "A"
+			: !file.afterExists
+				? "D"
+				: "M";
 	const slash = file.path.lastIndexOf("/");
 	return (
 		<details onToggle={(event) => setOpen(event.currentTarget.open)}>
@@ -250,14 +258,25 @@ function ReviewFile({
 					className="min-w-0 flex-1 truncate font-mono text-[11px]"
 					title={file.path}
 				>
-					<span className="text-fg">{file.path.slice(slash + 1)}</span>
-					{slash > 0 && (
+					<span className="text-fg">
+						{file.movedFrom
+							? `${file.movedFrom} → ${file.path}`
+							: file.path.slice(slash + 1)}
+					</span>
+					{!file.movedFrom && slash > 0 && (
 						<span className="ml-2 text-fg-dim">
 							{file.path.slice(0, slash)}
 						</span>
 					)}
 				</span>
-				<LineCounts added={file.added} removed={file.removed} />
+				{content && (
+					<span className="text-fg-dim">
+						{content.size.toLocaleString()} bytes
+					</span>
+				)}
+				{!content || file.added || file.removed ? (
+					<LineCounts added={file.added} removed={file.removed} />
+				) : null}
 			</summary>
 			{open && (
 				<div className="mt-1 mb-2 ml-6">
@@ -270,19 +289,26 @@ function ReviewFile({
 							Open file
 						</button>
 					)}
-					<div className="h-80 overflow-hidden rounded border border-border-subtle">
-						{change ? (
-							<Suspense
-								fallback={<p className="p-2 text-fg-dim">Loading diff…</p>}
-							>
-								<ReviewDiff file={change} />
-							</Suspense>
-						) : (
-							<p role="status" className="p-2 text-fg-dim">
-								Loading diff…
-							</p>
-						)}
-					</div>
+					{content && (
+						<p className="break-all font-mono text-fg-dim">
+							SHA-256 {content.sha256}
+						</p>
+					)}
+					{(!content || change?.before || change?.after) && (
+						<div className="h-80 overflow-hidden rounded border border-border-subtle">
+							{change ? (
+								<Suspense
+									fallback={<p className="p-2 text-fg-dim">Loading diff…</p>}
+								>
+									<ReviewDiff file={change} />
+								</Suspense>
+							) : (
+								<p role="status" className="p-2 text-fg-dim">
+									Loading diff…
+								</p>
+							)}
+						</div>
+					)}
 				</div>
 			)}
 		</details>

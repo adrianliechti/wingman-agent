@@ -14,6 +14,8 @@ export interface WorkspaceInfo extends Bootstrap {
 	"window.sidebar.position": "left" | "right";
 	platform: string;
 	managed_tools?: ManagedToolsStatus;
+	/** A temporary chat's, which the host removes once no window shows it. */
+	temporary?: boolean;
 }
 
 export interface ManagedToolsStatus {

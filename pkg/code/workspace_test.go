@@ -384,7 +384,7 @@ func TestWingmanHomeOwnsPersonalWorkspaceState(t *testing.T) {
 	}{
 		"agents config":     {agentsPath, filepath.Join(home, "agents.json")},
 		"global MCP config": {globalMCPConfigPath(), filepath.Join(home, "mcp.json")},
-		"project state":     {projectStateDir(workDir), projectDir},
+		"project state":     {ProjectStateDir(workDir), projectDir},
 		"memory":            {projectMemoryDir(workDir), filepath.Join(projectDir, "memory")},
 		"project plugins":   {projectPluginDataDir(workDir), filepath.Join(projectDir, "plugin-data")},
 		"personal plugins":  {personalPluginDataDir(), filepath.Join(home, "plugin-data")},
@@ -504,6 +504,7 @@ func TestEditedPathsCoverBatchedEdits(t *testing.T) {
 		{Path: "b/b.go", AfterExists: true},
 		{Path: "a.go", AfterExists: true},
 		{Path: "gone.go"},
+		{Path: "large.go", AfterExists: true, AfterRef: &tool.FileContentRef{Size: 12 << 20}},
 	}}}
 
 	if got := editedPaths(result); !slices.Equal(got, []string{"a.go", "b/b.go"}) {

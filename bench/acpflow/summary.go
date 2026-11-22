@@ -12,6 +12,19 @@ import (
 	"text/tabwriter"
 )
 
+func (r benchResult) asksBackCount() int {
+	if len(r.Turns) == 0 && asksBack(r.FinalText) {
+		return 1
+	}
+	count := 0
+	for _, turn := range r.Turns {
+		if asksBack(turn.FinalText) {
+			count++
+		}
+	}
+	return count
+}
+
 // One row per scenario, model, and directory, so two builds kept in separate directories line up.
 func writeSummary(w io.Writer, directories []string) error {
 	type key struct{ scenario, model, agent, label string }
@@ -77,11 +90,16 @@ func writeSummary(w io.Writer, directories []string) error {
 			toolErrors = append(toolErrors, float64(failures))
 			inputTotal += observed.InputTokens
 			cachedTotal += observed.CachedReadTokens
+			if _, recorded := observed.Signals["asks_back"]; !recorded {
+				if count := run.asksBackCount(); count > 0 {
+					signals["asks_back"] += count
+				}
+			}
 			for name, count := range observed.Signals {
 				signals[name] += count
 			}
-			// How the lead waited is the point of the delegation scenarios.
-			for _, name := range []string{"agent_wait", "agent_output"} {
+			// How the lead waited is the point of the delegation scenarios, whether it asked that of the others.
+			for _, name := range []string{"agent_wait", "agent_output", "elicit"} {
 				if count := observed.ToolCalls[name]; count > 0 {
 					signals[name] += count
 				}

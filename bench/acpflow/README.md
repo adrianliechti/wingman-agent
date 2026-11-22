@@ -43,12 +43,23 @@ Wingman gateway backend. Choose a model supported by that agent and gateway.
 | `plan_then_build` | Plan a fix, then implement it in a second turn |
 | `bug_review` | Review an uncommitted diff with two seeded defects |
 | `file_ops` | Rename a package directory, rename a file, remove a package |
+| `move_asset` | Move a 12 MiB binary asset and verify every byte |
 | `mode_switch` | Plan, implement, plan again; only the session mode forbids edits |
 | `agent_fanout` | Run three background subagents, then combine their reports |
 | `fork_context` | Hand work to a subagent that inherits the conversation |
 | `image_read` | Describe an image read from the workspace |
 | `unattended` | Finish a request that invites a question, without asking |
 | `slash_review` | Review the seeded diff through `/review` |
+| `soft_request` | Add a flag asked for with "let's …" and a trailing "also check …" |
+| `open_choice` | The `unattended` request in a normal session, where asking is allowed |
+| `plan_then_do` | "Come up with a plan first, then fix it" in one turn |
+| `multi_part` | Three loosely worded complaints, one of them a package to remove |
+| `problem_report` | A failing test described as a problem, with "can you take a look?" |
+| `adopt_refs` | Apply behaviour from two reference packages and a notes file in the workspace |
+| `adopt_sibling` | The same request with the references in a directory next to the workspace |
+| `edit_sibling` | Change a setting in the workspace and in a file next to the workspace |
+| `migrate_all` | Replace a deprecated helper in every package that uses it |
+| `question_only` | A question about a failing test; the workspace must stay unchanged |
 
 The dashboard runs two turns in one disposable repository and checks a
 production build after each turn. Dependencies come from
@@ -59,6 +70,19 @@ The scenarios from `file_ops` down each target one harness capability. Their
 prompts state the task and never name a tool or a mode rule, and their checks
 look only at the resulting workspace and answer. `mode_switch` and `unattended`
 need Wingman's session modes; the others run with any agent.
+
+The scenarios from `soft_request` to `migrate_all` ask for a change in the
+loose way people type it. An agent that answers with a proposal, a question,
+or a request for files leaves the workspace unchanged and fails the check.
+`question_only` is the counterpart: it fails when a question leads to edits.
+`adopt_sibling` and `edit_sibling` keep their reference files in
+`<workspace>-refs`, which Wingman's file tools can read but not write. The
+adoption check exercises 404, transient failures, rate limiting, and retry
+limits with an in-memory HTTP transport and a virtual clock. The edit check
+observes four client attempts and evaluates the sibling policy default.
+The shell sandbox can write to the shared temp directory where these fixtures
+live. The scenarios measure whether the agent works across directories when
+asked. Write approvals require a separate fixture.
 
 `-scenario` also takes a comma-separated list, or `suite` for every Go
 scenario. A list or suite writes one result per scenario into the `-output`
@@ -82,10 +106,12 @@ failed tool calls by name, and the full call list with arguments and output.
 
 | Signal | Meaning |
 |--------|---------|
-| `edit_move`, `edit_delete` | Files moved or deleted through `edit` |
+| `edit_move`, `edit_delete` | Files moved through `edit` or deleted through `delete` |
 | `shell_file_op` | Shell commands that move or remove files |
 | `agent_background`, `agent_fork_context` | Subagents started in the background, or with the conversation |
 | `plan_blocked`, `unattended_blocked` | Calls the harness refused because of the session mode |
+| `asks_back` | Turns whose final answer ends with a question or an offer to continue |
+| `elicit` | Questions Wingman put to the user through its question tool |
 
 The requests file contains prompts and tool output; keep it with the run
 artifacts. `-record none` turns recording off, `-record PATH` chooses the file.

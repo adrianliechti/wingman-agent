@@ -25,7 +25,7 @@ Undo checks all affected files first. If a file has changed again or the edit
 history is incomplete, it refuses the operation so you can resolve the conflict.
 If an interrupted rollback leaves a backup, the error shows its location.
 
-Turn review covers the built-in edit tool and synchronous child agents. Shell
+Turn review covers the built-in edit and delete tools and synchronous child agents. Shell
 commands, external tools, detached tasks, and native agents can change files
 outside that record. Use Git diffs to inspect the complete working tree. Older
 sessions without edit records cannot offer turn undo.

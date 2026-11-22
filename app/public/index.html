@@ -201,7 +201,7 @@
 
       .layout {
         display: grid;
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       }
 
       .brand-panel {
@@ -235,9 +235,15 @@
         display: none;
       }
 
+      .dropzones {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+      }
+
       .dropzone {
         width: max-content;
-        min-width: 148px;
+        min-width: 160px;
         height: 88px;
         padding: 0 1.75rem;
         display: flex;
@@ -282,14 +288,14 @@
 
       /* ============ Populated state ============ */
 
-      .layout.has-workspaces .dropzone {
+      .layout.has-workspaces .dropzones {
         display: none;
       }
 
       .workspaces {
-        width: 280px;
+        width: min(280px, 100%);
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 26px;
+        grid-template-columns: minmax(0, 1fr) 26px 26px;
         column-gap: 0.5rem;
         row-gap: 0.35rem;
         align-items: center;
@@ -435,7 +441,7 @@
       }
 
       .workspace-add {
-        grid-column: 2;
+        grid-column: 3;
         grid-row: 1;
         display: flex;
         align-items: center;
@@ -471,6 +477,10 @@
       .workspace-add svg {
         width: 14px;
         height: 14px;
+      }
+
+      .workspace-add.temporary {
+        grid-column: 2;
       }
 
       /* ============ Misc ============ */
@@ -521,14 +531,29 @@
           </picture>
         </aside>
         <main class="actions">
-          <button id="open-dropzone" class="dropzone" type="button">
-            <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 7a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.4.6l1 1a2 2 0 0 0 1.4.6H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-            </svg>
-            <span class="dropzone-title">Open Folder...</span>
-          </button>
+          <div class="dropzones">
+            <button id="open-dropzone" class="dropzone" type="button">
+              <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 7a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.4.6l1 1a2 2 0 0 0 1.4.6H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              </svg>
+              <span class="dropzone-title">Open Folder...</span>
+            </button>
+            <button id="temporary-dropzone" class="dropzone" type="button" title="A chat in a folder of its own, removed once no window shows it">
+              <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 3h2"></path><path d="M16 19h-2"></path><path d="M2 12v-2"></path><path d="M2 16v5.286a.71.71 0 0 0 1.212.502l1.149-1.149"></path><path d="M20 19a2 2 0 0 0 2-2v-1"></path><path d="M22 10v2"></path><path d="M22 6V5a2 2 0 0 0-2-2"></path><path d="M4 3a2 2 0 0 0-2 2v1"></path><path d="M8 19h2"></path><path d="M8 3h2"></path>
+              </svg>
+              <span class="dropzone-title">Temporary Chat</span>
+            </button>
+          </div>
           <section id="workspaces" class="workspaces" aria-label="Workspaces">
             <h2 class="workspaces-title">Workspaces</h2>
+            <button id="temporary-add" class="workspace-add temporary" type="button" title="Temporary chat, removed once no window shows it" aria-label="Temporary chat">
+              <span class="workspace-add-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 3h2"></path><path d="M16 19h-2"></path><path d="M2 12v-2"></path><path d="M2 16v5.286a.71.71 0 0 0 1.212.502l1.149-1.149"></path><path d="M20 19a2 2 0 0 0 2-2v-1"></path><path d="M22 10v2"></path><path d="M22 6V5a2 2 0 0 0-2-2"></path><path d="M4 3a2 2 0 0 0-2 2v1"></path><path d="M8 19h2"></path><path d="M8 3h2"></path>
+                </svg>
+              </span>
+            </button>
             <div id="workspaces-list" class="workspaces-list"></div>
             <button id="open-add" class="workspace-add" type="button" title="Open folder" aria-label="Open folder">
               <span class="workspace-add-icon">
@@ -568,17 +593,20 @@
       const OpenWorkspace = (path) => api("/app/workspaces/open", { path });
       const SelectFolder = async () => (await api("/app/folder", {}))?.path || "";
       const NewWindow = () => api("/app/window", {});
+      const TemporaryChat = async () => (await api("/app/temporary", {}))?.path || "";
 
       const layoutEl = document.getElementById("layout");
       const errEl = document.getElementById("error");
 
       const dropzoneBtn = document.getElementById("open-dropzone");
       const addBtn = document.getElementById("open-add");
+      const temporaryDropzoneBtn = document.getElementById("temporary-dropzone");
+      const temporaryAddBtn = document.getElementById("temporary-add");
       const shellMenuBtn = document.getElementById("shell-menu-trigger");
       const shellMenuPopup = document.getElementById("shell-menu-popup");
       const shellMenuOpen = document.getElementById("shell-menu-open");
       const shellMenuWindow = document.getElementById("shell-menu-window");
-      const openButtons = [dropzoneBtn, addBtn];
+      const openButtons = [dropzoneBtn, addBtn, temporaryDropzoneBtn, temporaryAddBtn];
 
       const workspacesListEl = document.getElementById("workspaces-list");
 
@@ -726,7 +754,24 @@
         }
       }
 
+      async function openTemporaryChat() {
+        if (isOpening) return;
+        isOpening = true;
+        setOpenDisabled(true);
+        errEl.textContent = "";
+        try {
+          const path = await TemporaryChat();
+          window.location.replace("/?project=" + encodeURIComponent(path));
+        } catch (e) {
+          errEl.textContent = String(e);
+          setOpenDisabled(false);
+          isOpening = false;
+        }
+      }
+
       dropzoneBtn.addEventListener("click", pickAndOpen);
+      temporaryDropzoneBtn.addEventListener("click", openTemporaryChat);
+      temporaryAddBtn.addEventListener("click", openTemporaryChat);
       addBtn.addEventListener("click", pickAndOpen);
       shellMenuBtn.addEventListener("click", () => {
         const open = shellMenuPopup.hidden;

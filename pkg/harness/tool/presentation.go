@@ -63,6 +63,11 @@ var presentationSpecs = indexPresentationSpecs([]presentationSpec{
 		path: []string{"file_path", "path"}, derivedHint: "edit",
 	},
 	{
+		names: []string{"delete", "Delete files"},
+		title: "Delete files", kind: "delete",
+		listPrimary: "file_paths",
+	},
+	{
 		names: []string{"grep", "Search files"},
 		title: "Search files", kind: "search", omit: []string{"path"},
 		primary: []string{"query", "pattern"}, path: []string{"path"},
@@ -242,6 +247,10 @@ func Present(name, kind, argsJSON string, hasLocation bool) Presentation {
 			for _, path := range batchEditPaths(args) {
 				p.Locations = append(p.Locations, Location{Path: path})
 			}
+		} else if name == "delete" || name == "Delete files" {
+			for _, path := range deletePaths(args) {
+				p.Locations = append(p.Locations, Location{Path: path})
+			}
 		}
 		hasLocation = len(p.Locations) > 0
 	}
@@ -300,6 +309,18 @@ func batchEditPaths(args map[string]any) []string {
 		}
 		if moveTo, _ := entry["move_to"].(string); moveTo != "" && !slices.Contains(paths, moveTo) {
 			paths = append(paths, moveTo)
+		}
+	}
+	return paths
+}
+
+// deletePaths returns each distinct file a delete call names, in order.
+func deletePaths(args map[string]any) []string {
+	values, _ := args["file_paths"].([]any)
+	var paths []string
+	for _, value := range values {
+		if path, _ := value.(string); path != "" && !slices.Contains(paths, path) {
+			paths = append(paths, path)
 		}
 	}
 	return paths

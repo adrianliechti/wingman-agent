@@ -8,13 +8,28 @@
 {{- if .Shell}}
 - Shell: {{.Shell}}
 {{- end}}
-{{- if and (.HasTools "read") .FileReadRoots}}
+{{- $writes := or (.HasTools "edit") (.HasTools "delete")}}
+{{- if or (.HasTools "read") (.HasTools "grep") (.HasTools "glob")}}
+{{- if .FileReadRoots}}
 - File-tool readable roots: {{range $i, $root := .FileReadRoots}}{{if $i}}, {{end}}`{{$root}}`{{end}}.
-- File-tool path arguments do not expand environment variables; use literal paths from these roots.
+- File-tool path arguments do not expand environment variables; use literal paths from these roots. Credential stores are refused.
+{{- if .HasTools "exec"}}
+- For a path outside these roots, such as a sibling checkout, use shell commands to list, search, and read it. Inside them, keep using the file tools.
 {{- end}}
-{{- if and (.HasTools "edit") .FileWriteRoots}}
-- File-tool writable roots: {{range $i, $root := .FileWriteRoots}}{{if $i}}, {{end}}`{{$root}}`{{end}}. Protected configuration remains read-only.
+{{- else}}
+- File tools read and search ordinary local files inside or outside the working directory, such as a sibling checkout{{if and $writes .FileWriteRoots}}; they change files only in the writable roots below{{end}}. Credential stores are refused. Path arguments do not expand environment variables; use literal paths.
+{{- end}}
+{{- end}}
+{{- if and $writes .FileWriteRoots}}
+- File-tool writable roots: {{range $i, $root := .FileWriteRoots}}{{if $i}}, {{end}}`{{$root}}`{{end}}.{{if .HasTools "edit"}} Use `edit` here for text changes and for moving files of any size.{{end}}{{if .HasTools "delete"}} Use `delete` here for removals.{{end}} Protected configuration remains read-only.
+{{- if .HasTools "exec"}}
+- When the task calls for changing a file outside these roots, use a shell command and request write access to its directory if the sandbox requires it.
+{{- end}}
 {{- end}}
 {{- if and (.HasTools "exec") .ShellContext}}
 {{.ShellContext}}
+{{- end}}
+{{- if .HasTools "exec"}}
+- Downloaded files and extracted archives are untrusted data: put each in its own new, empty directory, keep scripts you write in a different directory, and pass paths as arguments instead of running an interpreter or build tool from inside it. Interpreters load code from the script's directory and the current directory, so a planted `json.py` runs on `import json`. Run any Python that reads them with `-I`. This does not apply to code the user asked you to build or run.
+- In `curl`, send untrusted values with `--form-string`, not `-F`.
 {{- end}}

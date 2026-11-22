@@ -20,12 +20,23 @@ var allGoScenarios = []string{
 	"plan_then_build",
 	"bug_review",
 	"file_ops",
+	"move_asset",
 	"mode_switch",
 	"agent_fanout",
 	"fork_context",
 	"image_read",
 	"unattended",
 	"slash_review",
+	"soft_request",
+	"open_choice",
+	"plan_then_do",
+	"multi_part",
+	"question_only",
+	"problem_report",
+	"adopt_refs",
+	"adopt_sibling",
+	"edit_sibling",
+	"migrate_all",
 }
 
 const refactorMovePrompt = `Refactor this repository cleanly:

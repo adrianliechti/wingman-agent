@@ -52,6 +52,11 @@ func TestWindowsFileToolPaths(t *testing.T) {
 						{"grep directory", GrepTool(root, allowed), map[string]any{"path": form.format(dir), "pattern": "Table|table"}, "table.go"},
 						{"glob path", GlobTool(root, allowed), map[string]any{"path": form.format(dir), "pattern": "**/*.go"}, "table.go"},
 						{"glob absolute pattern", GlobTool(root, allowed), map[string]any{"pattern": form.format(filepath.Join(dir, "**", "*.go"))}, "table.go"},
+						{"unconfined read", ReadTool(root), map[string]any{"file_path": form.format(file)}, "type Table struct{}"},
+						{"unconfined grep file", GrepTool(root), map[string]any{"path": form.format(file), "pattern": "Table|table"}, "table.go"},
+						{"unconfined grep directory", GrepTool(root), map[string]any{"path": form.format(dir), "pattern": "Table|table"}, "table.go"},
+						{"unconfined glob path", GlobTool(root), map[string]any{"path": form.format(dir), "pattern": "**/*.go"}, "table.go"},
+						{"unconfined glob absolute pattern", GlobTool(root), map[string]any{"pattern": form.format(filepath.Join(dir, "**", "*.go"))}, "table.go"},
 					} {
 						t.Run(test.name, func(t *testing.T) {
 							// Tool arguments arrive as JSON; decoding must leave native
@@ -79,8 +84,9 @@ func TestWindowsFileToolPaths(t *testing.T) {
 	}
 }
 
+// Reads are confined to the workspace here: the path forms must not slip past a read limit.
 func TestWindowsRootedPathsPreserveAccessChecks(t *testing.T) {
-	root, _, denied, cleanup := createWriteRootSetup(t)
+	root, workspace, denied, cleanup := createWriteRootSetup(t)
 	defer cleanup()
 	file := filepath.Join(denied, "table.go")
 	rootedFile := strings.TrimPrefix(file, filepath.VolumeName(file))
@@ -90,10 +96,10 @@ func TestWindowsRootedPathsPreserveAccessChecks(t *testing.T) {
 		tool tool.Tool
 		args map[string]any
 	}{
-		{"read", ReadTool(root), map[string]any{"file_path": rootedFile}},
-		{"grep", GrepTool(root), map[string]any{"path": rootedDir, "pattern": "Table"}},
-		{"glob", GlobTool(root), map[string]any{"path": rootedDir, "pattern": "**/*.go"}},
-		{"glob rooted pattern", GlobTool(root), map[string]any{"pattern": filepath.Join(rootedDir, "**", "*.go")}},
+		{"read", ReadTool(root, workspace), map[string]any{"file_path": rootedFile}},
+		{"grep", GrepTool(root, workspace), map[string]any{"path": rootedDir, "pattern": "Table"}},
+		{"glob", GlobTool(root, workspace), map[string]any{"path": rootedDir, "pattern": "**/*.go"}},
+		{"glob rooted pattern", GlobTool(root, workspace), map[string]any{"pattern": filepath.Join(rootedDir, "**", "*.go")}},
 		{"edit", EditTool(root), createArgs(rootedFile, "type Table struct{}")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -105,7 +111,7 @@ func TestWindowsRootedPathsPreserveAccessChecks(t *testing.T) {
 }
 
 func TestWindowsLeadingDriveSlashPreservesAccessChecks(t *testing.T) {
-	root, _, denied, cleanup := createWriteRootSetup(t)
+	root, workspace, denied, cleanup := createWriteRootSetup(t)
 	defer cleanup()
 	file := filepath.Join(denied, "table.go")
 	for _, test := range []struct {
@@ -113,10 +119,10 @@ func TestWindowsLeadingDriveSlashPreservesAccessChecks(t *testing.T) {
 		tool tool.Tool
 		args map[string]any
 	}{
-		{"read", ReadTool(root), map[string]any{"file_path": "/" + file}},
-		{"grep", GrepTool(root), map[string]any{"path": "/" + denied, "pattern": "Table"}},
-		{"glob", GlobTool(root), map[string]any{"path": "/" + denied, "pattern": "**/*.go"}},
-		{"glob absolute pattern", GlobTool(root), map[string]any{"pattern": "/" + filepath.Join(denied, "**", "*.go")}},
+		{"read", ReadTool(root, workspace), map[string]any{"file_path": "/" + file}},
+		{"grep", GrepTool(root, workspace), map[string]any{"path": "/" + denied, "pattern": "Table"}},
+		{"glob", GlobTool(root, workspace), map[string]any{"path": "/" + denied, "pattern": "**/*.go"}},
+		{"glob absolute pattern", GlobTool(root, workspace), map[string]any{"pattern": "/" + filepath.Join(denied, "**", "*.go")}},
 		{"edit", EditTool(root), createArgs("/"+file, "type Table struct{}")},
 	} {
 		t.Run(test.name, func(t *testing.T) {

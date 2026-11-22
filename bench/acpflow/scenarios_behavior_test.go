@@ -434,7 +434,9 @@ func TestSummaryLinesUpTwoResultDirectories(t *testing.T) {
 		}
 		return result
 	}
-	write("main", "a-r1.json", run(true, 9, 1000, 100, map[string]int{"shell_file_op": 1}))
+	legacy := run(true, 9, 1000, 100, map[string]int{"shell_file_op": 1})
+	legacy.Turns = []benchTurn{{FinalText: "Should I proceed?"}, {FinalText: "Done."}}
+	write("main", "a-r1.json", legacy)
 	write("main", "a-r2.json", run(true, 11, 1000, 300, map[string]int{"shell_file_op": 2}))
 	write("branch", "a-r1.json", run(true, 6, 800, 600, map[string]int{"edit_move": 5}))
 	write("branch", "a-r2.json", run(false, 8, 800, 600, nil))
@@ -459,7 +461,7 @@ func TestSummaryLinesUpTwoResultDirectories(t *testing.T) {
 	if main[2] != "wingman@main" || main[4] != "2/2" || main[6] != "10.0" || main[9] != "20%" {
 		t.Errorf("main row = %v", main)
 	}
-	if !strings.Contains(lines[1], "agent_wait=2 edit_move=5") || !strings.Contains(lines[2], "shell_file_op=3") {
+	if !strings.Contains(lines[1], "agent_wait=2 edit_move=5") || !strings.Contains(lines[2], "asks_back=1 shell_file_op=3") {
 		t.Errorf("signals are not summed per row:\n%s", out.String())
 	}
 }
@@ -478,5 +480,283 @@ func TestRepeatScenariosKeepsRepeatedRunsApart(t *testing.T) {
 		if twice[i] != want[i] {
 			t.Fatalf("two passes = %+v, want %+v", twice, want)
 		}
+	}
+}
+
+func TestProposeOrDoFixturesAndChecks(t *testing.T) {
+	ctx := context.Background()
+
+	report := t.TempDir()
+	if err := writeUnattendedFixture(report); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSoftRequest(ctx, stepState{root: report}); err == nil {
+		t.Fatal("untouched fixture passed checkSoftRequest")
+	}
+	writeTestFile(t, report, "cmd/report/main.go", `package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+)
+
+type row struct {
+	Name  string
+	Count int
+}
+
+var rows = []row{{"builds", 42}, {"deploys", 7}, {"rollbacks", 1}}
+
+func main() {
+	if err := run(os.Args[1:], os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+}
+
+func run(args []string, out io.Writer) error {
+	flags := flag.NewFlagSet("report", flag.ContinueOnError)
+	format := flags.String("format", "text", "output format")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *format == "json" {
+		return json.NewEncoder(out).Encode(rows)
+	}
+	for _, r := range rows {
+		fmt.Fprintf(out, "%-10s %d\n", r.Name, r.Count)
+	}
+	return nil
+}
+`)
+	if err := checkSoftRequest(ctx, stepState{root: report}); err != nil {
+		t.Fatalf("report with a json format failed checkSoftRequest: %v", err)
+	}
+
+	shop := t.TempDir()
+	if err := writeFileOpsFixture(shop); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkMultiPart(ctx, stepState{root: shop}); err == nil {
+		t.Fatal("untouched fixture passed checkMultiPart")
+	}
+	if err := os.RemoveAll(filepath.Join(shop, "internal", "legacy")); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkMultiPart(ctx, stepState{root: shop}); err == nil {
+		t.Fatal("removing internal/legacy alone passed checkMultiPart")
+	}
+	path := filepath.Join(shop, "internal", "util", "strings.go")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixed := strings.NewReplacer(
+		`words[i] = strings.ToUpper(word[:1]) + strings.ToLower(word[1:])`,
+		"runes := []rune(strings.ToLower(word))\n\t\trunes[0] = unicode.ToUpper(runes[0])\n\t\twords[i] = string(runes)",
+		`return string(runes[:n-1]) + "…"`,
+		`return strings.TrimRight(string(runes[:n-1]), " ") + "…"`,
+		`import "strings"`,
+		"import (\n\t\"strings\"\n\t\"unicode\"\n)",
+	).Replace(string(data))
+	if err := os.WriteFile(path, []byte(fixed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkMultiPart(ctx, stepState{root: shop}); err != nil {
+		t.Fatalf("fixed shop failed checkMultiPart: %v", err)
+	}
+	if exists(shop, "internal", "util", "zz_bench_probe_test.go") {
+		t.Fatal("checkMultiPart left its probe behind")
+	}
+
+	queue := t.TempDir()
+	if err := writeModeSwitchFixture(queue); err != nil {
+		t.Fatal(err)
+	}
+	before := treeDigest(queue)
+	answer := "The delay doubles without being capped at MaxDelay."
+	if err := checkQuestionOnly(ctx, stepState{root: queue, treeBefore: before, finalText: answer}); err != nil {
+		t.Fatalf("an answer on an unchanged tree failed checkQuestionOnly: %v", err)
+	}
+	if err := checkQuestionOnly(ctx, stepState{root: queue, treeBefore: before, finalText: "Fixed."}); err == nil {
+		t.Fatal("an answer that never names MaxDelay passed checkQuestionOnly")
+	}
+	writeTestFile(t, queue, "taskqueue/extra.go", "package taskqueue\n")
+	if err := checkQuestionOnly(ctx, stepState{root: queue, treeBefore: before, finalText: answer}); err == nil {
+		t.Fatal("a changed tree passed checkQuestionOnly")
+	}
+}
+
+func TestAsksBack(t *testing.T) {
+	for text, want := range map[string]bool{
+		"":                                  false,
+		"Added the flag and ran the tests.": false,
+		"I can add JSON and CSV. Want me to proceed with both?":                  true,
+		"Here is the plan.\n\nLet me know if you'd like me to implement it.":     true,
+		"Plan is ready. I will start once you confirm.":                          true,
+		"Which formats should be supported?":                                     true,
+		"The flag is in. Ask for csv when you need it; nothing else is pending.": false,
+	} {
+		if got := asksBack(text); got != want {
+			t.Errorf("asksBack(%q) = %v, want %v", text, got, want)
+		}
+	}
+}
+
+// A small working client for the verifier's positive control.
+const referenceFetchClient = `package fetch
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"time"
+)
+
+type Client struct {
+	HTTP    *http.Client
+	BaseURL string
+}
+
+func (c *Client) Get(ctx context.Context, path string) ([]byte, error) {
+	for attempt := 1; attempt <= 4; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusOK {
+			defer resp.Body.Close()
+			return io.ReadAll(resp.Body)
+		}
+		resp.Body.Close()
+		if attempt == 4 || (resp.StatusCode != 429 && resp.StatusCode < 500) {
+			return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		seconds, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Duration(min(seconds, 8)) * time.Second):
+		}
+	}
+	panic("unreachable")
+}
+`
+
+func TestAdoptAndMigrateFixturesAndChecks(t *testing.T) {
+	ctx := context.Background()
+
+	for name, fixture := range map[string]func(string) error{"adopt_refs": writeAdoptRefsFixture, "adopt_sibling": writeAdoptSiblingFixture} {
+		// The sibling fixture writes its references next to the workspace.
+		root := filepath.Join(t.TempDir(), "workspace")
+		if err := fixture(root); err != nil {
+			t.Fatal(err)
+		}
+		if err := runGoTests(ctx, root, false, "./..."); err != nil {
+			t.Fatalf("%s fixture must start green: %v", name, err)
+		}
+		if err := checkAdoptRefs(ctx, stepState{root: root}); err == nil {
+			t.Fatalf("untouched %s fixture passed checkAdoptRefs", name)
+		}
+		inside := exists(root, "third_party", "alpha", "retry.go") && exists(root, "docs", "notes.md")
+		beside := exists(root+siblingSuffix, "alpha", "retry.go") && exists(root+siblingSuffix, "notes.md")
+		if name == "adopt_refs" && !inside || name == "adopt_sibling" && (inside || !beside) {
+			t.Fatalf("%s fixture put its references in the wrong place", name)
+		}
+		writeTestFile(t, root, "fetch/client.go", adoptClientSource+"\n// TODO: use Retry-After for 429.\n")
+		if err := checkAdoptRefs(ctx, stepState{root: root}); err == nil {
+			t.Fatal("comment-only adoption passed")
+		}
+		writeTestFile(t, root, "fetch/client.go", referenceFetchClient)
+		if err := checkAdoptRefs(ctx, stepState{root: root}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got, want := scenarioPrompt(adoptSiblingPrompt, "/tmp/run-7"), "from ../run-7-refs/alpha and ../run-7-refs/beta"; !strings.Contains(got, want) || strings.Contains(got, "{{") {
+		t.Fatalf("sibling prompt = %q, want it to name %q", got, want)
+	}
+
+	shared := filepath.Join(t.TempDir(), "workspace")
+	if err := writeAdoptSiblingFixture(shared); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkEditSibling(ctx, stepState{root: shared}); err == nil {
+		t.Fatal("untouched fixture passed checkEditSibling")
+	}
+	writeTestFile(t, shared, "fetch/client.go", strings.Replace(adoptClientSource, "attempt < 3", "attempt < 4", 1))
+	if err := checkEditSibling(ctx, stepState{root: shared}); err == nil {
+		t.Fatal("a change limited to the workspace passed checkEditSibling")
+	}
+	writeTestFile(t, shared+siblingSuffix, "beta/policy.go", strings.Replace(adoptReferenceFiles["beta/policy.go"], "MaxAttempts: 5", "MaxAttempts: 4", 1))
+	if err := checkEditSibling(ctx, stepState{root: shared}); err != nil {
+		t.Fatalf("both settings at 4 failed checkEditSibling: %v", err)
+	}
+
+	writeTestFile(t, shared, "fetch/client.go", adoptClientSource+"\n// updated policy\n")
+	if err := checkEditSibling(ctx, stepState{root: shared}); err == nil {
+		t.Fatal("client with three attempts passed")
+	}
+
+	ops := t.TempDir()
+	if err := writeMigrateAllFixture(ops); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGoTests(ctx, ops, false, "./..."); err != nil {
+		t.Fatalf("migrate_all fixture must start green: %v", err)
+	}
+	if err := checkMigrateAll(ctx, stepState{root: ops}); err == nil {
+		t.Fatal("untouched fixture passed checkMigrateAll")
+	}
+	replacer := strings.NewReplacer(
+		`"example.com/ops/legacylog"`, `"log/slog"`,
+		"legacylog.Printf(", "slog.Info(fmt.Sprintf(",
+		"legacylog.Errorf(", "slog.Error(fmt.Sprintf(",
+	)
+	migrated := 0
+	err := filepath.WalkDir(ops, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.Contains(path, "legacylog") {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || !bytes.Contains(data, []byte("legacylog")) {
+			return err
+		}
+		migrated++
+		var out []string
+		for _, line := range strings.Split(replacer.Replace(string(data)), "\n") {
+			if strings.Contains(line, "slog.Info(fmt.Sprintf(") || strings.Contains(line, "slog.Error(fmt.Sprintf(") {
+				line += ")"
+			}
+			out = append(out, line)
+		}
+		source := strings.Join(out, "\n")
+		if !strings.Contains(source, `"fmt"`) {
+			source = strings.Replace(source, `"log/slog"`, "\"fmt\"\n\t\"log/slog\"", 1)
+			source = strings.Replace(source, "import \"fmt\"\n\t\"log/slog\"", "import (\n\t\"fmt\"\n\t\"log/slog\"\n)", 1)
+		}
+		return os.WriteFile(path, []byte(source), 0o644)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated != 7 {
+		t.Fatalf("migrated %d files, want the 7 that use legacylog", migrated)
+	}
+	if err := checkMigrateAll(ctx, stepState{root: ops}); err != nil {
+		t.Fatalf("migrated workspace failed checkMigrateAll: %v", err)
+	}
+	writeTestFile(t, ops, "shipping/extra.go", "package shipping\n\n// legacylog was used here.\n")
+	if err := checkMigrateAll(ctx, stepState{root: ops}); err == nil {
+		t.Fatal("a leftover legacylog reference passed checkMigrateAll")
 	}
 }

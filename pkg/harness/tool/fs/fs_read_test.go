@@ -215,17 +215,16 @@ func TestReadTool(t *testing.T) {
 		}
 	})
 
-	t.Run("path outside workspace rejected", func(t *testing.T) {
-		_, err := readTool.Execute(context.Background(), map[string]any{
-			"file_path": "/etc/passwd",
-		})
-
-		if err == nil {
-			t.Error("expected error for path outside workspace")
+	t.Run("path outside workspace is readable", func(t *testing.T) {
+		outside := filepath.Join(t.TempDir(), "notes.txt")
+		if err := os.WriteFile(outside, []byte("sibling notes"), 0644); err != nil {
+			t.Fatal(err)
 		}
-
-		if !strings.Contains(err.Error(), "outside workspace") {
-			t.Errorf("expected 'outside workspace' error, got: %v", err)
+		result, err := readTool.Execute(context.Background(), map[string]any{
+			"file_path": outside,
+		})
+		if err != nil || !strings.Contains(result.Content.Text(), "sibling notes") {
+			t.Errorf("read outside the workspace = %q, %v", result.Content.Text(), err)
 		}
 	})
 
@@ -365,6 +364,17 @@ func TestReadAllowedReadRoots(t *testing.T) {
 		})
 		if err == nil {
 			t.Fatal("expected error for relative path outside workspace")
+		}
+	})
+
+	t.Run("without read roots a relative path may climb out of the workspace", func(t *testing.T) {
+		rel, err := filepath.Rel(root.Name(), deniedFile)
+		if err != nil {
+			t.Skip("no relative path between the temporary directories")
+		}
+		result, err := ReadTool(root).Execute(context.Background(), map[string]any{"file_path": rel})
+		if err != nil || !strings.Contains(result.Content.Text(), "secret") {
+			t.Errorf("unconfined read of %q = %q, %v", rel, result.Content.Text(), err)
 		}
 	})
 }

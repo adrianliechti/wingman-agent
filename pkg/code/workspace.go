@@ -78,11 +78,10 @@ func SessionIDFromContext(ctx context.Context) string {
 }
 
 type Workspace struct {
-	Root             *os.Root
-	RootPath         string
-	MemoryPath       string
-	ScratchPath      string
-	SystemSkillsPath string
+	Root        *os.Root
+	RootPath    string
+	MemoryPath  string
+	ScratchPath string
 
 	Plugins []plugin.Plugin
 
@@ -142,7 +141,7 @@ func NewWorkspace(workDir string) (*Workspace, error) {
 		root.Close()
 		return nil, fmt.Errorf("create scratch directory: %w", err)
 	}
-	bundled, systemSkillsPath, err := loadBundledSkills()
+	bundled, _, err := loadBundledSkills()
 	if err != nil {
 		os.RemoveAll(scratchDir)
 		root.Close()
@@ -174,16 +173,15 @@ func NewWorkspace(workDir string) (*Workspace, error) {
 	}
 
 	return &Workspace{
-		Root:             root,
-		RootPath:         workDir,
-		MemoryPath:       memoryDir,
-		ScratchPath:      scratchDir,
-		SystemSkillsPath: systemSkillsPath,
-		Plugins:          plugins,
-		MCP:              mcpManager,
-		DevTools:         managedTools,
-		baseSkills:       baseSkills,
-		skills:           mergedSkills,
+		Root:        root,
+		RootPath:    workDir,
+		MemoryPath:  memoryDir,
+		ScratchPath: scratchDir,
+		Plugins:     plugins,
+		MCP:         mcpManager,
+		DevTools:    managedTools,
+		baseSkills:  baseSkills,
+		skills:      mergedSkills,
 	}, nil
 }
 
@@ -1163,7 +1161,7 @@ func editedPaths(result tool.Result) []string {
 	changes, _ := tool.ResultFileChanges(result.Metadata)
 	var paths []string
 	for _, change := range changes {
-		if change.AfterExists && strings.TrimSpace(change.Path) != "" && !slices.Contains(paths, change.Path) {
+		if change.AfterExists && change.AfterRef == nil && strings.TrimSpace(change.Path) != "" && !slices.Contains(paths, change.Path) {
 			paths = append(paths, change.Path)
 		}
 	}
@@ -1653,7 +1651,9 @@ func globalMCPConfigPath() string {
 	return mcp.GlobalConfigPath()
 }
 
-func projectStateDir(workingDir string) string {
+// ProjectStateDir holds what Wingman keeps of a folder: its memory, sessions,
+// trust decisions and plugin data.
+func ProjectStateDir(workingDir string) string {
 	path, err := layout.WingmanPath("projects", projectKey(workingDir))
 	if err == nil {
 		return path
@@ -1663,13 +1663,13 @@ func projectStateDir(workingDir string) string {
 }
 
 func projectMemoryDir(workingDir string) string {
-	return filepath.Join(projectStateDir(workingDir), "memory")
+	return filepath.Join(ProjectStateDir(workingDir), "memory")
 }
 
 // projectPluginDataDir holds PLUGIN_DATA for plugins installed in the project,
 // alongside that project's other state so it survives plugin updates.
 func projectPluginDataDir(workingDir string) string {
-	return filepath.Join(projectStateDir(workingDir), "plugin-data")
+	return filepath.Join(ProjectStateDir(workingDir), "plugin-data")
 }
 
 func personalPluginDataDir() string {
@@ -1678,7 +1678,7 @@ func personalPluginDataDir() string {
 }
 
 func SessionsDir(workingDir string) string {
-	return filepath.Join(projectStateDir(workingDir), "sessions")
+	return filepath.Join(ProjectStateDir(workingDir), "sessions")
 }
 
 // SessionStores lists the sessions directory of every project that has state.

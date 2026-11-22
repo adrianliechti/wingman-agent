@@ -107,11 +107,13 @@ func TestWriteAndEditThroughAbsoluteInRootSymlink(t *testing.T) {
 
 type tool_ = func(context.Context, map[string]any) (tool.Result, error)
 
-func TestReadStillRejectsEscapingSymlink(t *testing.T) {
+// A link out of the workspace is read like the outside path it names; confined reads and every edit refuse it.
+func TestEscapingSymlinkIsFollowedOnlyByUnconfinedReads(t *testing.T) {
 	ws := t.TempDir()
 	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
 
-	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0644); err != nil {
+	if err := os.WriteFile(secret, []byte("secret"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outside, filepath.Join(ws, "leak")); err != nil {
@@ -124,10 +126,27 @@ func TestReadStillRejectsEscapingSymlink(t *testing.T) {
 	}
 	defer root.Close()
 
-	read := ReadTool(root)
-
-	if _, err := read.Execute(context.Background(), map[string]any{"file_path": "leak/secret.txt"}); err == nil {
-		t.Fatal("expected escaping symlink to stay blocked")
+	args := map[string]any{"file_path": "leak/secret.txt"}
+	result, err := ReadTool(root).Execute(context.Background(), args)
+	if err != nil || !strings.Contains(result.Content.Text(), "secret") {
+		t.Fatalf("unconfined read through an escaping symlink = %q, %v", result.Content.Text(), err)
+	}
+	if _, err := ReadTool(root, ws).Execute(context.Background(), args); err == nil {
+		t.Fatal("confined read followed an escaping symlink")
+	}
+	for _, edit := range []map[string]any{
+		{"file_path": "leak/secret.txt", "old_string": "secret", "new_string": "changed"},
+		createArgs("leak/new.txt", "escaped"),
+	} {
+		if _, err := EditTool(root).Execute(context.Background(), edit); err == nil {
+			t.Fatal("edit followed an escaping symlink")
+		}
+	}
+	if data, err := os.ReadFile(secret); err != nil || string(data) != "secret" {
+		t.Fatalf("outside file changed: %v %q", err, data)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("escaping create made an outside file: %v", err)
 	}
 }
 

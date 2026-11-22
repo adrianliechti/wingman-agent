@@ -21,17 +21,16 @@ import (
 
 const DefaultGlobLimit = 100
 
+// GlobTool searches any path. Read roots confine it to the workspace and those roots.
 func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 	return tool.Tool{
 		Name:   "glob",
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 
 		Description: strings.Join([]string{
-			"- Find files by name using glob patterns.",
-			"- Supports glob patterns like `**/*.js` or `src/**/*.ts`.",
+			"Find files by name using glob patterns such as `src/**/*.ts`.",
 			"- Basename patterns like `*.go` search recursively. Relative patterns containing `/` are relative to `path`; absolute patterns override `path` and keep their specified depth.",
 			"- Returns up to 100 matching file paths sorted by modification time (newest first), then by path for ties. Narrow the path or pattern when results are truncated.",
-			"- Use this tool when you need to find files by name patterns. Use `grep` for content/symbols.",
 			"- Symlinks encountered while matching and version-control directories (`.git`, `.svn`, …) are skipped. An explicitly requested search directory may use an allowed directory link. Dotfiles and gitignored files are included.",
 		}, "\n"),
 
@@ -39,7 +38,7 @@ func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 			"type": "object",
 			"properties": map[string]any{
 				"pattern": map[string]any{"type": "string", "description": "The glob pattern to match files against."},
-				"path":    map[string]any{"type": "string", "description": "Literal directory to search, within the workspace or an allowed read root. Defaults to workspace root; ignored for absolute patterns."},
+				"path":    map[string]any{"type": "string", "description": "Search directory. Defaults to the workspace. Absolute patterns override it. " + readPathScope(allowedReadRoots)},
 			},
 			"required":             []string{"pattern"},
 			"additionalProperties": false,
@@ -70,6 +69,9 @@ func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 
 			target, pattern, absolutePattern, err := resolveGlobSearch(searchDir, pattern, workingDir, root, allowedReadRoots)
 			if err != nil {
+				if absolutePattern && errors.Is(err, fs.ErrNotExist) {
+					return tool.Text("No files found"), nil
+				}
 				return tool.Result{}, err
 			}
 			defer target.Close()
@@ -106,7 +108,14 @@ func GlobTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
 				return tool.Result{}, fmt.Errorf("open search directory: %w", err)
 			}
 			defer searchRoot.Close()
-			fsys := globSearchFS{root: searchRoot, ctx: ctx, hidden: target.hiddenCredentials(target.SearchDirFS)}
+			fsys := globSearchFS{guardedSearchFS: guardedSearchFS{searchRoot, target.credentials}, ctx: ctx, hidden: target.hiddenCredentials(target.SearchDirFS)}
+			// A literal glob may use only Stat. Check the opened search directory
+			// here as well as every directory opened while walking below it.
+			dir, err := fsys.guardedSearchFS.Open(".")
+			if err != nil {
+				return tool.Result{}, err
+			}
+			dir.Close()
 			results := make(globResults, 0, DefaultGlobLimit)
 			totalMatches := 0
 
@@ -222,8 +231,8 @@ func (r *globResults) Pop() any {
 // Check every filesystem access, including literal pattern prefixes that
 // doublestar can otherwise follow without visiting their directory entries.
 type globSearchFS struct {
-	root *os.Root
-	ctx  context.Context
+	guardedSearchFS
+	ctx context.Context
 	// hidden reports credential stores inside the searched directory.
 	hidden credentialFilter
 }
@@ -263,14 +272,14 @@ func (f globSearchFS) Open(name string) (fs.File, error) {
 	if _, err := f.Stat(name); err != nil {
 		return nil, err
 	}
-	return f.root.Open(name)
+	return f.guardedSearchFS.Open(name)
 }
 
 func (f globSearchFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	if _, err := f.Stat(name); err != nil {
 		return nil, err
 	}
-	entries, err := fs.ReadDir(f.root.FS(), name)
+	entries, err := fs.ReadDir(f.guardedSearchFS, name)
 	if err != nil {
 		return nil, err
 	}

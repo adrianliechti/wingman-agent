@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -38,41 +37,6 @@ func TestClosedAgentRejectsNewSession(t *testing.T) {
 	if _, err := a.NewSession(context.Background()); err == nil {
 		t.Fatal("closed agent created a session")
 	}
-}
-
-func TestSessionFileRootsKeepSystemSkillsReadOnly(t *testing.T) {
-	volumeRoot := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
-	systemRoot := filepath.Join(volumeRoot, "wingman-system-skills", ".system")
-	outsideRoot := filepath.Join(volumeRoot, "wingman-outside-workspace")
-	ws := &code.Workspace{
-		RootPath:         t.TempDir(),
-		ScratchPath:      t.TempDir(),
-		SystemSkillsPath: systemRoot,
-	}
-
-	readRoots, writeRoots := sessionFileRoots(ws)
-	if !pathCoveredByRoots(systemRoot, readRoots) {
-		t.Fatalf("system skills root %q is not readable from %#v", systemRoot, readRoots)
-	}
-	if pathCoveredByRoots(systemRoot, writeRoots) {
-		t.Fatalf("system skills root %q is writable from %#v", systemRoot, writeRoots)
-	}
-	if pathCoveredByRoots(outsideRoot, readRoots) || pathCoveredByRoots(outsideRoot, writeRoots) {
-		t.Fatalf("outside path %q should not be covered by file roots (read=%#v, write=%#v)", outsideRoot, readRoots, writeRoots)
-	}
-}
-
-func pathCoveredByRoots(path string, roots []string) bool {
-	for _, root := range roots {
-		if root == "*" {
-			return true
-		}
-		relative, err := filepath.Rel(root, path)
-		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
 }
 
 func TestUnattendedApprovesAndResolvesPromptsWithoutUI(t *testing.T) {

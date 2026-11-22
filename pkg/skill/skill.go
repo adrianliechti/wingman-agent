@@ -307,9 +307,14 @@ func discoverPersonal(report bool) ([]Skill, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The Claude apps sync their own skills here; they depend on tools Wingman does not have.
+	var claudeSynced string
+	if home, err := os.UserHomeDir(); err == nil {
+		claudeSynced = filepath.Join(home, ".claude", "skills", "synced")
+	}
 	// Personal roots belong to different tools, so the first with skills wins.
 	for _, source := range sources {
-		if skills := discover([]string{source}, "", report, systemRoot); len(skills) > 0 {
+		if skills := discover([]string{source}, "", report, systemRoot, claudeSynced); len(skills) > 0 {
 			return skills, nil
 		}
 	}
@@ -338,14 +343,6 @@ func SystemSkillsRoot() (string, error) {
 	return layout.WingmanPath("skills", ".system")
 }
 
-// DiscoveryRoots returns every directory that can contribute skills to a
-// workspace. Callers use it to grant narrow resource access before a root is
-// created, so skills generated after a session starts remain usable.
-func DiscoveryRoots(root string) []string {
-	roots := projectDiscoveryRoots(root)
-	return append(roots, layout.PersonalRoots("skills")...)
-}
-
 func projectDiscoveryRoots(root string) []string {
 	sources := []string{filepath.Join(root, ".wingman", "skills")}
 	for _, configDir := range [...]string{".agents", ".github", ".claude"} {
@@ -360,25 +357,39 @@ func projectDiscoveryRoots(root string) []string {
 // Symbolic links and Windows junctions are followed once, with their resolved
 // paths used to prevent cycles.
 func LoadDir(dir string) []Skill {
-	return loadDir(dir, true, "", "", make(map[string]bool))
+	return loadDir(dir, true, "", make(map[string]bool))
 }
 
 // loadDir skips directories and SKILL.md files that resolve into a credential
 // store: a repository controls its skill links, and loaded text reaches the
 // prompt. workspace keeps a project located inside such a store usable.
 // visited holds the resolved directories already read.
-func loadDir(dir string, report bool, excludedRoot, workspace string, visited map[string]bool) []Skill {
+func loadDir(dir string, report bool, workspace string, visited map[string]bool, excludedRoots ...string) []Skill {
 	var skills []Skill
 	credentials := sandboxpolicy.NewCredentialGuard(workspace)
-	var excludedInfo fs.FileInfo
-	if excludedRoot != "" {
-		excludedRoot = filepath.Clean(excludedRoot)
-		excludedInfo, _ = os.Stat(excludedRoot)
+	type excludedRoot struct {
+		path string
+		info fs.FileInfo
+	}
+	var excluded []excludedRoot
+	for _, root := range excludedRoots {
+		if root != "" {
+			info, _ := os.Stat(root)
+			excluded = append(excluded, excludedRoot{filepath.Clean(root), info})
+		}
+	}
+	isExcluded := func(current string, info fs.FileInfo) bool {
+		for _, root := range excluded {
+			if filepath.Clean(current) == root.path || (info != nil && root.info != nil && os.SameFile(info, root.info)) {
+				return true
+			}
+		}
+		return false
 	}
 
 	var walk func(string)
 	walk = func(current string) {
-		if excludedRoot != "" && filepath.Clean(current) == excludedRoot {
+		if isExcluded(current, nil) {
 			return
 		}
 		resolved, err := pathutil.Resolve(current)
@@ -389,7 +400,7 @@ func loadDir(dir string, report bool, excludedRoot, workspace string, visited ma
 		if err != nil || !info.IsDir() {
 			return
 		}
-		if excludedInfo != nil && os.SameFile(info, excludedInfo) {
+		if isExcluded(current, info) {
 			return
 		}
 		visited[resolved] = true
@@ -471,14 +482,14 @@ func skillDirsThroughRepo(root, configDir string) []string {
 	return dirs
 }
 
-func discover(sources []string, relativeTo string, report bool, excludedRoot string) []Skill {
+func discover(sources []string, relativeTo string, report bool, excludedRoots ...string) []Skill {
 	var skills []Skill
 	seen := make(map[string]string)
 	// Shared across sources so a root linked to another one is read once.
 	visited := make(map[string]bool)
 
 	for _, source := range sources {
-		for _, sk := range loadDir(source, report, excludedRoot, relativeTo, visited) {
+		for _, sk := range loadDir(source, report, relativeTo, visited, excludedRoots...) {
 			key := strings.ToLower(sk.Name)
 
 			if winner, ok := seen[key]; ok {

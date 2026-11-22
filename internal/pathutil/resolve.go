@@ -5,8 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 )
+
+// OpenedPath identifies the object behind a live handle. A caller checking a
+// read boundary must use this path before consuming bytes from that handle.
+func OpenedPath(f *os.File) (string, error) {
+	defer runtime.KeepAlive(f)
+	return openedPath(f)
+}
 
 // Resolve returns the absolute path of an existing file or directory, following
 // symbolic links and Windows junctions. It does not grant access to that path;

@@ -235,6 +235,9 @@ for command options.
   with build commands, conventions, and other guidance.
 - **Skills:** put reusable workflows in `.wingman/skills/<name>/SKILL.md`, or in
   `~/.wingman/skills/` to use them across projects. Invoke them with `/<name>`.
+  Without personal Wingman skills, `~/.agents/skills/` or `~/.claude/skills/` is
+  used instead, except the skills the Claude apps sync into
+  `~/.claude/skills/synced/`, which rely on those apps' own tools.
 - **Plugins:** place a plugin directory in `.wingman/plugins/` or
   `~/.wingman/plugins/` to add its skills, MCP servers, and hooks.
 - **Custom agents:** add specialist instructions in `.wingman/agents/*.md` or

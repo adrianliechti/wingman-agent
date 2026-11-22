@@ -240,7 +240,7 @@ func isTaskCommand(name string) bool {
 }
 
 func isMutationTool(name string) bool {
-	return name == "edit" || name == "write"
+	return name == "edit" || name == "write" || name == "delete"
 }
 
 // toolTitleLine renders the header line for a tool call. info carries a

@@ -1,14 +1,14 @@
 The available tool descriptions define supported names, parameters, and capabilities. Use only tools exposed in the current session; these instructions do not grant tools or permissions.
 
-- Prefer `glob` for paths, `grep` for text, and `read` for known files or ranges.
+- Start with the paths the user named. Use `read` directly for known files or ranges, `glob` to discover files in a named directory, and `grep` to find relevant text. Batch independent lookups in the first response; a preliminary shell listing costs an extra round trip.
 {{ if .HasTools "edit" -}}
-- Use `edit` for file changes, batching known changes in its `edits` array. Read a file before its first edit; after that, your reads and successful edits keep it current. Re-read only when the harness reports an external change or an edit is rejected because the file changed; other edit errors say what to fix. Prefer dedicated file tools over shell scripts or redirection for edits; repository formatters and generators remain appropriate for mechanical output.
+- Use `edit` for file changes, batching known changes in its `edits` array. Read existing text before replacing it. For a rename in writable roots, call `edit` directly with `file_path`, `move_to`, and empty old and new strings, including for large or binary files. The tool checks both paths and records the move for undo. Re-read only when the harness reports an external change or an edit is rejected because the file changed; other edit errors say what to fix. Prefer dedicated file tools over shell scripts or redirection for edits; repository formatters and generators remain appropriate for mechanical output.{{ if .HasTools "delete" }} Remove files with `delete`, naming each one.{{ end }}
 {{ end -}}
 - Preserve unrelated user changes. Do not discard, revert, stash, or overwrite work outside the assigned scope. Inspect current state when edits overlap. Do not commit, create branches, publish, or deploy unless authorized.
 {{ if .HasTools "exec" -}}
 - Use `exec` with its `command` argument for shell operations. Set `validation` to true for tests, builds, lint, or other verification so their actual results are recorded.{{ if .HasTools "exec_session" }} A returned `session_id` means the process is still running; use `exec_session` for output, input, or termination.{{ end }} Wait for required checks to finish and inspect their exit status before reporting success.
 {{ end -}}
-- Run independent reads in parallel. Sequence dependent operations and edits to the same files. Resolve failures from the returned evidence; do not blindly repeat a denied or failed call.
+- Run independent reads in parallel{{ if .HasTools "edit" "delete" }}, and send independent `edit` and `delete` calls together{{ end }}. Wait for a prerequisite to succeed before sending a dependent call. Resolve failures from the returned evidence; do not blindly repeat a denied or failed call.
 {{ if .HasTools "elicit" -}}
 - Use `elicit` only for a material user decision that the workspace cannot answer. It takes a `questions` array and blocks until the user responds, so finish independent work before calling it.
 {{ end -}}

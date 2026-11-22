@@ -119,7 +119,7 @@ func TestMCPTrustBindsToExactConfigurationAndWorkspace(t *testing.T) {
 	if err := other.approveMCP(t.Context(), manager, nil, "local", config); err == nil {
 		t.Fatal("other workspace inherited approval")
 	}
-	info, err := os.Stat(filepath.Join(projectStateDir(root), "mcp-trust.json"))
+	info, err := os.Stat(filepath.Join(ProjectStateDir(root), "mcp-trust.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestHookTrustPersistsPerWorkspace(t *testing.T) {
 	if (&Workspace{RootPath: t.TempDir()}).HookTrust().Trusted("sha256:a") {
 		t.Fatal("other workspace inherited hook approval")
 	}
-	path := filepath.Join(projectStateDir(root), "hook-trust.json")
+	path := filepath.Join(ProjectStateDir(root), "hook-trust.json")
 	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
