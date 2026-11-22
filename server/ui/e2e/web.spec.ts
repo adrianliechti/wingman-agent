@@ -4112,7 +4112,7 @@ test("runs a coding tool and renders its result", async ({ page }) => {
 	await expect(tool).toBeVisible();
 	await tool.click();
 	await expect(
-		page.getByText(/Applied 1 edits across 1 files\./),
+		page.getByText(/Applied 1 edit across 1 file\./),
 	).toBeVisible();
 	await expect(
 		page.getByText("Created the requested file", { exact: true }),

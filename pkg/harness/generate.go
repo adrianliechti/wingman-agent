@@ -145,12 +145,15 @@ func responseStopReason(resp *responses.Response) string {
 	return reason
 }
 
-// Missing and null retain the fallback behavior for providers that do not
-// expose Codex's explicit turn boundary.
-func responseEndTurn(resp *responses.Response) *bool {
+// Some providers express the same boundary as a stop reason. An explicit
+// boolean takes precedence, including when it requests another model step.
+func responseEndTurn(resp *responses.Response, stopReason string) *bool {
 	var endTurn *bool
-	if err := json.Unmarshal([]byte(resp.JSON.ExtraFields["end_turn"].Raw()), &endTurn); err != nil {
-		return nil
+	if err := json.Unmarshal([]byte(resp.JSON.ExtraFields["end_turn"].Raw()), &endTurn); err == nil && endTurn != nil {
+		return endTurn
 	}
-	return endTurn
+	if stopReason == "end_turn" {
+		return new(true)
+	}
+	return nil
 }

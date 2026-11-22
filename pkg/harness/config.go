@@ -99,10 +99,9 @@ type Config struct {
 	// PermissionMode reports the active mode for hooks at each request boundary.
 	PermissionMode func() string
 
-	// RequireFinish enables the explicit finish_turn protocol for a model.
-	// Text-only replies cannot end Send when enabled. Structured output and
-	// native refusals use their own completion semantics.
-	RequireFinish func(model string) bool
+	// ConfirmUnphased offers finish_turn when a tool-enabled response stops
+	// without a turn boundary, a message phase, or a tool call.
+	ConfirmUnphased bool
 
 	// ContextInstructions supplies mutable session guidance (environment,
 	// project instructions, memory, skills). Changes append a replacement

@@ -330,7 +330,6 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 		turns := 0
 		firstRequest := true
 		var completion completionState
-		nativeContinuation := false
 		stopHookActive := false
 		for {
 			if err := ctx.Err(); err != nil {
@@ -343,7 +342,6 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				pending := a.takePendingInput()
 				if len(pending) > 0 {
 					completion = completionState{}
-					nativeContinuation = false
 				}
 				if err := a.appendInputs(ctx, nil, pending...); err != nil {
 					stop(err)
@@ -351,7 +349,7 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				}
 			}
 
-			if err := a.repairToolHistory(nativeContinuation); err != nil {
+			if err := a.repairToolHistory(completion.nativeContinuation); err != nil {
 				stop(err)
 				return
 			}
@@ -360,29 +358,14 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				return
 			}
 
-			stepCtx, req, err := a.buildStepRequest(ctx, nativeContinuation)
+			stepCtx, req, err := a.buildStepRequest(ctx, completion)
 			if err != nil {
 				stop(err)
 				return
 			}
 
-			// If a previous round already completed a final answer and only
-			// continued to confirm finish_turn, switching mid-turn to a model
-			// that does not use finish_turn completes the turn without asking
-			// the new model to regenerate the answer.
-			if !req.requireFinish && completion.awaitingFinish {
-				done, err := a.finishStep(ctx, stepCtx, completion.answer, false, false, nil, &completion, &stopHookActive)
-				if done {
-					if err != nil {
-						stop(err)
-					}
-					return
-				}
-				continue
-			}
-
 			firstRequest = false
-			resp, err := a.completeWithRetry(stepCtx, runtime.TurnID, req, yield)
+			resp, err := a.completeWithRetry(stepCtx, runtime.TurnID, req, &completion, yield)
 			if errors.Is(err, errSteerPreempt) {
 				// User steering preempted an in-flight stream before any tool ran.
 				// Drain pendingInput on the next iteration without consuming a turn.
@@ -401,7 +384,6 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				return
 			}
 			turns++
-			nativeContinuation = resp.endTurn != nil && !*resp.endTurn
 
 			EmitStreamEvent(ctx, StreamEventCommit)
 			if err := ctx.Err(); err != nil {
@@ -412,10 +394,12 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			// A filtered terminal response cannot dispatch further tools or
 			// automatically continue. Earlier completed items may have run.
 			needsFollowUp := false
+			var finish finishStatus
 			var completionErr error
 			filtered := resp.incomplete && resp.incompleteReason == "content_filter"
 			if !filtered {
-				calls, finished, finishRejected, err := a.resolveFinishCalls(req, resp, extractToolCalls(resp.messages), completion.answer, yield)
+				calls := extractToolCalls(resp.messages)
+				calls, finish, err = a.resolveFinishCalls(req, resp, calls, completion.answer, yield)
 				if err != nil {
 					stop(err)
 					return
@@ -425,7 +409,7 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 					return
 				}
 				var notice *Message
-				needsFollowUp, notice, completionErr = completion.advance(resp, req.requireFinish, finished, finishRejected, len(calls) > 0)
+				needsFollowUp, notice, completionErr = completion.advance(resp, req.finishMode, finish, len(calls) > 0)
 				if notice != nil {
 					if err := a.appendMessages(*notice); err != nil {
 						stop(err)
@@ -435,8 +419,8 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 			}
 
 			last := lastAssistantText(resp.messages)
-			if req.requireFinish && last == "" {
-				last = completion.answer
+			if finish == finishAccepted && last == "" {
+				last = completion.answer.text
 			}
 			done, err := a.finishStep(ctx, stepCtx, last, needsFollowUp, resp.incomplete, completionErr, &completion, &stopHookActive)
 			if done {
@@ -445,6 +429,7 @@ func (a *Agent) send(ctx context.Context, input []Content) (iter.Seq2[Message, e
 				}
 				return
 			}
+			completion.nativeContinuation = resp.endTurn != nil && !*resp.endTurn
 			if maxTurns > 0 && turns >= maxTurns {
 				stop(ErrMaxTurnsExceeded)
 				return
@@ -531,32 +516,27 @@ func contentText(input []Content) string {
 }
 
 func lastAssistantText(messages []Message) string {
+	return lastAssistantTextItem(messages).text
+}
+
+type assistantText struct {
+	text  string
+	phase MessagePhase
+}
+
+func lastAssistantTextItem(messages []Message) assistantText {
 	for _, message := range slices.Backward(messages) {
 		if message.Role == RoleAssistant {
 			if text := contentText(message.Content); text != "" {
-				return text
+				return assistantText{text: text, phase: message.Phase}
 			}
 		}
 	}
-	return ""
+	return assistantText{}
 }
 
-func endsWithNonterminalText(messages []Message) bool {
-	nonterminal := false
-	for _, message := range messages {
-		if message.Role != RoleAssistant {
-			continue
-		}
-		for _, content := range message.Content {
-			if content.Refusal != "" {
-				return false
-			}
-			if content.Text != "" {
-				nonterminal = message.Phase == PhaseCommentary || message.Phase == PhasePartialAnswer
-			}
-		}
-	}
-	return nonterminal
+func (item assistantText) isProgress() bool {
+	return item.phase == PhaseCommentary || item.phase == PhasePartialAnswer
 }
 
 func hiddenContextMessage(text string) Message {
@@ -582,7 +562,7 @@ func waitForRetry(ctx context.Context, delay time.Duration) bool {
 // completeRun gives every provider invocation its own durable lifecycle. A
 // retry is therefore a new Run rather than an invisible overwrite of the
 // failed attempt. Usage is applied only by the terminal event.
-func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, req *request, yield func(Message, error) bool) (resp *response, runErr error) {
+func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, req *request, completion *completionState, yield func(Message, error) bool) (resp *response, runErr error) {
 	runID := uuid.NewString()
 	if err := a.recordEvents(RuntimeEvent{
 		Type: EventRunStarted, TurnID: turnID, RunID: runID, Model: req.model,
@@ -691,9 +671,15 @@ func (a *Agent) completeRun(ctx, inferenceCtx context.Context, turnID string, re
 		}
 		runErr = errors.Join(runErr, drainErr)
 		if runErr != nil && !errors.Is(runErr, errSteerPreempt) {
+			// The retry sees the committed items even though this attempt failed.
+			if len(round.calls) > 0 {
+				*completion = completionState{}
+			} else if strings.TrimSpace(lastAssistantText(committed)) != "" {
+				completion.answer = assistantText{}
+			}
 			// A finish marker is only valid after the response completes. Give
 			// retained markers a rejected result before retrying a failed stream.
-			_, _, _, finishErr := a.resolveFinishCalls(req, &response{messages: committed, incomplete: true}, extractToolCalls(committed), "", emit)
+			_, _, finishErr := a.resolveFinishCalls(req, &response{messages: committed, incomplete: true}, extractToolCalls(committed), assistantText{}, emit)
 			runErr = errors.Join(runErr, finishErr)
 		}
 		if resp != nil {

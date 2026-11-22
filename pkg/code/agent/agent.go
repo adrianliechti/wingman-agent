@@ -14,7 +14,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/google/uuid"
 
@@ -1147,23 +1146,4 @@ func localTimezone(now time.Time) string {
 		offset = -offset
 	}
 	return fmt.Sprintf("%s (UTC%s%02d:%02d)", name, sign, offset/3600, offset%3600/60)
-}
-
-// requiresFinish enables the explicit finish_turn protocol for Claude models,
-// whose native stop reasons carry no message phase. The catalog is authoritative
-// for known models. Unknown deployment names can identify a model family as a
-// complete word, including Bedrock ARNs and aliases such as "bedrock-opus-5-5".
-func requiresFinish(id string) bool {
-	if m, ok := model.Find(id); ok {
-		return strings.EqualFold(m.Namespace, "anthropic")
-	}
-	for _, part := range strings.FieldsFunc(strings.ToLower(id), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	}) {
-		switch part {
-		case "claude", "opus", "sonnet", "haiku", "fable", "mythos":
-			return true
-		}
-	}
-	return false
 }

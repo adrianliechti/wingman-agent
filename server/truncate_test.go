@@ -53,7 +53,7 @@ func (m *truncateModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	fmt.Fprint(w, `data: {"type":"response.completed","sequence_number":2,"response":{"output":[{"type":"message","id":"answer","role":"assistant","status":"completed","content":[{"type":"output_text","text":"an answer","annotations":[]}]}],"usage":{"input_tokens":4,"output_tokens":2}}}`+"\n\ndata: [DONE]\n\n")
+	fmt.Fprint(w, `data: {"type":"response.completed","sequence_number":2,"response":{"output":[{"type":"message","id":"answer","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"an answer","annotations":[]}]}],"usage":{"input_tokens":4,"output_tokens":2}}}`+"\n\ndata: [DONE]\n\n")
 }
 
 // asked is the last request that carried a question.

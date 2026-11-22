@@ -66,7 +66,7 @@ func (m *clientToolModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	text, _ := json.Marshal("The model read " + output)
 	fmt.Fprintf(w, `data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"answer","output_index":0,"content_index":0,"delta":%s}`+"\n\n", text)
-	fmt.Fprintf(w, `data: {"type":"response.completed","sequence_number":2,"response":{"output":[{"type":"message","id":"answer","role":"assistant","status":"completed","content":[{"type":"output_text","text":%s,"annotations":[]}]}],"usage":{"input_tokens":4,"output_tokens":2}}}`+"\n\ndata: [DONE]\n\n", text)
+	fmt.Fprintf(w, `data: {"type":"response.completed","sequence_number":2,"response":{"output":[{"type":"message","id":"answer","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":%s,"annotations":[]}]}],"usage":{"input_tokens":4,"output_tokens":2}}}`+"\n\ndata: [DONE]\n\n", text)
 }
 
 type clientToolPeer struct {

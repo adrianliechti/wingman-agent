@@ -14,5 +14,6 @@ func DefaultConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg.ConfirmUnphased = true
 	return Config{Config: *cfg, Options: optionsFromEnvironment()}, nil
 }

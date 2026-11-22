@@ -3,8 +3,6 @@ package harness
 import (
 	"context"
 	"errors"
-	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -112,7 +110,7 @@ func (a *Agent) takePendingInput() []Message {
 	return queued
 }
 
-func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *request, yield func(Message, error) bool) (resp *response, err error) {
+func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *request, completion *completionState, yield func(Message, error) bool) (resp *response, err error) {
 	captureContent := a.Telemetry.CapturesMessageContent()
 	inferenceRequest := telemetry.InferenceRequest{
 		Model:          req.model,
@@ -127,7 +125,7 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 	defer func() { inference.End(streamingInferenceResult(resp, err, captureContent)) }()
 
 	for attempt := 0; ; attempt++ {
-		resp, err = a.completeRun(ctx, inferenceCtx, turnID, req, yield)
+		resp, err = a.completeRun(ctx, inferenceCtx, turnID, req, completion, yield)
 		_, hookStopped := errors.AsType[hookStopError](err)
 		if err == nil || errors.Is(err, errYieldStopped) || errors.Is(err, errSteerPreempt) || hookStopped {
 			return resp, err
@@ -223,8 +221,8 @@ func runCompactHooks[H ~func(context.Context, string) (hook.Outcome, error)](ctx
 	return combined
 }
 
-func (a *Agent) buildStepRequest(ctx context.Context, nativeContinuation bool) (context.Context, *request, error) {
-	stepCtx, req, err := a.newStepRequest(ctx, nativeContinuation)
+func (a *Agent) buildStepRequest(ctx context.Context, completion completionState) (context.Context, *request, error) {
+	stepCtx, req, err := a.newStepRequest(ctx, completion)
 	if err != nil {
 		return stepCtx, nil, err
 	}
@@ -234,7 +232,7 @@ func (a *Agent) buildStepRequest(ctx context.Context, nativeContinuation bool) (
 	return stepCtx, req, nil
 }
 
-func (a *Agent) newStepRequest(ctx context.Context, nativeContinuation bool) (context.Context, *request, error) {
+func (a *Agent) newStepRequest(ctx context.Context, completion completionState) (context.Context, *request, error) {
 	// Keep request settings with its hooks and tools, even if the user
 	// changes settings while the response is streaming.
 	stepRuntime := a.hookRuntime(ctx)
@@ -245,46 +243,24 @@ func (a *Agent) newStepRequest(ctx context.Context, nativeContinuation bool) (co
 		instructions = a.Instructions()
 	}
 
-	// Policy stays live even when the catalog is pinned for this turn.
-	tools := a.AvailableTools()
-	var outputSchema map[string]any
-	if schema, ok := OutputSchemaFromContext(ctx); ok {
-		outputSchema = schema
-	}
-	if outputSchema != nil {
-		// Structured output is a finalization pass. Keeping tools enabled
-		// lets some providers apply a tool's argument schema to ordinary
-		// text deltas instead of producing the requested final document.
-		tools = nil
-	}
-	allowFinish := outputSchema == nil && a.RequireFinish != nil
-	requireFinish := allowFinish && a.RequireFinish(stepRuntime.Model)
-	if allowFinish {
-		for _, t := range tools {
-			if t.Name == finishToolName {
-				return stepCtx, nil, fmt.Errorf("agent: tool name %q is reserved by RequireFinish", finishToolName)
-			}
-		}
-	}
-	if requireFinish {
-		tools = append(slices.Clone(tools), finishTool())
-		if instructions != "" {
-			instructions += "\n\n"
-		}
-		instructions += finishInstructions
-	}
-
+	outputSchema, _ := OutputSchemaFromContext(ctx)
 	req := &request{
 		model:             stepRuntime.Model,
 		effort:            stepRuntime.ReasoningEffort,
 		instructions:      instructions,
 		cacheKey:          a.CacheKey,
 		messages:          a.requestMessages(),
-		tools:             tools,
 		outputSchema:      outputSchema,
-		requireFinish:     requireFinish,
-		allowFinish:       allowFinish,
-		preserveReasoning: nativeContinuation,
+		preserveReasoning: completion.nativeContinuation,
+	}
+	// Structured finalization uses only the requested output schema.
+	if outputSchema == nil {
+		req.tools = a.AvailableTools()
+	}
+	if a.ConfirmUnphased && len(req.tools) > 0 {
+		if err := req.configureFinish(completion.confirming); err != nil {
+			return stepCtx, nil, err
+		}
 	}
 	return stepCtx, req, nil
 }
@@ -341,7 +317,7 @@ func (a *Agent) finishStep(ctx, stepCtx context.Context, lastAnswer string, need
 // Check before every request, including the first request of a follow-up turn.
 // Rewriting historical results has a cache cost, so do it only under pressure.
 func (a *Agent) prepareRequest(ctx context.Context, req *request) error {
-	if err := a.normalizeRequest(req); err != nil {
+	if err := a.dropIncompatibleReasoning(req); err != nil {
 		return err
 	}
 	overshoot := a.compactionOvershoot(req.model, a.requestTokens(req))
@@ -359,11 +335,4 @@ func (a *Agent) prepareRequest(ctx context.Context, req *request) error {
 	}
 	req.messages = a.requestMessages()
 	return nil
-}
-
-func (a *Agent) normalizeRequest(req *request) error {
-	if err := a.dropIncompatibleReasoning(req); err != nil {
-		return err
-	}
-	return a.dropIncompatibleFinishReminders(req)
 }

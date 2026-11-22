@@ -225,8 +225,7 @@ type request struct {
 	messages          []Message
 	tools             []tool.Tool
 	outputSchema      map[string]any
-	requireFinish     bool
-	allowFinish       bool
+	finishMode        finishMode
 	disableTools      bool
 	onOutputItem      func([]Message) error
 	preserveReasoning bool
@@ -268,6 +267,7 @@ type response struct {
 	finishReasons []string
 	stopReason    string
 	endTurn       *bool
+	refused       bool
 	dispatched    int
 
 	incomplete       bool
@@ -595,6 +595,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 		id:         final.ID,
 		model:      final.Model,
 		stopReason: responseStopReason(final),
+		refused:    len(streamedRefusals) != 0,
 		incomplete: incomplete,
 	}
 
@@ -603,7 +604,7 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 		status = "incomplete"
 		resp.incompleteReason = final.IncompleteDetails.Reason
 	} else {
-		resp.endTurn = responseEndTurn(final)
+		resp.endTurn = responseEndTurn(final, resp.stopReason)
 	}
 	resp.finishReasons = telemetryFinishReasons(status, resp.incompleteReason, resp.messages)
 	return resp, nil

@@ -145,7 +145,10 @@ func (b *contractModelBackend) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			"item_id": "contract-message", "output_index": 0, "content_index": 0,
 			"delta": acptest.NormalText,
 		})
-		writeContractSSE(w, completedEvent(2, 13, 4, 0, 5, 0, nil))
+		final := streamingTextItem(acptest.NormalText)
+		final["id"] = "contract-message"
+		final["phase"] = "final_answer"
+		writeContractSSE(w, completedEvent(2, 13, 4, 0, 5, 0, []map[string]any{final}))
 	default:
 		http.NotFound(w, r)
 	}

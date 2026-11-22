@@ -26,9 +26,9 @@ import (
 // WINGMAN_URL=http://localhost:4242 WINGMAN_LIVE_COMPLETION_MODELS=claude-sonnet-5,gpt-5.6-terra
 // go test ./pkg/code/agent -run TestLiveCompletion -count=1 -v
 //
-// All inference goes to the real backend. The first one or three responses
-// inject a protocol fault: tool_choice:none and progress-only instructions. For models
-// using phases, those fault responses are labelled commentary at the proxy.
+// All inference goes to the real backend. The first one or three completed responses
+// inject a protocol fault: no tools, progress-only instructions, and
+// missing phase and turn boundary metadata, regardless of deployment.
 // Reasoning from the injected prompt is discarded: it does not belong to the
 // agent's original instructions and must not be replayed after the fault.
 // After that fault, requests and streamed responses pass through unchanged.
@@ -70,10 +70,12 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	ws := newOptionsTestWorkspace(t)
+	const brokenSum = "package calc\n\nfunc Sum(a, b int) int { return a - b }\n"
+	const sumTest = "package calc\n\nimport \"testing\"\n\nfunc TestSum(t *testing.T) { if got := Sum(2, 3); got != 5 { t.Fatalf(\"got %d, want 5\", got) } }\n"
 	for name, content := range map[string]string{
 		"go.mod":      "module completion.test\n\ngo 1.24\n",
-		"sum.go":      "package calc\n\nfunc Sum(a, b int) int { return a - b }\n",
-		"sum_test.go": "package calc\n\nimport \"testing\"\n\nfunc TestSum(t *testing.T) { if got := Sum(2, 3); got != 5 { t.Fatalf(\"got %d, want 5\", got) } }\n",
+		"sum.go":      brokenSum,
+		"sum_test.go": sumTest,
 	} {
 		if err := os.WriteFile(filepath.Join(ws.RootPath, name), []byte(content), 0600); err != nil {
 			t.Fatal(err)
@@ -83,13 +85,12 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 	if err != nil {
 		t.Fatal(err)
 	}
-	var requests atomic.Int64
-	var nativeBoundary atomic.Bool
+	var requests, injected atomic.Int64
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.FlushInterval = -1
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		fault, _ := resp.Request.Context().Value(liveProgressKey{}).(bool)
-		if resp.StatusCode != http.StatusOK {
+		if !fault || resp.StatusCode != http.StatusOK {
 			return nil
 		}
 		body, err := io.ReadAll(resp.Body)
@@ -97,16 +98,13 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 		if err != nil {
 			return err
 		}
-		if !fault {
-			if bytes.Contains(body, []byte(`"end_turn":true`)) {
-				nativeBoundary.Store(true)
-			}
-			resp.Body = io.NopCloser(bytes.NewReader(body))
-			return nil
-		}
-		body, err = liveProgressFault(body, !requiresFinish(model))
+		body, completed, err := liveProgressFault(body)
 		if err != nil {
 			return err
+		}
+		// A retryable transport or stream error is not a text-only stop.
+		if completed {
+			injected.Add(1)
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 		resp.ContentLength = -1
@@ -115,7 +113,8 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 	}
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/responses") {
-			if requests.Add(1) <= faultRequests {
+			requests.Add(1)
+			if injected.Load() < faultRequests {
 				var request map[string]any
 				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 					t.Error(err)
@@ -123,7 +122,8 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 					return
 				}
 				r.Body.Close()
-				request["tool_choice"] = "none"
+				delete(request, "tools")
+				delete(request, "tool_choice")
 				request["instructions"] = "This is a transport fault test. Reply only with: Now I will run the tests. Do not use tools."
 				body, err := json.Marshal(request)
 				if err != nil {
@@ -187,8 +187,8 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 		for _, err := range stream {
 			runErr = errors.Join(runErr, err)
 		}
-		if !errors.Is(runErr, harness.ErrTurnIncomplete) || requests.Load() != 3 {
-			t.Fatalf("fault outcome=%v requests=%d", runErr, requests.Load())
+		if !errors.Is(runErr, harness.ErrTurnIncomplete) || injected.Load() != faultRequests {
+			t.Fatalf("fault outcome=%v injected=%d requests=%d", runErr, injected.Load(), requests.Load())
 		}
 		for _, event := range a.session(id).harness.StateSnapshot().Events {
 			if event.Type == harness.EventToolStarted {
@@ -225,8 +225,8 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 	toolStarted, releaseTool := make(chan struct{}), make(chan struct{})
 	var steered atomic.Bool
 	a.session(id).harness.Hooks.PostToolUse = append(a.session(id).harness.Hooks.PostToolUse,
-		func(ctx context.Context, call tool.ToolCall, _ string) (hook.Outcome, error) {
-			if call.Name != "read" || !steered.CompareAndSwap(false, true) {
+		func(ctx context.Context, _ tool.ToolCall, _ string) (hook.Outcome, error) {
+			if !steered.CompareAndSwap(false, true) {
 				return hook.Outcome{}, nil
 			}
 			snapshot, err := manager.Submit(ctx, id, code.TurnInput{ID: "live-steer", Intent: code.TurnInputSteer, Content: []harness.Content{{Text: "Also include STEER_OK in your final report. Continue the requested fix and test."}}})
@@ -250,7 +250,7 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 	select {
 	case <-toolStarted:
 	case event := <-terminal:
-		t.Fatalf("resume stopped before reading the fixture: %s %v", event.State, event.Err)
+		t.Fatalf("resume stopped before running a tool after %d requests: %s %v", requests.Load(), event.State, event.Err)
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
@@ -274,8 +274,21 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 	if faultRequests == 3 {
 		workIndex = 1
 	}
-	if len(reviews) != workIndex+2 || reviews[workIndex].Validation != "passed" || len(reviews[workIndex].Files) == 0 || len(reviews[workIndex+1].Checks) != 0 || len(reviews[workIndex+1].Files) != 0 {
+	if len(reviews) != workIndex+2 || reviews[workIndex].Validation != "passed" || len(reviews[workIndex+1].Checks) != 0 || len(reviews[workIndex+1].Files) != 0 {
 		t.Fatalf("work, validation, or follow-up repeated work: %+v", reviews)
+	}
+	if got, err := os.ReadFile(filepath.Join(ws.RootPath, "sum_test.go")); err != nil || string(got) != sumTest {
+		t.Fatalf("fixture test changed: %q, err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(ws.RootPath, "sum.go")); err != nil || string(got) == brokenSum {
+		t.Fatalf("fixture source was not updated: %q, err=%v", got, err)
+	}
+	tested := false
+	for _, check := range reviews[workIndex].Checks {
+		tested = tested || check.Outcome == "passed" && strings.Contains(check.Command, "go test")
+	}
+	if !tested {
+		t.Fatalf("missing successful go test in validation checks: %+v", reviews[workIndex].Checks)
 	}
 	var text strings.Builder
 	finishes := 0
@@ -289,24 +302,23 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 			}
 		}
 	}
-	// A gateway that reports the model's own end of turn finishes it without the marker.
-	needsMarkers := requiresFinish(resumeModel) && !nativeBoundary.Load()
-	if !strings.Contains(text.String(), "STEER_OK") || !strings.Contains(text.String(), "QUEUE_OK") || (needsMarkers && finishes < 2) {
+	if !strings.Contains(text.String(), "STEER_OK") || !strings.Contains(text.String(), "QUEUE_OK") {
 		t.Fatalf("steering/follow-up/finish missing: accepted finishes=%d text=%q", finishes, text.String())
 	}
 	usage := a.Usage(id)
 	t.Logf("model=%s requests=%d accepted_finishes=%d validation=%s input=%d cached=%d output=%d; progress recovery, real edit/test, steering, FIFO follow-up passed", model, requests.Load(), finishes, reviews[workIndex].Validation, usage.InputTokens, usage.CacheReadInputTokens, usage.OutputTokens)
 }
 
-func liveProgressFault(body []byte, commentary bool) ([]byte, error) {
+func liveProgressFault(body []byte) ([]byte, bool, error) {
 	var mark func(any)
 	mark = func(value any) {
 		switch value := value.(type) {
 		case map[string]any:
-			// The fault is a stop without a turn boundary; a gateway that reports one would end the turn.
+			// Simulate a text-only stop from a provider without native turn metadata.
 			delete(value, "end_turn")
-			if commentary && value["type"] == "message" && value["role"] == "assistant" {
-				value["phase"] = "commentary"
+			delete(value, "stop_reason")
+			if value["type"] == "message" && value["role"] == "assistant" {
+				delete(value, "phase")
 			}
 			if output, ok := value["output"].([]any); ok {
 				kept := output[:0]
@@ -328,6 +340,7 @@ func liveProgressFault(body []byte, commentary bool) ([]byte, error) {
 		}
 	}
 	lines := bytes.Split(body, []byte("\n"))
+	completed := false
 	for i, line := range lines {
 		data, ok := bytes.CutPrefix(line, []byte("data: "))
 		if !ok || bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
@@ -335,9 +348,12 @@ func liveProgressFault(body []byte, commentary bool) ([]byte, error) {
 		}
 		var event map[string]any
 		if err := json.Unmarshal(data, &event); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		typ, _ := event["type"].(string)
+		if typ == "response.completed" {
+			completed = true
+		}
 		item, _ := event["item"].(map[string]any)
 		if strings.Contains(typ, "reasoning") || item["type"] == "reasoning" {
 			lines[i] = nil
@@ -346,9 +362,12 @@ func liveProgressFault(body []byte, commentary bool) ([]byte, error) {
 		mark(event)
 		encoded, err := json.Marshal(event)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		lines[i] = append([]byte("data: "), encoded...)
 	}
-	return bytes.Join(lines, []byte("\n")), nil
+	if !completed {
+		return body, false, nil
+	}
+	return bytes.Join(lines, []byte("\n")), true, nil
 }

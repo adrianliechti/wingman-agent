@@ -251,6 +251,13 @@ func (a *Agent) repairToolHistory(preserveReasoning bool) error {
 	var cleaned, missing []Message
 	changed := false
 	for _, m := range messages {
+		if isLegacyFinishReminder(m) {
+			changed = true
+			if m.Content[0].Text == finishReminder {
+				continue
+			}
+			m.Content[0].Text = continuationReminder
+		}
 		hasCall := false
 		for _, c := range m.Content {
 			hasCall = hasCall || c.ToolCall != nil
@@ -296,5 +303,5 @@ func (a *Agent) repairToolHistory(preserveReasoning bool) error {
 	if !changed {
 		return nil
 	}
-	return a.replaceContext("repair interrupted tool or reasoning history", cleaned)
+	return a.replaceContext("repair tool and reasoning history", cleaned)
 }

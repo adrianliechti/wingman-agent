@@ -240,11 +240,11 @@ func (a *Agent) Compact(ctx context.Context, focus string) (CompactResult, error
 	if err := a.syncContextInstructions(); err != nil {
 		return CompactResult{}, err
 	}
-	ctx, req, err := a.newStepRequest(ctx, false)
+	ctx, req, err := a.newStepRequest(ctx, completionState{})
 	if err != nil {
 		return CompactResult{}, err
 	}
-	if err := a.normalizeRequest(req); err != nil {
+	if err := a.dropIncompatibleReasoning(req); err != nil {
 		return CompactResult{}, err
 	}
 	before := a.requestTokens(req)

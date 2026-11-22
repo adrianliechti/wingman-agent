@@ -426,13 +426,22 @@ func TestAgentToolSyncRunAdoptedForFollowUps(t *testing.T) {
 	}
 }
 
-func TestAgentToolReportSurvivesExplicitFinish(t *testing.T) {
+func TestAgentToolReportSurvivesFinishMarker(t *testing.T) {
+	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var req struct{ Tools []struct{ Name string } }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+		}
+		item := `{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"finished report"}]}`
+		for _, offered := range req.Tools {
+			if offered.Name == "finish_turn" {
+				item = `{"type":"function_call","id":"fc_1","call_id":"call_finish","name":"finish_turn","arguments":"{\"answer\":\"finished report\"}","status":"completed"}`
+			}
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"output\":["+
-			"{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"finished report\",\"annotations\":[]}]},"+
-			"{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_finish\",\"name\":\"finish_turn\",\"arguments\":\"{}\",\"status\":\"completed\"}"+
-			"],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+		fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"output\":[%s]}}\n\n", item)
 	}))
 	defer server.Close()
 
@@ -441,7 +450,10 @@ func TestAgentToolReportSurvivesExplicitFinish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.RequireFinish = func(string) bool { return true }
+	cfg.ConfirmUnphased = true
+	cfg.Tools = func() []tool.Tool {
+		return []tool.Tool{{Name: "read", Effect: tool.StaticEffect(tool.EffectReadOnly)}}
+	}
 
 	out, err := Tools(cfg, nil, nil)[0].Execute(t.Context(), map[string]any{
 		"description": "d", "prompt": "p", "agent_type": "explore",
@@ -449,8 +461,8 @@ func TestAgentToolReportSurvivesExplicitFinish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(out.Content.Text(), "finished report") || !strings.Contains(out.Content.Text(), "0 tool calls") {
-		t.Fatalf("result = %q", out.Content.Text())
+	if requests != 2 || !strings.HasPrefix(out.Content.Text(), "finished report") || !strings.Contains(out.Content.Text(), "0 tool calls") {
+		t.Fatalf("requests=%d result=%q", requests, out.Content.Text())
 	}
 }
 

@@ -44,21 +44,19 @@ func TestTurnReviewAndUndoSurviveJournalReload(t *testing.T) {
 			output = map[string]any{"type": "function_call", "id": "edit", "call_id": "edit", "name": "edit", "arguments": `{"edits":[{"file_path":"notes.txt","old_string":"user baseline","new_string":"user baseline plus agent edit"},{"file_path":"asset.bin","move_to":"renamed.bin","old_string":"","new_string":""}]}`, "status": "completed"}
 		default:
 			output = map[string]any{"type": "message", "id": "final", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "Done", "annotations": []any{}}}}
-		}
-		outputs := []any{output}
-		if request > 2 {
 			for _, tool := range body.Tools {
 				if tool.Name == "finish_turn" {
-					outputs = append(outputs, map[string]any{"type": "function_call", "id": "finish", "call_id": "finish", "name": "finish_turn", "arguments": "{}", "status": "completed"})
+					output = map[string]any{"type": "function_call", "id": "finish", "call_id": "finish", "name": "finish_turn", "arguments": `{"answer":"Done"}`, "status": "completed"}
 				}
 			}
 		}
-		data, _ := json.Marshal(map[string]any{"type": "response.completed", "sequence_number": 1, "response": map[string]any{"output": outputs, "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}}})
+		data, _ := json.Marshal(map[string]any{"type": "response.completed", "sequence_number": 1, "response": map[string]any{"output": []any{output}, "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}}})
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, "data: %s\n\n", data)
 	}))
 	defer provider.Close()
 	t.Setenv("WINGMAN_URL", provider.URL)
+	t.Setenv("WINGMAN_MODEL", "custom-deployment")
 	cfg, err := DefaultConfig()
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +75,9 @@ func TestTurnReviewAndUndoSurviveJournalReload(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+	if request != 4 {
+		t.Fatalf("requests=%d, want two tool calls, an unphased reply and its confirmation", request)
 	}
 	reviews, err := a.TurnReviews(t.Context(), id)
 	if err != nil || len(reviews) != 1 || len(reviews[0].Files) != 3 || reviews[0].Files[0].Before != "user baseline\n" || reviews[0].InputID != "review-input" || reviews[0].Validation != "not_run" {

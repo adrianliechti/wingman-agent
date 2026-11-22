@@ -75,7 +75,7 @@ func e2eConnection(t *testing.T, client acpsdk.Client, respond func(http.Respons
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.RequireFinish = func(string) bool { return false }
+	cfg.ConfirmUnphased = false
 	s := &contractServer{Server: &Server{
 		config: cfg, sessions: map[acpsdk.SessionId]*sessionEntry{},
 		sessionDirs: map[acpsdk.SessionId]string{}, workspaces: map[string]*workspaceEntry{},

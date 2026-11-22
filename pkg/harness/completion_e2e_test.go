@@ -20,8 +20,8 @@ import (
 // Exercise HTTP streaming, real side effects, the journal, and process-style
 // restoration. A transport's completed response must not imply a completed task.
 func TestCompletionE2EPreservesWorkAndResumes(t *testing.T) {
-	for _, requireFinish := range []bool{true, false} {
-		t.Run(fmt.Sprintf("require_finish=%t", requireFinish), func(t *testing.T) {
+	for _, confirmUnphased := range []bool{true, false} {
+		t.Run(fmt.Sprintf("confirm_unphased=%t", confirmUnphased), func(t *testing.T) {
 			var requests, executions atomic.Int64
 			path := filepath.Join(t.TempDir(), "receipt.txt")
 			provider := newContextProvider(t, func(w http.ResponseWriter, req contextRequest) {
@@ -31,7 +31,7 @@ func TestCompletionE2EPreservesWorkAndResumes(t *testing.T) {
 					fmt.Fprint(w, completedToolCall("record-once", "record"))
 				case n <= 4:
 					body := completedText("Now I will verify the receipt.")
-					if !requireFinish {
+					if !confirmUnphased {
 						body = strings.ReplaceAll(body, `"role":"assistant"`, `"role":"assistant","phase":"commentary"`)
 					}
 					fmt.Fprint(w, body)
@@ -39,9 +39,7 @@ func TestCompletionE2EPreservesWorkAndResumes(t *testing.T) {
 					if !bytes.Contains(req.Input, []byte("receipt=recorded-once")) || !bytes.Contains(req.Input, []byte("Continue")) {
 						t.Error("resume lost completed work or fresh user input")
 					}
-					fmt.Fprint(w, completedText("Verified receipt=recorded-once."))
-				case n == 6 && requireFinish:
-					fmt.Fprint(w, completedToolCall("finished", "finish_turn"))
+					fmt.Fprint(w, strings.ReplaceAll(completedText("Verified receipt=recorded-once."), `"role":"assistant"`, `"role":"assistant","phase":"final_answer"`))
 				default:
 					t.Error("unexpected extra request")
 					http.Error(w, "unexpected request", http.StatusBadRequest)
@@ -54,7 +52,7 @@ func TestCompletionE2EPreservesWorkAndResumes(t *testing.T) {
 				}
 				return tool.Text("receipt=recorded-once"), nil
 			}})
-			cfg.RequireFinish = func(string) bool { return requireFinish }
+			cfg.ConfirmUnphased = confirmUnphased
 			cfg.MaxTurns = 10
 			dir := t.TempDir()
 			journal, err := session.OpenJournal(dir, "completion")
@@ -83,11 +81,7 @@ func TestCompletionE2EPreservesWorkAndResumes(t *testing.T) {
 			if err := drain(t, a, "Continue; use the saved receipt and do not record it again."); err != nil {
 				t.Fatal(err)
 			}
-			wantRequests := int64(5)
-			if requireFinish {
-				wantRequests++
-			}
-			if requests.Load() != wantRequests || executions.Load() != 1 {
+			if requests.Load() != 5 || executions.Load() != 1 {
 				t.Fatalf("resume requests=%d executions=%d", requests.Load(), executions.Load())
 			}
 			if receipt, err := os.ReadFile(path); err != nil || string(receipt) != "recorded-once" {
@@ -97,11 +91,13 @@ func TestCompletionE2EPreservesWorkAndResumes(t *testing.T) {
 			if len(reviews) != 2 || reviews[0].Outcome != "incomplete" || reviews[1].Outcome != "completed" {
 				t.Fatalf("resumed reviews: %+v", reviews)
 			}
-			// New rounds append to the cached history, including across resume.
+			// Confirmation temporarily changes the tools. History stays append-only,
+			// and the resumed turn uses the original tools and instructions.
 			all := provider.snapshot()
 			for i := 1; i < len(all); i++ {
-				assertRequestPrefix(t, all[i-1], all[i])
+				assertInputPrefix(t, all[i-1], all[i])
 			}
+			assertRequestPrefix(t, all[0], all[len(all)-1])
 		})
 	}
 }

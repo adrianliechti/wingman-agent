@@ -74,7 +74,7 @@ func TestProjectInstructionsE2ERefreshAtToolBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.RequireFinish = func(string) bool { return false }
+	cfg.ConfirmUnphased = false
 	a := New(ws, cfg, nil)
 	t.Cleanup(func() { _ = a.Close() })
 	id, err := a.NewSession(t.Context())
@@ -194,7 +194,7 @@ func TestPlanToAgentTransitionPreservesPromptCachePrefixE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.RequireFinish = func(string) bool { return false }
+	cfg.ConfirmUnphased = false
 	a := New(ws, cfg, nil)
 	t.Cleanup(func() { _ = a.Close() })
 	id, err := a.NewSession(t.Context())

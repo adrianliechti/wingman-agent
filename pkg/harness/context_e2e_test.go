@@ -82,6 +82,11 @@ func assertRequestPrefix(t *testing.T, before, after contextRequest) {
 	if !bytes.Equal(before.Instructions, after.Instructions) || !bytes.Equal(before.Tools, after.Tools) || before.CacheKey != after.CacheKey {
 		t.Fatal("instructions, tools, or cache key changed")
 	}
+	assertInputPrefix(t, before, after)
+}
+
+func assertInputPrefix(t *testing.T, before, after contextRequest) {
+	t.Helper()
 	oldItems, newItems := requestItems(t, before), requestItems(t, after)
 	if len(newItems) < len(oldItems) {
 		t.Fatal("input prefix became shorter")
