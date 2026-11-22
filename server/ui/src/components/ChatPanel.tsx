@@ -28,6 +28,7 @@ import { useSessionSettings } from "../state/workspaceContext.ts";
 import { useToast } from "./ui/Feedback.tsx";
 import { atTextareaEdge } from "../utils/textareaNavigation";
 import { useColorScheme } from "../hooks/useColorScheme";
+import { useWorkspaceInfo } from "../hooks/useWorkspaceInfo";
 import { useCanCompact, useChatCommands } from "../hooks/useChatCommands";
 import { useVoiceAvailable, useVoiceInput } from "../hooks/useVoiceInput";
 import { useConversation } from "../hooks/useConversation";
@@ -187,6 +188,7 @@ export function ChatPanel({
 	onSeedConsumed,
 }: ChatPanelProps) {
 	const scheme = useColorScheme();
+	const temporary = useWorkspaceInfo()?.temporary ?? false;
 	const toast = useToast();
 	const { settings, setSettings, retryModels } = useSessionSettings(
 		sessionId,
@@ -1041,7 +1043,9 @@ export function ChatPanel({
 								className="w-20 h-20 mb-4 opacity-80"
 							/>
 							<div className="text-[13px] text-fg-dim leading-relaxed">
-								Ask me to write code, fix bugs, explore files, or run commands.
+								{temporary
+									? "Temporary chat. Its files and conversation are removed once no window shows it."
+									: "Ask me to write code, fix bugs, explore files, or run commands."}
 							</div>
 						</div>
 					</div>

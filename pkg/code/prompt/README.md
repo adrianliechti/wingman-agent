@@ -123,9 +123,13 @@ explicit restriction on unsolicited delegation. Reviewing Codex source at
 `b9775a0d57` (2026-10-16), especially
 `codex-rs/core/src/session/multi_agents.rs`, shows this is runtime policy selected
 by configuration/catalog overrides and reasoning effort, not an intrinsic model
-trait. Wingman uses one shared default: delegate bounded independent work when
-useful, subject to user/project/skill restrictions, independent of model or
-effort. From Codex's delegation guidance at `1885417cd4` (2026-11-09) the shared
+trait. Wingman uses one shared default, independent of model or effort. It
+follows Claude Code's guidance on when to launch an agent and leans the way
+Codex's runtime does: delegate when the user, project, or a skill asks for it,
+or when independent work clearly pays for a fresh context, and otherwise do
+the work directly. The earlier default, delegate bounded independent work when
+useful, doubled GPT-6.1 Terra's requests on tasks it chose to split (see
+"Aligned with Codex and Claude Code" below). From Codex's delegation guidance at `1885417cd4` (2026-11-09) the shared
 policy takes three rules: keep urgent work that blocks the next step, give each
 editing agent ownership of files or a responsibility, and review a child's
 edits and load-bearing claims. The child context carries the other two: the
@@ -518,8 +522,9 @@ the shared guidance and file-tool fixes.
 
 The fallback uses examples to distinguish a request to investigate and fix a
 reported failure from a question about a possible change. The Claude variants
-distinguish an approval denial from a file-tool path error. Both families
-treat session-context updates as state. In an intermediate run, Inkling
+keep Claude Code's bullets on declined calls and hooks, with one added clause:
+a declined action is not routed through another tool. Both families treat
+session-context updates as state. In an intermediate run, Inkling
 reverted a requested sibling edit and saved a preference the user had never
 expressed. The fallback now asks the model to identify the user message
 before taking either action. The shared runtime sends pure renames to `edit` with `move_to`,
@@ -546,6 +551,55 @@ total input tokens increased on both scenarios despite the shorter schemas.
 Inkling used the dedicated delete tool for all three package removals. Two
 of its three sibling-edit runs tried the file tool outside its write roots
 before completing the task with the shell.
+
+### Aligned with Codex and Claude Code
+
+A comparison of the requests Wingman sends with Codex 0.171.0 and Claude Code
+2.1.330 led to the changes below. Each was measured on its own build, `cceb9152`
+plus that change, against `cceb9152`, on the scenarios where it should show.
+Every run in this round passed on both builds.
+
+| Change | Source | Runs | Before → after |
+| --- | --- | --- | --- |
+| Delegate when asked or when the work clearly pays for a fresh context | Claude Code's agent tool; Codex's runtime does not spawn unasked | GPT-6.1 Terra, `adopt_sibling` and `multi_part`, 8 per build | median requests 12.5 → 7.5, input tokens 188k → 126k, agents launched 4 → 0 |
+| The same, on prompts that ask for subagents | | Terra and GPT-6.2 Sol, `agent_fanout` and `fork_context`, 10 per build | agents launched 20 → 20 |
+| GPT-6.2 regains Codex rules a shorter rewrite had dropped | Codex's GPT-6.2 prompt | GPT-6.2 Sol, all ten scenarios, 20 per build | mean requests 6.4 → 5.8, median input tokens 96k → 88k |
+| Edit without a prior read when the text is already known, Fable 5.2 only | Claude Code, for Fable 5.2 | Fable 5.2, `edit_sibling`, `multi_part`, `file_ops`, 9 per build | mean requests 5.6 → 4.9, median input tokens 151k → 124k |
+| Claude Code's wording for declined calls and hooks | Claude Code | Fable 5.2 and Sonnet 5.5, five scenarios, 10 per model and build | unchanged |
+| Fallback without the benchmark's own phrasing | | Gemini 4 Hydrogen and Qwen 3.8 Max, reworded bug report and `question_only` | unchanged |
+
+The restored GPT-6.2 rules keep questions out of progress updates, do not ask
+again for what an earlier turn authorized, need no permission for read-only
+actions, ask only for a material gap, put the user's instruction above skills,
+carry a follow-up question through to working results, and replace a sentence
+that invited extra branches and abstractions with Codex's rules against them.
+
+Two candidates were dropped after measuring. Codex's rule against loading a
+skill on keywords alone left GPT-6.2 Sol loading `debug` as often as before (7
+of 12 runs against 6) at the same request count. The edit-without-read note,
+given to every model, made Fable 5.2 cheaper but cost GPT-6.2 Sol 7.6 → 8.2 and
+Inkling 2 Small 10.3 → 11.0 mean requests, so only Fable 5.2 carries it, as in
+Claude Code.
+
+Not measured: Claude Code's two shell hints on downloaded archives and `curl
+--form-string`, which no scenario exercises, and skipping the skills the
+Claude apps sync into `~/.claude/skills/synced`. Those rely on the apps' own
+tools and added about 3 KB to every session context.
+
+The final tree against the same prompts before these changes, all ten
+scenarios twice per model:
+
+| Model | Passed | Mean requests | Median input tokens |
+| --- | --- | --- | --- |
+| GPT-6.2 Sol | 20/20 → 20/20 | 6.4 → 6.3 | 96k → 88k |
+| GPT-6.1 Terra | 20/20 → 20/20 | 6.5 → 6.6 | 96k → 90k |
+| Claude Fable 5.2 | 20/20 → 20/20 | 4.5 → 4.3 | 115k → 108k |
+| Inkling 2 Small | 18/18 → 20/20 | 7.9 → 9.2 | 167k → 158k |
+| Gemini 4 Hydrogen | 20/20 → 20/20 | 5.0 → 5.0 | 91k → 84k |
+
+Inkling's higher mean came from a few long runs. Over 10 to 13 runs per build
+on `adopt_sibling`, the final tree averaged 10.0 requests against 9.5, with the
+same median of 9 and a spread of about 2.5 on both.
 
 ## Check a change
 

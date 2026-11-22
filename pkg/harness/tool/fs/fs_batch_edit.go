@@ -24,7 +24,7 @@ func batchEditTool(root *os.Root, freshness *Freshness, allowedWriteRoots ...str
 		Effect: tool.StaticEffect(tool.EffectMutates),
 		Description: strings.Join([]string{
 			"Create or edit UTF-8 text up to 10 MiB per file. A pure move accepts a regular file of any size, including binary files. Put every independent replacement, creation, and move you know about into one `edits` array. Entries for the same file run in order.",
-			"Match the file's current text, taken from a read, a grep, or an earlier edit. A separate read is not required when you already have the exact text. Copy text without line numbers. Use a unique old_string or set replace_all. Matching tolerates minor whitespace and typography differences.",
+			"Read existing text before replacing it. Copy text without line numbers. Use a unique old_string or set replace_all. Matching tolerates minor whitespace and typography differences.",
 			"To create a file or fill an empty file, use an empty old_string. To rename, pass move_to and two empty strings. The tool checks both paths, creates destination parents, and refuses occupied destinations and file symlinks. Use the delete tool to remove files.",
 			"Validation finishes before any file changes. Commit failures attempt rollback and report restoration errors. A successful result lists the changes; use it without re-reading the files.",
 		}, "\n"),

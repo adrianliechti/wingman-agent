@@ -285,6 +285,7 @@ func (h *Host) flagUnopened(p types.DispatchActionParams, origin types.ActionOri
 	if err != nil {
 		return false
 	}
+	saved := alias.Resource != ""
 	// A session of an agent's own CLI is kept by the host from now on.
 	alias.Resource = resource
 	alias = alias.rooted()
@@ -296,6 +297,11 @@ func (h *Host) flagUnopened(p types.DispatchActionParams, origin types.ActionOri
 	h.projectMu.Lock()
 	defer h.projectMu.Unlock()
 	h.mu.Lock()
+	// One deleted meanwhile, as a temporary chat's are as it closes, stays deleted.
+	if _, ok := h.aliases[resource]; saved && !ok {
+		h.mu.Unlock()
+		return false
+	}
 	h.rememberAliasLocked(alias)
 	h.stageAliasLocked(alias, false)
 	status := types.SessionStatusIdle | alias.flags()
