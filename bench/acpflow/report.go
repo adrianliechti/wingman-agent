@@ -438,7 +438,7 @@ func toolCategory(title string) string {
 		return "read"
 	case strings.Contains(value, "find"), strings.Contains(value, "search"), strings.Contains(value, "list"), strings.Contains(value, "glob"):
 		return "search"
-	case strings.Contains(value, "patch"), strings.Contains(value, "edit"), strings.Contains(value, "write"):
+	case strings.Contains(value, "patch"), strings.Contains(value, "edit"), strings.Contains(value, "write"), strings.Contains(value, "delete"):
 		return "edit"
 	case strings.Contains(value, "command"), strings.Contains(value, "execute"), strings.Contains(value, "terminal"), strings.Contains(value, "shell"):
 		return "execute"

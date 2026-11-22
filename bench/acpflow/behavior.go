@@ -152,6 +152,9 @@ func addSignals(signals map[string]int, call toolCallRecord, output string) {
 				signals["edit_delete"]++
 			}
 		}
+	case "delete":
+		paths, _ := args["file_paths"].([]any)
+		signals["edit_delete"] += len(paths)
 	case "exec", "exec_command", "Bash", "shell", "local_shell", "shell_command":
 		command, _ := args["command"].(string)
 		if command == "" {

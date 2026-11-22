@@ -9,7 +9,7 @@ import (
 
 func allPromptTools() []string {
 	return []string{
-		"glob", "grep", "read", "edit",
+		"glob", "grep", "read", "edit", "delete",
 		"exec", "exec_session", "schedule", "elicit",
 		"fetch", "search_web", "lsp",
 		"agent", "agent_output", "agent_send", "agent_stop",

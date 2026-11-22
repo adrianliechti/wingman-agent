@@ -57,6 +57,10 @@ func (f *Freshness) recordInfo(ctx context.Context, target fileTarget, info os.F
 }
 
 func (f *Freshness) recordState(ctx context.Context, st fileState) {
+	// A file outside every root has no later edit to protect, and the shell changing it would be announced as external.
+	if !st.target.InWorkspace && st.target.RootPath == "" {
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if origin := tool.BackgroundOrigin(ctx); origin != "" {
@@ -111,7 +115,7 @@ func (f *Freshness) TrackSnapshots(t tool.Tool) tool.Tool {
 	return t
 }
 
-func (f *Freshness) staleContent(ctx context.Context, target fileTarget, content []byte) bool {
+func (f *Freshness) staleContent(ctx context.Context, target fileTarget, content []byte, ref *tool.FileContentRef) bool {
 	if f == nil {
 		return false
 	}
@@ -122,6 +126,9 @@ func (f *Freshness) staleContent(ctx context.Context, target fileTarget, content
 	}
 	digest := states[target.AbsPath].digest
 	f.mu.Unlock()
+	if ref != nil {
+		return digest != "" && digest != ref.SHA256
+	}
 	return digest != "" && fmt.Sprintf("%x", sha256.Sum256(content)) != digest
 }
 

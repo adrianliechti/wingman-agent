@@ -6370,6 +6370,15 @@ test("recovery: turn review previews attributed edits and refuses a conflicting 
 				added: 1,
 				removed: 1,
 			},
+			{
+				path: "dist/release.bin",
+				movedFrom: "assets/release.bin",
+				afterRef: { sha256: "a".repeat(64), size: 12 << 20 },
+				beforeExists: false,
+				afterExists: true,
+				added: 0,
+				removed: 0,
+			},
 		],
 		checks: [
 			{
@@ -6407,12 +6416,18 @@ test("recovery: turn review previews attributed edits and refuses a conflicting 
 	const { finish } = await reviewActive(page);
 	finish();
 	const card = page.locator("[data-turn-review]");
-	await expect(card).toContainText("1 file changed");
+	await expect(card).toContainText("2 files changed");
 	await expect(card).toContainText("Validation passed");
 	await card.getByRole("button", { name: /Review changes/ }).click();
 	await expect(card).toContainText("exit 0");
 	await expect(card).toContainText("packages/frontend");
-	await card.locator("summary").click();
+	const rename = card
+		.locator("details")
+		.filter({ hasText: "assets/release.bin → dist/release.bin" });
+	await rename.locator("summary").click();
+	await expect(rename).toContainText("SHA-256 " + "a".repeat(64));
+	await expect(rename.locator(".monaco-diff-editor")).toHaveCount(0);
+	await card.locator("summary").filter({ hasText: "editable.txt" }).click();
 	await expect(card.locator(".monaco-diff-editor")).toBeVisible();
 	await card
 		.getByRole("button", { name: "Undo tracked edits", exact: true })

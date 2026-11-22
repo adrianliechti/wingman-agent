@@ -41,3 +41,21 @@ func TestTurnReviewListingSummarizesNetFileChanges(t *testing.T) {
 		t.Fatalf("listing sends file contents: %s", data)
 	}
 }
+
+func TestTurnReviewShowsSingleRowForChainedBinaryRename(t *testing.T) {
+	ref := &tool.FileContentRef{SHA256: "digest", Size: 12 << 20}
+	review := harness.TurnReview{Files: []tool.FileChange{
+		{Path: "assets/a.bin", BeforeExists: true, BeforeRef: ref},
+		{Path: "interim", AfterExists: true, AfterRef: ref, MovedFrom: "assets/a.bin"},
+		{Path: "interim", BeforeExists: true, BeforeRef: ref},
+		{Path: "dist/a.bin", AfterExists: true, AfterRef: ref, MovedFrom: "interim"},
+	}}
+	if stats := changesOf([]harness.TurnReview{review}); stats.Files == nil || *stats.Files != 1 {
+		t.Fatalf("session counted the two paths as distinct file changes: %+v", stats)
+	}
+	list := newTurnReviewListing(review)
+	detail := netFileChanges(review.Files)
+	if len(list.Files) != 1 || len(detail) != 1 || list.Files[0].Path != "dist/a.bin" || list.Files[0].MovedFrom != "assets/a.bin" || !list.Files[0].AfterRef.Equal(ref) || detail[0].MovedFrom != list.Files[0].MovedFrom {
+		t.Fatalf("listing=%+v, detail=%+v", list.Files, detail)
+	}
+}

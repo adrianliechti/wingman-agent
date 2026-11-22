@@ -84,33 +84,36 @@ func TestLinkedSkillRootIntoCredentialStoreIsRefused(t *testing.T) {
 			}
 			root := openRoot(t, workspace)
 			allowed := []string{ordinary, hostile}
-			read, glob, grep := ReadTool(root, allowed...), GlobTool(root, allowed...), GrepTool(root, allowed...)
+			granted := [3]tool.Tool{ReadTool(root, allowed...), GlobTool(root, allowed...), GrepTool(root, allowed...)}
 			// The links are created after the session captured its read roots.
 			testenv.DirLink(t, kind, shared, ordinary)
 			testenv.DirLink(t, kind, store, hostile)
 
-			for _, path := range []string{hostile, filepath.Join(".claude", "skills")} {
-				expectCredentialDenial(t, []credentialCall{
-					{"read " + path, read, map[string]any{"file_path": filepath.Join(path, "id_ed25519")}},
-					{"grep " + path, grep, map[string]any{"path": path, "pattern": "fixture", "output_mode": "content"}},
-					{"grep file " + path, grep, map[string]any{"path": filepath.Join(path, "config"), "pattern": "Host"}},
-					{"glob " + path, glob, map[string]any{"path": path, "pattern": "**/*"}},
-					{"glob pattern " + path, glob, map[string]any{"pattern": filepath.Join(workspace, ".claude", "skills", "*")}},
-				})
-			}
-			for _, check := range []struct {
-				name string
-				tool tool.Tool
-				args map[string]any
-				want string
-			}{
-				{"read", read, map[string]any{"file_path": filepath.Join(ordinary, "review", "SKILL.md")}, "name: review"},
-				{"glob", glob, map[string]any{"path": ordinary, "pattern": "**/*.md"}, "SKILL.md"},
-				{"grep", grep, map[string]any{"path": filepath.Join(".agents", "skills"), "pattern": "Shared review", "output_mode": "content"}, "Shared review guidance"},
-			} {
-				result, err := check.tool.Execute(context.Background(), check.args)
-				if err != nil || !strings.Contains(result.Content.Text(), check.want) {
-					t.Errorf("%s through the ordinary linked root = %q, %v", check.name, result.Content.Text(), err)
+			for mode, tools := range map[string][3]tool.Tool{"granted": granted, "unconfined": {ReadTool(root), GlobTool(root), GrepTool(root)}} {
+				read, glob, grep := tools[0], tools[1], tools[2]
+				for _, path := range []string{hostile, filepath.Join(".claude", "skills")} {
+					expectCredentialDenial(t, []credentialCall{
+						{mode + " read " + path, read, map[string]any{"file_path": filepath.Join(path, "id_ed25519")}},
+						{mode + " grep " + path, grep, map[string]any{"path": path, "pattern": "fixture", "output_mode": "content"}},
+						{mode + " grep file " + path, grep, map[string]any{"path": filepath.Join(path, "config"), "pattern": "Host"}},
+						{mode + " glob " + path, glob, map[string]any{"path": path, "pattern": "**/*"}},
+						{mode + " glob pattern " + path, glob, map[string]any{"pattern": filepath.Join(workspace, ".claude", "skills", "*")}},
+					})
+				}
+				for _, check := range []struct {
+					name string
+					tool tool.Tool
+					args map[string]any
+					want string
+				}{
+					{"read", read, map[string]any{"file_path": filepath.Join(ordinary, "review", "SKILL.md")}, "name: review"},
+					{"glob", glob, map[string]any{"path": ordinary, "pattern": "**/*.md"}, "SKILL.md"},
+					{"grep", grep, map[string]any{"path": filepath.Join(".agents", "skills"), "pattern": "Shared review", "output_mode": "content"}, "Shared review guidance"},
+				} {
+					result, err := check.tool.Execute(context.Background(), check.args)
+					if err != nil || !strings.Contains(result.Content.Text(), check.want) {
+						t.Errorf("%s %s through the ordinary linked root = %q, %v", mode, check.name, result.Content.Text(), err)
+					}
 				}
 			}
 		})
@@ -118,10 +121,10 @@ func TestLinkedSkillRootIntoCredentialStoreIsRefused(t *testing.T) {
 }
 
 // A link nested inside an allowed root is refused as a credential location,
-// both when only the enclosing root is granted and when the linked skill
-// directory holds its own grant.
+// when only the enclosing root is granted, when the linked skill directory
+// holds its own grant, and when reads are not confined at all.
 func TestNestedLinkIntoCredentialStoreIsRefused(t *testing.T) {
-	for _, granted := range []bool{false, true} {
+	for _, granted := range []string{"root", "link", "unconfined"} {
 		_, store := credentialStore(t)
 		workspace := t.TempDir()
 		skills := filepath.Join(workspace, ".agents", "skills")
@@ -134,9 +137,12 @@ func TestNestedLinkIntoCredentialStoreIsRefused(t *testing.T) {
 			t.Fatal(err)
 		}
 		root := openRoot(t, workspace)
-		allowed := []string{skills}
-		if granted {
-			allowed = append(allowed, nested)
+		var allowed []string
+		switch granted {
+		case "root":
+			allowed = []string{skills}
+		case "link":
+			allowed = []string{skills, nested}
 		}
 		read, glob, grep := ReadTool(root, allowed...), GlobTool(root, allowed...), GrepTool(root, allowed...)
 		expectCredentialDenial(t, []credentialCall{
@@ -153,7 +159,7 @@ func TestNestedLinkIntoCredentialStoreIsRefused(t *testing.T) {
 		} {
 			result, err := search.tool.Execute(context.Background(), search.args)
 			if err != nil || strings.Contains(result.Content.Text(), "id_ed25519") || strings.Contains(result.Content.Text(), "fixture") {
-				t.Errorf("granted=%t: %s of the enclosing root = %q, %v", granted, search.name, result.Content.Text(), err)
+				t.Errorf("granted=%s: %s of the enclosing root = %q, %v", granted, search.name, result.Content.Text(), err)
 			}
 		}
 	}
@@ -169,18 +175,15 @@ func TestEditIntoCredentialStoreIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for name, edit := range map[string]tool.Tool{"linked write root": EditTool(root, memory), "any path": EditTool(root, "*")} {
-		expectCredentialDenial(t, []credentialCall{
-			{name + " create", edit, createArgs(filepath.Join(memory, "authorized_keys"), "ssh-ed25519 attacker")},
-			{name + " replace", edit, map[string]any{"edits": []any{
-				map[string]any{"file_path": "local.txt", "old_string": "original", "new_string": "changed"},
-				map[string]any{"file_path": filepath.Join(memory, "config"), "old_string": "Host fixture", "new_string": "Host attacker"},
-			}}},
-		})
-	}
+	edit := EditTool(root, memory)
 	expectCredentialDenial(t, []credentialCall{
-		{"wildcard read", ReadTool(root, "*"), map[string]any{"file_path": filepath.Join(home, ".ssh", "id_ed25519")}},
-		{"wildcard home read", ReadTool(root, "*"), map[string]any{"file_path": "~/.ssh/id_ed25519"}},
+		{"create", edit, createArgs(filepath.Join(memory, "authorized_keys"), "ssh-ed25519 attacker")},
+		{"replace", edit, map[string]any{"edits": []any{
+			map[string]any{"file_path": "local.txt", "old_string": "original", "new_string": "changed"},
+			map[string]any{"file_path": filepath.Join(memory, "config"), "old_string": "Host fixture", "new_string": "Host attacker"},
+		}}},
+		{"read", ReadTool(root), map[string]any{"file_path": filepath.Join(home, ".ssh", "id_ed25519")}},
+		{"home read", ReadTool(root), map[string]any{"file_path": "~/.ssh/id_ed25519"}},
 	})
 	if _, err := os.Stat(filepath.Join(store, "authorized_keys")); !os.IsNotExist(err) {
 		t.Errorf("edit created a file in the credential store: %v", err)
@@ -284,10 +287,12 @@ func TestWorkspaceInsideCredentialStoreKeepsItsFiles(t *testing.T) {
 			t.Errorf("%s in a workspace inside a store = %q, %v", check.tool.Name, result.Content.Text(), err)
 		}
 	}
-	// The rest of the store stays out of reach, even through an explicit grant.
+	// The rest of the store stays out of reach, with an explicit grant and without read roots.
 	expectCredentialDenial(t, []credentialCall{
 		{"read", ReadTool(root, store), map[string]any{"file_path": filepath.Join(store, "id_ed25519")}},
 		{"glob", GlobTool(root, store), map[string]any{"path": store, "pattern": "*"}},
+		{"unconfined read", ReadTool(root), map[string]any{"file_path": filepath.Join("..", "id_ed25519")}},
+		{"unconfined glob", GlobTool(root), map[string]any{"path": store, "pattern": "*"}},
 	})
 }
 
@@ -304,4 +309,49 @@ func TestWorkspaceRedirectedIntoCredentialStoreIsRefused(t *testing.T) {
 		{"glob", GlobTool(root), map[string]any{"pattern": "*"}},
 		{"edit", EditTool(root), createArgs("authorized_keys", "ssh-ed25519 attacker")},
 	})
+}
+
+// Unconfined reads reach any path except a credential store, however the store is addressed.
+func TestUnconfinedReadsRefuseCredentialStores(t *testing.T) {
+	home, store := credentialStore(t)
+	workspace := filepath.Join(home, "project")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "notes.txt"), []byte("fixture notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(home, "alias")
+	testenv.DirLink(t, "symlink", store, alias)
+	root := openRoot(t, workspace)
+	read, glob, grep := ReadTool(root), GlobTool(root), GrepTool(root)
+
+	expectCredentialDenial(t, []credentialCall{
+		{"read", read, map[string]any{"file_path": filepath.Join(store, "id_ed25519")}},
+		{"read home", read, map[string]any{"file_path": "~/.ssh/id_ed25519"}},
+		{"read climbing", read, map[string]any{"file_path": filepath.Join("..", ".ssh", "id_ed25519")}},
+		{"read through link", read, map[string]any{"file_path": filepath.Join(alias, "id_ed25519")}},
+		{"grep", grep, map[string]any{"path": store, "pattern": "fixture", "output_mode": "content"}},
+		{"grep file", grep, map[string]any{"path": filepath.Join(store, "config"), "pattern": "Host"}},
+		{"grep through link", grep, map[string]any{"path": alias, "pattern": "fixture"}},
+		{"glob", glob, map[string]any{"path": store, "pattern": "*"}},
+		{"glob climbing", glob, map[string]any{"path": filepath.Join("..", ".ssh"), "pattern": "*"}},
+		{"glob pattern", glob, map[string]any{"pattern": filepath.Join(store, "*")}},
+	})
+
+	// A search above the store skips it and keeps the ordinary files.
+	for _, search := range []credentialCall{
+		{"glob", glob, map[string]any{"path": home, "pattern": "**/*"}},
+		{"glob wildcard directory", glob, map[string]any{"pattern": filepath.Join(home, "*", "*")}},
+		{"grep", grep, map[string]any{"path": home, "pattern": "fixture|Host", "output_mode": "content"}},
+	} {
+		result, err := search.tool.Execute(context.Background(), search.args)
+		content := result.Content.Text()
+		if err != nil || strings.Contains(content, "id_ed25519") || strings.Contains(content, "PRIVATE KEY") || strings.Contains(content, "Host fixture") {
+			t.Errorf("%s above the store = %q, %v", search.name, content, err)
+		}
+		if search.name != "glob wildcard directory" && !strings.Contains(content, "notes.txt") {
+			t.Errorf("%s above the store lost an ordinary file: %q", search.name, content)
+		}
+	}
 }

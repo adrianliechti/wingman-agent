@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
 )
 
 type cancelWhenInstalledContext struct {
@@ -124,10 +126,14 @@ func TestTransactionContentReadIsBounded(t *testing.T) {
 	if err := root.WriteFile("file", []byte(strings.Repeat("x", 4096)), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if err := checkTransactionContent(t.Context(), root, "file", []byte("xxxxx"), nil, sandboxpolicy.NewCredentialGuard(root.Name())); err == nil {
+		t.Fatal("growing text matched its old contents")
+	}
 	for _, expected := range []int{0, 5} {
-		got, err := readTransactionContent(t.Context(), root, "file", expected)
-		if err != nil || len(got) != expected+1 {
-			t.Fatalf("bounded read = %d bytes, %v", len(got), err)
+		reader := strings.NewReader(strings.Repeat("x", 4096))
+		_, err := hashFileContent(t.Context(), reader, int64(expected))
+		if err == nil || reader.Len() != 4096-expected-1 {
+			t.Fatalf("read %d bytes, error %v", 4096-reader.Len(), err)
 		}
 	}
 }

@@ -82,7 +82,7 @@ type sessionState struct {
 	scriptOptions *schedule.Options
 
 	freshness      *fs.Freshness
-	fileReadRoots  []string
+	fileReadRoots  []string // Empty permits ordinary local reads outside the workspace.
 	fileWriteRoots []string
 
 	changedMu    sync.Mutex
@@ -1071,6 +1071,10 @@ func (s *sessionState) instructionsData() prompt.SectionData {
 	if s.scriptOptions != nil {
 		shellContext = shell.ExecutionContext(ws.RootPath, s.scriptOptions.Shell)
 	}
+	var readRoots []string
+	if len(s.fileReadRoots) > 0 {
+		readRoots = promptRoots(append([]string{ws.RootPath}, s.fileReadRoots...))
+	}
 	return prompt.SectionData{
 		ToolNames:           promptToolNames(s.harness.AvailableTools()),
 		PlanMode:            s.currentMode() == modePlan,
@@ -1081,7 +1085,7 @@ func (s *sessionState) instructionsData() prompt.SectionData {
 		Arch:                runtime.GOARCH,
 		WorkingDir:          ws.RootPath,
 		Shell:               localShell(),
-		FileReadRoots:       promptRoots(append([]string{ws.RootPath}, s.fileReadRoots...)),
+		FileReadRoots:       readRoots,
 		FileWriteRoots:      promptRoots(append([]string{ws.RootPath}, s.fileWriteRoots...)),
 		ShellContext:        shellContext,
 		MemoryDir:           ws.MemoryPath,

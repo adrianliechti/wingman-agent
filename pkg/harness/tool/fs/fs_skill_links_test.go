@@ -60,21 +60,25 @@ func TestSkillDirectoryLinks(t *testing.T) {
 					if scope == "project" {
 						paths = append(paths, filepath.Join(".agents", "skills", "review"))
 					}
-					for _, path := range paths {
-						for _, check := range []struct {
-							name string
-							tool tool.Tool
-							args map[string]any
-							want string
-						}{
-							{"skill", read, map[string]any{"file_path": filepath.Join(path, "SKILL.md")}, "name: review"},
-							{"reference", read, map[string]any{"file_path": filepath.Join(path, "references", "guide.md")}, "Shared review guidance"},
-							{"glob", glob, map[string]any{"path": path, "pattern": "**/*.md"}, "guide.md"},
-							{"grep", grep, map[string]any{"path": path, "pattern": "Shared review guidance", "output_mode": "content"}, "Shared review guidance"},
-						} {
-							result, err := check.tool.Execute(context.Background(), check.args)
-							if err != nil || !strings.Contains(result.Content.Text(), check.want) {
-								t.Errorf("%s through %q = %q, %v", check.name, path, result.Content.Text(), err)
+					// A session leaves reads unconfined; a host that confines them grants the skill roots.
+					for mode, tools := range map[string][3]tool.Tool{"granted": {read, glob, grep}, "unconfined": {ReadTool(root), GlobTool(root), GrepTool(root)}} {
+						read, glob, grep := tools[0], tools[1], tools[2]
+						for _, path := range paths {
+							for _, check := range []struct {
+								name string
+								tool tool.Tool
+								args map[string]any
+								want string
+							}{
+								{"skill", read, map[string]any{"file_path": filepath.Join(path, "SKILL.md")}, "name: review"},
+								{"reference", read, map[string]any{"file_path": filepath.Join(path, "references", "guide.md")}, "Shared review guidance"},
+								{"glob", glob, map[string]any{"path": path, "pattern": "**/*.md"}, "guide.md"},
+								{"grep", grep, map[string]any{"path": path, "pattern": "Shared review guidance", "output_mode": "content"}, "Shared review guidance"},
+							} {
+								result, err := check.tool.Execute(context.Background(), check.args)
+								if err != nil || !strings.Contains(result.Content.Text(), check.want) {
+									t.Errorf("%s %s through %q = %q, %v", mode, check.name, path, result.Content.Text(), err)
+								}
 							}
 						}
 					}
@@ -89,7 +93,7 @@ func TestSkillDirectoryLinks(t *testing.T) {
 							tool tool.Tool
 							args map[string]any
 						}{
-							{ReadTool(root), map[string]any{"file_path": file}},
+							{ReadTool(root, workspace), map[string]any{"file_path": file}},
 							{EditTool(root), createArgs(filepath.Join(path, "references", "new.md"), "overwrite")},
 							{EditTool(root), map[string]any{"edits": []any{
 								map[string]any{"file_path": localFile, "old_string": "original", "new_string": "changed"},

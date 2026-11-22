@@ -121,6 +121,9 @@ func applyEditOp(content string, op editOp, pathArg string) (string, error) {
 	}
 	if op.oldText == "" {
 		if content != "" {
+			if op.newText == "" {
+				return "", fmt.Errorf("%s has content, so an empty old_string and new_string change nothing; to delete the file use the `delete` tool", pathArg)
+			}
 			return "", fmt.Errorf("cannot create or replace empty file %s: file already has content", pathArg)
 		}
 		return op.newText, nil

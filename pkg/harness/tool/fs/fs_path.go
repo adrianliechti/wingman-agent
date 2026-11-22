@@ -7,7 +7,6 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -54,10 +53,6 @@ func anchorRootedPath(path, workingDir string) string {
 
 func matchAllowedRoot(absPath string, allowedRoots []string) (rootClean, sub string, ok bool) {
 	absPath = filepath.Clean(absPath)
-	if slices.Contains(allowedRoots, "*") {
-		return absPath, "", true
-	}
-
 	if rootClean, sub, ok = matchAllowedRootLiteral(absPath, allowedRoots); ok {
 		return rootClean, sub, true
 	}
@@ -104,10 +99,10 @@ func matchAllowedRootLiteral(cleaned string, allowedRoots []string) (rootClean, 
 	return rootClean, sub, ok
 }
 
-// Explicit roots take precedence over the workspace: an approved skills root
-// can be a link located inside the workspace whose target is outside it.
+// Explicit roots take precedence over the workspace: an approved root can be
+// a link located inside the workspace whose target is outside it.
 func matchExplicitRoot(pathArg, workingDir string, allowedRoots []string) (string, string, bool) {
-	if len(allowedRoots) == 0 || slices.Contains(allowedRoots, "*") {
+	if len(allowedRoots) == 0 {
 		return "", "", false
 	}
 	if !filepath.IsAbs(pathArg) {
@@ -205,12 +200,19 @@ func resolveRootPath(root *os.Root, rel string) (string, bool) {
 
 type fileTarget struct {
 	InWorkspace bool
-	RootPath    string
+	RootPath    string // An explicit root. Empty for the workspace and for an unconfined read.
 	RelPath     string
 	AbsPath     string // Always populated, including workspace targets.
 
 	// Bind an external target to the directory validated for this request.
 	rootInfo os.FileInfo
+}
+
+func (target fileTarget) displayPath() string {
+	if target.InWorkspace {
+		return filepath.ToSlash(filepath.Clean(target.RelPath))
+	}
+	return target.AbsPath
 }
 
 func fileTargetRoot(workspaceRoot *os.Root, target fileTarget) (*os.Root, string, func(), error) {
@@ -236,7 +238,7 @@ func fileTargetRoot(workspaceRoot *os.Root, target fileTarget) (*os.Root, string
 }
 
 // accessFileTarget shares root ownership and link retries across file operations.
-// An unrestricted operation is selected only for an explicit wildcard target;
+// An unrestricted operation is selected only for an unconfined read;
 // a failed rooted operation must never fall back to unrestricted filesystem I/O.
 func accessFileTarget[T any](root *os.Root, target fileTarget, within func(*os.Root, string) (T, error), unrestricted func(string) (T, error)) (T, error) {
 	targetRoot, path, closeRoot, err := fileTargetRoot(root, target)
@@ -268,21 +270,28 @@ func readFileTarget(root *os.Root, target fileTarget) ([]byte, error) {
 }
 
 func openFileTarget(root *os.Root, target fileTarget) (*os.File, error) {
-	return accessFileTarget(root, target, (*os.Root).Open, os.Open)
+	return accessFileTarget(root, target, func(r *os.Root, name string) (*os.File, error) {
+		return r.OpenFile(name, readFlags, 0)
+	}, func(name string) (*os.File, error) { return os.OpenFile(name, readFlags, 0) })
 }
 
-// matchFileTarget selects the access grant shared by file and search tools.
-// File tools bind its identity; search tools retain its opened handle.
-func matchFileTarget(pathArg, workingDir string, allowedRoots []string, action string) (fileTarget, error) {
+func cleanPathArg(pathArg, workingDir string) string {
 	pathArg = anchorRootedPath(expandHome(normalizePathArg(pathArg)), workingDir)
+	// Judge a relative path that climbs out of the workspace like its absolute form.
+	if clean := filepath.Clean(pathArg); clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		pathArg = filepath.Join(workingDir, clean)
+	}
+	return pathArg
+}
+
+// matchFileTarget selects the access grant that admits a path: an explicit root or the workspace.
+func matchFileTarget(pathArg, workingDir string, allowedRoots []string, action string) (fileTarget, error) {
+	pathArg = cleanPathArg(pathArg, workingDir)
 
 	rootClean, sub, allowed := matchExplicitRoot(pathArg, workingDir, allowedRoots)
 	if !allowed {
 		if rel, ok := relPathWithinWorkspace(pathArg, workingDir); ok {
 			return fileTarget{InWorkspace: true, RelPath: rel, AbsPath: filepath.Join(workingDir, rel)}, nil
-		}
-		if slices.Contains(allowedRoots, "*") {
-			return fileTarget{AbsPath: filepath.Clean(pathArg)}, nil
 		}
 		return fileTarget{}, fmt.Errorf("cannot %s: outside workspace and allowed roots: path %q (workspace %q)", action, pathArg, workingDir)
 	}
@@ -291,6 +300,33 @@ func matchFileTarget(pathArg, workingDir string, allowedRoots []string, action s
 		sub = "."
 	}
 	return fileTarget{RootPath: rootClean, RelPath: sub, AbsPath: filepath.Join(rootClean, sub)}, nil
+}
+
+// matchReadTarget admits any path unless readRoots confine it, as the shell sandbox does; a workspace link that leaves the workspace then reads as the outside path it names.
+func matchReadTarget(pathArg, workingDir string, readRoots []string, action string) (fileTarget, error) {
+	cleaned := cleanPathArg(pathArg, workingDir)
+	absPath := cleaned
+	if !filepath.IsAbs(absPath) {
+		absPath = filepath.Join(workingDir, absPath)
+	}
+	if len(readRoots) > 0 || !onLocalVolume(absPath) {
+		return matchFileTarget(pathArg, workingDir, readRoots, action)
+	}
+	resolved := resolveForCompare(absPath)
+	if !onLocalVolume(resolved) {
+		return matchFileTarget(pathArg, workingDir, readRoots, action)
+	}
+	if rel, ok := relPathWithinWorkspace(cleaned, workingDir); ok {
+		if _, ok := relPathLiteral(resolved, resolveForCompare(workingDir)); ok {
+			return fileTarget{InWorkspace: true, RelPath: rel, AbsPath: filepath.Join(workingDir, rel)}, nil
+		}
+	}
+	return fileTarget{AbsPath: filepath.Clean(absPath)}, nil
+}
+
+// onLocalVolume keeps unconfined reads off Windows UNC and device paths: opening one contacts the host or device it names.
+func onLocalVolume(path string) bool {
+	return runtime.GOOS != "windows" || len(filepath.VolumeName(path)) == 2
 }
 
 // checkCredentialTarget refuses a target that resolves into a credential store,
@@ -307,30 +343,51 @@ func checkCredentialTarget(guard sandboxpolicy.CredentialGuard, target fileTarge
 	return nil
 }
 
+// resolveReadTarget gives an unconfined read inside a write root the target an edit gets, so both track one file.
+func resolveReadTarget(pathArg, workingDir string, readRoots, writeRoots []string, action string, guard sandboxpolicy.CredentialGuard) (fileTarget, error) {
+	target, err := matchReadTarget(pathArg, workingDir, readRoots, action)
+	if err != nil {
+		return fileTarget{}, err
+	}
+	// Record an unconfined read of a writable file under the same root as an
+	// edit, so freshness can distinguish an external change from our own edit.
+	if len(readRoots) == 0 && !target.InWorkspace && len(writeRoots) > 0 {
+		if grant, sub, ok := matchAllowedRoot(target.AbsPath, writeRoots); ok {
+			if _, inside := relPathLiteral(resolveForCompare(target.AbsPath), resolveForCompare(grant)); inside {
+				target.RootPath, target.RelPath = grant, filepath.Clean(sub)
+			}
+		}
+	}
+	return bindFileTarget(target, pathArg, action, guard)
+}
+
 func resolveFileTarget(pathArg, workingDir string, allowedRoots []string, action string) (fileTarget, error) {
+	return resolveGuardedTarget(pathArg, workingDir, allowedRoots, action, sandboxpolicy.NewCredentialGuard(workingDir))
+}
+
+func resolveGuardedTarget(pathArg, workingDir string, allowedRoots []string, action string, guard sandboxpolicy.CredentialGuard) (fileTarget, error) {
 	target, err := matchFileTarget(pathArg, workingDir, allowedRoots, action)
 	if err != nil {
 		return target, err
 	}
-	guard := sandboxpolicy.NewCredentialGuard(workingDir)
-	if target.RootPath == "" {
-		if err := checkCredentialTarget(guard, target, pathArg, action); err != nil {
-			return fileTarget{}, err
+	return bindFileTarget(target, pathArg, action, guard)
+}
+
+func bindFileTarget(target fileTarget, pathArg, action string, guard sandboxpolicy.CredentialGuard) (fileTarget, error) {
+	if target.RootPath != "" {
+		target.RootPath = resolveForCompare(target.RootPath)
+		target.AbsPath = filepath.Join(target.RootPath, target.RelPath)
+		r, err := os.OpenRoot(target.RootPath)
+		if err != nil {
+			return fileTarget{}, fmt.Errorf("cannot %s: open allowed root %q: %w", action, target.RootPath, err)
 		}
-		return target, nil
-	}
-	target.RootPath = resolveForCompare(target.RootPath)
-	target.AbsPath = filepath.Join(target.RootPath, target.RelPath)
-	r, err := os.OpenRoot(target.RootPath)
-	if err != nil {
-		return fileTarget{}, fmt.Errorf("cannot %s: open allowed root %q: %w", action, target.RootPath, err)
-	}
-	defer r.Close()
-	// Capture identity through the handle: Windows may defer loading a file
-	// ID for pathname-based Stat until SameFile, after the path has changed.
-	target.rootInfo, err = r.Stat(".")
-	if err != nil {
-		return fileTarget{}, fmt.Errorf("cannot %s: stat allowed root %q: %w", action, target.RootPath, err)
+		defer r.Close()
+		// Capture identity through the handle: Windows may defer loading a file
+		// ID for pathname-based Stat until SameFile, after the path has changed.
+		target.rootInfo, err = r.Stat(".")
+		if err != nil {
+			return fileTarget{}, fmt.Errorf("cannot %s: stat allowed root %q: %w", action, target.RootPath, err)
+		}
 	}
 	// Checked after binding, so the vetted directory is the one later opened.
 	if err := checkCredentialTarget(guard, target, pathArg, action); err != nil {
@@ -345,6 +402,7 @@ type searchTarget struct {
 	close       func()
 
 	reportPrefix string
+	reportFile   string // Explicit file named through an external alias.
 
 	// credentials prunes stores that lie inside the searched directory.
 	credentials sandboxpolicy.CredentialGuard
@@ -369,14 +427,17 @@ func (st *searchTarget) Close() {
 }
 
 func (st *searchTarget) ReportPath(fsPath string) string {
+	if st.reportFile != "" {
+		return st.reportFile
+	}
 	if st.reportPrefix == "" {
 		return filepath.FromSlash(fsPath)
 	}
 	return filepath.Join(st.reportPrefix, filepath.FromSlash(fsPath))
 }
 
-func resolveSearchTarget(pathArg, workingDir string, workspaceRoot *os.Root, allowedReadRoots []string, action string) (*searchTarget, error) {
-	target, err := matchFileTarget(pathArg, workingDir, allowedReadRoots, action)
+func resolveSearchTarget(pathArg, workingDir string, workspaceRoot *os.Root, readRoots []string, action string) (*searchTarget, error) {
+	target, err := matchReadTarget(pathArg, workingDir, readRoots, action)
 	if err != nil {
 		return nil, err
 	}
@@ -390,32 +451,40 @@ func resolveSearchTarget(pathArg, workingDir string, workspaceRoot *os.Root, all
 	}
 
 	rootClean, sub := target.RootPath, target.RelPath
+	reportPrefix := rootClean
+	var reportFile string
 	if rootClean == "" {
-		// Wildcard searches still need a directory handle to walk. For a
+		// An unconfined search still needs a directory handle to walk. For a
 		// single file, anchor at its parent and search just that filename.
-		rootClean, sub = target.AbsPath, "."
+		rootClean, sub = resolveForCompare(target.AbsPath), "."
+		reportPrefix = target.AbsPath
 		info, err := os.Stat(rootClean)
 		if err != nil {
 			return nil, fmt.Errorf("cannot %s: stat path %q: %w", action, rootClean, err)
 		}
 		if !info.IsDir() {
 			rootClean, sub = filepath.Dir(rootClean), filepath.Base(rootClean)
+			reportPrefix = filepath.Dir(target.AbsPath)
+			reportFile = filepath.Base(target.AbsPath)
 		}
 	}
 
 	r, err := os.OpenRoot(rootClean)
 	if err != nil {
-		return nil, fmt.Errorf("cannot %s: open allowed root %q: %w", action, rootClean, err)
+		return nil, fmt.Errorf("cannot %s: open search root %q: %w", action, rootClean, err)
 	}
 
-	reportPrefix := rootClean
-	if rel, ok := relPathLiteral(rootClean, workingDir); ok {
+	if rel, ok := relPathLiteral(reportPrefix, workingDir); ok {
 		reportPrefix = rel
 		if rel == "." {
 			reportPrefix = ""
 		}
 	}
+	if reportFile != "" {
+		reportFile = filepath.Join(reportPrefix, reportFile)
+	}
 	return (&searchTarget{
+		reportFile:   reportFile,
 		Root:         r,
 		SearchDirFS:  filepath.ToSlash(sub),
 		reportPrefix: reportPrefix,

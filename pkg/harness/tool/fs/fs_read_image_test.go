@@ -33,7 +33,7 @@ func TestReadToolViewsImageByContent(t *testing.T) {
 				t.Fatal(err)
 			}
 			// A low text threshold must not send an image through line streaming.
-			out, err := readTool(root, nil, 1).Execute(t.Context(), map[string]any{"file_path": name, "offset": 100, "limit": 1})
+			out, err := readTool(root, nil, 1, nil, nil).Execute(t.Context(), map[string]any{"file_path": name, "offset": 100, "limit": 1})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -103,7 +103,7 @@ func TestReadToolImageSourceLimitAndReadRoots(t *testing.T) {
 	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadTool(root).Execute(t.Context(), map[string]any{"file_path": path}); err == nil {
+	if _, err := ReadTool(root, root.Name()).Execute(t.Context(), map[string]any{"file_path": path}); err == nil {
 		t.Fatal("image outside read roots was accepted")
 	}
 	out, err := ReadTool(root, outside).Execute(t.Context(), map[string]any{"file_path": path})

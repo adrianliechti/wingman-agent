@@ -504,6 +504,7 @@ func TestEditedPathsCoverBatchedEdits(t *testing.T) {
 		{Path: "b/b.go", AfterExists: true},
 		{Path: "a.go", AfterExists: true},
 		{Path: "gone.go"},
+		{Path: "large.go", AfterExists: true, AfterRef: &tool.FileContentRef{Size: 12 << 20}},
 	}}}
 
 	if got := editedPaths(result); !slices.Equal(got, []string{"a.go", "b/b.go"}) {

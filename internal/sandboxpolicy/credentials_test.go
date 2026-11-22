@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -181,5 +182,75 @@ func TestCredentialGuardHidesStoreEntries(t *testing.T) {
 	}
 	if guard.Named("main.go") {
 		t.Error("ordinary name treated as a store candidate")
+	}
+}
+
+func TestCheckOpenedUsesFileHandle(t *testing.T) {
+	home, ssh, _, _ := credentialHome(t)
+	guard := NewCredentialGuard(t.TempDir())
+	for _, tc := range []struct {
+		name   string
+		denied bool
+	}{
+		{filepath.Join(ssh, "id_ed25519"), true},
+		{filepath.Join(home, ".pypirc"), true},
+		{filepath.Join(home, "notes.txt"), false},
+	} {
+		if err := os.WriteFile(tc.name, []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(tc.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := f.Stat()
+		if err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+		got := guard.CheckOpened(f, info)
+		f.Close()
+		if (got != nil) != tc.denied {
+			t.Errorf("CheckOpened(%s) = %v; denied = %t", tc.name, got, tc.denied)
+		}
+	}
+}
+
+// A caller may retain a handle while the name it used changes. The descriptor
+// continues to refer to the ordinary file the caller originally opened.
+func TestCheckOpenedKeepsOriginalFileAcrossAliasChange(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" && runtime.GOOS != "linux" {
+		t.Skip("requires a native handle-to-path implementation")
+	}
+	home, _, netrc, _ := credentialHome(t)
+	plain := filepath.Join(home, "notes.txt")
+	if err := os.WriteFile(plain, []byte("notes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(home, "current")
+	if err := os.Symlink(plain, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	f, err := os.Open(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(netrc, alias); err != nil {
+		t.Fatal(err)
+	}
+	guard := NewCredentialGuard(t.TempDir())
+	if err := guard.Check(alias); err == nil {
+		t.Fatal("expected alias to be protected")
+	}
+	if err := guard.CheckOpened(f, info); err != nil {
+		t.Fatalf("lost the original open file: %v", err)
 	}
 }

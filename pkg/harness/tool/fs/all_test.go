@@ -12,7 +12,7 @@ func TestTools(t *testing.T) {
 
 	tools := Tools(root, nil)
 
-	expectedNames := []string{"read", "edit", "grep", "glob"}
+	expectedNames := []string{"read", "edit", "delete", "grep", "glob"}
 
 	if len(tools) != len(expectedNames) {
 		t.Errorf("expected %d tools, got %d", len(expectedNames), len(tools))

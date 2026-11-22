@@ -778,7 +778,7 @@ func TestGrepAllowedReadRoots(t *testing.T) {
 	})
 }
 
-func TestGrepWildcardReadRoot(t *testing.T) {
+func TestGrepSearchesOutsideWorkspaceWithoutReadRoots(t *testing.T) {
 	root, _, cleanup := createTestRoot(t)
 	defer cleanup()
 	dir := t.TempDir()
@@ -788,7 +788,7 @@ func TestGrepWildcardReadRoot(t *testing.T) {
 	}
 	for _, path := range []string{dir, file} {
 		t.Run(filepath.Base(path), func(t *testing.T) {
-			result, err := GrepTool(root, "*").Execute(context.Background(), map[string]any{
+			result, err := GrepTool(root).Execute(context.Background(), map[string]any{
 				"path": path, "pattern": "Table",
 			})
 			if err != nil {

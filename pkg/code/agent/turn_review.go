@@ -28,6 +28,6 @@ func (a *Agent) UndoTurn(ctx context.Context, sessionID, turnID string) error {
 		return fmt.Errorf("session not loaded")
 	}
 	return s.harness.UndoTurn(ctx, turnID, func(ctx context.Context, files []tool.FileChange) error {
-		return fs.UndoFileChanges(ctx, a.workspace.Root, files)
+		return fs.UndoFileChanges(ctx, a.workspace.Root, files, s.fileWriteRoots...)
 	})
 }

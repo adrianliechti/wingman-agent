@@ -296,13 +296,24 @@ func TestGlobTool(t *testing.T) {
 		}
 	})
 
-	t.Run("glob path outside workspace rejected", func(t *testing.T) {
-		_, err := globTool.Execute(context.Background(), map[string]any{
-			"pattern": "*.go",
-			"path":    "/etc",
-		})
-		if err == nil {
-			t.Fatal("expected error for search path outside workspace")
+	t.Run("glob searches a path outside the workspace", func(t *testing.T) {
+		outside := t.TempDir()
+		if err := os.WriteFile(filepath.Join(outside, "sibling.go"), []byte("package sibling"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join(outside, "sibling.go")
+		for name, args := range map[string]map[string]any{
+			"path":             {"pattern": "*.go", "path": outside},
+			"absolute pattern": {"pattern": filepath.Join(outside, "*.go")},
+		} {
+			result, err := globTool.Execute(context.Background(), args)
+			if err != nil || !strings.Contains(result.Content.Text(), want) {
+				t.Errorf("%s = %q, %v; want %s", name, result.Content.Text(), err, want)
+			}
+		}
+		result, err := globTool.Execute(context.Background(), map[string]any{"pattern": filepath.Join(outside, "missing", "*.go")})
+		if err != nil || result.Content.Text() != "No files found" {
+			t.Errorf("absolute pattern in a missing outside directory = %q, %v", result.Content.Text(), err)
 		}
 	})
 

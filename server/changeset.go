@@ -521,7 +521,10 @@ func (p *Project) editingFilesLocked() map[string]bool {
 				continue
 			}
 			call, ok := tool.ToolCall.Value.(*types.ToolCallRunningState)
-			if !ok || string(call.Meta["toolKind"]) != `"edit"` {
+			if !ok {
+				continue
+			}
+			if kind := string(call.Meta["toolKind"]); kind != `"edit"` && kind != `"delete"` {
 				continue
 			}
 			for _, content := range call.Content {

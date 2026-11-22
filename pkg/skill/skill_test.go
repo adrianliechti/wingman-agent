@@ -472,6 +472,24 @@ func TestDiscoverIgnoresReservedSystemSkillsInWorkspace(t *testing.T) {
 	}
 }
 
+func TestDiscoverPersonalSkipsSkillsTheClaudeAppsSync(t *testing.T) {
+	home := testenv.UserHome(t)
+	testenv.WingmanHome(t)
+
+	claude := filepath.Join(home, ".claude", "skills")
+	writeSkill(t, filepath.Join(claude, "synced", "account_bundle", "computer-use"), "computer-use", "drives the Claude desktop app")
+	skills, err := DiscoverPersonal()
+	if err != nil || len(skills) != 0 {
+		t.Fatalf("personal skills = %#v, %v; want none from the synced directory", skills, err)
+	}
+
+	writeSkill(t, filepath.Join(claude, "release"), "release", "from claude")
+	skills, err = DiscoverPersonal()
+	if err != nil || len(skills) != 1 || skills[0].Name != "release" {
+		t.Fatalf("personal skills = %#v, %v; want only the user's own skill", skills, err)
+	}
+}
+
 func TestDiscoverPersonalStopsAtFirstLocationWithSkills(t *testing.T) {
 	home := testenv.UserHome(t)
 	wingmanHome := testenv.WingmanHome(t)

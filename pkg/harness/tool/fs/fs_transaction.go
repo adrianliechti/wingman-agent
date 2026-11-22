@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/google/uuid"
 )
 
@@ -20,14 +21,16 @@ import (
 // Every replacement is staged before any original is moved, and failures
 // restore already-touched files in reverse order.
 type fileChange struct {
-	target        fileTarget
-	displayPath   string
-	before        []byte
-	beforePresent bool
-	beforeMode    os.FileMode
-	after         []byte
-	afterPresent  bool
-	afterMode     *os.FileMode
+	beforeRef, afterRef *tool.FileContentRef
+	movedFrom           string
+	target              fileTarget
+	displayPath         string
+	before              []byte
+	beforePresent       bool
+	beforeMode          os.FileMode
+	after               []byte
+	afterPresent        bool
+	afterMode           *os.FileMode
 
 	root       *os.Root
 	path       string
@@ -51,13 +54,18 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	guard := sandboxpolicy.NewCredentialGuard(workspaceRoot.Name())
+	byPath := make(map[string]*fileChange)
 	for i := range tx.changes {
 		change := &tx.changes[i]
+		if change.beforeRef != nil {
+			byPath[filepath.Clean(change.displayPath)] = change
+		}
 		if err := sandboxpolicy.CheckWrite(workspaceRoot.Name(), change.target.AbsPath); err != nil {
 			closeTransactionRoots(tx)
 			return err
 		}
-		change.root, change.path, change.closeRoot, err = transactionLocation(workspaceRoot, change.target)
+		change.root, change.path, change.closeRoot, err = transactionLocation(workspaceRoot, change.target, !change.afterPresent || change.movedFrom != "" || change.afterRef != nil)
 		if err != nil {
 			closeTransactionRoots(tx)
 			return fmt.Errorf("prepare %s: %w", change.displayPath, err)
@@ -98,11 +106,22 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 				return fmt.Errorf("prepare directory for %s: %w", change.displayPath, err)
 			}
 		}
-		change.tempPath = filepath.Join(dir, ".wingman-edit-"+uuid.NewString())
-		file, openErr := change.root.OpenFile(change.tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		temp := filepath.Join(dir, ".wingman-edit-"+uuid.NewString())
+		if change.afterRef != nil {
+			src := byPath[filepath.Clean(change.movedFrom)]
+			if src == nil || !src.beforeRef.Equal(change.afterRef) {
+				return fmt.Errorf("cannot restore %s: matching move source is missing", change.displayPath)
+			}
+			if err := stageRename(ctx, src, change, temp, guard); err != nil {
+				return fmt.Errorf("stage rename to %s: %w", change.displayPath, err)
+			}
+			continue
+		}
+		file, openErr := change.root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if openErr != nil {
 			return fmt.Errorf("stage %s: %w", change.displayPath, openErr)
 		}
+		change.tempPath = temp
 		_, writeErr := file.Write(change.after)
 		closeErr := file.Close()
 		if writeErr != nil {
@@ -127,8 +146,7 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 		for i := len(tx.changes) - 1; i >= 0; i-- {
 			change := &tx.changes[i]
 			if change.installed {
-				current, readErr := readTransactionContent(context.WithoutCancel(ctx), change.root, change.path, len(change.after))
-				if readErr != nil || !bytes.Equal(current, change.after) {
+				if err := checkTransactionContent(context.WithoutCancel(ctx), change.root, change.path, change.after, change.afterRef, guard); err != nil {
 					errs = append(errs, fmt.Errorf("cannot roll back %s: changed externally; original retained at %s", change.displayPath, change.backupPath))
 					continue
 				}
@@ -152,7 +170,7 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 
 	// Validate the whole batch before moving even its first file.
 	for i := range tx.changes {
-		if err := validateFileChange(ctx, &tx.changes[i]); err != nil {
+		if err := validateFileChange(ctx, &tx.changes[i], true, guard); err != nil {
 			return err
 		}
 	}
@@ -162,7 +180,9 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 		if err := ctx.Err(); err != nil {
 			return errors.Join(err, rollback())
 		}
-		if err := validateFileChange(ctx, change); err != nil {
+		// The backup is hashed immediately after rename. Check its metadata here
+		// without streaming the same large file twice back-to-back.
+		if err := validateFileChange(ctx, change, change.beforeRef == nil, guard); err != nil {
 			return errors.Join(err, rollback())
 		}
 		if change.beforePresent {
@@ -171,15 +191,23 @@ func commitFileTransactionLocked(ctx context.Context, workspaceRoot *os.Root, tx
 				change.backupPath = ""
 				return errors.Join(fmt.Errorf("prepare %s: %w", change.displayPath, err), rollback())
 			}
-			moved, readErr := readTransactionContent(ctx, change.root, change.backupPath, len(change.before))
-			if readErr != nil {
-				return errors.Join(fmt.Errorf("check %s: %w", change.displayPath, readErr), rollback())
+			if info, statErr := change.root.Lstat(change.backupPath); statErr != nil || !info.Mode().IsRegular() || !samePermissions(info.Mode(), change.beforeMode) {
+				return errors.Join(fmt.Errorf("%s changed type or permissions during edit", change.displayPath), rollback())
 			}
-			if !bytes.Equal(moved, change.before) {
-				return errors.Join(fmt.Errorf("%s changed on disk during edit; read it again", change.displayPath), rollback())
+			if err := checkTransactionContent(ctx, change.root, change.backupPath, change.before, change.beforeRef, guard); err != nil {
+				return errors.Join(fmt.Errorf("%s changed on disk during edit: %w", change.displayPath, err), rollback())
 			}
 		}
 		if change.afterPresent {
+			if change.afterRef != nil {
+				info, err := change.root.Lstat(change.tempPath)
+				if err != nil || !info.Mode().IsRegular() || !samePermissions(info.Mode(), *change.afterMode) {
+					return errors.Join(fmt.Errorf("%s changed type or permissions during move", change.displayPath), rollback())
+				}
+				if err := checkTransactionContent(ctx, change.root, change.tempPath, nil, change.afterRef, guard); err != nil {
+					return errors.Join(err, rollback())
+				}
+			}
 			if err := change.root.Link(change.tempPath, change.path); err != nil {
 				return errors.Join(fmt.Errorf("install %s: %w", change.displayPath, err), rollback())
 			}
@@ -215,8 +243,15 @@ func pruneEmptyParents(change *fileChange) []string {
 	var pruned []string
 	display := filepath.ToSlash(change.displayPath)
 	for dir := filepath.Dir(change.path); dir != "." && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
-		// Remove fails on a directory that still has entries.
-		if err := change.root.Remove(dir); err != nil {
+		// os.Root.Remove can unlink an ordinary file if another process
+		// replaces the empty directory. Use a directory-only operation.
+		parent, err := change.root.OpenFile(filepath.Dir(dir), readFlags, 0)
+		if err != nil {
+			break
+		}
+		err = removeEmptyDir(parent, filepath.Base(dir))
+		parent.Close()
+		if err != nil {
 			break
 		}
 		display = pathpkg.Dir(display)
@@ -238,60 +273,49 @@ func closeTransactionRoots(tx *fileTransaction) {
 // a relative path. The symlink fallback preserves the existing file-tool
 // behavior for absolute in-root links while keeping containment enforced by
 // os.Root during staging and renames.
-func transactionLocation(workspaceRoot *os.Root, target fileTarget) (*os.Root, string, func(), error) {
+func transactionLocation(workspaceRoot *os.Root, target fileTarget, keepFinalName bool) (*os.Root, string, func(), error) {
 	root, path, closeRoot, err := fileTargetRoot(workspaceRoot, target)
 	if err != nil {
 		return nil, "", nil, err
 	}
 	if root == nil {
-		root, path, closeRoot, err = absoluteTransactionLocation(path)
-		if err != nil {
-			return nil, "", nil, err
-		}
+		// Only read targets are unrooted; a write must never follow one.
+		return nil, "", nil, fmt.Errorf("%s is outside the workspace and writable roots", target.AbsPath)
 	}
 	path = filepath.Clean(filepath.FromSlash(path))
 
-	if sub, ok := resolveRootPath(root, path); ok {
-		path = filepath.Clean(sub)
+	if keepFinalName {
+		// Keep the named directory entry. Resolving a final symlink here
+		// would delete its referent and leave the link dangling.
+		if sub, ok := resolveRootPath(root, filepath.Dir(path)); ok {
+			path = filepath.Join(sub, filepath.Base(path))
+		}
+	} else if sub, ok := resolveRootPath(root, path); ok {
+		path = sub
 	}
 	return root, path, closeRoot, nil
 }
 
-func absoluteTransactionLocation(path string) (*os.Root, string, func(), error) {
-	path = filepath.Clean(path)
-	volume := filepath.VolumeName(path)
-	base := string(filepath.Separator)
-	if volume != "" {
-		base = volume + string(filepath.Separator)
-	}
-	rel, err := filepath.Rel(base, path)
-	if err != nil {
-		return nil, "", nil, err
-	}
-	root, err := os.OpenRoot(base)
-	if err != nil {
-		return nil, "", nil, err
-	}
-	return root, rel, func() { _ = root.Close() }, nil
-}
-
-func validateFileChange(ctx context.Context, change *fileChange) error {
-	info, err := change.root.Stat(change.path)
+func validateFileChange(ctx context.Context, change *fileChange, compareContent bool, guard sandboxpolicy.CredentialGuard) error {
+	info, err := change.root.Lstat(change.path)
 	if !change.beforePresent && os.IsNotExist(err) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("%s changed on disk; read it again: %w", change.displayPath, err)
 	}
-	if !change.beforePresent || !info.Mode().IsRegular() || !samePermissions(info.Mode(), change.beforeMode) || info.Size() != int64(len(change.before)) {
+	size := int64(len(change.before))
+	if change.beforeRef != nil {
+		size = change.beforeRef.Size
+	}
+	if !change.beforePresent || !info.Mode().IsRegular() || !samePermissions(info.Mode(), change.beforeMode) || info.Size() != size {
 		return fmt.Errorf("%s changed on disk; read it again", change.displayPath)
 	}
-	current, err := readTransactionContent(ctx, change.root, change.path, len(change.before))
-	if err != nil {
-		return fmt.Errorf("check %s: %w", change.displayPath, err)
+	if !compareContent {
+		return nil
 	}
-	if !bytes.Equal(current, change.before) {
-		return fmt.Errorf("%s changed on disk; read it again", change.displayPath)
+	if err := checkTransactionContent(ctx, change.root, change.path, change.before, change.beforeRef, guard); err != nil {
+		return fmt.Errorf("%s changed on disk; read it again: %w", change.displayPath, err)
 	}
 	return nil
 }
@@ -309,11 +333,38 @@ func samePermissions(a, b os.FileMode) bool {
 // A file can grow after Stat, including during rollback. Read at most one byte
 // beyond the expected contents so the comparison detects growth without an
 // unbounded allocation. Even an expected empty file must have a bounded read.
-func readTransactionContent(ctx context.Context, root *os.Root, path string, expectedBytes int) ([]byte, error) {
-	file, err := root.Open(path)
+func checkTransactionContent(ctx context.Context, root *os.Root, path string, data []byte, ref *tool.FileContentRef, guard sandboxpolicy.CredentialGuard) error {
+	file, err := root.OpenFile(path, readFlags, 0)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer file.Close()
-	return readContent(ctx, io.LimitReader(file, int64(expectedBytes)+1), -1)
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	if err := guard.CheckOpened(file, info); err != nil {
+		return err
+	}
+	if ref != nil {
+		got, err := hashFileContent(ctx, file, ref.Size)
+		if err != nil {
+			return err
+		}
+		if ref.Equal(got) {
+			return nil
+		}
+	} else {
+		got, err := readContent(ctx, io.LimitReader(file, int64(len(data))+1), -1)
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(data, got) {
+			return nil
+		}
+	}
+	return fmt.Errorf("contents differ")
 }

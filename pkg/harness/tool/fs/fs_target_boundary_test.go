@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 )
 
@@ -64,7 +65,7 @@ func TestFileTargetRejectsReplacedAllowedRoot(t *testing.T) {
 				file.Close()
 				t.Error("streaming read followed a replacement allowed root")
 			}
-			if _, _, closeRoot, err := transactionLocation(root, target); err == nil {
+			if _, _, closeRoot, err := transactionLocation(root, target, true); err == nil {
 				if closeRoot != nil {
 					closeRoot()
 				}
@@ -81,5 +82,24 @@ func TestFileTargetRejectsReplacedAllowedRoot(t *testing.T) {
 				t.Errorf("search lost its original allowed root: %q, %v", data, err)
 			}
 		})
+	}
+}
+
+func TestEditTransactionRefusesTargetAdmittedOnlyForReading(t *testing.T) {
+	workspace, outside := t.TempDir(), t.TempDir()
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	target, err := resolveReadTarget(filepath.Join(outside, "note.txt"), workspace, nil, nil, "read file", sandboxpolicy.NewCredentialGuard(workspace))
+	if err != nil || target.InWorkspace || target.RootPath != "" {
+		t.Fatalf("unconfined read target = %+v, %v", target, err)
+	}
+	if _, _, closeRoot, err := transactionLocation(root, target, true); err == nil {
+		if closeRoot != nil {
+			closeRoot()
+		}
+		t.Fatal("an edit transaction accepted a target admitted only for reading")
 	}
 }

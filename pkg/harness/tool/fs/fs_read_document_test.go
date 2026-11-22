@@ -122,7 +122,7 @@ func TestReadToolSniffsDocumentsBeforeTextSizeThreshold(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "report"), buildTestPDF("PDF report text"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	result, err := readTool(root, nil, 1).Execute(t.Context(), map[string]any{"file_path": "report"})
+	result, err := readTool(root, nil, 1, nil, nil).Execute(t.Context(), map[string]any{"file_path": "report"})
 	if err != nil || result.Metadata["format"] != "pdf" || !strings.Contains(result.Content.Text(), "PDF report text") {
 		t.Fatalf("document read = %+v, err = %v", result, err)
 	}

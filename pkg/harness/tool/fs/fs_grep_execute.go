@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	pathpkg "path"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -69,12 +70,15 @@ func executeGrep(ctx context.Context, root *os.Root, cfg *grepArgs, allowedReadR
 		return tool.Result{}, fmt.Errorf("path is not a regular file: %s", cfg.searchPath)
 	}
 	accepts := func(path, relative string) bool {
+		if target.reportFile != "" {
+			path, relative = target.reportFile, pathpkg.Base(filepath.ToSlash(target.reportFile))
+		}
 		return matchesGrepGlobs(cfg.globPatterns, path, relative) && (cfg.typeFilter == "" || matchesType(path, cfg.typeFilter))
 	}
 	if !info.IsDir() && !accepts(target.SearchDirFS, pathpkg.Base(target.SearchDirFS)) {
 		return tool.Text("No matches found"), nil
 	}
-	fsys := target.Root.FS()
+	fsys := guardedSearchFS{target.Root, target.credentials}
 	page := &grepPage{skip: cfg.resultOffset, limit: cfg.effectiveLimit}
 	var files globResults
 	// A page cannot contain more entries than bytes. Keep only enough newest

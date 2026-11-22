@@ -31,6 +31,14 @@ func resolve(path string) (string, error) {
 	}
 	defer windows.CloseHandle(handle)
 
+	return finalPath(handle, path)
+}
+
+func openedPath(f *os.File) (string, error) {
+	return finalPath(windows.Handle(f.Fd()), f.Name())
+}
+
+func finalPath(handle windows.Handle, path string) (string, error) {
 	buffer := make([]uint16, 260)
 	for {
 		// Zero selects FILE_NAME_NORMALIZED | VOLUME_NAME_DOS.

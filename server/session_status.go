@@ -182,10 +182,10 @@ func changesOf(reviews []harness.TurnReview) *types.ChangesSummary {
 			edits = append(edits, review.Files...)
 		}
 	}
-	net, _ := tool.NetFileChanges(edits)
+	net := netFileChanges(edits)
 	var additions, deletions, files int64
 	for _, file := range net {
-		if file.BeforeExists == file.AfterExists && file.Before == file.After && file.ResultMode() == file.Mode {
+		if file.Unchanged() {
 			continue
 		}
 		added, removed := diff.LineStats(file.Before, file.After, time.Second)

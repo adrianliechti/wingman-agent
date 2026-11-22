@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -364,5 +365,185 @@ func TestEditMoveAndDeletePruneEmptiedDirectories(t *testing.T) {
 	// Undo removes the files the edit created, and with them their directory.
 	if _, err := os.Stat(filepath.Join(dir, "internal", "textutil")); !os.IsNotExist(err) {
 		t.Errorf("undo left internal/textutil behind: %v", err)
+	}
+}
+
+// Inkling and DeepSeek Flash dropped an optional new_string in live probes; providers keep required arguments.
+func TestEditSchemaRequiresBothStrings(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	edits := EditTool(root).Parameters["properties"].(map[string]any)["edits"].(map[string]any)
+	required, _ := edits["items"].(map[string]any)["required"].([]string)
+	for _, want := range []string{"file_path", "old_string", "new_string"} {
+		if !slices.Contains(required, want) {
+			t.Errorf("edit entries do not require %s: %v", want, required)
+		}
+	}
+}
+
+// Inkling sends two empty strings when it means to delete; the error has to name the way out.
+func TestEditEmptyStringsOnExistingFilePointToDeleteTool(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	_, err = EditTool(root).Execute(t.Context(), map[string]any{"edits": []any{map[string]any{"file_path": "a.go", "old_string": "", "new_string": "", "replace_all": false}}})
+	if err == nil || !strings.Contains(err.Error(), "use the `delete` tool") {
+		t.Fatalf("error = %v, want it to point to the delete tool", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "a.go")); string(got) != "package a\n" {
+		t.Fatalf("a.go changed to %q", got)
+	}
+}
+
+func TestDeleteToolRemovesListedFilesOrNone(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{"pkg/a.go": "package pkg\n", "pkg/b.go": "package pkg\n", "keep.go": "package main\n"} {
+		if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	remove := DeleteTool(root)
+
+	// One missing path fails the call before anything is removed, and the error names the caller's argument.
+	_, err = remove.Execute(t.Context(), map[string]any{"file_paths": []any{"pkg/a.go", "pkg/missing.go"}})
+	if err == nil || !strings.Contains(err.Error(), "file_paths[1]") || strings.Contains(err.Error(), "edits[") {
+		t.Fatalf("error = %v, want it to name file_paths[1]", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "pkg", "a.go")); statErr != nil {
+		t.Fatalf("pkg/a.go was removed by a failed call: %v", statErr)
+	}
+	// Diagnostics should preserve a literal filename that resembles an edit field.
+	_, err = remove.Execute(t.Context(), map[string]any{"file_paths": []any{"edits[notes].txt"}})
+	if err == nil || !strings.Contains(err.Error(), "file_paths[0]") || !strings.Contains(err.Error(), "edits[notes].txt") {
+		t.Fatalf("delete changed the filename in its diagnostic: %v", err)
+	}
+
+	result, err := remove.Execute(t.Context(), map[string]any{"file_paths": []any{"pkg/a.go", "pkg/b.go"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := result.Content.Text(); !strings.HasPrefix(text, "Deleted 2 files.") || !strings.Contains(text, "pkg/a.go") {
+		t.Fatalf("result = %q", text)
+	}
+	if changes, changesErr := tool.ResultFileChanges(result.Metadata); changesErr != nil || len(changes) != 2 {
+		t.Fatalf("file changes = %v, %v; want the two deletions for review and undo", changes, changesErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "pkg")); !os.IsNotExist(statErr) {
+		t.Fatalf("emptied directory still exists: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "keep.go")); statErr != nil {
+		t.Fatalf("unlisted file was removed: %v", statErr)
+	}
+
+	for name, args := range map[string]map[string]any{
+		"empty list": {"file_paths": []any{}},
+		"pattern":    {"file_paths": []any{"*.go"}},
+		"directory":  {"file_paths": []any{"."}},
+		"outside":    {"file_paths": []any{"../elsewhere.go"}},
+	} {
+		if _, err := remove.Execute(t.Context(), args); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "keep.go")); statErr != nil {
+		t.Fatalf("keep.go was removed by a rejected call: %v", statErr)
+	}
+}
+
+func TestMoveAndDeletePreserveFileSymlinksAndTheirTargets(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	if err := root.WriteFile("target.txt", []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Symlink("target.txt", "alias.txt"); err != nil {
+		t.Skipf("file links unavailable: %v", err)
+	}
+	for _, tc := range []struct {
+		tool tool.Tool
+		args map[string]any
+	}{
+		{DeleteTool(root), map[string]any{"file_paths": []any{"alias.txt"}}},
+		{EditTool(root), map[string]any{"file_path": "alias.txt", "move_to": "moved.txt"}},
+		{EditTool(root), map[string]any{"file_path": "alias.txt", "delete": true}},
+	} {
+		if _, err := tc.tool.Execute(t.Context(), tc.args); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+			t.Errorf("%s returned %v", tc.tool.Name, err)
+		}
+	}
+	if dest, err := root.Readlink("alias.txt"); err != nil || dest != "target.txt" {
+		t.Fatalf("alias = %q, %v", dest, err)
+	}
+	if data, err := root.ReadFile("target.txt"); err != nil || string(data) != "original" {
+		t.Fatalf("target = %q, %v", data, err)
+	}
+	if _, err := root.Stat("moved.txt"); !os.IsNotExist(err) {
+		t.Fatalf("move created a destination: %v", err)
+	}
+}
+
+func TestPruningSkipsAParentReplacedWithAnOrdinaryFile(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	if err := root.WriteFile("old-dir", []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	change := fileChange{root: root, path: filepath.Join("old-dir", "removed"), target: fileTarget{InWorkspace: true}}
+	if pruned := pruneEmptyParents(&change); len(pruned) != 0 {
+		t.Fatalf("reported pruned directories: %v", pruned)
+	}
+	if b, err := root.ReadFile("old-dir"); err != nil || string(b) != "keep" {
+		t.Fatalf("pruning removed the replacement: %q, %v", b, err)
+	}
+}
+
+// Sessions saved before the split replay entries that carry the flag.
+func TestEditStillAcceptsTheDeleteFlagButDoesNotAdvertiseIt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	edit := EditTool(root)
+	entry := edit.Parameters["properties"].(map[string]any)["edits"].(map[string]any)["items"].(map[string]any)["properties"].(map[string]any)
+	if _, advertised := entry["delete"]; advertised || strings.Contains(edit.Description, "delete: true") {
+		t.Fatal("the edit schema still offers a delete flag")
+	}
+	if _, err := edit.Execute(t.Context(), map[string]any{"edits": []any{map[string]any{"file_path": "a.go", "delete": true}}}); err != nil {
+		t.Fatalf("an entry with the delete flag was rejected: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "a.go")); !os.IsNotExist(statErr) {
+		t.Fatalf("a.go still exists: %v", statErr)
 	}
 }

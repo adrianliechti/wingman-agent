@@ -79,9 +79,12 @@ func TestFileToolsDirectoryLinkPaths(t *testing.T) {
 				workspace := t.TempDir()
 				base := workspace
 				var allowed []string
+				// Confined reads name the workspace; without read roots they reach any path.
+				readRoots := []string{workspace}
 				if scope == "allowed root" {
 					base = t.TempDir()
 					allowed = []string{base}
+					readRoots = allowed
 				}
 				real := filepath.Join(base, "real")
 				if err := os.Mkdir(real, 0755); err != nil {
@@ -104,22 +107,24 @@ func TestFileToolsDirectoryLinkPaths(t *testing.T) {
 				if data, err := os.ReadFile(filepath.Join(real, "missing", "nested", "output.txt")); err != nil || string(data) != "linked output" {
 					t.Errorf("create did not reach the contained directory: %q, %v", data, err)
 				}
-				for _, check := range []struct {
-					tool tool.Tool
-					args map[string]any
-				}{
-					{ReadTool(root, allowed...), map[string]any{"file_path": file}},
-					{GrepTool(root, allowed...), map[string]any{"path": link, "pattern": "linked", "output_mode": "content"}},
-					{GrepTool(root, allowed...), map[string]any{"path": file, "pattern": "linked", "output_mode": "content"}},
-					{GlobTool(root, allowed...), map[string]any{"path": link, "pattern": "**/*.txt"}},
-				} {
-					result, err := check.tool.Execute(context.Background(), check.args)
-					if err != nil {
-						t.Errorf("%s through link: %v", check.tool.Name, err)
-					} else if check.tool.Name == "read" && !strings.Contains(result.Content.Text(), "linked content") {
-						t.Errorf("read did not reach the linked file: %q", result.Content.Text())
-					} else if check.tool.Name != "read" && !strings.Contains(result.Content.Text(), filepath.Join("link", "note.txt")) {
-						t.Errorf("%s lost the linked file's display path: %q", check.tool.Name, result.Content.Text())
+				for _, roots := range [][]string{readRoots, nil} {
+					for _, check := range []struct {
+						tool tool.Tool
+						args map[string]any
+					}{
+						{ReadTool(root, roots...), map[string]any{"file_path": file}},
+						{GrepTool(root, roots...), map[string]any{"path": link, "pattern": "linked", "output_mode": "content"}},
+						{GrepTool(root, roots...), map[string]any{"path": file, "pattern": "linked", "output_mode": "content"}},
+						{GlobTool(root, roots...), map[string]any{"path": link, "pattern": "**/*.txt"}},
+					} {
+						result, err := check.tool.Execute(context.Background(), check.args)
+						if err != nil {
+							t.Errorf("%s through link with read roots %q: %v", check.tool.Name, roots, err)
+						} else if check.tool.Name == "read" && !strings.Contains(result.Content.Text(), "linked content") {
+							t.Errorf("read did not reach the linked file: %q", result.Content.Text())
+						} else if check.tool.Name != "read" && !strings.Contains(result.Content.Text(), filepath.Join("link", "note.txt")) {
+							t.Errorf("%s with read roots %q lost the linked file's display path: %q", check.tool.Name, roots, result.Content.Text())
+						}
 					}
 				}
 
@@ -133,19 +138,59 @@ func TestFileToolsDirectoryLinkPaths(t *testing.T) {
 					tool tool.Tool
 					args map[string]any
 				}{
-					{ReadTool(root, allowed...), map[string]any{"file_path": filepath.Join(escape, "secret.txt")}},
-					{GrepTool(root, allowed...), map[string]any{"path": escape, "pattern": "secret"}},
-					{GlobTool(root, allowed...), map[string]any{"path": escape, "pattern": "**/*.txt"}},
+					{ReadTool(root, readRoots...), map[string]any{"file_path": filepath.Join(escape, "secret.txt")}},
+					{GrepTool(root, readRoots...), map[string]any{"path": escape, "pattern": "secret"}},
+					{GlobTool(root, readRoots...), map[string]any{"path": escape, "pattern": "**/*.txt"}},
 					{EditTool(root, allowed...), createArgs(filepath.Join(escape, "missing", "output.txt"), "overwrite")},
 				} {
 					if result, err := check.tool.Execute(context.Background(), check.args); err == nil {
 						t.Errorf("%s followed an escaping directory link: %q", check.tool.Name, result.Content.Text())
 					}
 				}
+				// Without read roots the link is an ordinary way to name the outside directory.
+				for _, check := range []struct {
+					tool tool.Tool
+					args map[string]any
+				}{
+					{ReadTool(root), map[string]any{"file_path": filepath.Join(escape, "secret.txt")}},
+					{GrepTool(root), map[string]any{"path": escape, "pattern": "secret"}},
+					{GlobTool(root), map[string]any{"path": escape, "pattern": "**/*.txt"}},
+				} {
+					if result, err := check.tool.Execute(context.Background(), check.args); err != nil || !strings.Contains(result.Content.Text(), "secret") {
+						t.Errorf("unconfined %s through an escaping directory link = %q, %v", check.tool.Name, result.Content.Text(), err)
+					}
+				}
 				if _, err := os.Stat(filepath.Join(outside, "missing")); !os.IsNotExist(err) {
 					t.Errorf("escaping create made a directory: %v", err)
 				}
 			})
+		}
+	}
+}
+
+func TestCatalogReadsExplicitFileAliasInWriteRoot(t *testing.T) {
+	workspace, writable, sibling := t.TempDir(), t.TempDir(), t.TempDir()
+	note := filepath.Join(sibling, "notes.txt")
+	if err := os.WriteFile(note, []byte("ordinary notes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(writable, "alias.md")
+	if err := os.Symlink(note, alias); err != nil {
+		t.Skipf("file links unavailable: %v", err)
+	}
+	for _, tl := range Tools(openRoot(t, workspace), &Options{AllowedWriteRoots: []string{writable}}) {
+		var args map[string]any
+		switch tl.Name {
+		case "read":
+			args = map[string]any{"file_path": alias}
+		case "grep":
+			args = map[string]any{"path": alias, "pattern": "ordinary", "glob": "*.md", "output_mode": "content"}
+		default:
+			continue
+		}
+		out, err := tl.Execute(t.Context(), args)
+		if err != nil || !strings.Contains(out.Content.Text(), "ordinary notes") || (tl.Name == "grep" && !strings.Contains(out.Content.Text(), alias)) {
+			t.Errorf("%s on alias = %q, %v", tl.Name, out.Content.Text(), err)
 		}
 	}
 }

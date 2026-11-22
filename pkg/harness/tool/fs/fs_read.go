@@ -9,19 +9,20 @@ import (
 	"os"
 	"strings"
 
+	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/text"
 )
 
+// ReadTool reads any path. Read roots confine it to the workspace and those roots.
 func ReadTool(root *os.Root, allowedReadRoots ...string) tool.Tool {
-	return readTool(root, nil, 0, allowedReadRoots...)
+	return readTool(root, nil, 0, allowedReadRoots, nil)
 }
 
-func readTool(root *os.Root, freshness *Freshness, maxFileBytes int64, allowedReadRoots ...string) tool.Tool {
+func readTool(root *os.Root, freshness *Freshness, maxFileBytes int64, allowedReadRoots, allowedWriteRoots []string) tool.Tool {
 	if maxFileBytes == 0 {
 		maxFileBytes = MaxReadFileBytes
 	}
-
 	return tool.Tool{
 		Name:   "read",
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
@@ -38,7 +39,7 @@ func readTool(root *os.Root, freshness *Freshness, maxFileBytes int64, allowedRe
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"file_path": map[string]any{"type": "string", "description": "Workspace-relative path, absolute workspace path, or path in an explicitly allowed read root."},
+				"file_path": map[string]any{"type": "string", "description": "File path, relative to the workspace or absolute. " + readPathScope(allowedReadRoots)},
 				"offset":    map[string]any{"type": "integer", "minimum": 1, "description": "1-based line number to start reading from, including for converted documents. Only provide for large files or known ranges. Defaults to 1."},
 				"limit":     map[string]any{"type": "integer", "minimum": 1, "description": "Positive number of lines to read, including from converted documents. Only provide for large files or known ranges."},
 			},
@@ -74,7 +75,8 @@ func readTool(root *os.Root, freshness *Freshness, maxFileBytes int64, allowedRe
 				startLine = v
 			}
 
-			target, err := resolveFileTarget(pathArg, workingDir, allowedReadRoots, "read file")
+			guard := sandboxpolicy.NewCredentialGuard(workingDir)
+			target, err := resolveReadTarget(pathArg, workingDir, allowedReadRoots, allowedWriteRoots, "read file", guard)
 			if err != nil {
 				return tool.Result{}, err
 			}
@@ -94,6 +96,17 @@ func readTool(root *os.Root, freshness *Freshness, maxFileBytes int64, allowedRe
 				return tool.Result{}, fmt.Errorf("read file %q: %w", pathArg, err)
 			}
 			defer f.Close()
+			opened, err := f.Stat()
+			if err != nil {
+				return tool.Result{}, err
+			}
+			if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+				return tool.Result{}, fmt.Errorf("file changed while opening %q", pathArg)
+			}
+			if err := guard.CheckOpened(f, opened); err != nil {
+				return tool.Result{}, err
+			}
+			info = opened
 			reader := bufio.NewReader(f)
 			head, err := reader.Peek(512)
 			if err != nil && err != io.EOF {
@@ -152,7 +165,7 @@ func readTool(root *os.Root, freshness *Freshness, maxFileBytes int64, allowedRe
 				return tool.Text(output), nil
 			}
 
-			if result, handled, err := readDocument(ctx, target, pathArg, content, startLine, limit, nil); handled {
+			if result, handled, err := readDocument(ctx, pathArg, content, startLine, limit); handled {
 				if err == nil {
 					freshness.recordInfo(ctx, target, info)
 				}

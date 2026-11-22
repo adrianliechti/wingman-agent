@@ -155,7 +155,7 @@ func (review *TurnReview) addResult(result *ToolResult, position *uint64, execut
 		}
 		return
 	}
-	if result.Name == "edit" {
+	if result.Name == "edit" || result.Name == "delete" {
 		if changes, err := tool.ResultFileChanges(result.Metadata); err != nil {
 			review.Uncertain = true
 		} else if len(changes) > 0 {
@@ -223,7 +223,7 @@ func (review *TurnReview) addResult(result *ToolResult, position *uint64, execut
 			check.Outcome = "not_confirmed"
 		}
 		review.addCheck(check)
-	} else if result.Name != "edit" && result.Name != "read" && result.Name != "ls" && result.Name != "glob" && result.Name != "grep" {
+	} else if result.Name != "edit" && result.Name != "delete" && result.Name != "read" && result.Name != "ls" && result.Name != "glob" && result.Name != "grep" {
 		review.Untracked = true
 	}
 }

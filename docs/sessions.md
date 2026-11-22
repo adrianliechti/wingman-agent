@@ -209,9 +209,20 @@ approval is unavailable.
 The agent's shell commands and scheduled scripts use an OS sandbox by default:
 Seatbelt on macOS, bubblewrap (`bwrap`) with seccomp on Linux, and a native
 process security environment (PSEC) on Windows. Unavailable backends fail closed.
-Set `WINGMAN_SANDBOX=off` to explicitly disable shell OS isolation; file and
-search tools (`read`, `edit`, `glob`, `grep`) keep their workspace roots and
-protected-configuration checks regardless.
+Set `WINGMAN_SANDBOX=off` to explicitly disable shell OS isolation. With either
+setting, `read`, `glob`, and `grep` can reach ordinary files inside and outside
+the workspace by default. The file tools check opened files and directories
+before returning content, including through symlinks. They refuse
+credential stores such as SSH keys, package registry credentials, and host
+password databases. On Windows, reads outside the workspace use lettered drives.
+`edit` and `delete` can change files in the workspace, project memory, and the
+session’s private temporary directory, subject to protected-configuration checks.
+Content edits and deletions accept UTF-8 text up to 10 MiB. A pure move accepts
+regular files of any size, including binary files. For large or binary moves,
+the turn journal stores paths, permissions, size, and a SHA-256 digest. Undo
+checks the destination before restoring the original path. A move or deletion names
+a regular file directly. A file symlink is refused so the target and link both
+survive. An authorized edit can still update a file through an in-root symlink.
 
 - Commands can read your files, including credentials such as `~/.ssh` and
   `~/.aws`, and keep authentication environment variables such as GitHub and

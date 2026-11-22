@@ -39,11 +39,9 @@ func documentData(data []byte) bool {
 
 func readDocument(
 	ctx context.Context,
-	inputTarget fileTarget,
 	inputPath string,
 	data []byte,
 	startLine, limit int,
-	freshness *Freshness,
 ) (tool.Result, bool, error) {
 	explicit := documentPath(inputPath)
 	if !explicit && !documentData(data) {
@@ -63,7 +61,6 @@ func readDocument(
 		}
 		return tool.Result{}, true, fmt.Errorf("read document %q: %w", inputPath, err)
 	}
-	freshness.record(ctx, inputTarget)
 
 	metadata := map[string]any{
 		"file_path": inputPath,

@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+
+	"github.com/adrianliechti/wingman-agent/internal/sandboxpolicy"
 )
 
 // textOutsideSingleQuotes preserves offsets while blanking syntax that the
@@ -1009,23 +1011,25 @@ func isSensitiveCredentialPath(value string) bool {
 	path = strings.ReplaceAll(path, `\`, "/")
 	path = strings.ReplaceAll(path, "//", "/")
 
-	for _, exact := range []string{
-		"/etc/shadow", "/etc/gshadow", "/etc/security/opasswd", "/private/etc/master.passwd",
-	} {
+	for _, exact := range sandboxpolicy.SystemCredentialPaths {
 		if path == exact || strings.Contains(path, " "+exact) || strings.Contains(path, "="+exact) {
 			return true
 		}
 	}
 
+	for _, name := range sandboxpolicy.CredentialHomeFiles {
+		if strings.Contains(path, "/"+name) {
+			return true
+		}
+	}
 	for _, marker := range []string{
 		"/.aws/credentials", "/.aws/config",
 		"/.config/gcloud/application_default_credentials.json",
 		"/.config/gcloud/legacy_credentials/",
 		"/.azure/accesstokens.json", "/.azure/msal_token_cache",
-		"/.kube/config", "/.docker/config.json",
-		"/.config/gh/hosts.yml", "/.config/glab-cli/config.yml",
+		"/.kube/config",
+		"/.config/gh/hosts.yml",
 		"/.gnupg/private-keys-v1.d/",
-		"/.netrc", "/_netrc", "/.pypirc", "/.git-credentials",
 	} {
 		if strings.Contains(path, marker) {
 			return true

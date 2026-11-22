@@ -7,7 +7,7 @@ import (
 )
 
 var fsTools = map[string]bool{
-	"read": true, "write": true, "edit": true,
+	"read": true, "write": true, "edit": true, "delete": true,
 	"grep": true, "glob": true,
 }
 
@@ -23,6 +23,15 @@ func ExtractHint(argsJSON, toolName string) string {
 	if toolName == "edit" || toolName == "Edit file" {
 		if paths := batchEditPaths(args); len(paths) > 0 {
 			return normalizeWorkspacePath(strings.Join(strings.Fields(paths[0]), " "))
+		}
+	}
+	if toolName == "delete" || toolName == "Delete files" {
+		if paths := deletePaths(args); len(paths) > 0 {
+			hint := normalizeWorkspacePath(strings.Join(strings.Fields(paths[0]), " "))
+			if len(paths) > 1 {
+				hint += fmt.Sprintf(" (+%d more)", len(paths)-1)
+			}
+			return hint
 		}
 	}
 

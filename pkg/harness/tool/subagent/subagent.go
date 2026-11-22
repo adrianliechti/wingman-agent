@@ -983,7 +983,7 @@ func allowVerificationTool(t tool.Tool) bool {
 	}
 
 	switch t.Name {
-	case "write", "edit", "ask", "elicit":
+	case "write", "edit", "delete", "ask", "elicit":
 		return false
 	case "exec", "shell", "exec_command", "exec_session":
 		return true

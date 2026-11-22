@@ -55,11 +55,14 @@ type turnReviewListing struct {
 }
 
 type turnFileStats struct {
-	Path         string `json:"path"`
-	BeforeExists bool   `json:"beforeExists"`
-	AfterExists  bool   `json:"afterExists"`
-	Added        int    `json:"added"`
-	Removed      int    `json:"removed"`
+	Path         string               `json:"path"`
+	BeforeExists bool                 `json:"beforeExists"`
+	AfterExists  bool                 `json:"afterExists"`
+	Added        int                  `json:"added"`
+	Removed      int                  `json:"removed"`
+	BeforeRef    *tool.FileContentRef `json:"beforeRef,omitempty"`
+	AfterRef     *tool.FileContentRef `json:"afterRef,omitempty"`
+	MovedFrom    string               `json:"movedFrom,omitempty"`
 }
 
 func newTurnReviewListing(review harness.TurnReview) turnReviewListing {
@@ -67,7 +70,12 @@ func newTurnReviewListing(review harness.TurnReview) turnReviewListing {
 	files := make([]turnFileStats, len(net))
 	for i, file := range net {
 		added, removed := diff.LineStats(file.Before, file.After, time.Second)
-		files[i] = turnFileStats{Path: file.Path, BeforeExists: file.BeforeExists, AfterExists: file.AfterExists, Added: added, Removed: removed}
+		files[i] = turnFileStats{
+			Path: file.Path, MovedFrom: file.MovedFrom,
+			BeforeExists: file.BeforeExists, AfterExists: file.AfterExists,
+			BeforeRef: file.BeforeRef, AfterRef: file.AfterRef,
+			Added: added, Removed: removed,
+		}
 	}
 	return turnReviewListing{TurnReview: review, Files: files}
 }
@@ -75,10 +83,25 @@ func newTurnReviewListing(review harness.TurnReview) turnReviewListing {
 // netFileChanges folds the edits like undo does, keeping forward-slash paths for the UI.
 func netFileChanges(changes []tool.FileChange) []tool.FileChange {
 	net, _ := tool.NetFileChanges(changes)
-	for i := range net {
-		net[i].Path = filepath.ToSlash(net[i].Path)
+	moved := make(map[string]*tool.FileContentRef)
+	for _, file := range net {
+		if file.MovedFrom != "" && file.AfterRef != nil {
+			moved[filepath.Clean(filepath.FromSlash(file.MovedFrom))] = file.AfterRef
+		}
 	}
-	return net
+	visible := net[:0]
+	for _, file := range net {
+		if file.BeforeRef != nil && file.Unchanged() {
+			continue
+		}
+		if !file.AfterExists && (!file.BeforeExists || file.BeforeRef != nil && file.BeforeRef.Equal(moved[file.Path])) {
+			continue
+		}
+		file.Path = filepath.ToSlash(file.Path)
+		file.MovedFrom = filepath.ToSlash(file.MovedFrom)
+		visible = append(visible, file)
+	}
+	return visible
 }
 
 func handleTurnUndo(c *sessionController, w http.ResponseWriter, r *http.Request) {
