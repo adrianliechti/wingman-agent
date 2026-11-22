@@ -327,6 +327,12 @@ func (p *Project) availableLocked() bool {
 // Caller holds host.mu.
 func (p *Project) detachLocked() {
 	p.stop()
+	p.unlistLocked()
+}
+
+// unlistLocked takes the project and its sessions out of the host, so that no
+// client reaches them, while its work keeps its context. Caller holds host.mu.
+func (p *Project) unlistLocked() {
 	if p.host.projects[p.dir] == p {
 		delete(p.host.projects, p.dir)
 	}

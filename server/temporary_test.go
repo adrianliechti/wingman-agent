@@ -14,6 +14,7 @@ import (
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
+	types "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
 // temporaryTestDir gives a test its own folder of temporary chats.
@@ -103,6 +104,16 @@ func TestTemporaryChatIsRemovedOnceNoWindowShowsIt(t *testing.T) {
 				return temporary.windowRequests == 0
 			})
 			h.closeIdle(0)
+			if first {
+				// The host's first project lasts as long as the host.
+				if !exists(chat) {
+					t.Fatal("the host's first project was removed while the host runs")
+				}
+				if recorder := windowRequest(t, s, http.MethodGet, "/", "", ""); recorder.Code != http.StatusOK {
+					t.Fatalf("pages no longer load: %d", recorder.Code)
+				}
+				s.Close()
+			}
 
 			for _, path := range []string{chat, chat + ".lock", state, aliases} {
 				if exists(path) {
@@ -244,7 +255,7 @@ func TestTemporaryChatsNeedAPrivateRoot(t *testing.T) {
 
 func TestSweepRemovesTemporaryChatsNoWingmanHasOpen(t *testing.T) {
 	testenv.WingmanHome(t)
-	temporaryTestDir(t)
+	root := temporaryTestDir(t)
 	folder := func(age time.Duration) string {
 		dir, err := NewTemporaryFolder()
 		if err != nil {
@@ -265,13 +276,67 @@ func TestSweepRemovesTemporaryChatsNoWingmanHasOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer remove()
+	other := filepath.Join(root, "other")
+	if err := os.Mkdir(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(root, old, old); err != nil {
+		t.Fatal(err)
+	}
 
 	sweepTemporary()
 
 	if exists(stale) || exists(stale+".lock") || exists(code.ProjectStateDir(stale)) {
 		t.Fatal("the sweep left a temporary chat no Wingman has open")
 	}
-	if !exists(fresh) || !exists(open) || !exists(code.ProjectStateDir(open)) {
-		t.Fatal("the sweep removed a temporary chat that is new or open")
+	if !exists(fresh) || !exists(open) || !exists(code.ProjectStateDir(open)) || !exists(other) {
+		t.Fatal("the sweep removed a temporary chat that is new or open, or what is not a chat")
+	}
+}
+
+// A session deleted while its flag waits to be saved, as a temporary chat's
+// are as it closes, is not saved again.
+func TestFlagDoesNotSaveASessionDeletedMeanwhile(t *testing.T) {
+	testenv.WingmanHome(t)
+	protocolTestGateway(t)
+	h, err := NewHost(t.Context(), &HostOptions{disableManagedTools: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(h.Close)
+	dir := canonicalPath(t.TempDir())
+	saved := sessionAlias{Resource: "ahp-session:/flagged", Project: dir, Backend: code.BuiltinAgentName, Session: "s1"}
+	h.mu.Lock()
+	h.rememberAliasLocked(saved)
+	h.mu.Unlock()
+
+	h.projectMu.Lock()
+	flagged := make(chan bool)
+	go func() {
+		flagged <- h.flagUnopened(types.DispatchActionParams{Channel: saved.Resource, Action: types.StateAction{Value: &types.SessionIsReadChangedAction{Type: types.ActionTypeSessionIsReadChanged, IsRead: true}}}, types.ActionOrigin{})
+	}()
+	waitProtocol(t, func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.creating[saved.Resource] != nil
+	})
+	time.Sleep(50 * time.Millisecond) // past its look at what the host saved
+	h.mu.Lock()
+	h.forgetSessionLocked(saved.Resource)
+	h.mu.Unlock()
+	h.projectMu.Unlock()
+
+	if <-flagged {
+		t.Fatal("the flag of a deleted session was saved")
+	}
+	h.mu.Lock()
+	_, remembered := h.aliases[saved.Resource]
+	h.mu.Unlock()
+	if remembered {
+		t.Fatal("a deleted session came back")
 	}
 }

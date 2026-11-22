@@ -23,8 +23,7 @@ func (s *Server) checkInstance(next http.Handler) http.Handler {
 				return
 			}
 		}
-		// A temporary chat lasts while a window shows it, even the host's first project.
-		if s.front != nil || s.Project.temporary != nil {
+		if s.front != nil {
 			p := s.Project
 			p.host.mu.Lock()
 			if !p.availableLocked() {

@@ -251,17 +251,19 @@ func (h *Host) closeIdle(idle time.Duration) {
 		}
 		h.mu.Lock()
 		// Any request that could start work reaches the project first, which counts as use.
-		if h.ctx.Err() != nil || h.projects[p.dir] != p || p == h.web && p.temporary == nil || p.windowRequests > 0 || time.Since(p.used) < wait || h.subscribedLocked(p) {
+		if h.ctx.Err() != nil || h.projects[p.dir] != p || p == h.web || p.windowRequests > 0 || time.Since(p.used) < wait || h.subscribedLocked(p) {
 			h.mu.Unlock()
 			continue
 		}
 		if p.temporary != nil {
+			// No client reaches the chat any more while its agents delete their sessions.
+			p.unlistLocked()
 			h.mu.Unlock()
 			p.deleteAgentSessions()
-			h.mu.Lock()
+		} else {
+			p.detachLocked()
+			h.mu.Unlock()
 		}
-		p.detachLocked()
-		h.mu.Unlock()
 		p.close()
 		closed = true
 	}

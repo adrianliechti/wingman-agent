@@ -632,7 +632,7 @@ func TestStartPageOpensTemporaryChat(t *testing.T) {
 	}
 	app := newTestApp(newTestHosts(t, hostsThatStay))
 
-	if rec := serve(app, "GET", "/", ""); !strings.Contains(rec.Body.String(), `id="open-temporary"`) {
+	if rec := serve(app, "GET", "/", ""); !strings.Contains(rec.Body.String(), `id="temporary-dropzone"`) {
 		t.Fatal("start page offers no temporary chat")
 	}
 	rec := serve(app, "POST", "/app/temporary", "{}")

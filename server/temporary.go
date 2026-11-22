@@ -95,7 +95,9 @@ func sweepTemporary() {
 	}
 	names := map[string]bool{}
 	for _, entry := range entries {
-		names[strings.TrimSuffix(entry.Name(), ".lock")] = true
+		if name := strings.TrimSuffix(entry.Name(), ".lock"); strings.HasPrefix(name, "chat-") {
+			names[name] = true
+		}
 	}
 	for name := range names {
 		dir := filepath.Join(root, name)
