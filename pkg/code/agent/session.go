@@ -129,9 +129,6 @@ func (s *sessionState) configureHarness() {
 	sessionCfg.ContextInstructions = s.contextInstructions
 	sessionCfg.ContextSections = s.contextSections
 	sessionCfg.PermissionMode = s.permissionMode
-	if sessionCfg.RequireFinish == nil {
-		sessionCfg.RequireFinish = requiresFinish
-	}
 	if policy := reviewExtraPolicy(); policy != "" {
 		sessionCfg.ReviewExtraPolicy = policy
 	}

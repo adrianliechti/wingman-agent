@@ -75,7 +75,7 @@ func TestSlashReviewRunsIsolatedReadOnlyChildAndRecordsSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.RequireFinish = func(string) bool { return false }
+	cfg.ConfirmUnphased = false
 	cfg.Model = func() string { return "inkling-2-mini" }
 	cfg.Effort = func() string { return "none" }
 	cfg.ComplexModel = "thinkingmachines/Inkling-2-Small"

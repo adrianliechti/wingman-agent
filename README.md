@@ -192,6 +192,8 @@ The built-in Wingman agent reads provider settings from environment variables:
 | `WINGMAN_URL` | Wingman gateway URL |
 | `WINGMAN_TOKEN` | Gateway authentication token, if required |
 | `WINGMAN_MODEL` | Default model; also selectable with `/model` |
+| `WINGMAN_MODEL_UTILITY` | Model for short internal requests, including completion checks when the decision model is empty |
+| `WINGMAN_MODEL_DECISION` | Optional deployment for the OpenAI Decisions API, for example `gpt-6-luna` |
 | `WINGMAN_EFFORT` | Reasoning effort; also selectable with `/model` |
 | `WINGMAN_MODEL_TRANSCRIBE` | Optional model for microphone dictation |
 | `WINGMAN_MODEL_REALTIME` | Optional Realtime API model for voice conversations |

@@ -20,6 +20,7 @@ import { visibleAttachments } from "../../api/chatCommands";
 import type { ChatEntry } from "../../types/session";
 import type { Phase, ToolLocation } from "../../types/protocol";
 import { MarkdownContent } from "../MarkdownContent";
+import { ImageViewer } from "../ui/ImageViewer";
 import { looksLikeDiffPath, shouldRenderDiff } from "./diffOutput";
 import { type ToolBucket, toolBucket } from "./stepSummary";
 
@@ -124,24 +125,32 @@ export function AttachmentChip({
 }
 
 function EntryImages({ entry, spaced }: { entry: ChatEntry; spaced: boolean }) {
+	const [viewing, setViewing] = useState<string | null>(null);
 	if (!entry.images?.length) return null;
 	return (
 		<div className={`flex flex-wrap gap-1.5 ${spaced ? "mt-2" : ""}`}>
 			{entry.images.map((src, i) => (
-				<a
+				<button
 					key={`${entry.id}-img-${i}`}
-					href={src}
-					target="_blank"
-					rel="noreferrer"
-					className="block overflow-hidden rounded bg-bg-active"
+					type="button"
+					onClick={() => setViewing(src)}
+					aria-label="View image"
+					className="block cursor-zoom-in overflow-hidden rounded bg-bg-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
 				>
 					<img
 						src={src}
 						alt="attachment"
 						className="block max-h-40 max-w-[240px] object-contain"
 					/>
-				</a>
+				</button>
 			))}
+			{viewing && (
+				<ImageViewer
+					src={viewing}
+					alt="attachment"
+					onClose={() => setViewing(null)}
+				/>
+			)}
 		</div>
 	);
 }

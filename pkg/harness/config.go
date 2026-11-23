@@ -99,10 +99,10 @@ type Config struct {
 	// PermissionMode reports the active mode for hooks at each request boundary.
 	PermissionMode func() string
 
-	// RequireFinish enables the explicit finish_turn protocol for a model.
-	// Text-only replies cannot end Send when enabled. Structured output and
-	// native refusals use their own completion semantics.
-	RequireFinish func(model string) bool
+	// ConfirmUnphased checks ambiguous text-only stops on tool-enabled turns.
+	ConfirmUnphased bool
+	// DecisionModel selects a Decisions API deployment. Empty uses the utility LLM.
+	DecisionModel string
 
 	// ContextInstructions supplies mutable session guidance (environment,
 	// project instructions, memory, skills). Changes append a replacement
@@ -275,7 +275,7 @@ func (c *Config) Realtime(model string) *audio.Realtime {
 // ConfigFromEnvironment builds a config from the environment; the caller owns its Telemetry.
 func ConfigFromEnvironment() (*Config, error) {
 	client := createClient()
-	cfg := &Config{client: &client}
+	cfg := &Config{client: &client, DecisionModel: strings.TrimSpace(os.Getenv("WINGMAN_MODEL_DECISION"))}
 	if value := strings.TrimSpace(os.Getenv("WINGMAN_OUTPUT_TOKEN_BUDGET")); value != "" {
 		budget, err := strconv.Atoi(value)
 		if err != nil || budget < 0 {

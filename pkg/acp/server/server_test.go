@@ -458,6 +458,7 @@ func TestACPTaskTurnWritesFileAndReportsUsage(t *testing.T) {
 				"id":     "msg_1",
 				"role":   "assistant",
 				"status": "completed",
+				"phase":  "final_answer",
 				"content": []map[string]any{{
 					"type":        "output_text",
 					"text":        "done",

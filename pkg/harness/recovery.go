@@ -231,7 +231,7 @@ func isReasoningReplayError(err error) bool {
 // Keep the attempted call so the next model cannot mistake it for unstarted
 // work. A result without a call is removed at content granularity.
 func (a *Agent) repairToolHistory(preserveReasoning bool) error {
-	messages := a.contextSnapshot()
+	messages, changed := migrateFinishHistory(a.contextSnapshot())
 
 	callIDs := make(map[string]bool)
 	outputIDs := make(map[string]bool)
@@ -249,7 +249,6 @@ func (a *Agent) repairToolHistory(preserveReasoning bool) error {
 	}
 
 	var cleaned, missing []Message
-	changed := false
 	for _, m := range messages {
 		hasCall := false
 		for _, c := range m.Content {
@@ -296,5 +295,5 @@ func (a *Agent) repairToolHistory(preserveReasoning bool) error {
 	if !changed {
 		return nil
 	}
-	return a.replaceContext("repair interrupted tool or reasoning history", cleaned)
+	return a.replaceContext("repair tool and reasoning history", cleaned)
 }

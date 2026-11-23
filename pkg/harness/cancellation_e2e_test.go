@@ -20,7 +20,6 @@ func TestAlreadyCancelledHarnessSendE2E(t *testing.T) {
 	})
 	var starts, prompts atomic.Int64
 	cfg := e2eConfig(t)
-	cfg.RequireFinish = func(string) bool { return false }
 	cfg.CacheKey = "cancel-e2e"
 	cfg.Hooks = hook.Hooks{
 		SessionStart: []hook.SessionStart{func(context.Context, string) (hook.Outcome, error) {

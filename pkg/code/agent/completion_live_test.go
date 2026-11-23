@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,14 +27,10 @@ import (
 // WINGMAN_URL=http://localhost:4242 WINGMAN_LIVE_COMPLETION_MODELS=claude-sonnet-5,gpt-5.6-terra
 // go test ./pkg/code/agent -run TestLiveCompletion -count=1 -v
 //
-// All inference goes to the real backend. The first one or three responses
-// inject a protocol fault: tool_choice:none and progress-only instructions. For models
-// using phases, those fault responses are labelled commentary at the proxy.
-// Reasoning from the injected prompt is discarded: it does not belong to the
-// agent's original instructions and must not be replayed after the fault.
-// After that fault, requests and streamed responses pass through unchanged.
-// Real read/edit/exec tools then fix and test a Go fixture, with steering, a FIFO
-// follow-up, and restoration from disk through the production coding agent.
+// The first one or three requests ask the selected model for a known progress
+// update in isolation. Present its text without turn metadata to exercise the
+// ambiguous-stop path on every deployment. The classifier and all subsequent
+// agent requests go through the gateway with their original instructions.
 func TestLiveCompletion(t *testing.T) {
 	models := strings.FieldsFunc(os.Getenv("WINGMAN_LIVE_COMPLETION_MODELS"), func(r rune) bool { return r == ',' })
 	if len(models) == 0 {
@@ -64,16 +61,16 @@ func TestLiveCompletion(t *testing.T) {
 	}
 }
 
-type liveProgressKey struct{}
-
 func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultRequests int64) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	ws := newOptionsTestWorkspace(t)
+	const brokenSum = "package calc\n\nfunc Sum(a, b int) int { return a - b }\n"
+	const sumTest = "package calc\n\nimport \"testing\"\n\nfunc TestSum(t *testing.T) { if got := Sum(2, 3); got != 5 { t.Fatalf(\"got %d, want 5\", got) } }\n"
 	for name, content := range map[string]string{
 		"go.mod":      "module completion.test\n\ngo 1.24\n",
-		"sum.go":      "package calc\n\nfunc Sum(a, b int) int { return a - b }\n",
-		"sum_test.go": "package calc\n\nimport \"testing\"\n\nfunc TestSum(t *testing.T) { if got := Sum(2, 3); got != 5 { t.Fatalf(\"got %d, want 5\", got) } }\n",
+		"sum.go":      brokenSum,
+		"sum_test.go": sumTest,
 	} {
 		if err := os.WriteFile(filepath.Join(ws.RootPath, name), []byte(content), 0600); err != nil {
 			t.Fatal(err)
@@ -83,57 +80,56 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 	if err != nil {
 		t.Fatal(err)
 	}
-	var requests atomic.Int64
-	var nativeBoundary atomic.Bool
+	var requests, decisions, utilityChecks, injected atomic.Int64
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.FlushInterval = -1
-	proxy.ModifyResponse = func(resp *http.Response) error {
-		fault, _ := resp.Request.Context().Value(liveProgressKey{}).(bool)
-		if resp.StatusCode != http.StatusOK {
-			return nil
-		}
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return err
-		}
-		if !fault {
-			if bytes.Contains(body, []byte(`"end_turn":true`)) {
-				nativeBoundary.Store(true)
-			}
-			resp.Body = io.NopCloser(bytes.NewReader(body))
-			return nil
-		}
-		body, err = liveProgressFault(body, !requiresFinish(model))
-		if err != nil {
-			return err
-		}
-		resp.Body = io.NopCloser(bytes.NewReader(body))
-		resp.ContentLength = -1
-		resp.Header.Del("Content-Length")
-		return nil
+	upstream, err := harness.ConfigFromEnvironment()
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = upstream.Telemetry.Shutdown(context.Background()) })
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/decisions") {
+			decisions.Add(1)
+		}
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/responses") {
-			if requests.Add(1) <= faultRequests {
-				var request map[string]any
-				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-					t.Error(err)
-					http.Error(w, "invalid test request", http.StatusBadRequest)
-					return
+			body, err := io.ReadAll(r.Body)
+			r.Body.Close()
+			var meta struct {
+				Model  string
+				Stream bool
+				Tools  []struct{ Name string }
+				Text   struct {
+					Format struct {
+						Schema struct{ Properties map[string]json.RawMessage }
+					}
 				}
-				r.Body.Close()
-				request["tool_choice"] = "none"
-				request["instructions"] = "This is a transport fault test. Reply only with: Now I will run the tests. Do not use tools."
-				body, err := json.Marshal(request)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				r = r.WithContext(context.WithValue(r.Context(), liveProgressKey{}, true))
-				r.Body = io.NopCloser(bytes.NewReader(body))
-				r.ContentLength = int64(len(body))
 			}
+			if err != nil || json.Unmarshal(body, &meta) != nil {
+				http.Error(w, "invalid test request", http.StatusBadRequest)
+				return
+			}
+			for _, tool := range meta.Tools {
+				if tool.Name == "finish_turn" {
+					t.Error("agent still advertised finish_turn")
+				}
+			}
+			if meta.Stream {
+				requests.Add(1)
+			} else if _, ok := meta.Text.Format.Schema.Properties["progress"]; ok {
+				utilityChecks.Add(1)
+			}
+			if meta.Stream && injected.Load() < faultRequests {
+				if err := writeLiveProgress(w, r, upstream, meta.Model, requests.Load()); err != nil {
+					t.Errorf("generating progress fixture with %s: %v", meta.Model, err)
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				injected.Add(1)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
 		}
 		proxy.ServeHTTP(w, r)
 	}))
@@ -167,12 +163,6 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 				}
 				if content.ToolCall != nil {
 					t.Logf("tool call: %s", content.ToolCall.Name)
-					if content.ToolCall.Name == "finish_turn" {
-						t.Logf("finish arguments: %s", content.ToolCall.Args)
-					}
-				}
-				if content.ToolResult != nil && content.ToolResult.Name == "finish_turn" {
-					t.Logf("finish result: %s", content.ToolResult.Content.Text())
 				}
 			}
 		}
@@ -187,8 +177,8 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 		for _, err := range stream {
 			runErr = errors.Join(runErr, err)
 		}
-		if !errors.Is(runErr, harness.ErrTurnIncomplete) || requests.Load() != 3 {
-			t.Fatalf("fault outcome=%v requests=%d", runErr, requests.Load())
+		if !errors.Is(runErr, harness.ErrTurnIncomplete) || injected.Load() != faultRequests {
+			t.Fatalf("fault outcome=%v injected=%d requests=%d", runErr, injected.Load(), requests.Load())
 		}
 		for _, event := range a.session(id).harness.StateSnapshot().Events {
 			if event.Type == harness.EventToolStarted {
@@ -225,8 +215,8 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 	toolStarted, releaseTool := make(chan struct{}), make(chan struct{})
 	var steered atomic.Bool
 	a.session(id).harness.Hooks.PostToolUse = append(a.session(id).harness.Hooks.PostToolUse,
-		func(ctx context.Context, call tool.ToolCall, _ string) (hook.Outcome, error) {
-			if call.Name != "read" || !steered.CompareAndSwap(false, true) {
+		func(ctx context.Context, _ tool.ToolCall, _ string) (hook.Outcome, error) {
+			if !steered.CompareAndSwap(false, true) {
 				return hook.Outcome{}, nil
 			}
 			snapshot, err := manager.Submit(ctx, id, code.TurnInput{ID: "live-steer", Intent: code.TurnInputSteer, Content: []harness.Content{{Text: "Also include STEER_OK in your final report. Continue the requested fix and test."}}})
@@ -250,7 +240,7 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 	select {
 	case <-toolStarted:
 	case event := <-terminal:
-		t.Fatalf("resume stopped before reading the fixture: %s %v", event.State, event.Err)
+		t.Fatalf("resume stopped before running a tool after %d requests: %s %v", requests.Load(), event.State, event.Err)
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
@@ -274,81 +264,70 @@ func testLiveCompletion(t *testing.T, backend, model, resumeModel string, faultR
 	if faultRequests == 3 {
 		workIndex = 1
 	}
-	if len(reviews) != workIndex+2 || reviews[workIndex].Validation != "passed" || len(reviews[workIndex].Files) == 0 || len(reviews[workIndex+1].Checks) != 0 || len(reviews[workIndex+1].Files) != 0 {
+	if len(reviews) != workIndex+2 || reviews[workIndex].Validation != "passed" || len(reviews[workIndex+1].Checks) != 0 || len(reviews[workIndex+1].Files) != 0 {
 		t.Fatalf("work, validation, or follow-up repeated work: %+v", reviews)
 	}
+	if got, err := os.ReadFile(filepath.Join(ws.RootPath, "sum_test.go")); err != nil || string(got) != sumTest {
+		t.Fatalf("fixture test changed: %q, err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(ws.RootPath, "sum.go")); err != nil || string(got) == brokenSum {
+		t.Fatalf("fixture source was not updated: %q, err=%v", got, err)
+	}
+	tested := false
+	for _, check := range reviews[workIndex].Checks {
+		tested = tested || check.Outcome == "passed" && strings.Contains(check.Command, "go test")
+	}
+	if !tested {
+		t.Fatalf("missing successful go test in validation checks: %+v", reviews[workIndex].Checks)
+	}
 	var text strings.Builder
-	finishes := 0
 	for _, message := range a.Messages(id) {
 		for _, content := range message.Content {
 			if message.Role == harness.RoleAssistant {
 				text.WriteString(content.Text)
 			}
-			if result := content.ToolResult; result != nil && result.Name == "finish_turn" && !result.IsError {
-				finishes++
-			}
 		}
 	}
-	// A gateway that reports the model's own end of turn finishes it without the marker.
-	needsMarkers := requiresFinish(resumeModel) && !nativeBoundary.Load()
-	if !strings.Contains(text.String(), "STEER_OK") || !strings.Contains(text.String(), "QUEUE_OK") || (needsMarkers && finishes < 2) {
-		t.Fatalf("steering/follow-up/finish missing: accepted finishes=%d text=%q", finishes, text.String())
+	if !strings.Contains(text.String(), "STEER_OK") || !strings.Contains(text.String(), "QUEUE_OK") {
+		t.Fatalf("steering or follow-up missing: %q", text.String())
+	}
+	want, other := utilityChecks.Load(), decisions.Load()
+	if cfg.DecisionModel != "" {
+		want, other = other, want
+	}
+	if want < faultRequests || other != 0 {
+		t.Fatalf("decision model=%q: decisions=%d utility checks=%d injected=%d", cfg.DecisionModel, decisions.Load(), utilityChecks.Load(), injected.Load())
 	}
 	usage := a.Usage(id)
-	t.Logf("model=%s requests=%d accepted_finishes=%d validation=%s input=%d cached=%d output=%d; progress recovery, real edit/test, steering, FIFO follow-up passed", model, requests.Load(), finishes, reviews[workIndex].Validation, usage.InputTokens, usage.CacheReadInputTokens, usage.OutputTokens)
+	t.Logf("model=%s requests=%d decisions=%d utility checks=%d validation=%s input=%d cached=%d output=%d", model, requests.Load(), decisions.Load(), utilityChecks.Load(), reviews[workIndex].Validation, usage.InputTokens, usage.CacheReadInputTokens, usage.OutputTokens)
 }
 
-func liveProgressFault(body []byte, commentary bool) ([]byte, error) {
-	var mark func(any)
-	mark = func(value any) {
-		switch value := value.(type) {
-		case map[string]any:
-			// The fault is a stop without a turn boundary; a gateway that reports one would end the turn.
-			delete(value, "end_turn")
-			if commentary && value["type"] == "message" && value["role"] == "assistant" {
-				value["phase"] = "commentary"
-			}
-			if output, ok := value["output"].([]any); ok {
-				kept := output[:0]
-				for _, item := range output {
-					if object, ok := item.(map[string]any); ok && object["type"] == "reasoning" {
-						continue
-					}
-					kept = append(kept, item)
-				}
-				value["output"] = kept
-			}
-			for _, child := range value {
-				mark(child)
-			}
-		case []any:
-			for _, child := range value {
-				mark(child)
-			}
-		}
+func writeLiveProgress(w http.ResponseWriter, r *http.Request, upstream *harness.Config, model string, sequence int64) error {
+	const progress = "Now I will run the tests."
+	result, err := upstream.Generate(r.Context(), harness.GenerateOptions{
+		Model: model, Instructions: "Repeat the supplied sentence verbatim. Output only that sentence.", Input: progress,
+	})
+	if err != nil {
+		return err
 	}
-	lines := bytes.Split(body, []byte("\n"))
-	for i, line := range lines {
-		data, ok := bytes.CutPrefix(line, []byte("data: "))
-		if !ok || bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-			continue
-		}
-		var event map[string]any
-		if err := json.Unmarshal(data, &event); err != nil {
-			return nil, err
-		}
-		typ, _ := event["type"].(string)
-		item, _ := event["item"].(map[string]any)
-		if strings.Contains(typ, "reasoning") || item["type"] == "reasoning" {
-			lines[i] = nil
-			continue
-		}
-		mark(event)
-		encoded, err := json.Marshal(event)
-		if err != nil {
-			return nil, err
-		}
-		lines[i] = append([]byte("data: "), encoded...)
+	if result.Text != progress {
+		return fmt.Errorf("expected %q, received %q", progress, result.Text)
 	}
-	return bytes.Join(lines, []byte("\n")), nil
+	// Forward only the visible reply and its usage. Reasoning and turn metadata
+	// from the isolated prompt do not belong in the coding conversation.
+	u := result.Usage
+	reply, err := json.Marshal(map[string]any{
+		"status": "completed", "model": model,
+		"output": []any{map[string]any{"type": "message", "id": fmt.Sprintf("progress-%d", sequence), "role": "assistant", "status": "completed",
+			"content": []any{map[string]string{"type": "output_text", "text": result.Text}}}},
+		"usage": map[string]any{"input_tokens": u.InputTokens, "output_tokens": u.OutputTokens,
+			"input_tokens_details":  map[string]int64{"cached_tokens": u.CacheReadInputTokens, "cache_write_tokens": u.CacheCreationInputTokens},
+			"output_tokens_details": map[string]int64{"reasoning_tokens": u.ReasoningTokens}},
+	})
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	_, err = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":%s}\n\n", reply)
+	return err
 }

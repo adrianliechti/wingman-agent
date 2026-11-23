@@ -35,7 +35,7 @@ func cancellationE2EAgent(t *testing.T, hooks hook.Hooks) (*Agent, string, *atom
 		t.Fatal(err)
 	}
 	cfg.Model = func() string { return "test-model" }
-	cfg.RequireFinish = func(string) bool { return false }
+	cfg.ConfirmUnphased = false
 	cfg.Hooks = hooks
 	a := New(ws, cfg, nil)
 	t.Cleanup(func() { _ = a.Close() })

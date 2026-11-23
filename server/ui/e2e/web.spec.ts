@@ -239,6 +239,14 @@ test("renders read and fetch image attachments in restored transcripts", async (
 			)
 			.toBe(1);
 	}
+
+	// Data URLs cannot open in a new window, so the image opens in the app.
+	await page.locator('[data-entry-id="read-image"] img').click();
+	const viewer = page.getByRole("dialog", { name: "attachment" });
+	await expect(viewer.locator("img")).toHaveAttribute("src", image);
+	expect(page.context().pages()).toHaveLength(1);
+	await page.keyboard.press("Escape");
+	await expect(viewer).toBeHidden();
 });
 function sessionTab(page: Page, id: string) {
 	return page.locator(
@@ -4111,9 +4119,7 @@ test("runs a coding tool and renders its result", async ({ page }) => {
 	const tool = page.getByRole("button", { name: /^Edit file/ });
 	await expect(tool).toBeVisible();
 	await tool.click();
-	await expect(
-		page.getByText(/Applied 1 edits across 1 files\./),
-	).toBeVisible();
+	await expect(page.getByText(/Applied 1 edit across 1 file\./)).toBeVisible();
 	await expect(
 		page.getByText("Created the requested file", { exact: true }),
 	).toBeVisible();

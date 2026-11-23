@@ -56,7 +56,7 @@ func emitE2ETextResponse(w http.ResponseWriter, id, text string) {
 		"type": "response.completed", "sequence_number": 2,
 		"response": map[string]any{
 			"output": []any{map[string]any{
-				"type": "message", "id": id, "role": "assistant", "status": "completed",
+				"type": "message", "id": id, "role": "assistant", "status": "completed", "phase": "final_answer",
 				"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
 			}},
 			"usage": map[string]any{

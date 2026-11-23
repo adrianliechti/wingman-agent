@@ -70,13 +70,13 @@ func TestFailedStreamDoesNotRetryAfterPersistenceFailure(t *testing.T) {
 }
 
 func TestSendHonorsExplicitTurnBoundary(t *testing.T) {
-	for _, requireFinish := range []bool{false, true} {
+	for _, confirmUnphased := range []bool{false, true} {
 		for _, tc := range []struct{ name, output string }{
 			{"reasoning", `{"type":"reasoning","id":"rs_probe","summary":[{"type":"summary_text","text":"Still checking."}]}`},
 			{"commentary", commentaryOutput},
 			{"final answer", finalAnswerOutput},
 		} {
-			t.Run(fmt.Sprintf("%s/require_finish=%t", tc.name, requireFinish), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/confirm_unphased=%t", tc.name, confirmUnphased), func(t *testing.T) {
 				requests := 0
 				client := streamingTestClient(func(r *http.Request) string {
 					requests++
@@ -89,15 +89,15 @@ func TestSendHonorsExplicitTurnBoundary(t *testing.T) {
 					if requests <= 4 {
 						return endTurnResponse("false", tc.output)
 					}
-					// The explicit boundary takes precedence over phase-based recovery.
+					// A text-only stop completes the turn for models using native boundaries.
 					return endTurnResponse("true", commentaryOutput)
 				})
-				a := &Agent{Config: &Config{client: &client, MaxTurns: 6, RequireFinish: func(string) bool { return requireFinish }}}
+				a := &Agent{Config: &Config{client: &client, MaxTurns: 6, ConfirmUnphased: confirmUnphased, Tools: confirmationTestTools}}
 				if err := runLoopTurn(t.Context(), a, "work"); err != nil {
 					t.Fatal(err)
 				}
 				if requests != 5 {
-					t.Fatalf("requests=%d, want four continuations followed by completion", requests)
+					t.Fatalf("requests=%d, want 5", requests)
 				}
 			})
 		}
@@ -168,28 +168,25 @@ func TestReasoningReplayAcrossStreamRetry(t *testing.T) {
 	}
 }
 
-func TestFailedStreamRejectsRetainedFinishMarker(t *testing.T) {
+// The partial progress message is retained across a transport retry. Only the
+// successfully completed response can trigger a turn-completion check.
+func TestFinishAfterStreamRetry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		requests := 0
 		client := streamingTestClient(func(r *http.Request) string {
 			requests++
 			if requests == 1 {
-				return itemDoneEvents(loopCall("finish", finishToolName, `{"answer":"done"}`)) +
-					"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"retry\"}}}\n\n"
+				return itemDoneEvents(commentaryOutput) + "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"retry\"}}}\n\n"
 			}
-			req := readLoopRequest(t, r)
-			want := []string{"user:work", "call:finish", "result:finish"}
-			if got := loopInputOrder(req.Input); !slices.Equal(got, want) {
-				t.Errorf("retry input=%v, want %v", got, want)
+			if !slices.Contains(loopInputOrder(readLoopRequest(t, r).Input), "assistant:I will check that now.") {
+				t.Fatal("retry lost committed progress")
 			}
-			return phaseTestResponse(false, loopCall("finish_retry", finishToolName, `{"answer":"done"}`))
+			return phaseTestResponse(false, finalAnswerOutput)
 		})
-		a := &Agent{Config: &Config{client: &client, RequireFinish: func(string) bool { return true }}}
-		if err := runLoopTurn(t.Context(), a, "work"); err != nil {
-			t.Fatal(err)
-		}
-		if requests != 2 {
-			t.Fatalf("requests=%d", requests)
+		a := &Agent{Config: &Config{client: &client, ConfirmUnphased: true, Tools: confirmationTestTools}}
+		ctx := WithStreamEventHandlers(t.Context(), StreamEventHandlers{Reset: func() {}})
+		if err := runLoopTurn(ctx, a, "Verify."); err != nil || requests != 2 {
+			t.Fatalf("requests=%d error=%v", requests, err)
 		}
 	})
 }

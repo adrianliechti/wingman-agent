@@ -3,8 +3,6 @@ package harness
 import (
 	"context"
 	"errors"
-	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -112,7 +110,7 @@ func (a *Agent) takePendingInput() []Message {
 	return queued
 }
 
-func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *request, yield func(Message, error) bool) (resp *response, err error) {
+func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *request, completion *completionState, yield func(Message, error) bool) (resp *response, err error) {
 	captureContent := a.Telemetry.CapturesMessageContent()
 	inferenceRequest := telemetry.InferenceRequest{
 		Model:          req.model,
@@ -127,7 +125,7 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 	defer func() { inference.End(streamingInferenceResult(resp, err, captureContent)) }()
 
 	for attempt := 0; ; attempt++ {
-		resp, err = a.completeRun(ctx, inferenceCtx, turnID, req, yield)
+		resp, err = a.completeRun(ctx, inferenceCtx, turnID, req, completion, yield)
 		_, hookStopped := errors.AsType[hookStopError](err)
 		if err == nil || errors.Is(err, errYieldStopped) || errors.Is(err, errSteerPreempt) || hookStopped {
 			return resp, err
@@ -161,7 +159,7 @@ func (a *Agent) completeWithRetry(ctx context.Context, turnID string, req *reque
 		}
 		// Completed items and tool results survive stream failures. Rebuild
 		// every retry from that history, as with compaction/replay recovery.
-		if repairErr := a.repairToolHistory(req.preserveReasoning); repairErr != nil {
+		if repairErr := a.repairToolHistory(completion.nativeContinuation); repairErr != nil {
 			return resp, repairErr
 		}
 		req.messages = a.requestMessages()
@@ -223,18 +221,7 @@ func runCompactHooks[H ~func(context.Context, string) (hook.Outcome, error)](ctx
 	return combined
 }
 
-func (a *Agent) buildStepRequest(ctx context.Context, nativeContinuation bool) (context.Context, *request, error) {
-	stepCtx, req, err := a.newStepRequest(ctx, nativeContinuation)
-	if err != nil {
-		return stepCtx, nil, err
-	}
-	if err := a.prepareRequest(stepCtx, req); err != nil {
-		return stepCtx, nil, err
-	}
-	return stepCtx, req, nil
-}
-
-func (a *Agent) newStepRequest(ctx context.Context, nativeContinuation bool) (context.Context, *request, error) {
+func (a *Agent) newStepRequest(ctx context.Context) (context.Context, *request) {
 	// Keep request settings with its hooks and tools, even if the user
 	// changes settings while the response is streaming.
 	stepRuntime := a.hookRuntime(ctx)
@@ -245,48 +232,20 @@ func (a *Agent) newStepRequest(ctx context.Context, nativeContinuation bool) (co
 		instructions = a.Instructions()
 	}
 
-	// Policy stays live even when the catalog is pinned for this turn.
-	tools := a.AvailableTools()
-	var outputSchema map[string]any
-	if schema, ok := OutputSchemaFromContext(ctx); ok {
-		outputSchema = schema
-	}
-	if outputSchema != nil {
-		// Structured output is a finalization pass. Keeping tools enabled
-		// lets some providers apply a tool's argument schema to ordinary
-		// text deltas instead of producing the requested final document.
-		tools = nil
-	}
-	allowFinish := outputSchema == nil && a.RequireFinish != nil
-	requireFinish := allowFinish && a.RequireFinish(stepRuntime.Model)
-	if allowFinish {
-		for _, t := range tools {
-			if t.Name == finishToolName {
-				return stepCtx, nil, fmt.Errorf("agent: tool name %q is reserved by RequireFinish", finishToolName)
-			}
-		}
-	}
-	if requireFinish {
-		tools = append(slices.Clone(tools), finishTool())
-		if instructions != "" {
-			instructions += "\n\n"
-		}
-		instructions += finishInstructions
-	}
-
+	outputSchema, _ := OutputSchemaFromContext(ctx)
 	req := &request{
-		model:             stepRuntime.Model,
-		effort:            stepRuntime.ReasoningEffort,
-		instructions:      instructions,
-		cacheKey:          a.CacheKey,
-		messages:          a.requestMessages(),
-		tools:             tools,
-		outputSchema:      outputSchema,
-		requireFinish:     requireFinish,
-		allowFinish:       allowFinish,
-		preserveReasoning: nativeContinuation,
+		model:        stepRuntime.Model,
+		effort:       stepRuntime.ReasoningEffort,
+		instructions: instructions,
+		cacheKey:     a.CacheKey,
+		messages:     a.requestMessages(),
+		outputSchema: outputSchema,
 	}
-	return stepCtx, req, nil
+	// Structured finalization uses only the requested output schema.
+	if outputSchema == nil {
+		req.tools = a.AvailableTools()
+	}
+	return stepCtx, req
 }
 
 // finishStep evaluates Stop hooks when a step has no pending follow-up or
@@ -341,7 +300,7 @@ func (a *Agent) finishStep(ctx, stepCtx context.Context, lastAnswer string, need
 // Check before every request, including the first request of a follow-up turn.
 // Rewriting historical results has a cache cost, so do it only under pressure.
 func (a *Agent) prepareRequest(ctx context.Context, req *request) error {
-	if err := a.normalizeRequest(req); err != nil {
+	if err := a.dropIncompatibleReasoning(req); err != nil {
 		return err
 	}
 	overshoot := a.compactionOvershoot(req.model, a.requestTokens(req))
@@ -359,11 +318,4 @@ func (a *Agent) prepareRequest(ctx context.Context, req *request) error {
 	}
 	req.messages = a.requestMessages()
 	return nil
-}
-
-func (a *Agent) normalizeRequest(req *request) error {
-	if err := a.dropIncompatibleReasoning(req); err != nil {
-		return err
-	}
-	return a.dropIncompatibleFinishReminders(req)
 }

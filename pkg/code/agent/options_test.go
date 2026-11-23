@@ -187,6 +187,7 @@ func TestNewUsesExplicitSettingsWithoutEnvironmentMerge(t *testing.T) {
 	t.Setenv("WINGMAN_EFFORT", "low")
 	t.Setenv("WINGMAN_MODEL_COMPLEX", "environment-complex")
 	t.Setenv("WINGMAN_MODEL_UTILITY", "environment-utility")
+	t.Setenv("WINGMAN_MODEL_DECISION", "environment-decision")
 	t.Setenv("OTEL_SDK_DISABLED", "true")
 	t.Setenv("WINGMAN_OUTPUT_TOKEN_BUDGET", "")
 	t.Setenv("WINGMAN_TASK_MAX_TOKENS", "")
@@ -207,6 +208,10 @@ func TestNewUsesExplicitSettingsWithoutEnvironmentMerge(t *testing.T) {
 	cfg.SandboxNetwork = false
 	cfg.ComplexModel = "gpt-6-astra"
 	cfg.UtilityModel = "gpt-6-luna"
+	if cfg.DecisionModel != "environment-decision" {
+		t.Fatalf("configured decision model = %q", cfg.DecisionModel)
+	}
+	cfg.DecisionModel = "decision-deployment"
 	a := New(workspace, cfg, nil)
 	defer a.Close()
 
@@ -224,7 +229,7 @@ func TestNewUsesExplicitSettingsWithoutEnvironmentMerge(t *testing.T) {
 	}
 	assertTools(t, a, id, nil, []string{"exec", "exec_session", "search_web", "fetch"})
 	s := a.session(id)
-	if s.harness.MaxTurns != 7 || s.harness.Model() != "gpt-6-sol" || s.harness.Effort() != "high" {
+	if s.harness.MaxTurns != 7 || s.harness.Model() != "gpt-6-sol" || s.harness.Effort() != "high" || s.harness.DecisionModel != "decision-deployment" {
 		t.Fatal("session did not retain its startup config")
 	}
 	if s.scriptOptions.Shell.Network || s.scriptOptions.Shell.DisableSandbox {
