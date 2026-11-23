@@ -9,7 +9,7 @@ import (
 
 func TestAgentAPIContract(t *testing.T) {
 	t.Setenv("WINGMAN_URL", "http://localhost:1")
-	app, err := New(t.Context(), t.TempDir(), &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(t.Context(), t.TempDir(), &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,12 +29,12 @@ func TestAgentAPIContract(t *testing.T) {
 	if boot.Protocol != 2 || boot.InstanceID == "" || boot.WorkspaceID == "" {
 		t.Fatalf("bootstrap: %#v", boot)
 	}
-	activityRequest := httptest.NewRequest(http.MethodGet, "http://localhost/api/workspace/activity", nil)
-	activityRequest.Header.Set(instanceHeader, boot.InstanceID)
-	activity := httptest.NewRecorder()
-	app.ServeHTTP(activity, activityRequest)
-	if activity.Code != 200 || !json.Valid(activity.Body.Bytes()) {
-		t.Fatalf("activity: %d %s", activity.Code, activity.Body)
+	scopedRequest := httptest.NewRequest(http.MethodGet, "http://localhost/api/workspace/skills", nil)
+	scopedRequest.Header.Set(instanceHeader, boot.InstanceID)
+	scoped := httptest.NewRecorder()
+	app.ServeHTTP(scoped, scopedRequest)
+	if scoped.Code != 200 || !json.Valid(scoped.Body.Bytes()) {
+		t.Fatalf("scoped request: %d %s", scoped.Code, scoped.Body)
 	}
 
 	var info map[string]any

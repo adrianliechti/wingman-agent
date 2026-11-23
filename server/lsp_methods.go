@@ -10,8 +10,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/language"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/server/ahp"
@@ -61,19 +59,14 @@ type lspMethod struct {
 	resolve bool
 }
 
-var lspWorkspaceMethods = map[string]func(*lspConnection, context.Context, json.RawMessage) (any, error){
-	"workspace/textDocumentContent": (*lspConnection).textDocumentContent,
-	"workspace/diagnostic":          (*lspConnection).workspaceDiagnostics,
-}
-
 var lspDocumentMethods = map[string]lspMethod{
 	"wingman/documentCapabilities": {handle: func(c *lspConnection, ctx context.Context, q lspQuery) (any, error) {
-		return c.server.lspEditorCapabilities(ctx, q.path), nil
+		return c.lspEditorCapabilities(ctx, q.path), nil
 	}},
 	"textDocument/diagnostic":          {handle: (*lspConnection).diagnostic, empty: lspEmptyDiagnostics},
-	"textDocument/definition":          {handle: lspLocations((*code.Workspace).DefinitionLocations)},
-	"textDocument/typeDefinition":      {handle: lspLocations((*code.Workspace).TypeDefinitionLocations)},
-	"textDocument/implementation":      {handle: lspLocations((*code.Workspace).ImplementationLocations)},
+	"textDocument/definition":          {handle: lspLocations((*language.Service).DefinitionLocations)},
+	"textDocument/typeDefinition":      {handle: lspLocations((*language.Service).TypeDefinitionLocations)},
+	"textDocument/implementation":      {handle: lspLocations((*language.Service).ImplementationLocations)},
 	"textDocument/references":          {handle: (*lspConnection).references},
 	"textDocument/hover":               {handle: (*lspConnection).hover},
 	"textDocument/completion":          {handle: (*lspConnection).completion},
@@ -96,11 +89,11 @@ var lspDocumentMethods = map[string]lspMethod{
 
 func lspNull(lspQuery) any             { return nil }
 func lspUnchanged(q lspQuery) any      { return q.raw }
-func lspEmptyDiagnostics(lspQuery) any { return map[string]any{"kind": "full", "items": []any{}} }
+func lspEmptyDiagnostics(lspQuery) any { return &lsp.FullDocumentDiagnosticReport{Kind: "full"} }
 
 func (c *lspConnection) request(ctx context.Context, req ahp.Request, buffers map[string]lspBuffer) (any, error) {
-	if handle := lspWorkspaceMethods[req.Method]; handle != nil {
-		return handle(c, ctx, req.Params)
+	if req.Method == "workspace/textDocumentContent" {
+		return c.textDocumentContent(ctx, req.Params)
 	}
 	method, ok := lspDocumentMethods[req.Method]
 	if !ok {
@@ -130,7 +123,7 @@ func (c *lspConnection) request(ctx context.Context, req ahp.Request, buffers ma
 	if q.path, err = c.path(q.uri); err != nil {
 		return nil, err
 	}
-	if method.empty != nil && !c.server.Project.workspace.HasLSPFor(q.path) {
+	if method.empty != nil && !c.language.HasLSPFor(q.path) {
 		return method.empty(q), nil
 	}
 	if doc, ok := buffers[q.uri]; ok && req.Method != "wingman/documentCapabilities" {
@@ -186,7 +179,7 @@ func (c *lspConnection) textDocumentContent(ctx context.Context, raw json.RawMes
 		return nil, &ahp.Error{Code: -32803, Message: "source not found"}
 	}
 	if virtual != "" {
-		text, err := c.server.Project.workspace.LSPVirtualContent(ctx, virtual)
+		text, err := c.language.VirtualContent(ctx, virtual)
 		if err != nil {
 			return nil, err
 		}
@@ -214,43 +207,22 @@ func (c *lspConnection) textDocumentContent(ctx context.Context, raw json.RawMes
 	return map[string]string{"text": string(data)}, nil
 }
 
-func (c *lspConnection) workspaceDiagnostics(ctx context.Context, _ json.RawMessage) (any, error) {
-	report := c.server.Project.workspace.Diagnostics(ctx)
-	items := []any{}
-	reported := map[string]bool{}
-	for path, diagnostics := range report.Diagnostics {
-		uri := fileuri.FromPath(path)
-		reported[uri] = true
-		items = append(items, map[string]any{"uri": uri, "version": nil, "kind": "full", "items": lspDiagnostics(diagnostics)})
-	}
-	c.mu.Lock()
-	// A file reported earlier but clean now needs an empty report to clear it.
-	for uri := range c.reported {
-		if !reported[uri] {
-			items = append(items, map[string]any{"uri": uri, "version": nil, "kind": "full", "items": []any{}})
-		}
-	}
-	c.reported = reported
-	c.mu.Unlock()
-	return map[string]any{"items": items, "_wingman": map[string]any{"checked_files": report.CheckedFiles, "discovered_files": report.DiscoveredFiles, "discovery_truncated": report.DiscoveryTruncated, "unknown_files": report.UnknownFiles, "unavailable_servers": report.UnavailableServers, "analyzing": report.Analyzing}}, nil
-}
-
 func (c *lspConnection) diagnostic(ctx context.Context, q lspQuery) (any, error) {
-	diagnostics, known, err := c.server.Project.workspace.FileDiagnostics(ctx, q.path, q.content)
+	diagnostics, known, err := c.language.FileDiagnostics(ctx, q.path, q.content)
 	if err != nil {
 		return nil, err
 	}
 	if !known {
 		return nil, &ahp.Error{Code: -32802, Message: "diagnostics are not available yet", Data: map[string]any{"retriggerRequest": true}}
 	}
-	return map[string]any{"kind": "full", "items": lspDiagnostics(diagnostics)}, nil
+	return &lsp.FullDocumentDiagnosticReport{Kind: "full", Items: diagnostics}, nil
 }
 
-type lspLocationFinder func(*code.Workspace, context.Context, string, *string, int, int) ([]lsp.Location, error)
+type lspLocationFinder func(*language.Service, context.Context, string, *string, int, int) ([]lsp.Location, error)
 
 func lspLocations(find lspLocationFinder) func(*lspConnection, context.Context, lspQuery) (any, error) {
 	return func(c *lspConnection, ctx context.Context, q lspQuery) (any, error) {
-		locations, err := find(c.server.Project.workspace, ctx, q.path, q.content, q.line, q.column)
+		locations, err := find(c.language, ctx, q.path, q.content, q.line, q.column)
 		return c.allowLocations(locations), err
 	}
 }
@@ -276,12 +248,12 @@ func (c *lspConnection) references(ctx context.Context, q lspQuery) (any, error)
 	if len(q.params.Context) > 0 && json.Unmarshal(q.params.Context, &reference) != nil {
 		return nil, ahp.InvalidParams("invalid reference context")
 	}
-	locations, err := c.server.Project.workspace.ReferenceLocations(ctx, q.path, q.content, q.line, q.column, reference.IncludeDeclaration)
+	locations, err := c.language.ReferenceLocations(ctx, q.path, q.content, q.line, q.column, reference.IncludeDeclaration)
 	return c.allowLocations(locations), err
 }
 
 func (c *lspConnection) hover(ctx context.Context, q lspQuery) (any, error) {
-	text, textRange, err := c.server.Project.workspace.HoverRange(ctx, q.path, q.content, q.line, q.column)
+	text, textRange, err := c.language.HoverRange(ctx, q.path, q.content, q.line, q.column)
 	if err != nil || strings.TrimSpace(text) == "" {
 		return nil, err
 	}
@@ -299,7 +271,7 @@ func (c *lspConnection) completion(ctx context.Context, q lspQuery) (any, error)
 			return nil, err
 		}
 	}
-	list, err := c.server.Project.workspace.CompletionItems(ctx, q.path, q.content, q.line, q.column, trigger)
+	list, err := c.language.CompletionItems(ctx, q.path, q.content, q.line, q.column, trigger)
 	if err != nil {
 		return nil, err
 	}
@@ -314,7 +286,7 @@ func (c *lspConnection) resolveCompletion(ctx context.Context, q lspQuery) (any,
 	if err := lsp.Unmarshal(q.raw, &item); err != nil {
 		return nil, err
 	}
-	return c.server.Project.workspace.ResolveCompletionItem(ctx, q.path, q.content, item)
+	return c.language.ResolveCompletionItem(ctx, q.path, q.content, item)
 }
 
 func (c *lspConnection) signatureHelp(ctx context.Context, q lspQuery) (any, error) {
@@ -324,11 +296,11 @@ func (c *lspConnection) signatureHelp(ctx context.Context, q lspQuery) (any, err
 			return nil, err
 		}
 	}
-	return c.server.Project.workspace.SignatureHelp(ctx, q.path, q.content, q.line, q.column, trigger)
+	return c.language.SignatureHelp(ctx, q.path, q.content, q.line, q.column, trigger)
 }
 
 func (c *lspConnection) documentSymbols(ctx context.Context, q lspQuery) (any, error) {
-	documents, flat, err := c.server.Project.workspace.DocumentSymbolItems(ctx, q.path, q.content)
+	documents, flat, err := c.language.DocumentSymbols(ctx, q.path, q.content)
 	if len(documents) > 0 {
 		return documents, err
 	}
@@ -340,15 +312,15 @@ func (c *lspConnection) documentSymbols(ctx context.Context, q lspQuery) (any, e
 }
 
 func (c *lspConnection) documentHighlights(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.Project.workspace.DocumentHighlights(ctx, q.path, q.content, q.line, q.column)
+	return c.language.DocumentHighlights(ctx, q.path, q.content, q.line, q.column)
 }
 
 func (c *lspConnection) foldingRanges(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.Project.workspace.FoldingRanges(ctx, q.path, q.content)
+	return c.language.FoldingRanges(ctx, q.path, q.content)
 }
 
 func (c *lspConnection) semanticTokens(ctx context.Context, q lspQuery) (any, error) {
-	tokens, err := c.server.Project.workspace.SemanticTokens(ctx, q.path, q.content)
+	tokens, err := c.language.SemanticTokens(ctx, q.path, q.content)
 	if err != nil {
 		return nil, err
 	}
@@ -356,14 +328,14 @@ func (c *lspConnection) semanticTokens(ctx context.Context, q lspQuery) (any, er
 }
 
 func (c *lspConnection) prepareRename(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.Project.workspace.PrepareRename(ctx, q.path, q.content, q.line, q.column)
+	return c.language.PrepareRename(ctx, q.path, q.content, q.line, q.column)
 }
 
 func (c *lspConnection) rename(ctx context.Context, q lspQuery) (any, error) {
 	if strings.TrimSpace(q.params.NewName) == "" {
 		return nil, ahp.InvalidParams("newName is required")
 	}
-	edit, err := c.server.Project.workspace.Rename(ctx, q.path, q.content, q.line, q.column, q.params.NewName)
+	edit, err := c.language.Rename(ctx, q.path, q.content, q.line, q.column, q.params.NewName)
 	if err != nil {
 		return nil, err
 	}
@@ -380,7 +352,7 @@ func (c *lspConnection) codeActions(ctx context.Context, q lspQuery) (any, error
 			return nil, err
 		}
 	}
-	actions, err := c.server.Project.workspace.CodeActions(ctx, q.path, q.content, q.params.Range, actionContext.Only, actionContext.TriggerKind)
+	actions, err := c.language.CodeActions(ctx, q.path, q.content, q.params.Range, actionContext.Only, actionContext.TriggerKind)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +384,7 @@ func (c *lspConnection) resolveCodeAction(ctx context.Context, q lspQuery) (any,
 	if err := lsp.Unmarshal(q.raw, &action); err != nil {
 		return nil, err
 	}
-	resolved, err := c.server.Project.workspace.ResolveCodeAction(ctx, q.path, q.content, action)
+	resolved, err := c.language.ResolveCodeAction(ctx, q.path, q.content, action)
 	if err != nil {
 		return nil, err
 	}
@@ -432,11 +404,10 @@ func (c *lspConnection) resolveCodeAction(ctx context.Context, q lspQuery) (any,
 }
 
 func (c *lspConnection) executeCommand(ctx context.Context, q lspQuery) (any, error) {
-	w := c.server.Project.workspace
 	if q.params.Command == "" {
 		return nil, ahp.InvalidParams("command is required")
 	}
-	capabilities, _, err := w.EditorLSPCapabilities(ctx, q.path)
+	capabilities, _, err := c.language.Capabilities(ctx, q.path)
 	if err != nil {
 		return nil, err
 	}
@@ -461,24 +432,24 @@ func (c *lspConnection) executeCommand(ctx context.Context, q lspQuery) (any, er
 		applied, err := c.applyEdit(ctx, q.id, requested.Label, edit)
 		return err == nil && applied
 	}
-	result, err := w.ExecuteLSPCommandWithEdits(native, q.path, q.content, lsp.Command{Command: q.params.Command, Arguments: q.params.Arguments}, apply)
+	result, err := c.language.ExecuteCommand(native, q.path, q.content, lsp.Command{Command: q.params.Command, Arguments: q.params.Arguments}, apply)
 	return result, editorRequestError(native, err)
 }
 
 func (c *lspConnection) formatting(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.Project.workspace.Formatting(ctx, q.path, q.content, q.params.Options)
+	return c.language.Formatting(ctx, q.path, q.content, q.params.Options)
 }
 
 func (c *lspConnection) rangeFormatting(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.Project.workspace.RangeFormatting(ctx, q.path, q.content, q.params.Range, q.params.Options)
+	return c.language.RangeFormatting(ctx, q.path, q.content, q.params.Range, q.params.Options)
 }
 
 func (c *lspConnection) onTypeFormatting(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.Project.workspace.OnTypeFormatting(ctx, q.path, q.content, q.line, q.column, q.params.Character, q.params.Options)
+	return c.language.OnTypeFormatting(ctx, q.path, q.content, q.line, q.column, q.params.Character, q.params.Options)
 }
 
 func (c *lspConnection) inlayHints(ctx context.Context, q lspQuery) (any, error) {
-	return c.server.Project.workspace.InlayHints(ctx, q.path, q.content, q.params.Range)
+	return c.language.InlayHints(ctx, q.path, q.content, q.params.Range)
 }
 
 func routeLSPItems(value any, uri, field string) (any, error) {
@@ -507,7 +478,7 @@ func (c *lspConnection) lspEdit(edit *lsp.WorkspaceEdit, q lspQuery) (any, error
 	if edit == nil {
 		return nil, nil
 	}
-	documents, err := c.server.workspaceEditDocuments(edit)
+	documents, err := c.workspaceEditDocuments(edit)
 	if err != nil {
 		return nil, err
 	}
@@ -536,17 +507,6 @@ func (c *lspConnection) lspEdit(edit *lsp.WorkspaceEdit, q lspQuery) (any, error
 	return result, nil
 }
 
-func lspDiagnostics(diagnostics []language.Diagnostic) []any {
-	items := make([]any, 0, len(diagnostics))
-	for _, diagnostic := range diagnostics {
-		if len(diagnostic.Wire) > 0 {
-			items = append(items, diagnostic.Wire)
-		} else {
-			items = append(items, diagnostic)
-		}
-	}
-	return items
-}
 func encodeLSPSemanticTokens(tokens []language.SemanticToken) map[string]any {
 	slices.SortStableFunc(tokens, func(a, b language.SemanticToken) int {
 		if a.Line != b.Line {

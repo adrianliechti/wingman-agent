@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
@@ -43,32 +42,16 @@ type lspDocument struct {
 // lspQueueLimit bounds the bytes waiting behind a slow document notification.
 const lspQueueLimit = 128 << 20
 
-type lspConnection struct {
-	*editorSocket
-	server    *Server
-	mu        sync.Mutex
-	documents map[string]lspBuffer
-	reported  map[string]bool // documents in the last workspace diagnostic report
-	replies   map[string]chan json.RawMessage
-	sequence  atomic.Uint64
-}
-
 func validLSPID(id json.RawMessage) bool {
 	return len(id) == 0 || id[0] == '"' || id[0] == '-' || id[0] >= '0' && id[0] <= '9'
 }
 
 func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
-	peer, err := s.acceptEditorSocket(w, r)
+	c, err := s.acceptLSPConnection(w, r)
 	if err != nil {
 		return
 	}
-	defer peer.close()
-	c := &lspConnection{editorSocket: peer, server: s, documents: map[string]lspBuffer{}, replies: map[string]chan json.RawMessage{}}
-	defer func() {
-		s.editor.lspDocumentsMu.Lock()
-		delete(s.editor.lspRefreshers, c)
-		s.editor.lspDocumentsMu.Unlock()
-	}()
+	defer c.close()
 	// Document notifications are processed in receive order. Requests begin only
 	// after preceding changes have been applied; cancellation never queues behind
 	// a slow language server.
@@ -77,7 +60,7 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 		defer c.releaseDocuments()
 		initialized, shutdown := false, false
 		for {
-			job, ok := queue.pop(peer.ctx)
+			job, ok := queue.pop(c.ctx)
 			if !ok {
 				return
 			}
@@ -86,70 +69,52 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 			if request.Method == "initialize" {
 				done()
 				if initialized {
-					peer.reply(request.ID, nil, &ahp.Error{Code: -32600, Message: "already initialized"})
+					c.reply(request.ID, nil, &ahp.Error{Code: -32600, Message: "already initialized"})
 					continue
 				}
 				initialized = true
-				var params struct {
-					Capabilities struct {
-						Workspace struct {
-							Diagnostics struct {
-								RefreshSupport bool `json:"refreshSupport"`
-							} `json:"diagnostics"`
-						} `json:"workspace"`
-					} `json:"capabilities"`
-				}
-				if json.Unmarshal(request.Params, &params) == nil && params.Capabilities.Workspace.Diagnostics.RefreshSupport {
-					s.editor.lspDocumentsMu.Lock()
-					if s.editor.lspRefreshers == nil {
-						s.editor.lspRefreshers = map[*lspConnection]struct{}{}
-					}
-					s.editor.lspRefreshers[c] = struct{}{}
-					s.editor.lspDocumentsMu.Unlock()
-				}
-				peer.reply(request.ID, map[string]any{"serverInfo": map[string]any{"name": "Wingman"}, "capabilities": c.capabilities()}, nil)
+				c.reply(request.ID, map[string]any{"serverInfo": map[string]any{"name": "Wingman"}, "capabilities": c.capabilities()}, nil)
 				continue
 			}
 			if request.Method == "exit" {
-				peer.cancel()
+				c.cancel()
 				return
 			}
 			if !initialized {
 				done()
-				peer.reply(request.ID, nil, &ahp.Error{Code: -32002, Message: "language connection is not initialized"})
+				c.reply(request.ID, nil, &ahp.Error{Code: -32002, Message: "language connection is not initialized"})
 				continue
 			}
 			if shutdown {
 				done()
-				peer.reply(request.ID, nil, &ahp.Error{Code: -32600, Message: "language connection is shut down"})
+				c.reply(request.ID, nil, &ahp.Error{Code: -32600, Message: "language connection is shut down"})
 				continue
 			}
 			if request.Method == "initialized" {
 				done()
-				peer.reply(request.ID, nil, &ahp.Error{Code: -32600, Message: "initialized is a notification"})
+				c.reply(request.ID, nil, &ahp.Error{Code: -32600, Message: "initialized is a notification"})
 				continue
 			}
 			if request.Method == "shutdown" {
 				done()
 				shutdown = true
-				peer.reply(request.ID, nil, nil)
+				c.reply(request.ID, nil, nil)
 				continue
 			}
 			if len(request.ID) == 0 {
 				if err := c.documentNotification(request.Method, request.Params); err != nil {
-					peer.notify("window/logMessage", map[string]any{"type": 1, "message": err.Error()})
+					c.notify("window/logMessage", map[string]any{"type": 1, "message": err.Error()})
 				}
 				continue
 			}
 			if err := ctx.Err(); err != nil {
 				done()
-				peer.reply(request.ID, nil, editorRequestError(ctx, err))
+				c.reply(request.ID, nil, editorRequestError(ctx, err))
 				continue
 			}
 			// Capture buffers before the next notification is processed.
 			c.mu.Lock()
-			buffers := make(map[string]lspBuffer, len(c.documents))
-			maps.Copy(buffers, c.documents)
+			buffers := maps.Clone(c.documents)
 			c.mu.Unlock()
 			go func() {
 				defer done()
@@ -159,17 +124,17 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 					data, err = lsp.Marshal(result)
 					result = json.RawMessage(data)
 				}
-				peer.reply(request.ID, result, editorRequestError(ctx, err))
+				c.reply(request.ID, result, editorRequestError(ctx, err))
 			}()
 		}
 	}()
 	for {
-		_, data, err := peer.writer.conn.Read(peer.ctx)
+		_, data, err := c.writer.conn.Read(c.ctx)
 		if err != nil {
 			return
 		}
 		if !json.Valid(data) {
-			peer.reply(json.RawMessage("null"), nil, &ahp.Error{Code: -32700, Message: "parse error"})
+			c.reply(json.RawMessage("null"), nil, &ahp.Error{Code: -32700, Message: "parse error"})
 			continue
 		}
 		var message struct {
@@ -197,7 +162,7 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 			if len(request.ID) > 0 && validLSPID(request.ID) {
 				id = request.ID
 			}
-			peer.reply(id, nil, &ahp.Error{Code: -32600, Message: "invalid JSON-RPC message"})
+			c.reply(id, nil, &ahp.Error{Code: -32600, Message: "invalid JSON-RPC message"})
 			continue
 		}
 		if request.Method == "$/cancelRequest" {
@@ -205,10 +170,10 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 				ID json.RawMessage `json:"id"`
 			}
 			_ = json.Unmarshal(request.Params, &p)
-			peer.cancelRequest(string(p.ID))
+			c.cancelRequest(string(p.ID))
 			continue
 		}
-		job := lspTask{Request: request, ctx: peer.ctx, done: func() {}, size: len(data)}
+		job := lspTask{Request: request, ctx: c.ctx, done: func() {}, size: len(data)}
 		if len(request.ID) == 0 && request.Method == "textDocument/didChange" {
 			var p struct {
 				TextDocument struct {
@@ -225,15 +190,15 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 			if request.Method == "workspace/executeCommand" {
 				timeout = 0 // command edits wait for the user's review; the native call stays bounded
 			}
-			ctx, done, err := peer.begin(string(request.ID), timeout)
+			ctx, done, err := c.begin(string(request.ID), timeout)
 			if err != nil {
-				peer.reply(request.ID, nil, err)
+				c.reply(request.ID, nil, err)
 				continue
 			}
 			job.ctx, job.done = ctx, done
 		}
 		if !queue.push(job) {
-			peer.cancel()
+			c.cancel()
 			return
 		}
 	}
@@ -305,7 +270,7 @@ func (c *lspConnection) capabilities() map[string]any {
 		"codeActionProvider": map[string]any{"resolveProvider": true}, "documentFormattingProvider": true, "documentRangeFormattingProvider": true,
 		"documentOnTypeFormattingProvider": map[string]any{"firstTriggerCharacter": "\n", "moreTriggerCharacter": []string{";", "}"}},
 		"semanticTokensProvider":           map[string]any{"legend": map[string]any{"tokenTypes": lspTokenTypes, "tokenModifiers": lspTokenModifiers}, "full": true},
-		"inlayHintProvider":                true, "diagnosticProvider": map[string]any{"interFileDependencies": true, "workspaceDiagnostics": true},
+		"inlayHintProvider":                true, "diagnosticProvider": map[string]any{"interFileDependencies": true, "workspaceDiagnostics": false},
 		"executeCommandProvider": map[string]any{"commands": []string{}},
 		"workspace":              map[string]any{"textDocumentContent": map[string]any{"schemes": []string{lspSourceScheme}}},
 		"experimental":           map[string]any{"wingman": map[string]any{"workspaceURI": fileuri.FromPath(c.server.Project.workspace.RootPath), "scope": c.server.Project.scope, "documentCapabilities": true}},
@@ -451,7 +416,7 @@ func (c *lspConnection) syncShared(ctx context.Context, shared *lspDocument, doc
 	if shared.writer != c || shared.buffer != doc {
 		shared.changes++
 	}
-	if err := c.server.Project.workspace.SyncEditorDocument(ctx, doc.path, doc.text, doc.saved); err != nil {
+	if err := c.language.SyncDocument(ctx, doc.path, doc.text, doc.saved); err != nil {
 		shared.writer = nil
 		return err
 	}
@@ -558,7 +523,7 @@ func (c *lspConnection) releaseDocument(path string) error {
 		return nil
 	}
 	shared.writer = nil
-	err := s.Project.workspace.CloseEditorDocument(ctx, path)
+	err := c.language.CloseDocument(ctx, path)
 	// The entry stays registered during the close so a new owner waits for it.
 	s.editor.lspDocumentsMu.Lock()
 	if len(shared.owners) == 0 && s.editor.lspDocuments[path] == shared {
@@ -578,19 +543,5 @@ func (c *lspConnection) releaseDocuments() {
 	c.mu.Unlock()
 	for path := range paths {
 		_ = c.releaseDocument(path)
-	}
-}
-
-// refreshDiagnostics asks clients to pull diagnostics again (LSP
-// workspace/diagnostic/refresh). Their responses carry nothing to wait for.
-func (s *Server) refreshDiagnostics() {
-	s.editor.lspDocumentsMu.Lock()
-	clients := make([]*lspConnection, 0, len(s.editor.lspRefreshers))
-	for c := range s.editor.lspRefreshers {
-		clients = append(clients, c)
-	}
-	s.editor.lspDocumentsMu.Unlock()
-	for _, c := range clients {
-		c.send(map[string]any{"jsonrpc": "2.0", "id": fmt.Sprintf("refresh:%d", c.sequence.Add(1)), "method": "workspace/diagnostic/refresh"})
 	}
 }

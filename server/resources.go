@@ -383,7 +383,6 @@ func (p *Project) mutateResource(req ahp.Request) (any, error) {
 		return nil, err
 	}
 	s.flushFiles()
-	s.refreshDiagnostics()
 	return struct{}{}, nil
 }
 func (p *Project) writeResource(rel string, params types.ResourceWriteParams) error {

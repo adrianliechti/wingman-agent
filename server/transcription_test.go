@@ -40,7 +40,7 @@ func TestTranscriptionAPI(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("WINGMAN_URL", gateway.URL)
 			t.Setenv("WINGMAN_DISABLE_VOICE", c.disable)
-			app, err := New(t.Context(), t.TempDir(), &ServerOptions{NoBrowser: true, disableManagedTools: true})
+			app, err := New(t.Context(), t.TempDir(), &ServerOptions{NoBrowser: true})
 			if err != nil {
 				t.Fatal(err)
 			}

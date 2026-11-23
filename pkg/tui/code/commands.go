@@ -80,7 +80,6 @@ func (a *App) builtinCommands() []slashCommand {
 		})
 	}
 	cmds = append(cmds,
-		slashCommand{Name: "/problems", Desc: "Show problems", Busy: true, Run: (*App).showDiagnosticsView},
 		slashCommand{Name: "/diff", Desc: "Show or hide working tree changes", Busy: true, Run: (*App).showDiffView},
 	)
 	if _, ok := a.agent.(contextStatsProvider); ok {

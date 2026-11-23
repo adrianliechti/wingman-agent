@@ -9,6 +9,13 @@ func wireDocument(uri string) protocol.TextDocumentIdentifier {
 	return protocol.TextDocumentIdentifier{URI: lspuri.MustParse(uri)}
 }
 
+func documentPosition(uri string, line, character int) protocol.TextDocumentPositionParams {
+	return protocol.TextDocumentPositionParams{
+		TextDocument: wireDocument(uri),
+		Position:     wirePosition(line, character),
+	}
+}
+
 func wirePosition(line, character int) protocol.Position {
 	return protocol.Position{Line: uint32(max(line, 0)), Character: uint32(max(character, 0))}
 }

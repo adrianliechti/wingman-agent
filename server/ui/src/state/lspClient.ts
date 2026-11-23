@@ -13,7 +13,7 @@ export class LSPClient {
 	};
 	private documents = new Map<string, { text: string; version: number }>();
 	constructor(instance: string) {
-		this.connection = new EditorConnection("lsp", instance, {
+		this.connection = new EditorConnection(instance, {
 			processId: null,
 			clientInfo: { name: "Wingman Web" },
 			rootUri: null,
@@ -26,7 +26,6 @@ export class LSPClient {
 						changeAnnotationSupport: {},
 					},
 					textDocumentContent: {},
-					diagnostics: { refreshSupport: true },
 				},
 				textDocument: {
 					synchronization: { didSave: true },
@@ -193,31 +192,6 @@ export class LSPClient {
 				documents: value?.edit?._wingman?.documents ?? {},
 			} as T;
 		return value as T;
-	}
-	async workspaceDiagnostics(signal?: AbortSignal) {
-		const result = await this.connection.request<any>(
-			"workspace/diagnostic",
-			{},
-			signal,
-		);
-		const items = result.items.flatMap((item: any) =>
-			diagnostics(
-				decodeURIComponent(item.uri.slice(this.root.length)),
-				item.items,
-			),
-		);
-		items.sort(
-			(a: any, b: any) =>
-				({ error: 0, warning: 1, info: 2 })[a.severity as "error"] -
-					{ error: 0, warning: 1, info: 2 }[b.severity as "error"] ||
-				a.path.localeCompare(b.path) ||
-				a.line - b.line,
-		);
-		return {
-			...result._wingman,
-			unavailable_servers: result._wingman?.unavailable_servers ?? [],
-			diagnostics: items,
-		};
 	}
 }
 

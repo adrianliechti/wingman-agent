@@ -56,7 +56,14 @@ type CallHierarchyItem = protocol.CallHierarchyItem
 type CallHierarchyIncomingCall = protocol.CallHierarchyIncomingCall
 type CallHierarchyOutgoingCall = protocol.CallHierarchyOutgoingCall
 type Diagnostic = protocol.Diagnostic
-type FileChangeType = protocol.FileChangeType
+type FullDocumentDiagnosticReport = protocol.FullDocumentDiagnosticReport
+
+const (
+	FileChangeTypeCreated = protocol.FileChangeTypeCreated
+	FileChangeTypeChanged = protocol.FileChangeTypeChanged
+	FileChangeTypeDeleted = protocol.FileChangeTypeDeleted
+)
+
 type DiagnosticSeverity = protocol.DiagnosticSeverity
 type String = protocol.String
 type MarkupContent = protocol.MarkupContent
@@ -68,8 +75,6 @@ type MarkedStringSlice = protocol.MarkedStringSlice
 type DocumentSymbolResult = protocol.DocumentSymbolResult
 type DocumentSymbolSlice = protocol.DocumentSymbolSlice
 type SymbolInformationSlice = protocol.SymbolInformationSlice
-type WorkspaceSymbolResult = protocol.WorkspaceSymbolResult
-type WorkspaceSymbolSlice = protocol.WorkspaceSymbolSlice
 
 const (
 	DiagnosticSeverityError       = protocol.DiagnosticSeverityError

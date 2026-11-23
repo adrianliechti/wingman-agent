@@ -17,6 +17,7 @@ import (
 
 	"github.com/adrianliechti/go-shell"
 
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/settings"
 	"github.com/adrianliechti/wingman-agent/server"
 )
@@ -42,6 +43,8 @@ type App struct {
 }
 
 func main() {
+	go code.RemoveLegacyTools()
+
 	// The background host shares the executable and runs without a window;
 	// it inherits the PATH its window repaired.
 	if len(os.Args) > 1 && os.Args[1] == hostCommand {

@@ -1,1 +1,1 @@
-import{n as e}from"./chunk-Y2CYZVJY.js";import{p as t}from"./src.js";var n=e((e,n)=>{let r;return n===`sandbox`&&(r=t(`#i`+e)),t(n===`sandbox`?r.nodes()[0].contentDocument.body:`body`).select(`[id="${e}"]`)},`getDiagramElement`);export{n as t};
+import{n as e}from"./chunk-Y2CYZVJY.js";import{t}from"./d3-selection.js";var n=e((e,n)=>{let r;return n===`sandbox`&&(r=t(`#i`+e)),t(n===`sandbox`?r.nodes()[0].contentDocument.body:`body`).select(`[id="${e}"]`)},`getDiagramElement`);export{n as t};

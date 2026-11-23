@@ -2,6 +2,7 @@ package lsp_test
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,221 +14,87 @@ import (
 )
 
 func TestNewToolsExposesSingleLSPTool(t *testing.T) {
-	tools := NewTools(newTestManager(t))
-	if len(tools) != 1 {
-		t.Fatalf("len(NewTools) = %d, want 1", len(tools))
+	tools := NewTools(newTestService(t))
+	if len(tools) != 1 || tools[0].Name != "lsp" {
+		t.Fatalf("tools = %#v, want one lsp tool", tools)
 	}
-
 	lspTool := tools[0]
-	if lspTool.Name != "lsp" {
-		t.Fatalf("tool name = %q, want lsp", lspTool.Name)
-	}
 
 	props := lspTool.Parameters["properties"].(map[string]any)
-	operation := props["operation"].(map[string]any)
-	enums := operation["enum"].([]string)
-
-	for _, want := range []string{
-		"diagnostics",
-		"goToDefinition",
-		"findReferences",
-		"hover",
-		"documentSymbol",
-		"workspaceSymbol",
-		"goToImplementation",
-		"incomingCalls",
-		"outgoingCalls",
-	} {
-		if !slices.Contains(enums, want) {
-			t.Fatalf("operation enum missing %q: %#v", want, enums)
+	if got, want := slices.Sorted(maps.Keys(props)), []string{"character", "filePath", "line", "operation", "query", "symbol"}; !slices.Equal(got, want) {
+		t.Fatalf("parameters = %v, want %v", got, want)
+	}
+	enums := props["operation"].(map[string]any)["enum"].([]string)
+	want := []string{
+		"goToDefinition", "findReferences", "hover", "documentSymbol", "workspaceSymbol",
+		"goToImplementation", "prepareCallHierarchy", "incomingCalls", "outgoingCalls",
+	}
+	if !slices.Equal(enums, want) {
+		t.Fatalf("operations = %v, want %v", enums, want)
+	}
+	for _, operation := range want {
+		if !strings.Contains(lspTool.Description, "- "+operation+":") {
+			t.Errorf("description does not explain %s", operation)
 		}
 	}
-
-	for _, removed := range []string{"workspaceDiagnostics", "prepareCallHierarchy"} {
-		if slices.Contains(enums, removed) {
-			t.Fatalf("operation enum should not contain %q: %#v", removed, enums)
+	for _, key := range []string{"line", "character"} {
+		if minimum, ok := props[key].(map[string]any)["minimum"].(int); !ok || minimum != 1 {
+			t.Fatalf("%s minimum = %#v, want 1", key, props[key].(map[string]any)["minimum"])
 		}
 	}
-
-	if _, ok := props["symbol"]; !ok {
-		t.Fatal("expected symbol parameter")
+	if required := lspTool.Parameters["required"].([]string); !slices.Equal(required, []string{"operation"}) {
+		t.Fatalf("required = %#v", required)
 	}
-
-	for _, key := range []string{"line", "column"} {
-		param := props[key].(map[string]any)
-		if minimum, ok := param["minimum"].(int); !ok || minimum != 1 {
-			t.Fatalf("%s minimum = %#v, want 1", key, param["minimum"])
-		}
-	}
-
-	required := lspTool.Parameters["required"].([]string)
-	if !slices.Equal(required, []string{"operation"}) {
-		t.Fatalf("required = %#v, want [operation]", required)
-	}
-
-	additional, ok := lspTool.Parameters["additionalProperties"].(bool)
-	if !ok || additional {
+	if additional, ok := lspTool.Parameters["additionalProperties"].(bool); !ok || additional {
 		t.Fatalf("additionalProperties = %#v, want false", lspTool.Parameters["additionalProperties"])
 	}
 }
 
-func TestLSPToolRejectsZeroBasedPositionInput(t *testing.T) {
-	manager := newTestManager(t)
-	lspTool := NewTools(manager)[0]
-
-	_, err := lspTool.Execute(context.Background(), map[string]any{
-		"operation": "hover",
-		"file_path": "main.go",
-		"line":      0,
-		"column":    1,
-	})
-	if err == nil || !strings.Contains(err.Error(), "line must be a positive 1-based integer") {
-		t.Fatalf("expected line validation error, got: %v", err)
-	}
-
-	_, err = lspTool.Execute(context.Background(), map[string]any{
-		"operation": "hover",
-		"file_path": "main.go",
-		"line":      1,
-		"column":    0,
-	})
-	if err == nil || !strings.Contains(err.Error(), "column must be a positive 1-based integer") {
-		t.Fatalf("expected column validation error, got: %v", err)
-	}
-}
-
-func TestLSPToolRejectsFractionalPositionInput(t *testing.T) {
-	manager := newTestManager(t)
-	lspTool := NewTools(manager)[0]
-
-	_, err := lspTool.Execute(context.Background(), map[string]any{
-		"operation": "hover",
-		"file_path": "main.go",
-		"line":      1.5,
-		"column":    1,
-	})
-	if err == nil || !strings.Contains(err.Error(), "line must be a positive 1-based integer") {
-		t.Fatalf("expected line validation error, got: %v", err)
-	}
-}
-
-func TestLSPToolRequiresPositionOrSymbol(t *testing.T) {
-	manager := newTestManager(t)
-	lspTool := NewTools(manager)[0]
-
-	_, err := lspTool.Execute(context.Background(), map[string]any{
-		"operation": "hover",
-		"file_path": "main.go",
-	})
-	if err == nil || !strings.Contains(err.Error(), "position required") {
-		t.Fatalf("expected position required error, got: %v", err)
-	}
-
-	_, err = lspTool.Execute(context.Background(), map[string]any{
-		"operation": "hover",
-		"file_path": "main.go",
-		"line":      1,
-	})
-	if err == nil || !strings.Contains(err.Error(), "column must be a positive 1-based integer") {
-		t.Fatalf("expected column error, got: %v", err)
-	}
-
-	_, err = lspTool.Execute(context.Background(), map[string]any{
-		"operation": "hover",
-		"file_path": "main.go",
-		"column":    3,
-	})
-	if err == nil || !strings.Contains(err.Error(), "line must be a positive 1-based integer") {
-		t.Fatalf("expected line error, got: %v", err)
-	}
-}
-
-func TestLSPToolResolvesSymbolOnLine(t *testing.T) {
-	manager := newTestManager(t)
-	lspTool := NewTools(manager)[0]
-
-	_, err := lspTool.Execute(context.Background(), map[string]any{
-		"operation": "hover",
-		"file_path": "main.go",
-		"line":      1,
-		"symbol":    "missing",
-	})
-	if err == nil || !strings.Contains(err.Error(), `symbol "missing" not found on line 1`) {
-		t.Fatalf("expected symbol-not-on-line error, got: %v", err)
-	}
-
-	result, err := lspTool.Execute(context.Background(), map[string]any{
-		"operation": "hover",
-		"file_path": "main.go",
-		"line":      1,
-		"symbol":    "main",
-	})
-	if err != nil || !strings.Contains(result.Content.Text(), "Tree-sitter fallback (no language server for this file)") {
-		t.Fatalf("expected symbol to resolve and fall back to tree-sitter, got: %q %v", result.Content.Text(), err)
-	}
-}
-
-func TestLSPToolRejectsOutOfRangeLine(t *testing.T) {
-	manager := newTestManager(t)
-	lspTool := NewTools(manager)[0]
-
-	_, err := lspTool.Execute(context.Background(), map[string]any{
-		"operation": "hover",
-		"file_path": "main.go",
-		"line":      99,
-		"column":    1,
-	})
-	if err == nil || !strings.Contains(err.Error(), "out of range") {
-		t.Fatalf("expected out of range error, got: %v", err)
-	}
-}
-
-func TestLSPToolRejectsDirectories(t *testing.T) {
-	manager := newLanguageService(t, t.TempDir())
-	lspTool := NewTools(manager)[0]
-
-	_, err := lspTool.Execute(context.Background(), map[string]any{
-		"operation": "documentSymbol",
-		"file_path": ".",
-	})
-	if err == nil || !strings.Contains(err.Error(), "path is a directory") {
-		t.Fatalf("expected directory validation error, got: %v", err)
-	}
-}
-
-func TestLSPToolRejectsPathsOutsideWorkspace(t *testing.T) {
-	tmpDir := t.TempDir()
+func TestLSPToolValidatesArgumentsBeforeAnyServer(t *testing.T) {
+	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside.go")
-	if err := os.WriteFile(outside, []byte("package outside\n"), 0644); err != nil {
-		t.Fatalf("write outside file: %v", err)
+	for path, content := range map[string]string{filepath.Join(root, "main.go"): "package main\n", outside: "package outside\n"} {
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
+	service := newLanguageService(t, root)
+	lspTool := NewTools(service)[0]
 
-	lspTool := NewTools(newLanguageService(t, tmpDir))[0]
-
-	_, err := lspTool.Execute(context.Background(), map[string]any{
-		"operation": "documentSymbol",
-		"file_path": outside,
-	})
-	if err == nil || !strings.Contains(err.Error(), "outside workspace") {
-		t.Fatalf("expected outside workspace error, got: %v", err)
+	for name, test := range map[string]struct {
+		args map[string]any
+		want string
+	}{
+		"zero line":           {map[string]any{"operation": "hover", "filePath": "main.go", "line": 0, "character": 1}, "line must be a positive 1-based integer"},
+		"zero character":      {map[string]any{"operation": "hover", "filePath": "main.go", "line": 1, "character": 0}, "character must be a positive 1-based integer"},
+		"fractional line":     {map[string]any{"operation": "hover", "filePath": "main.go", "line": 1.5, "character": 1}, "line must be a positive 1-based integer"},
+		"no position":         {map[string]any{"operation": "hover", "filePath": "main.go"}, "position required"},
+		"line only":           {map[string]any{"operation": "hover", "filePath": "main.go", "line": 1}, "character must be a positive 1-based integer"},
+		"character only":      {map[string]any{"operation": "hover", "filePath": "main.go", "character": 3}, "line must be a positive 1-based integer"},
+		"line out of range":   {map[string]any{"operation": "hover", "filePath": "main.go", "line": 99, "character": 1}, "out of range"},
+		"symbol not on line":  {map[string]any{"operation": "hover", "filePath": "main.go", "line": 1, "symbol": "missing"}, `symbol "missing" not found on line 1`},
+		"unknown operation":   {map[string]any{"operation": "diagnostics", "filePath": "main.go"}, "unknown LSP operation"},
+		"missing file path":   {map[string]any{"operation": "documentSymbol"}, "filePath is required"},
+		"missing file":        {map[string]any{"operation": "documentSymbol", "filePath": "absent.go"}, "file not found"},
+		"directory":           {map[string]any{"operation": "documentSymbol", "filePath": "."}, "path is a directory"},
+		"outside workspace":   {map[string]any{"operation": "documentSymbol", "filePath": outside}, "outside workspace"},
+		"relative outside":    {map[string]any{"operation": "documentSymbol", "filePath": "../outside.go"}, "outside workspace"},
+		"old parameter names": {map[string]any{"operation": "documentSymbol", "file_path": "main.go"}, "filePath is required"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := lspTool.Execute(context.Background(), test.args); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
 	}
-
-	_, err = lspTool.Execute(context.Background(), map[string]any{
-		"operation": "documentSymbol",
-		"file_path": "../outside.go",
-	})
-	if err == nil || !strings.Contains(err.Error(), "outside workspace") {
-		t.Fatalf("expected relative outside workspace error, got: %v", err)
+	if service.Running() {
+		t.Fatal("invalid arguments started a language server")
 	}
 }
 
-func newTestManager(t *testing.T) *language.Service {
+func newTestService(t *testing.T) *language.Service {
 	t.Helper()
-	tmpDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n"), 0644); err != nil {
-		t.Fatalf("write test file: %v", err)
-	}
-	return newLanguageService(t, tmpDir)
+	return newLanguageService(t, t.TempDir())
 }
 
 func newLanguageService(t *testing.T, root string) *language.Service {

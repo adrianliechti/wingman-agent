@@ -29,7 +29,7 @@ func positionFromDisplay(path string, line, column int) (lsp.Position, error) {
 	}
 	runes := []rune(lines[line-1])
 	if column < 1 || column > len(runes)+1 {
-		return lsp.Position{}, fmt.Errorf("column %d out of range for line %d (line has %d columns)", column, line, len(runes)+1)
+		return lsp.Position{}, fmt.Errorf("character %d out of range for line %d (line has %d characters)", column, line, len(runes)+1)
 	}
 	return lsp.Position{Line: uint32(line - 1), Character: uint32(utf16ColumnFromRune(lines[line-1], column-1))}, nil
 }
@@ -47,7 +47,7 @@ func positionOfSymbolOnLine(path string, line int, symbol string) (lsp.Position,
 		return lsp.Position{}, fmt.Errorf("symbol %q not found on line %d", symbol, line)
 	}
 	if findWordInLineFrom(lines[line-1], symbol, column+1) >= 0 {
-		return lsp.Position{}, fmt.Errorf("symbol %q is ambiguous on line %d; pass line and column", symbol, line)
+		return lsp.Position{}, fmt.Errorf("symbol %q is ambiguous on line %d; pass line and character", symbol, line)
 	}
 	return lsp.Position{Line: uint32(line - 1), Character: uint32(utf16ColumnFromRune(lines[line-1], column))}, nil
 }
@@ -64,14 +64,6 @@ func symbolPosition(ctx context.Context, session *lsp.Session, uri, name string,
 	}
 	documentSymbols, symbols := language.DocumentSymbolsFromProtocol(result)
 	return declarationPosition(ctx, path, documentSymbols, symbols, name, line)
-}
-
-func treeSitterSymbolPosition(ctx context.Context, service *language.Service, path, name string, line int) (lsp.Position, error) {
-	documentSymbols, err := service.TreeSitterDocumentSymbols(path, nil)
-	if err != nil {
-		return lsp.Position{}, err
-	}
-	return declarationPosition(ctx, path, documentSymbols, nil, name, line)
 }
 
 func declarationPosition(ctx context.Context, path string, documentSymbols []lsp.DocumentSymbol, symbols []lsp.SymbolInformation, name string, line int) (lsp.Position, error) {
@@ -95,7 +87,7 @@ func declarationPosition(ctx context.Context, path string, documentSymbols []lsp
 	}
 	// A qualified name must not silently resolve to an unrelated leaf name.
 	if strings.Contains(name, ".") {
-		return lsp.Position{}, fmt.Errorf("qualified symbol %q not found; use documentSymbol or pass line and column", name)
+		return lsp.Position{}, fmt.Errorf("qualified symbol %q not found; use documentSymbol or pass line and character", name)
 	}
 	return positionOfSymbol(path, name)
 }

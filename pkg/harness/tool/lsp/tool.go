@@ -8,12 +8,25 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/language"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
+
+const fallbackAdvice = "Use grep/glob/read instead; do not retry this LSP query."
+
+var operations = []string{
+	"goToDefinition",
+	"findReferences",
+	"hover",
+	"documentSymbol",
+	"workspaceSymbol",
+	"goToImplementation",
+	"prepareCallHierarchy",
+	"incomingCalls",
+	"outgoingCalls",
+}
 
 func NewTools(service *language.Service) []tool.Tool {
 	if service == nil {
@@ -23,429 +36,249 @@ func NewTools(service *language.Service) []tool.Tool {
 }
 
 func lspTool(service *language.Service) tool.Tool {
-	manager := service.Manager()
 	return tool.Tool{
 		Name: "lsp",
 		Description: strings.Join([]string{
-			"Read-only language-server queries: exact definitions, types, references, implementations, calls, diagnostics and refactoring previews. Prefer for aliases and same-name symbols.",
-			"Without a working server, definitions, references, hover, symbols, implementations and calls fall back to tree-sitter: syntactic, name-matched candidates, labeled as such; verify bindings before relying on them.",
-			"Call known files/symbols directly; no status preflight. Servers/capabilities may be unavailable.",
-			"Navigation, hover, calls and previewRename require file_path plus symbol or line+column. Results include source lines; definitions include snippets.",
-			"findReferences includes non-call uses; incomingCalls/outgoingCalls report calls. Rename/code-action previews never modify files or execute commands; apply through edit.",
-			"Missing/pending diagnostics do not prove clean code. Follow pagination for exhaustive results.",
+			"Query a language server for code intelligence. Read-only. Prefer it to text search for same-named symbols and references through aliases.",
+			"",
+			"Operations:",
+			"- goToDefinition: where a symbol is defined",
+			"- findReferences: every reference to a symbol",
+			"- hover: type and documentation of a symbol",
+			"- documentSymbol: the symbols of a file",
+			"- workspaceSymbol: symbols matching query across the workspace; filePath is optional",
+			"- goToImplementation: implementations of an interface or abstract method",
+			"- prepareCallHierarchy: the function or method at a position",
+			"- incomingCalls: callers of the function at a position",
+			"- outgoingCalls: functions called by the function at a position",
+			"",
+			"filePath selects the language server. Operations on a symbol take line and character, or symbol to find it by name in the file. Results include source lines.",
+			"A server starts on first use and must be installed; without one the call fails and grep is the fallback.",
 		}, "\n"),
 		Effect: tool.StaticEffect(tool.EffectReadOnly),
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"operation": map[string]any{
-					"type": "string",
-					"enum": []string{
-						"status",
-						"diagnostics",
-						"goToDefinition",
-						"goToTypeDefinition",
-						"findReferences",
-						"hover",
-						"documentSymbol",
-						"workspaceSymbol",
-						"goToImplementation",
-						"incomingCalls",
-						"outgoingCalls",
-						"previewRename",
-						"codeActions",
-					},
-					"description": "status reports servers/capabilities without starting them; documentSymbol lists file symbols; workspaceSymbol searches repo symbols.",
-				},
-				"file_path": map[string]any{
 					"type":        "string",
-					"description": "Required except for workspaceSymbol, diagnostics and status. diagnostics: omit for a bounded workspace scan; status: supply for file capabilities.",
+					"enum":        operations,
+					"description": "The LSP operation to perform.",
+				},
+				"filePath": map[string]any{
+					"type":        "string",
+					"description": "Absolute or workspace-relative path of the file to operate on. workspaceSymbol without it searches every language in the workspace.",
 				},
 				"line": map[string]any{
 					"type":        "integer",
 					"minimum":     1,
-					"description": "1-based line; pair with column or constrain symbol to this line.",
+					"description": "1-based line, as shown in editors.",
 				},
-				"column": map[string]any{
+				"character": map[string]any{
 					"type":        "integer",
 					"minimum":     1,
-					"description": "1-based Unicode character column, not bytes. Requires line.",
+					"description": "1-based character offset in the line, as shown in editors. Requires line.",
 				},
 				"symbol": map[string]any{
 					"type":        "string",
-					"description": "Alternative to line+column: declaration name (prefer Type.method); unqualified names can select a unique occurrence. Ambiguity returns candidates.",
+					"description": "Alternative to line and character: the symbol's name in the file (prefer Type.method). With line, the occurrence on that line. Ambiguity returns candidates.",
 				},
 				"query": map[string]any{
 					"type":        "string",
-					"description": "workspaceSymbol: name filter; empty lists broadly.",
+					"description": "workspaceSymbol only: the name or partial name to search for.",
 				},
-				"offset":              map[string]any{"type": "integer", "minimum": 0, "description": "0-based pagination offset; default 0."},
-				"limit":               map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Results per page; default 100."},
-				"new_name":            map[string]any{"type": "string", "description": "previewRename: proposed new symbol name."},
-				"action_title":        map[string]any{"type": "string", "description": "codeActions: omit to list actions for file/optional position; exact title to preview one."},
-				"output_mode":         map[string]any{"type": "string", "enum": []string{"locations", "count"}, "description": "findReferences: source locations (default) or counts per file; count pagination pages files."},
-				"include_declaration": map[string]any{"type": "boolean", "description": "findReferences: default true; false for uses only."},
 			},
 			"required":             []string{"operation"},
 			"additionalProperties": false,
 		},
-		Execute: func(ctx context.Context, args map[string]any) (result tool.Result, err error) {
-			ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-			defer cancel()
-			defer func() {
-				if ctx.Err() != nil {
-					result, err = tool.Result{}, ctx.Err()
-				}
-			}()
+		Execute: func(ctx context.Context, args map[string]any) (tool.Result, error) {
 			if err := ctx.Err(); err != nil {
 				return tool.Result{}, err
 			}
-			for _, key := range []string{"operation", "file_path", "symbol", "query", "new_name", "action_title", "output_mode"} {
-				if raw, exists := args[key]; exists {
-					if _, ok := raw.(string); !ok {
-						return tool.Result{}, fmt.Errorf("%s must be a string", key)
-					}
-				}
-			}
-			if raw, exists := args["output_mode"]; exists {
-				if mode, _ := raw.(string); mode != "locations" && mode != "count" {
-					return tool.Result{}, fmt.Errorf("output_mode must be locations or count")
-				}
-			}
-			if raw, exists := args["include_declaration"]; exists {
-				if _, ok := raw.(bool); !ok {
-					return tool.Result{}, fmt.Errorf("include_declaration must be boolean")
-				}
-			}
-			for _, key := range []string{"line", "column"} {
-				if _, _, err := optionalPositiveInt(args, key); err != nil {
-					return tool.Result{}, err
-				}
-			}
-			if _, column := args["column"]; column {
-				if _, line := args["line"]; !line {
-					return tool.Result{}, fmt.Errorf("line must be a positive 1-based integer when column is supplied")
-				}
-			}
-			operation, _ := args["operation"].(string)
-			page, err := parsePage(args)
+			content, err := run(ctx, service, args)
 			if err != nil {
 				return tool.Result{}, err
 			}
-
-			// fallback, when non-nil, answers from tree-sitter if the server
-			// is missing, lacks the capability or fails the request.
-			runPosition := func(fn func(session *lsp.Session, uri string, line, column int) (string, error), fallback func(path string, line, column int) (string, error)) (string, error) {
-				path, err := requiredFileArg(manager.WorkingDir(), args, "file_path")
-				if err != nil {
-					return "", err
-				}
-
-				pos, lookup, err := resolvePosition(path, args)
-				if err != nil {
-					return "", err
-				}
-				line, _, _ := optionalPositiveInt(args, "line")
-
-				var content string
-				session, uri, lspErr := openFile(ctx, manager, path)
-				if lspErr == nil {
-					lspErr = requireCapability(session.Capabilities(), operation)
-				}
-				if lspErr == nil {
-					position := pos
-					if lookup != "" {
-						position, lspErr = symbolPosition(ctx, session, uri, lookup, line)
-					}
-					if lspErr == nil {
-						if content, err = fn(session, uri, int(position.Line), int(position.Character)); err == nil {
-							return content, nil
-						}
-						lspErr = fmt.Errorf("%s failed: %w. %s", operation, err, fallbackAdvice)
-					}
-				}
-				if fallback == nil || ctx.Err() != nil || !language.TreeSitterSupported(path) {
-					return content, lspErr
-				}
-
-				if lookup != "" {
-					if pos, err = treeSitterSymbolPosition(ctx, service, path, lookup, line); err != nil {
-						return "", err
-					}
-				}
-				content, err = fallback(path, int(pos.Line), int(pos.Character))
-				if err != nil {
-					return "", fmt.Errorf("%s tree-sitter fallback failed: %w. %s", operation, err, fallbackAdvice)
-				}
-				return treeSitterNote(manager, path, lspErr) + content, nil
-			}
-
-			switch operation {
-			case "status":
-				return serverStatus(manager, args)
-			case "codeActions":
-				return previewCodeActions(ctx, manager, args, page)
-			case "previewRename":
-				started := time.Now()
-				newName, _ := args["new_name"].(string)
-				if strings.TrimSpace(newName) == "" {
-					return tool.Result{}, fmt.Errorf("new_name is required")
-				}
-				var preview tool.Result
-				_, err := runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
-					edit, err := s.Rename(ctx, uri, line, column, newName)
-					if err != nil {
-						return "", err
-					}
-					preview, err = workspaceEditPreview(manager, edit, started)
-					return preview.Content.Text(), err
-				}, nil)
-				return preview, err
-			case "diagnostics":
-				path, _ := args["file_path"].(string)
-				if strings.TrimSpace(path) == "" {
-					if len(manager.DetectServers()) == 0 {
-						return tool.Result{}, fmt.Errorf("no LSP servers detected in workspace; diagnostics unavailable. %s", fallbackAdvice)
-					}
-					return tool.Text(formatWorkspaceDiagnostics(service.Diagnostics(ctx), manager.WorkingDir())), nil
-				}
-
-				path, err := resolveExistingFile(manager.WorkingDir(), path)
-				if err != nil {
-					return tool.Result{}, err
-				}
-
-				session, uri, err := openFile(ctx, manager, path)
-				if err != nil {
-					return tool.Result{}, err
-				}
-
-				raw, known := session.WaitForDiagnostics(ctx, uri, 3*time.Second)
-				if !known {
-					return tool.Text("No diagnostics data: the language server did not report results for this file (it may still be analyzing or not support diagnostics). Do not treat this as a clean result."), nil
-				}
-				values := language.DiagnosticsFromProtocol(raw)
-				if len(values) == 0 {
-					return tool.Text("No diagnostics found"), nil
-				}
-				return tool.Text(language.FormatDiagnostics(values, path, manager.WorkingDir())), nil
-			case "workspaceSymbol":
-				query, _ := args["query"].(string)
-				symbols, workspaceSymbols, err := service.WorkspaceSymbols(ctx, query)
-				// Files without a server (or every file, when no server
-				// answered) are covered syntactically.
-				serversFailed := err != nil && len(symbols)+len(workspaceSymbols) == 0
-				syntactic, truncated, syntaxErr := service.TreeSitterWorkspaceSymbols(ctx, query, !serversFailed)
-				if ctx.Err() != nil {
-					return tool.Result{}, ctx.Err()
-				}
-				for _, symbol := range slices.Concat(symbols, syntactic) {
-					location := symbol.Location
-					converted := lsp.WorkspaceSymbol{Location: &location}
-					converted.Name, converted.Kind = symbol.Name, symbol.Kind
-					workspaceSymbols = append(workspaceSymbols, converted)
-				}
-				if len(workspaceSymbols) == 0 && (syntaxErr != nil || serversFailed && len(manager.Projects()) > 0) {
-					return tool.Result{}, fmt.Errorf("workspace symbol search unavailable/incomplete: %w. %s", errors.Join(err, syntaxErr), fallbackAdvice)
-				}
-				var notes []string
-				switch {
-				case serversFailed:
-					notes = append(notes, fmt.Sprintf("Tree-sitter fallback (language servers: %s): syntactic, name-matched results.", lspFailure(err)))
-				case err != nil:
-					notes = append(notes, "Partial workspace results: "+err.Error()+". "+fallbackAdvice)
-				}
-				if len(syntactic) > 0 && !serversFailed {
-					notes = append(notes, fmt.Sprintf("%d symbols from files without a language server come from tree-sitter (syntactic).", len(syntactic)))
-				}
-				if truncated {
-					notes = append(notes, "Tree-sitter matches were capped; refine the query.")
-				}
-				content := "No symbols found"
-				if len(workspaceSymbols) > 0 {
-					content = formatWorkspaceSymbols(workspaceSymbols, manager.WorkingDir(), page)
-				}
-				if len(notes) > 0 {
-					content = strings.Join(notes, "\n") + "\n\n" + content
-				}
-				return tool.Text(content), nil
-			case "documentSymbol":
-				path, err := requiredFileArg(manager.WorkingDir(), args, "file_path")
-				if err != nil {
-					return tool.Result{}, err
-				}
-				session, uri, lspErr := openFile(ctx, manager, path)
-				if lspErr == nil {
-					lspErr = requireCapability(session.Capabilities(), "documentSymbol")
-				}
-				if lspErr == nil {
-					result, err := session.DocumentSymbols(ctx, uri)
-					documentSymbols, symbols := language.DocumentSymbolsFromProtocol(result)
-					if err == nil {
-						if len(symbols) > 0 {
-							return tool.Text(formatSymbolInformation(symbols, manager.WorkingDir(), page)), nil
-						}
-						if len(documentSymbols) > 0 {
-							return tool.Text(formatDocumentSymbolPage(documentSymbols, path, manager.WorkingDir(), page)), nil
-						}
-						return tool.Text("No symbols found"), nil
-					}
-					lspErr = err
-				}
-				if ctx.Err() != nil || !language.TreeSitterSupported(path) {
-					return tool.Result{}, errors.Join(lspErr, ctx.Err())
-				}
-				documentSymbols, err := service.TreeSitterDocumentSymbols(path, nil)
-				if err != nil {
-					return tool.Result{}, err
-				}
-				content := "No symbols found"
-				if len(documentSymbols) > 0 {
-					content = formatDocumentSymbolPage(documentSymbols, path, manager.WorkingDir(), page)
-				}
-				return tool.Text(treeSitterNote(manager, path, lspErr) + content), nil
-			case "goToDefinition", "goToTypeDefinition":
-				var fallback func(string, int, int) (string, error)
-				if operation == "goToDefinition" {
-					fallback = func(path string, line, column int) (string, error) {
-						locations, err := service.TreeSitterDefinitions(ctx, path, nil, line, column)
-						if err != nil || len(locations) == 0 {
-							return "No definition found", err
-						}
-						return formatDefinitions(locations, manager.WorkingDir(), page), nil
-					}
-				}
-				content, err := runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
-					var locations []lsp.Location
-					var err error
-					if operation == "goToTypeDefinition" {
-						locations, err = s.TypeDefinitionLocations(ctx, uri, line, column)
-					} else {
-						locations, err = s.DefinitionLocations(ctx, uri, line, column)
-					}
-					if err != nil || len(locations) == 0 {
-						return "No definition found", err
-					}
-					return formatDefinitions(locations, manager.WorkingDir(), page), nil
-				}, fallback)
-				return tool.Text(content), err
-			case "findReferences":
-				mode := "locations"
-				if raw, exists := args["output_mode"]; exists {
-					mode, _ = raw.(string)
-				}
-				include := true
-				if raw, exists := args["include_declaration"]; exists {
-					include, _ = raw.(bool)
-				}
-				content, err := runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
-					locations, err := s.ReferenceLocations(ctx, uri, line, column, include)
-					if err == nil && mode == "count" {
-						return formatReferenceCounts(locations, manager.WorkingDir(), include, page), nil
-					}
-					if err != nil || len(locations) == 0 {
-						return "No references found", err
-					}
-					return formatLocations("References", locations, manager.WorkingDir(), page), nil
-				}, func(path string, line, column int) (string, error) {
-					locations, truncated, err := service.TreeSitterReferences(ctx, path, nil, line, column, include)
-					if err != nil {
-						return "", err
-					}
-					var content string
-					switch {
-					case mode == "count":
-						content = formatReferenceCounts(locations, manager.WorkingDir(), include, page)
-					case len(locations) == 0:
-						return "No references found", nil
-					default:
-						content = formatLocations("References", locations, manager.WorkingDir(), page)
-					}
-					if truncated {
-						content = fmt.Sprintf("Only the first %d matches were collected.\n", len(locations)) + content
-					}
-					return content, nil
-				})
-				return tool.Text(content), err
-			case "hover":
-				content, err := runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
-					hover, err := s.Hover(ctx, uri, line, column)
-					content := language.HoverText(hover)
-					if err == nil && content == "" {
-						content = "No hover information available"
-					}
-					return content, err
-				}, func(path string, line, column int) (string, error) {
-					content, err := service.TreeSitterHover(ctx, path, nil, line, column)
-					if err == nil && content == "" {
-						content = "No hover information available"
-					}
-					return content, err
-				})
-				return tool.Text(content), err
-			case "goToImplementation":
-				content, err := runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
-					locations, err := s.ImplementationLocations(ctx, uri, line, column)
-					if err != nil || len(locations) == 0 {
-						return "No implementations found", err
-					}
-					return formatLocations("Implementations", locations, manager.WorkingDir(), page), nil
-				}, func(path string, line, column int) (string, error) {
-					locations, err := service.TreeSitterImplementations(ctx, path, nil, line, column)
-					if err != nil || len(locations) == 0 {
-						return "No implementations found (only explicit extends/implements/embedding is visible syntactically)", err
-					}
-					return formatLocations("Implementations", locations, manager.WorkingDir(), page), nil
-				})
-				return tool.Text(content), err
-			case "incomingCalls", "outgoingCalls":
-				content, err := runPosition(func(s *lsp.Session, uri string, line, column int) (string, error) {
-					items, err := s.PrepareCallHierarchy(ctx, uri, line, column)
-					if err != nil || len(items) == 0 {
-						return "No call hierarchy item found at this position", err
-					}
-					if len(items) > 1 {
-						return "", fmt.Errorf("ambiguous call hierarchy (%d items); choose a more specific position", len(items))
-					}
-					var content string
-					if operation == "incomingCalls" {
-						calls, err := s.IncomingCalls(ctx, items[0])
-						if err != nil || len(calls) == 0 {
-							return "No incoming calls found", err
-						}
-						content = formatIncomingCalls(calls, manager.WorkingDir(), page)
-					} else {
-						calls, err := s.OutgoingCalls(ctx, items[0])
-						if err != nil || len(calls) == 0 {
-							return "No outgoing calls found", err
-						}
-						content = formatOutgoingCalls(calls, manager.WorkingDir(), page)
-					}
-					return content, nil
-				}, func(path string, line, column int) (string, error) {
-					if operation == "incomingCalls" {
-						calls, err := service.TreeSitterIncomingCalls(ctx, path, line, column)
-						if err != nil || len(calls) == 0 {
-							return "No incoming calls found", err
-						}
-						return formatIncomingCalls(calls, manager.WorkingDir(), page), nil
-					}
-					calls, unresolved, err := service.TreeSitterOutgoingCalls(ctx, path, line, column)
-					if err != nil || len(calls)+len(unresolved) == 0 {
-						return "No outgoing calls found", err
-					}
-					content := formatOutgoingCalls(calls, manager.WorkingDir(), page)
-					if len(unresolved) > 0 {
-						content += "\nNo workspace declaration (library or dynamic calls): " + strings.Join(unresolved, ", ") + "\n"
-					}
-					return content, nil
-				})
-				return tool.Text(content), err
-			default:
-				return tool.Result{}, fmt.Errorf("unknown LSP operation %q; see the operation enum", operation)
-			}
+			return tool.Text(content), nil
 		},
 	}
+}
+
+func run(ctx context.Context, service *language.Service, args map[string]any) (string, error) {
+	manager := service.Manager()
+	for _, key := range []string{"operation", "filePath", "symbol", "query"} {
+		if raw, exists := args[key]; exists {
+			if _, ok := raw.(string); !ok {
+				return "", fmt.Errorf("%s must be a string", key)
+			}
+		}
+	}
+	operation, _ := args["operation"].(string)
+	if !slices.Contains(operations, operation) {
+		return "", fmt.Errorf("unknown LSP operation %q; use one of %s", operation, strings.Join(operations, ", "))
+	}
+	if path, _ := args["filePath"].(string); operation == "workspaceSymbol" && strings.TrimSpace(path) == "" {
+		query, _ := args["query"].(string)
+		symbols, err := service.WorkspaceSymbols(ctx, query)
+		if err != nil {
+			return "", failed(operation, err)
+		}
+		return formatWorkspaceSymbols(symbols, manager.WorkingDir()), nil
+	}
+	path, err := requiredFileArg(manager.WorkingDir(), args)
+	if err != nil {
+		return "", err
+	}
+	var position lsp.Position
+	var lookup string
+	if operation != "documentSymbol" && operation != "workspaceSymbol" {
+		if position, lookup, err = resolvePosition(path, args); err != nil {
+			return "", err
+		}
+	}
+
+	session, uri, err := openFile(ctx, manager, path)
+	if err != nil {
+		return "", err
+	}
+	if err := requireCapability(session.Capabilities(), operation); err != nil {
+		return "", err
+	}
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, session.RequestTimeout())
+	defer cancel()
+	content, err := query(ctx, session, manager.WorkingDir(), operation, path, uri, position, lookup, args)
+	switch {
+	case parent.Err() != nil:
+		return "", parent.Err()
+	case ctx.Err() != nil:
+		return "", fmt.Errorf("the language server did not answer within %s; it may still be indexing. Try again later or use grep", session.RequestTimeout())
+	case err != nil:
+		return "", err
+	}
+	if session.Analyzing() {
+		content = "The language server is still indexing; results may be incomplete.\n\n" + content
+	}
+	return content, nil
+}
+
+func query(ctx context.Context, session *lsp.Session, root, operation, path, uri string, position lsp.Position, lookup string, args map[string]any) (string, error) {
+	var err error
+	if lookup != "" {
+		line, _, _ := optionalPositiveInt(args, "line")
+		if position, err = symbolPosition(ctx, session, uri, lookup, line); err != nil {
+			return "", err
+		}
+	}
+
+	line, character := int(position.Line), int(position.Character)
+	var content string
+	switch operation {
+	case "goToDefinition":
+		locations, err := session.DefinitionLocations(ctx, uri, line, character)
+		if err != nil {
+			return "", failed(operation, err)
+		}
+		content = formatDefinitions(locations, root)
+	case "findReferences":
+		locations, err := session.ReferenceLocations(ctx, uri, line, character, true)
+		if err != nil {
+			return "", failed(operation, err)
+		}
+		content = formatLocations("References", locations, root)
+	case "goToImplementation":
+		locations, err := session.ImplementationLocations(ctx, uri, line, character)
+		if err != nil {
+			return "", failed(operation, err)
+		}
+		content = formatLocations("Implementations", locations, root)
+	case "hover":
+		hover, err := session.Hover(ctx, uri, line, character)
+		if err != nil {
+			return "", failed(operation, err)
+		}
+		if content = language.HoverText(hover); content == "" {
+			content = "No hover information available"
+		}
+	case "documentSymbol":
+		result, err := session.DocumentSymbols(ctx, uri)
+		if err != nil {
+			return "", failed(operation, err)
+		}
+		documentSymbols, symbols := language.DocumentSymbolsFromProtocol(result)
+		if len(symbols) > 0 {
+			content = formatSymbolInformation(symbols, root)
+		} else {
+			content = formatDocumentSymbols(documentSymbols, path, root)
+		}
+	case "workspaceSymbol":
+		query, _ := args["query"].(string)
+		symbols, err := session.WorkspaceSymbols(ctx, query)
+		if err != nil {
+			return "", failed(operation, err)
+		}
+		content = formatWorkspaceSymbols(symbols, root)
+	case "prepareCallHierarchy", "incomingCalls", "outgoingCalls":
+		items, err := session.PrepareCallHierarchy(ctx, uri, line, character)
+		if err != nil {
+			return "", failed(operation, err)
+		}
+		switch {
+		case operation == "prepareCallHierarchy":
+			content = formatCallItems(items, root)
+		case len(items) == 0:
+			content = "No function or method found at this position"
+		case len(items) > 1:
+			return "", fmt.Errorf("ambiguous call hierarchy (%d items); choose a more specific position", len(items))
+		case operation == "incomingCalls":
+			calls, err := session.IncomingCalls(ctx, items[0])
+			if err != nil {
+				return "", failed(operation, err)
+			}
+			content = formatIncomingCalls(calls, root)
+		default:
+			calls, err := session.OutgoingCalls(ctx, items[0])
+			if err != nil {
+				return "", failed(operation, err)
+			}
+			content = formatOutgoingCalls(calls, root)
+		}
+	}
+	return content, nil
+}
+
+func failed(operation string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%s failed: %w. %s", operation, err, fallbackAdvice)
+}
+
+func operationCapability(c lsp.ServerCapabilities, operation string) any {
+	switch operation {
+	case "goToDefinition":
+		return c.DefinitionProvider
+	case "findReferences":
+		return c.ReferencesProvider
+	case "goToImplementation":
+		return c.ImplementationProvider
+	case "hover":
+		return c.HoverProvider
+	case "prepareCallHierarchy", "incomingCalls", "outgoingCalls":
+		return c.CallHierarchyProvider
+	case "documentSymbol":
+		return c.DocumentSymbolProvider
+	case "workspaceSymbol":
+		return c.WorkspaceSymbolProvider
+	default:
+		return nil
+	}
+}
+
+func requireCapability(c lsp.ServerCapabilities, operation string) error {
+	if !lsp.CapabilityEnabled(operationCapability(c, operation)) {
+		return fmt.Errorf("LSP operation %s is unsupported by this server. %s", operation, fallbackAdvice)
+	}
+	return nil
 }
 
 func resolvePosition(path string, args map[string]any) (lsp.Position, string, error) {
@@ -453,8 +286,7 @@ func resolvePosition(path string, args map[string]any) (lsp.Position, string, er
 	if err != nil {
 		return lsp.Position{}, "", err
 	}
-
-	column, hasColumn, err := optionalPositiveInt(args, "column")
+	character, hasCharacter, err := optionalPositiveInt(args, "character")
 	if err != nil {
 		return lsp.Position{}, "", err
 	}
@@ -463,8 +295,10 @@ func resolvePosition(path string, args map[string]any) (lsp.Position, string, er
 	symbol = strings.TrimSpace(symbol)
 
 	switch {
-	case hasLine && hasColumn:
-		pos, err := positionFromDisplay(path, line, column)
+	case hasCharacter && !hasLine:
+		return lsp.Position{}, "", fmt.Errorf("line must be a positive 1-based integer when character is supplied")
+	case hasLine && hasCharacter:
+		pos, err := positionFromDisplay(path, line, character)
 		return pos, "", err
 	case symbol != "" && hasLine && strings.Contains(symbol, "."):
 		// A qualified declaration need not appear literally in source (Go's
@@ -478,11 +312,9 @@ func resolvePosition(path string, args map[string]any) (lsp.Position, string, er
 	case symbol != "":
 		return lsp.Position{}, symbol, nil
 	case hasLine:
-		return lsp.Position{}, "", fmt.Errorf("column must be a positive 1-based integer (or pass symbol instead)")
-	case hasColumn:
-		return lsp.Position{}, "", fmt.Errorf("line must be a positive 1-based integer (or pass symbol instead)")
+		return lsp.Position{}, "", fmt.Errorf("character must be a positive 1-based integer (or pass symbol instead)")
 	default:
-		return lsp.Position{}, "", fmt.Errorf("position required: pass line and column, or symbol (optionally with line)")
+		return lsp.Position{}, "", fmt.Errorf("position required: pass line and character, or symbol (optionally with line)")
 	}
 }
 
@@ -500,10 +332,10 @@ func optionalPositiveInt(args map[string]any, key string) (int, bool, error) {
 	return value, true, nil
 }
 
-func requiredFileArg(workingDir string, args map[string]any, key string) (string, error) {
-	path, _ := args[key].(string)
+func requiredFileArg(workingDir string, args map[string]any) (string, error) {
+	path, _ := args["filePath"].(string)
 	if strings.TrimSpace(path) == "" {
-		return "", fmt.Errorf("%s is required", key)
+		return "", fmt.Errorf("filePath is required")
 	}
 
 	return resolveExistingFile(workingDir, path)
@@ -572,6 +404,9 @@ func expandHome(path string) string {
 func openFile(ctx context.Context, manager *lsp.Manager, path string) (*lsp.Session, string, error) {
 	session, err := manager.GetSession(ctx, path)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, "", err
+		}
 		return nil, "", fmt.Errorf("%w. %s", err, fallbackAdvice)
 	}
 
@@ -584,4 +419,21 @@ func openFile(ctx context.Context, manager *lsp.Manager, path string) (*lsp.Sess
 	}
 
 	return session, uri, nil
+}
+
+// Agent positions refer to disk, whereas an editor may have an unsaved
+// buffer. Never silently query different text at that position.
+func requireSavedContent(session *lsp.Session, path string) error {
+	buffer, ok := session.DocumentContent(path)
+	if !ok {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if buffer != string(data) {
+		return fmt.Errorf("the editor buffer for %s differs from disk. Save or reload it before querying LSP, or use read/grep for disk content", path)
+	}
+	return nil
 }

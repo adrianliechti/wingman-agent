@@ -26,21 +26,19 @@ type HostOptions struct {
 	// Idle is how long a project stays open without clients or work: 15 minutes when zero.
 	Idle time.Duration
 
-	disableManagedTools bool
 	// folder is the one folder the host of a server started in it shows.
 	folder string
 }
 
 // Host serves AHP for any project, opening one when a session names its directory.
 type Host struct {
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	id                  string // this host process, which a reconnecting window recognizes
-	disableManagedTools bool
-	token               string
-	handler             http.Handler
-	background          sync.WaitGroup
-	closeOnce           sync.Once
+	ctx        context.Context
+	cancel     context.CancelFunc
+	id         string // this host process, which a reconnecting window recognizes
+	token      string
+	handler    http.Handler
+	background sync.WaitGroup
+	closeOnce  sync.Once
 
 	mu          sync.Mutex
 	creating    map[string]chan struct{} // sessions being created, closed when done
@@ -84,7 +82,6 @@ func NewHost(ctx context.Context, opts *HostOptions) (*Host, error) {
 	}
 	h := newHost(ctx)
 	h.token = opts.Token
-	h.disableManagedTools = opts.disableManagedTools
 	h.home = canonicalPath(home)
 	if opts.folder != "" {
 		h.folder = h.home

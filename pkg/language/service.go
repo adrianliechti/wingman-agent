@@ -20,23 +20,15 @@ type Service struct {
 	closed bool
 }
 
-func New(root string, managerOptions ...lsp.ManagerOption) *Service {
+func New(root string, servers ...lsp.Server) *Service {
 	return &Service{
 		root:    root,
-		manager: lsp.NewManager(root, managerOptions...),
+		manager: lsp.NewManager(root, servers...),
 		syntax:  treesitter.NewWorkspace(root),
 	}
 }
 
 func (s *Service) Manager() *lsp.Manager { return s.manager }
-
-func (s *Service) WarmUp() {
-	s.lifeMu.RLock()
-	defer s.lifeMu.RUnlock()
-	if !s.closed {
-		s.manager.WarmUpServers()
-	}
-}
 
 func (s *Service) Close() {
 	s.lifeMu.Lock()
@@ -48,70 +40,40 @@ func (s *Service) Close() {
 	s.manager.Close()
 }
 
-func (s *Service) HasLSP() bool {
-	s.lifeMu.RLock()
-	defer s.lifeMu.RUnlock()
-	return !s.closed && len(s.manager.DetectServers()) > 0
-}
-
 func (s *Service) HasLSPFor(filePath string) bool {
 	s.lifeMu.RLock()
 	defer s.lifeMu.RUnlock()
 	return !s.closed && s.manager.FindServer(filePath) != nil
 }
 
-// InvalidateLSPDetection makes managed-tool changes visible to subsequent
-// capability and session lookups.
-func (s *Service) InvalidateLSPDetection() {
+// withLSPDocument keeps the session alive while synchronizing and querying a document.
+func withLSPDocument[T any](ctx context.Context, s *Service, filePath string, content *string, request func(*lsp.Session, string) (T, error)) (T, error) {
 	s.lifeMu.RLock()
 	defer s.lifeMu.RUnlock()
-	if !s.closed {
-		s.manager.InvalidateDetection()
-	}
-}
-
-// SetServerInitializationOptions refreshes a server's startup configuration.
-func (s *Service) SetServerInitializationOptions(name string, value any) error {
-	s.lifeMu.RLock()
-	defer s.lifeMu.RUnlock()
+	var zero T
 	if s.closed {
-		return nil
-	}
-	return s.manager.SetServerInitializationOptions(name, value)
-}
-
-func (s *Service) hasLSPServerFor(filePath string) bool {
-	return s.manager.FindServer(filePath) != nil
-}
-
-func (s *Service) withLSPDocument(ctx context.Context, filePath string, content *string, fn func(*lsp.Session, string) error) error {
-	s.lifeMu.RLock()
-	defer s.lifeMu.RUnlock()
-	if s.closed {
-		return fmt.Errorf("code intelligence service is closed")
+		return zero, fmt.Errorf("code intelligence service is closed")
 	}
 	session, err := s.manager.GetSession(ctx, filePath)
 	if err != nil {
-		return err
+		return zero, err
 	}
-	uri, err := syncDocument(ctx, session, filePath, content)
-	if err != nil {
-		return err
-	}
-	return fn(session, uri)
-}
-
-func syncDocument(ctx context.Context, session *lsp.Session, filePath string, content *string) (string, error) {
+	var uri string
 	if content != nil {
-		return session.SyncRequestDocument(ctx, filePath, *content)
+		uri, err = session.SyncRequestDocument(ctx, filePath, *content)
+	} else {
+		uri, err = session.OpenDocument(ctx, filePath)
 	}
-	return session.OpenDocument(ctx, filePath)
+	if err != nil {
+		return zero, err
+	}
+	return request(session, uri)
 }
 
 func (s *Service) SyncDocument(ctx context.Context, filePath, content string, saved bool) error {
 	s.lifeMu.RLock()
 	defer s.lifeMu.RUnlock()
-	if s.closed || !s.hasLSPServerFor(filePath) {
+	if s.closed || s.manager.FindServer(filePath) == nil {
 		return nil
 	}
 	session, err := s.manager.GetSession(ctx, filePath)
@@ -134,7 +96,7 @@ func (s *Service) CloseDocument(ctx context.Context, filePath string) error {
 func (s *Service) Capabilities(ctx context.Context, filePath string) (lsp.ServerCapabilities, bool, error) {
 	s.lifeMu.RLock()
 	defer s.lifeMu.RUnlock()
-	if s.closed || !s.hasLSPServerFor(filePath) {
+	if s.closed || s.manager.FindServer(filePath) == nil {
 		return lsp.ServerCapabilities{}, false, nil
 	}
 	session, err := s.manager.GetSession(ctx, filePath)
@@ -157,6 +119,12 @@ func (s *Service) DocumentContent(filePath string) (string, bool) {
 	return session.DocumentContent(filePath)
 }
 
+func (s *Service) Running() bool {
+	s.lifeMu.RLock()
+	defer s.lifeMu.RUnlock()
+	return !s.closed && s.manager.Running()
+}
+
 func (s *Service) FilesChanged(ctx context.Context, changes []lsp.FileChange) {
 	s.lifeMu.RLock()
 	defer s.lifeMu.RUnlock()
@@ -173,13 +141,4 @@ func (s *Service) VirtualContent(ctx context.Context, uri string) (string, error
 		return "", fmt.Errorf("code intelligence service is closed")
 	}
 	return s.manager.VirtualContent(ctx, uri)
-}
-
-func (s *Service) Activities() []lsp.ServerActivity {
-	s.lifeMu.RLock()
-	defer s.lifeMu.RUnlock()
-	if s.closed {
-		return nil
-	}
-	return s.manager.Activities()
 }

@@ -8,25 +8,11 @@ export interface WorkspaceInfo extends Bootstrap {
 	name: string;
 	path: string;
 	shells: ShellEntry[];
-	lsp: boolean;
-	debug: boolean;
 	"window.terminal.position": "tab" | "bottom";
 	"window.sidebar.position": "left" | "right";
 	platform: string;
-	managed_tools?: ManagedToolsStatus;
 	/** A temporary chat's, which the host removes once no window shows it. */
 	temporary?: boolean;
-}
-
-export interface ManagedToolsStatus {
-	state: "installing" | "ready" | "error";
-	tool?: string;
-	label?: string;
-	phase?: "checking" | "installing" | "updating";
-	current?: number;
-	total?: number;
-	error?: string;
-	unavailable?: string[];
 }
 
 export const workspaceQuery = queryOptions({
@@ -34,20 +20,6 @@ export const workspaceQuery = queryOptions({
 	queryFn: ({ signal }) =>
 		fetchJSON<WorkspaceInfo>("/api/workspace", { signal }),
 });
-
-export interface InspectAvailability {
-	inspect: boolean;
-	diagnostics: boolean;
-	debug: boolean;
-}
-
-export function getInspectAvailability(
-	capabilities: Pick<WorkspaceInfo, "lsp" | "debug"> | null,
-): InspectAvailability {
-	const diagnostics = capabilities?.lsp ?? false;
-	const debug = capabilities?.debug ?? false;
-	return { inspect: diagnostics, diagnostics, debug };
-}
 
 export interface GitWeekActivity {
 	week: string;

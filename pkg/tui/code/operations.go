@@ -14,7 +14,6 @@ const (
 	operationNone operationKind = iota
 	operationSession
 	operationShell
-	operationDiagnostics
 	operationCompact
 )
 

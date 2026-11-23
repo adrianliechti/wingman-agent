@@ -1,34 +1,13 @@
 package tooling
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
-
-func TestResolveProjectWalksToWorkspaceRoot(t *testing.T) {
-	root := t.TempDir()
-	project := filepath.Join(root, "services", "api")
-	if err := os.MkdirAll(project, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	name := Candidates(runtime.GOOS, "example-tool")[0]
-	command := filepath.Join(root, "node_modules", ".bin", name)
-	if err := os.MkdirAll(filepath.Dir(command), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(command, []byte("test"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if got := ResolveProject(project, root, "example-tool"); got != command {
-		t.Fatalf("ResolveProject = %q, want %q", got, command)
-	}
-}
 
 func TestRunnableRejectsMissingShebangInterpreter(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -62,76 +41,6 @@ func TestEnvironmentDoesNotAddCurrentDirectoryToEmptyPath(t *testing.T) {
 	}
 }
 
-func TestMajorVersionAtLeast(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test helper uses a POSIX script")
-	}
-	command := filepath.Join(t.TempDir(), "versioned")
-	if err := os.WriteFile(command, []byte("#!/bin/sh\nprintf 'Version 7.1.0\\n'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if !MajorVersionAtLeast(ctx, command, 7, "") || MajorVersionAtLeast(ctx, command, 8, "") {
-		t.Fatal("major version probe returned the wrong result")
-	}
-}
-
-func TestMajorVersionProbeUsesProjectDirectory(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test helper uses a POSIX script")
-	}
-	project := t.TempDir()
-	if err := os.WriteFile(filepath.Join(project, ".available"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	command := filepath.Join(t.TempDir(), "project-aware")
-	if err := os.WriteFile(command, []byte("#!/bin/sh\n[ -f .available ] || exit 1\nprintf 'Version 1.0.0\\n'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if !MajorVersionAtLeast(ctx, command, ProbeExecutes, project) {
-		t.Fatal("project-aware command was probed from the wrong directory")
-	}
-	if MajorVersionAtLeast(ctx, command, ProbeExecutes, t.TempDir()) {
-		t.Fatal("project-aware command ignored its working directory")
-	}
-}
-
-func TestMajorVersionProbeReflectsRuntimeAvailability(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test helper uses a POSIX script")
-	}
-	directory := t.TempDir()
-	command := filepath.Join(directory, "runtime-backed")
-	marker := command + ".ready"
-	contents := "#!/bin/sh\n[ -f \"$0.ready\" ] || exit 1\nprintf 'Version 7.1.0\\n'\n"
-	if err := os.WriteFile(command, []byte(contents), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(marker, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if !MajorVersionAtLeast(ctx, command, ProbeExecutes, "") {
-		t.Fatal("available runtime was rejected")
-	}
-	if err := os.Remove(marker); err != nil {
-		t.Fatal(err)
-	}
-	if MajorVersionAtLeast(ctx, command, ProbeExecutes, "") {
-		t.Fatal("probe reused a stale successful result")
-	}
-	if err := os.WriteFile(marker, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !MajorVersionAtLeast(ctx, command, ProbeExecutes, "") {
-		t.Fatal("probe reused a stale failed result")
-	}
-}
-
 func TestLookPathSearchesEveryGOPATHEntry(t *testing.T) {
 	first := t.TempDir()
 	second := t.TempDir()
@@ -153,14 +62,6 @@ func TestLookPathSearchesEveryGOPATHEntry(t *testing.T) {
 	}
 	if got != command {
 		t.Fatalf("LookPath = %q, want %q", got, command)
-	}
-}
-
-func TestResolveProjectRejectsDirectoryOutsideWorkspace(t *testing.T) {
-	root := t.TempDir()
-	outside := t.TempDir()
-	if got := ResolveProject(outside, root, "example-tool"); got != "" {
-		t.Fatalf("ResolveProject outside workspace = %q", got)
 	}
 }
 

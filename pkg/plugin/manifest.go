@@ -53,6 +53,11 @@ func parseManifest(data []byte) (Manifest, []string, error) {
 
 	var notes []string
 	for _, field := range slices.Sorted(maps.Keys(raw)) {
+		if field == languageServersField {
+			// Read separately: Claude Code's field is not part of the portable schema.
+			delete(raw, field)
+			continue
+		}
 		if !slices.Contains(manifestFields, field) {
 			notes = append(notes, fmt.Sprintf("ignoring unknown manifest field %q", field))
 			delete(raw, field)

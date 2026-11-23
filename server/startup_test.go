@@ -104,7 +104,7 @@ func TestModelRefreshRecoversFromDiscoveryFailure(t *testing.T) {
 	defer gateway.Close()
 	t.Setenv("WINGMAN_URL", gateway.URL)
 	t.Setenv("WINGMAN_MODEL", "gpt-6-sol")
-	app, err := New(t.Context(), t.TempDir(), &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(t.Context(), t.TempDir(), &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}

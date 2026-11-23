@@ -48,7 +48,7 @@ func TestTemporaryChatIsRemovedOnceNoWindowShowsIt(t *testing.T) {
 			if !first {
 				dir = canonicalPath(t.TempDir())
 			}
-			s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, Projects: true, disableManagedTools: true})
+			s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, Projects: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -137,7 +137,7 @@ func TestTemporaryChatsAreRemovedWhenTheHostStops(t *testing.T) {
 	testenv.WingmanHome(t)
 	protocolTestGateway(t)
 	temporaryTestDir(t)
-	h, err := NewHost(t.Context(), &HostOptions{disableManagedTools: true})
+	h, err := NewHost(t.Context(), &HostOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestTemporaryChatWaitsForRunningWorkOnly(t *testing.T) {
 	testenv.WingmanHome(t)
 	protocolTestGateway(t)
 	temporaryTestDir(t)
-	h, err := NewHost(t.Context(), &HostOptions{disableManagedTools: true})
+	h, err := NewHost(t.Context(), &HostOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestSweepRemovesTemporaryChatsNoWingmanHasOpen(t *testing.T) {
 func TestFlagDoesNotSaveASessionDeletedMeanwhile(t *testing.T) {
 	testenv.WingmanHome(t)
 	protocolTestGateway(t)
-	h, err := NewHost(t.Context(), &HostOptions{disableManagedTools: true})
+	h, err := NewHost(t.Context(), &HostOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

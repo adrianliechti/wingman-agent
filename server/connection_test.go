@@ -350,7 +350,7 @@ func protocolTestGateway(t *testing.T) {
 func TestAHPBuiltinAgentRoundTrip(t *testing.T) {
 	testenv.WingmanHome(t)
 	protocolTestGateway(t)
-	app, err := New(t.Context(), t.TempDir(), &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(t.Context(), t.TempDir(), &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}

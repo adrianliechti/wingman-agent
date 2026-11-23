@@ -23,7 +23,7 @@ import (
 func reviewWorkspaceResourceHost(t *testing.T) (*Server, *Project, string) {
 	t.Helper()
 	root := t.TempDir()
-	app := newDebugTestServer(t, root)
+	app := newEditorTestServer(t, root)
 	h := app.Project
 	t.Cleanup(h.host.Close)
 	return app, h, root

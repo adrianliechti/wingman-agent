@@ -3,15 +3,7 @@ import type { TabDisposition } from "./types/tabs";
 
 export interface CenterTab {
 	id: string;
-	type:
-		| "chat"
-		| "file"
-		| "diff"
-		| "compare"
-		| "terminal"
-		| "debug"
-		| "task"
-		| "insights";
+	type: "chat" | "file" | "diff" | "compare" | "terminal" | "task" | "insights";
 	label: string;
 	path?: string;
 	diffLayer?: DiffLayer;
@@ -90,40 +82,6 @@ export function placeCenterTab(
 	const tabs = [...current];
 	tabs[previewIndex] = placed;
 	return { tabs, replaced: previous };
-}
-
-export function syncDebugTab(
-	current: CenterTab[],
-	terminalId: string | undefined,
-	ensure: boolean,
-	pane?: "right",
-): CenterTab[] {
-	let changed = false;
-	let next = current;
-	if (terminalId) {
-		const filtered = current.filter(
-			(tab) => tab.type !== "terminal" || tab.terminalId !== terminalId,
-		);
-		if (filtered.length !== current.length) {
-			next = filtered;
-			changed = true;
-		}
-	}
-
-	const index = next.findIndex((tab) => tab.id === "debug");
-	if (index < 0) {
-		return ensure
-			? [
-					...next,
-					{ id: "debug", type: "debug", label: "Debug", terminalId, pane },
-				]
-			: next;
-	}
-	if (next[index].terminalId === terminalId) return changed ? next : current;
-
-	const updated = [...next];
-	updated[index] = { ...updated[index], terminalId };
-	return updated;
 }
 
 // Reorders a tab to the given strip position; the target index is expressed

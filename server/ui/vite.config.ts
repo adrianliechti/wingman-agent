@@ -4,7 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 
 // Every route the workspace server serves outside the UI bundle.
 export function proxyToServer(target: string) {
-	const routes = ["/api", "/ahp", "/lsp", "/dap", "/content", "/preview"];
+	const routes = ["/api", "/ahp", "/lsp", "/content", "/preview"];
 	return Object.fromEntries(
 		routes.map((route) => [route, { target, ws: true }]),
 	);

@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
-	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	codetui "github.com/adrianliechti/wingman-agent/pkg/tui/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
@@ -45,7 +43,7 @@ func runTUI(ctx context.Context, opts tuiOptions) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, host.Close()) }()
-	ws, wa := host.workspace, host.agent
+	wa := host.agent
 
 	sessionID := opts.SessionID
 	if sessionID == "latest" {
@@ -77,34 +75,5 @@ func runTUI(ctx context.Context, opts tuiOptions) (err error) {
 	}
 
 	app := codetui.New(ctx, wa, sessionID)
-	toolUpdate := ws.StartManagedToolsUpdate(ctx, code.ManagedLSPTools, func(progress devtools.Progress) {
-		label := progress.Label
-		if label == "" {
-			label = progress.Tool
-		}
-		message := "Installing " + label
-		if progress.Phase == devtools.ProgressUpdating {
-			message = "Updating " + label
-		}
-		if progress.Total > 0 {
-			message = fmt.Sprintf("%s (%d/%d)", message, progress.Current, progress.Total)
-		}
-		app.SetBackgroundStatus(message, false)
-	})
-	defer toolUpdate.Cancel()
-	go func() {
-		_, updateErr := toolUpdate.Wait()
-		if devtools.IsUnavailable(updateErr) {
-			tools := devtools.ToolLabels(devtools.UnavailableTools(updateErr))
-			message := "Automatic development-tool setup could not finish"
-			if len(tools) > 0 {
-				message = "Could not install " + strings.Join(tools, ", ")
-			}
-			app.SetBackgroundStatus(message+"; project and system tools still work", true)
-			return
-		}
-		app.SetBackgroundStatus("", false)
-	}()
-
 	return app.Run()
 }

@@ -5,7 +5,7 @@ export interface EditorRequestOptions {
 	timeout?: number;
 }
 
-/** Shared socket lifecycle only. LSP is JSON-RPC; DAP keeps its own envelope. */
+/** The language gateway's socket lifecycle and JSON-RPC envelope. */
 export class EditorConnection {
 	private socket?: WebSocket;
 	private connecting?: Promise<void>;
@@ -15,22 +15,13 @@ export class EditorConnection {
 		number,
 		{ resolve(value: any): void; reject(error: Error): void; cleanup(): void }
 	>();
-	private listeners = new Set<(method: string, params: any) => void>();
 	private handlers = new Map<number, (params: any) => Promise<boolean>>();
 	onReady?: (result: any) => void;
-	readonly mode: "lsp" | "dap";
 	readonly instance: string;
 	readonly initialize: object;
-	constructor(mode: "lsp" | "dap", instance: string, initialize: object) {
-		this.mode = mode;
+	constructor(instance: string, initialize: object) {
 		this.instance = instance;
 		this.initialize = initialize;
-	}
-	onEvent(listener: (method: string, params: any) => void) {
-		this.listeners.add(listener);
-		return () => {
-			this.listeners.delete(listener);
-		};
 	}
 	close() {
 		++this.generation;
@@ -38,9 +29,7 @@ export class EditorConnection {
 		this.socket = undefined;
 		this.connecting = undefined;
 		socket?.close();
-		this.rejectPending(
-			new Error(`${this.mode.toUpperCase()} connection closed`),
-		);
+		this.rejectPending(new Error("LSP connection closed"));
 	}
 	private rejectPending(error: Error) {
 		for (const p of this.pending.values()) {
@@ -52,14 +41,14 @@ export class EditorConnection {
 	private async connect() {
 		if (this.connecting) return this.connecting;
 		const generation = ++this.generation;
-		const url = new URL(`/${this.mode}`, location.href);
+		const url = new URL("/lsp", location.href);
 		url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
 		url.searchParams.set("instance", this.instance);
 		const socket = new WebSocket(url);
 		this.socket = socket;
 		const opening = new Promise<void>((resolve, reject) => {
 			const timer = setTimeout(() => {
-				reject(new Error(`${this.mode} connection timed out`));
+				reject(new Error("lsp connection timed out"));
 				socket.close();
 			}, 10000);
 			socket.onopen = () => {
@@ -68,18 +57,17 @@ export class EditorConnection {
 			};
 			socket.onerror = () => {
 				clearTimeout(timer);
-				reject(new Error(`${this.mode} connection failed`));
+				reject(new Error("lsp connection failed"));
 			};
 			socket.onclose = () => {
 				clearTimeout(timer);
-				reject(new Error(`${this.mode} connection closed`));
+				reject(new Error("lsp connection closed"));
 				if (generation !== this.generation) return;
 				this.socket = undefined;
 				this.connecting = undefined;
 				this.rejectPending(
-					new Error(`${this.mode} connection lost; refresh before retrying`),
+					new Error("lsp connection lost; refresh before retrying"),
 				);
-				for (const listener of this.listeners) listener("disconnected", {});
 			};
 			socket.onmessage = (event) => {
 				if (generation === this.generation)
@@ -91,7 +79,7 @@ export class EditorConnection {
 				const result = await this.sendRequest("initialize", this.initialize);
 				if (generation !== this.generation)
 					throw new Error("Connection was replaced");
-				if (this.mode === "lsp") this.notify("initialized", {});
+				this.notify("initialized", {});
 				this.onReady?.(result);
 			})
 			.catch((error) => {
@@ -119,13 +107,11 @@ export class EditorConnection {
 		return this.sendRequest(method, params, signal, options);
 	}
 	notify(method: string, params: unknown) {
-		if (this.mode !== "lsp")
-			throw new Error("DAP does not have JSON-RPC notifications");
 		this.send({ jsonrpc: "2.0", method, params });
 	}
 	private send(value: unknown) {
 		if (this.socket?.readyState !== WebSocket.OPEN)
-			throw new Error(`${this.mode} connection is unavailable`);
+			throw new Error("lsp connection is unavailable");
 		this.socket.send(JSON.stringify(value));
 	}
 	private sendRequest<T>(
@@ -143,16 +129,8 @@ export class EditorConnection {
 					signal?.reason ??
 						new DOMException("Request timed out", "TimeoutError"),
 				);
-				if (this.socket?.readyState === WebSocket.OPEN) {
-					if (this.mode === "lsp") this.notify("$/cancelRequest", { id });
-					else
-						this.send({
-							seq: ++this.sequence,
-							type: "request",
-							command: "cancel",
-							arguments: { requestId: id },
-						});
-				}
+				if (this.socket?.readyState === WebSocket.OPEN)
+					this.notify("$/cancelRequest", { id });
 			};
 			const timer = timeout > 0 ? setTimeout(cancel, timeout) : undefined;
 			const cleanup = () => {
@@ -164,11 +142,7 @@ export class EditorConnection {
 			if (applyEdit) this.handlers.set(id, applyEdit);
 			signal?.addEventListener("abort", cancel, { once: true });
 			try {
-				this.send(
-					this.mode === "lsp"
-						? { jsonrpc: "2.0", id, method, params }
-						: { seq: id, type: "request", command: method, arguments: params },
-				);
+				this.send({ jsonrpc: "2.0", id, method, params });
 			} catch (error) {
 				this.pending.delete(id);
 				cleanup();
@@ -185,13 +159,7 @@ export class EditorConnection {
 			this.close();
 			return;
 		}
-		if (this.mode === "lsp" && message.method) {
-			if (message.method === "workspace/diagnostic/refresh") {
-				this.send({ jsonrpc: "2.0", id: message.id, result: null });
-				for (const listener of this.listeners)
-					listener(message.method, message.params);
-				return;
-			}
+		if (message.method) {
 			if (message.id !== undefined) {
 				const handler =
 					message.method === "workspace/applyEdit"
@@ -224,31 +192,18 @@ export class EditorConnection {
 							result: { applied: false, failureReason: String(error) },
 						});
 				}
-			} else
-				for (const listener of this.listeners)
-					listener(message.method, message.params);
+			}
 			return;
 		}
-		if (this.mode === "dap" && message.type === "event") {
-			for (const listener of this.listeners)
-				listener(message.event, message.body);
-			return;
-		}
-		const id = this.mode === "lsp" ? message.id : message.request_seq;
-		const pending = this.pending.get(id);
+		const pending = this.pending.get(message.id);
 		if (!pending) return;
-		this.pending.delete(id);
+		this.pending.delete(message.id);
 		pending.cleanup();
-		if (message.error || message.success === false)
+		if (message.error)
 			pending.reject(
-				new Error(
-					message.error?.message ??
-						message.body?.error?.format ??
-						message.message ??
-						"Protocol request failed",
-				),
+				new Error(message.error.message ?? "Protocol request failed"),
 			);
-		else pending.resolve(this.mode === "lsp" ? message.result : message.body);
+		else pending.resolve(message.result);
 	}
 }
 

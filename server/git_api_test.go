@@ -39,7 +39,7 @@ func TestGitAPIStageCommitPushAndPull(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app, err := New(context.Background(), repoDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(context.Background(), repoDir, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestGitAPIBranchFetchIsExplicit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app, err := New(context.Background(), repoDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(context.Background(), repoDir, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestGitAPIInitCreatesRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestGitAPIInitRemovesDanglingShadowPointer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestGitAPIRejectsInvalidPath(t *testing.T) {
 	if _, err := git.PlainInit(repoDir, false); err != nil {
 		t.Fatal(err)
 	}
-	app, err := New(context.Background(), repoDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(context.Background(), repoDir, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestGitAPIStageAll(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	app, err := New(context.Background(), repoDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(context.Background(), repoDir, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ func TestGitAPIRejectsLooseJSON(t *testing.T) {
 	if _, err := git.PlainInit(repoDir, false); err != nil {
 		t.Fatal(err)
 	}
-	app, err := New(context.Background(), repoDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(context.Background(), repoDir, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestGitAPIHistoryAndCompare(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app, err := New(context.Background(), repoDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(context.Background(), repoDir, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,12 +435,7 @@ func getWorkspaceInfo(t *testing.T, baseURL string) map[string]any {
 
 func assertWorkspaceInfo(t *testing.T, caps map[string]any) {
 	t.Helper()
-	for _, name := range []string{"lsp", "debug"} {
-		if _, ok := caps[name].(bool); !ok {
-			t.Errorf("capability %q = %#v, want non-null boolean", name, caps[name])
-		}
-	}
-	for _, name := range []string{"diffs", "git_init", "tasks", "terminal", "workspace_name", "git", "backends"} {
+	for _, name := range []string{"diffs", "git_init", "tasks", "terminal", "workspace_name", "git", "backends", "lsp", "debug", "managed_tools"} {
 		if _, exists := caps[name]; exists {
 			t.Errorf("redundant field %q remains", name)
 		}

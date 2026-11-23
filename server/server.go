@@ -42,8 +42,7 @@ type ServerOptions struct {
 	// desktop app does: its windows open any folder and its session list holds
 	// the sessions of every folder. Without it the server shows the folder it
 	// started in and no other.
-	Projects            bool
-	disableManagedTools bool
+	Projects bool
 }
 
 // Server serves the web UI and HTTP adapters for one project of its host. The
@@ -69,7 +68,7 @@ func New(ctx context.Context, workDir string, opts *ServerOptions) (*Server, err
 	if opts == nil {
 		opts = new(ServerOptions)
 	}
-	hostOptions := &HostOptions{disableManagedTools: opts.disableManagedTools}
+	hostOptions := &HostOptions{}
 	if !opts.Projects {
 		hostOptions.folder = workDir
 	}
@@ -268,13 +267,8 @@ func (s *Server) Run(ctx context.Context, port int) error {
 }
 
 func (s *Server) registerRoutes(r chi.Router) {
-	s.Project.host.mu.Lock()
-	s.Project.onDiagnostics = s.refreshDiagnostics
-	s.Project.host.mu.Unlock()
-
 	r.Get("/ahp", s.Project.host.handleAHP)
 	r.Get("/lsp", s.handleLSP)
-	r.Get("/dap", s.handleDAP)
 	r.Get("/content", s.handleFileDownload)
 	r.Get("/preview", s.handleFilePreview)
 	r.Route("/api", func(r chi.Router) {
@@ -282,13 +276,10 @@ func (s *Server) registerRoutes(r chi.Router) {
 		s.registerSessionRoutes(r)
 
 		// Workspace setup and external source retrieval are host services; editor
-		// and debugger operations use the LSP and DAP WebSocket gateways.
-		r.Post("/workspace/debug/targets", s.handleDebugTargets)
-		r.Post("/workspace/debug/plan", s.handleDebugPlan)
+		// operations use the LSP WebSocket gateway.
 		r.Post("/settings/window.terminal.position", s.handleWindowTerminalSettings)
 		r.Post("/settings/window.sidebar.position", s.handleWindowSidebarSettings)
 		r.Get("/workspace/skills", s.handleSkills)
-		r.Get("/workspace/activity", s.handleWorkspaceActivity)
 		r.Get("/workspace/files", s.handleFileSearch)
 		r.Post("/workspace/search", s.handleWorkspaceSearch)
 		r.Post("/workspace/reveal", s.handleReveal)
@@ -332,29 +323,23 @@ type workspaceResponse struct {
 	Name                   string                          `json:"name"`
 	Path                   string                          `json:"path"`
 	Shells                 []terminal.Shell                `json:"shells"`
-	LSP                    bool                            `json:"lsp"`
-	Debug                  bool                            `json:"debug"`
 	WindowTerminalPosition settings.WindowTerminalPosition `json:"window.terminal.position"`
 	WindowSidebarPosition  settings.WindowSidebarPosition  `json:"window.sidebar.position"`
 	Platform               string                          `json:"platform"`
-	ManagedTools           *managedToolsStatus             `json:"managed_tools,omitempty"`
 	Temporary              bool                            `json:"temporary,omitempty"` // a temporary chat's, removed once no window shows it
 }
 
 func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	ws := s.Project.workspace
 	info := workspaceResponse{
-		WorkspaceScope: s.Project.scope,
-		Namespace:      s.Project.namespace,
-		Protocol:       2,
-		Directory:      s.Project.directoryURI(),
-		ProjectURI:     projectInfo(s.Project.dir).Uri,
-		Name:           projectName(ws.RootPath),
-		Path:           ws.RootPath,
-		Shells:         append([]terminal.Shell{}, terminal.Shells()...),
-		// As last found: a window does not wait for a look through the folder.
-		LSP:                    s.Project.hasLSP.Load(),
-		Debug:                  s.Project.hasDebug.Load(),
+		WorkspaceScope:         s.Project.scope,
+		Namespace:              s.Project.namespace,
+		Protocol:               2,
+		Directory:              s.Project.directoryURI(),
+		ProjectURI:             projectInfo(s.Project.dir).Uri,
+		Name:                   projectName(ws.RootPath),
+		Path:                   ws.RootPath,
+		Shells:                 append([]terminal.Shell{}, terminal.Shells()...),
 		WindowTerminalPosition: s.windowTerminalPosition(),
 		WindowSidebarPosition:  s.windowSidebarPosition(),
 		Platform:               runtime.GOOS,
@@ -362,9 +347,6 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Project.host != nil {
 		info.Host = s.Project.host.id
-	}
-	if status := s.Project.managedToolsStatus(); status.State != "" {
-		info.ManagedTools = &status
 	}
 	writeJSON(w, info)
 }

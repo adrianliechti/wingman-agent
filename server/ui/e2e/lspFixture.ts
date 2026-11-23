@@ -112,21 +112,6 @@ class LanguageFixture {
 						}
 						if (method === "textDocument/diagnostic")
 							result = { kind: "full", items: (result ?? []).map(diagnostic) };
-						if (method === "workspace/diagnostic") {
-							const groups = Map.groupBy(
-								result.diagnostics ?? [],
-								(item: any) => item.path,
-							);
-							result = {
-								items: [...groups].map(([path, items]) => ({
-									uri: `${root}/${path}`,
-									version: null,
-									kind: "full",
-									items: items.map(diagnostic),
-								})),
-								_wingman: result,
-							};
-						}
 						if (method === "textDocument/codeAction")
 							result = result.actions.map((action: any) => ({
 								...action,

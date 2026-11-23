@@ -35,7 +35,7 @@ func TestInitializationAndWorkspaceRequestsUseTheSameProjectURI(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "project with spaces")
 	uri := fileuri.FromPath(root)
 	rpc := &initializationRecorder{}
-	session := &Session{rootURI: uri, rpc: rpc}
+	session := &Session{root: root, rpc: rpc}
 	if err := session.initialize(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,23 @@ func TestFilesChangedRefreshesDiskDocumentsButNotEditors(t *testing.T) {
 	if content, _ := session.DocumentContent(editor); content != "one\n" {
 		t.Fatalf("editor-owned document was replaced from disk: %q", content)
 	}
-	if err := session.FilesChanged(ctx, []FileChange{{Path: disk, Type: protocol.FileChangeTypeDeleted}}); err != nil {
+	if _, err := session.OpenDocument(ctx, editor); err != nil {
+		t.Fatal(err)
+	}
+	if content, _ := session.DocumentContent(editor); content != "one\n" {
+		t.Fatalf("disk request replaced saved editor: %q", content)
+	}
+	deleted := []FileChange{{Path: disk, Type: protocol.FileChangeTypeDeleted}}
+	if err := session.FilesChanged(ctx, deleted); err != nil {
+		t.Fatal(err)
+	}
+	if _, open := session.DocumentContent(disk); !open {
+		t.Fatal("queued deletion closed a file already replaced on disk")
+	}
+	if err := os.Remove(disk); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.FilesChanged(ctx, deleted); err != nil {
 		t.Fatal(err)
 	}
 	if _, open := session.DocumentContent(disk); open {
@@ -168,7 +184,7 @@ func TestFilesChangedReportsRegisteredWatchers(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	rpc := &watchedFilesRecorder{}
-	session := &Session{rootURI: fileuri.FromPath(root), rpc: rpc, documents: map[string]*document{}}
+	session := &Session{root: root, rpc: rpc, documents: map[string]*document{}}
 	client := &sessionClient{session: session}
 	register := func(id, options string) {
 		t.Helper()
@@ -177,6 +193,9 @@ func TestFilesChangedReportsRegisteredWatchers(t *testing.T) {
 		}
 	}
 	register("go", `{"watchers":[{"globPattern":"**/*.go"}]}`)
+	if err := client.UnregisterCapability(ctx, &protocol.UnregistrationParams{Unregisterations: []protocol.Unregistration{{ID: "go", Method: "textDocument/hover"}}}); err != nil {
+		t.Fatal(err)
+	}
 	register("mod", `{"watchers":[{"globPattern":{"baseUri":"`+fileuri.FromPath(root)+`","pattern":"go.mod"},"kind":4}]}`)
 	path := func(name string) string { return filepath.Join(root, name) }
 	changes := []FileChange{
@@ -203,7 +222,7 @@ func TestFilesChangedReportsRegisteredWatchers(t *testing.T) {
 func TestCommandEditsReportTheClientsDecision(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	session := &Session{rootURI: fileuri.FromPath(root)}
+	session := &Session{root: root}
 	client := &sessionClient{session: session}
 	edit := func(path string) *protocol.ApplyWorkspaceEditParams {
 		return &protocol.ApplyWorkspaceEditParams{Edit: protocol.WorkspaceEdit{Changes: map[lspuri.URI][]protocol.TextEdit{
@@ -237,7 +256,7 @@ func TestCommandEditReviewDoesNotBlockTheServersMessages(t *testing.T) {
 	defer cancel()
 	root := t.TempDir()
 	hostSide, serverSide := net.Pipe()
-	session := &Session{rootURI: fileuri.FromPath(root), documents: map[string]*document{}}
+	session := &Session{root: root, documents: map[string]*document{}}
 	_, conn, _ := protocol.NewClient(ctx, &sessionClient{session: session}, jsonrpc2.NewStream(hostSide))
 	defer conn.Close()
 	server := jsonrpc2.NewConn(jsonrpc2.NewStream(serverSide))
@@ -299,71 +318,73 @@ func TestOpenDocumentDoesNotReplaceDirtyEditorBuffer(t *testing.T) {
 	}
 }
 
-func TestSessionTracksWorkDoneProgressDetails(t *testing.T) {
-	message := "Loading Gradle project"
-	percentage := uint32(20)
-	session := &Session{}
-	session.applyProgress("gradle", progressUpdate{
-		Kind:       "begin",
-		Title:      "Indexing Kotlin",
-		Message:    &message,
-		Percentage: &percentage,
-	})
-	if !session.Analyzing() {
-		t.Fatal("session did not report active analysis")
-	}
-	progress := session.Progress()
-	if len(progress) != 1 || progress[0].Title != "Indexing Kotlin" || progress[0].Message != message || progress[0].Percentage == nil || *progress[0].Percentage != 20 {
-		t.Fatalf("progress = %+v", progress)
-	}
+type editDiagnosticServer struct {
+	protocol.UnimplementedServer
+	duringPull func()
+}
 
-	message = "Resolving dependencies"
-	percentage = 65
-	session.applyProgress("gradle", progressUpdate{Kind: "report", Message: &message, Percentage: &percentage})
-	progress = session.Progress()
-	if len(progress) != 1 || progress[0].Title != "Indexing Kotlin" || progress[0].Message != message || progress[0].Percentage == nil || *progress[0].Percentage != 65 {
-		t.Fatalf("reported progress = %+v", progress)
-	}
+func (s editDiagnosticServer) Diagnostic(context.Context, *protocol.DocumentDiagnosticParams) (protocol.DocumentDiagnosticReport, error) {
+	s.duringPull()
+	return &protocol.RelatedFullDocumentDiagnosticReport{FullDocumentDiagnosticReport: protocol.FullDocumentDiagnosticReport{
+		Kind: "full", Items: []protocol.Diagnostic{{Message: protocol.String("draft error")}},
+	}}, nil
+}
 
-	session.applyProgress("gradle", progressUpdate{Kind: "end"})
-	if session.Analyzing() || len(session.Progress()) != 0 {
-		t.Fatal("completed progress remained active")
+func TestEditDiagnosticsDiscardReportWhenEditorChangesDuringPull(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "main.go")
+	const edited = "package main\n"
+	if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, reopen := range []bool{false, true} {
+		session := &Session{documents: map[string]*document{}, pullDiags: true}
+		session.rpc = editDiagnosticServer{duringPull: func() {
+			if _, err := session.SyncEditorDocument(ctx, path, "broken draft", false); err != nil {
+				t.Fatal(err)
+			}
+			if reopen {
+				if err := session.CloseDocument(ctx, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Restore the edited text before the old diagnostic reply arrives.
+			if _, err := session.SyncEditorDocument(ctx, path, edited, false); err != nil {
+				t.Fatal(err)
+			}
+		}}
+		if got := session.DiagnosticsForEdit(ctx, path, edited, time.Second); len(got) != 0 {
+			t.Errorf("reopen=%v: superseded diagnostic reached the edit: %v", reopen, got)
+		}
 	}
 }
 
-func TestManagerActivitiesAreReadOnlyAndProjectScoped(t *testing.T) {
-	root := t.TempDir()
-	session := &Session{
-		server: Server{
-			Name: "gopls", Label: "Go",
-		},
-		rootURI:  fileuri.FromPath(root),
-		progress: map[string]WorkProgress{"index": {Title: "Indexing"}},
+func TestSessionTracksWorkDoneProgress(t *testing.T) {
+	session := &Session{}
+	session.applyProgress("gradle", progressUpdate{Kind: "begin"})
+	session.applyProgress("gradle", progressUpdate{Kind: "report"})
+	if !session.Analyzing() {
+		t.Fatal("session did not report active analysis")
 	}
-	session.alive.Store(true)
-	manager := NewManager(root)
-	defer manager.cancel()
-	manager.sessions["go"] = &sessionEntry{session: session}
-
-	activities := manager.Activities()
-	if len(activities) != 1 || activities[0].Server != "gopls" || activities[0].Label != "Go" || activities[0].ProjectDir != root || !activities[0].Analyzing || len(activities[0].Operations) != 1 {
-		t.Fatalf("activities = %+v", activities)
+	session.applyProgress("gradle", progressUpdate{Kind: "end"})
+	if session.Analyzing() {
+		t.Fatal("completed progress remained active")
 	}
 }
 
 func TestGetSessionStopsRestartingAfterRepeatedCrashes(t *testing.T) {
 	root := t.TempDir()
-	manager := NewManager(root)
-	project := projectRoot{
-		Dir:    root,
-		Server: Server{Name: "test-server", Command: filepath.Join(root, "missing-language-server")},
+	manager := newTestManager(root)
+	manager.connect = func(context.Context, string, Server) (*Session, error) {
+		return nil, errors.New("start failed")
 	}
-	key := projectKey(project)
+	path := filepath.Join(root, "main.go")
+	key := testServer.Name
 
 	// Each round simulates a session that started and then died.
-	for attempt := 1; attempt <= maxRestarts; attempt++ {
+	for attempt := 1; attempt <= defaultMaxRestarts; attempt++ {
 		manager.sessions[key] = &sessionEntry{session: &Session{}}
-		if _, err := manager.getSession(context.Background(), project); err == nil {
+		if _, err := manager.GetSession(context.Background(), path); err == nil {
 			t.Fatalf("attempt %d: expected the restart to fail", attempt)
 		}
 		if manager.restarts[key] != attempt {
@@ -372,32 +393,14 @@ func TestGetSessionStopsRestartingAfterRepeatedCrashes(t *testing.T) {
 	}
 
 	manager.sessions[key] = &sessionEntry{session: &Session{}}
-	_, err := manager.getSession(context.Background(), project)
+	_, err := manager.GetSession(context.Background(), path)
 	if err == nil || !strings.Contains(err.Error(), "not restarting") {
 		t.Fatalf("err = %v, want the restart cap to apply", err)
 	}
 
 	// The cap must survive the dead session being dropped from the map.
-	if _, err := manager.getSession(context.Background(), project); err == nil || !strings.Contains(err.Error(), "not restarting") {
+	if _, err := manager.GetSession(context.Background(), path); err == nil || !strings.Contains(err.Error(), "not restarting") {
 		t.Fatalf("err = %v, want the restart cap to stay in effect", err)
-	}
-}
-
-func TestServerInitializationOptionsInvalidateOldDescriptor(t *testing.T) {
-	manager := NewManager(t.TempDir())
-	server := Server{Name: "jdtls", InitializationOptions: []byte(`{"bundles":[]}`)}
-
-	if err := manager.SetServerInitializationOptions("JDTLS", map[string]any{"bundles": []string{"debug.jar"}}); err != nil {
-		t.Fatal(err)
-	}
-	manager.detectMu.Lock()
-	current := manager.serverInitializationOptionsCurrentLocked(server)
-	manager.detectMu.Unlock()
-	if current {
-		t.Fatal("descriptor with old initialization options remained current")
-	}
-	if len(manager.initializationOptions["jdtls"]) == 0 {
-		t.Fatal("initialization options were not normalized by server name")
 	}
 }
 
@@ -427,17 +430,18 @@ func TestRetryRPCReturnsLastTransientErrorWithoutAnotherDelay(t *testing.T) {
 }
 
 func TestManagerCloseCancelsInFlightSessionStart(t *testing.T) {
-	manager := NewManager(t.TempDir())
+	root := t.TempDir()
+	manager := newTestManager(root)
+	path := filepath.Join(root, "main.go")
 	started := make(chan struct{})
 	manager.connect = func(ctx context.Context, _ string, _ Server) (*Session, error) {
 		close(started)
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	project := projectRoot{Dir: t.TempDir(), Server: Server{Name: "blocked"}}
 	result := make(chan error, 1)
 	go func() {
-		_, err := manager.getSession(context.Background(), project)
+		_, err := manager.GetSession(context.Background(), path)
 		result <- err
 	}()
 
@@ -459,7 +463,9 @@ func TestManagerCloseCancelsInFlightSessionStart(t *testing.T) {
 }
 
 func TestCancellingFirstCallerDoesNotCancelSharedSessionStart(t *testing.T) {
-	manager := NewManager(t.TempDir())
+	root := t.TempDir()
+	manager := newTestManager(root)
+	path := filepath.Join(root, "main.go")
 	t.Cleanup(manager.cancel)
 
 	started := make(chan struct{})
@@ -476,11 +482,10 @@ func TestCancellingFirstCallerDoesNotCancelSharedSessionStart(t *testing.T) {
 		}
 	}
 
-	project := projectRoot{Dir: t.TempDir(), Server: Server{Name: "slow"}}
 	firstCtx, cancelFirst := context.WithCancel(context.Background())
 	firstResult := make(chan error, 1)
 	go func() {
-		_, err := manager.getSession(firstCtx, project)
+		_, err := manager.GetSession(firstCtx, path)
 		firstResult <- err
 	}()
 
@@ -504,7 +509,7 @@ func TestCancellingFirstCallerDoesNotCancelSharedSessionStart(t *testing.T) {
 		err     error
 	}, 1)
 	go func() {
-		session, err := manager.getSession(context.Background(), project)
+		session, err := manager.GetSession(context.Background(), path)
 		secondResult <- struct {
 			session *Session
 			err     error

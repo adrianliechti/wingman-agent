@@ -38,7 +38,7 @@ func hostTestOptions(t *testing.T, root, token string) *HostOptions {
 	t.Helper()
 	t.Setenv("HOME", root)
 	t.Setenv("USERPROFILE", root)
-	return &HostOptions{Token: token, disableManagedTools: true}
+	return &HostOptions{Token: token}
 }
 
 func hostTestProject(t *testing.T, root, name string) (dir, uri string) {
@@ -80,7 +80,7 @@ func hostTestSession(t *testing.T, client *sdk.Client, uri, directory string) *t
 }
 
 func TestHostRejectsAMissingFolder(t *testing.T) {
-	if _, err := NewHost(t.Context(), &HostOptions{folder: filepath.Join(t.TempDir(), "missing"), disableManagedTools: true}); err == nil {
+	if _, err := NewHost(t.Context(), &HostOptions{folder: filepath.Join(t.TempDir(), "missing")}); err == nil {
 		t.Fatal("a host started for a folder that does not exist")
 	}
 }

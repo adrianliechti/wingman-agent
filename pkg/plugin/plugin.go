@@ -1,5 +1,6 @@
 // Package plugin implements Agent Plugins v1.0.0. It loads plugin directories
-// and exposes their skills, MCP servers, and namespaced lifecycle hooks.
+// and exposes their skills, MCP servers, language servers, and namespaced
+// lifecycle hooks.
 //
 // https://agent-plugins.org
 package plugin
@@ -13,6 +14,7 @@ import (
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness/hook/external"
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
+	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
@@ -24,11 +26,15 @@ type Plugin struct {
 	Root string
 	Data string
 
+	// Personal is set for a plugin found in the user's own plugin directory.
+	Personal bool
+
 	Manifest Manifest
 
-	Skills  []skill.Skill
-	Servers map[string]mcp.ServerConfig
-	Hooks   *external.Config
+	Skills          []skill.Skill
+	Servers         map[string]mcp.ServerConfig
+	LanguageServers []lsp.Server
+	Hooks           *external.Config
 }
 
 // Diagnostic reports something a plugin got wrong that did not stop the rest of
@@ -57,17 +63,17 @@ func Discover(workDir, projectData, personalData string) ([]Plugin, []Diagnostic
 	seen := make(map[string]string)
 
 	for _, root := range layout.ProjectRoots(workDir, "plugins") {
-		plugins, diagnostics = discover(root, projectData, plugins, diagnostics, seen)
+		plugins, diagnostics = discover(root, projectData, false, plugins, diagnostics, seen)
 	}
 
 	for _, root := range layout.PersonalRoots("plugins") {
-		plugins, diagnostics = discover(root, personalData, plugins, diagnostics, seen)
+		plugins, diagnostics = discover(root, personalData, true, plugins, diagnostics, seen)
 	}
 
 	return plugins, diagnostics
 }
 
-func discover(root, dataRoot string, plugins []Plugin, diagnostics []Diagnostic, seen map[string]string) ([]Plugin, []Diagnostic) {
+func discover(root, dataRoot string, personal bool, plugins []Plugin, diagnostics []Diagnostic, seen map[string]string) ([]Plugin, []Diagnostic) {
 	entries, err := os.ReadDir(root)
 
 	if err != nil {
@@ -85,11 +91,14 @@ func discover(root, dataRoot string, plugins []Plugin, diagnostics []Diagnostic,
 	for _, name := range names {
 		dir := filepath.Join(root, name)
 
-		if !hasPluginManifest(dir) {
-			continue
+		var p *Plugin
+		var notes []string
+		var err error
+		if hasPluginManifest(dir) {
+			p, notes, err = loadPlugin(dir, dataRoot)
+		} else {
+			p, notes = loadClaudePlugin(dir, dataRoot)
 		}
-
-		p, notes, err := loadPlugin(dir, dataRoot)
 
 		for _, note := range notes {
 			diagnostics = append(diagnostics, Diagnostic{Path: dir, Message: note})
@@ -97,6 +106,9 @@ func discover(root, dataRoot string, plugins []Plugin, diagnostics []Diagnostic,
 
 		if err != nil {
 			diagnostics = append(diagnostics, Diagnostic{Path: dir, Message: err.Error()})
+			continue
+		}
+		if p == nil {
 			continue
 		}
 
@@ -108,6 +120,7 @@ func discover(root, dataRoot string, plugins []Plugin, diagnostics []Diagnostic,
 			continue
 		}
 		seen[p.Name] = dir
+		p.Personal = personal
 
 		plugins = append(plugins, *p)
 	}
@@ -140,18 +153,8 @@ func loadPlugin(dir, dataRoot string) (*Plugin, []string, error) {
 		Manifest: manifest,
 	}
 
-	if dataRoot != "" {
-		resolvedDataRoot, err := resolvePath(dataRoot)
-		if err != nil {
-			return nil, notes, fmt.Errorf("resolve plugin data root: %w", err)
-		}
-		p.Data, err = resolvePath(filepath.Join(resolvedDataRoot, manifest.Name))
-		if err != nil {
-			return nil, notes, fmt.Errorf("resolve plugin data directory: %w", err)
-		}
-		if !contains(resolvedDataRoot, p.Data) {
-			return nil, notes, fmt.Errorf("plugin name %q escapes the plugin data root", manifest.Name)
-		}
+	if p.Data, err = dataDirectory(dataRoot, manifest.Name); err != nil {
+		return nil, notes, err
 	}
 
 	skills, skillNotes := loadSkills(root, manifest.Name)
@@ -161,6 +164,10 @@ func loadPlugin(dir, dataRoot string) (*Plugin, []string, error) {
 	servers, serverNotes := loadServers(p)
 	p.Servers = servers
 	notes = append(notes, serverNotes...)
+
+	languageServers, languageNotes := loadLanguageServers(p, resolved.LanguageServers)
+	p.LanguageServers = languageServers
+	notes = append(notes, languageNotes...)
 
 	hooks, hookNotes := loadHooks(root, resolved)
 	p.Hooks = hooks
@@ -173,6 +180,24 @@ func loadPlugin(dir, dataRoot string) (*Plugin, []string, error) {
 	}
 
 	return p, notes, nil
+}
+
+func dataDirectory(dataRoot, name string) (string, error) {
+	if dataRoot == "" {
+		return "", nil
+	}
+	resolvedDataRoot, err := resolvePath(dataRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve plugin data root: %w", err)
+	}
+	data, err := resolvePath(filepath.Join(resolvedDataRoot, name))
+	if err != nil {
+		return "", fmt.Errorf("resolve plugin data directory: %w", err)
+	}
+	if !contains(resolvedDataRoot, data) {
+		return "", fmt.Errorf("plugin name %q escapes the plugin data root", name)
+	}
+	return data, nil
 }
 
 func loadSkills(root, name string) ([]skill.Skill, []string) {

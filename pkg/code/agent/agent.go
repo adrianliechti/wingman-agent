@@ -917,9 +917,6 @@ func (s *sessionState) sessionTools() []tool.Tool {
 func (s *sessionState) filterTools(tools []tool.Tool) []tool.Tool {
 	guarded := make([]tool.Tool, len(tools))
 	for i, t := range tools {
-		if t.Name == "lsp" && s.freshness != nil {
-			t = s.freshness.TrackSnapshots(t)
-		}
 		guarded[i] = s.guardModeTool(t)
 	}
 	slices.SortStableFunc(guarded, func(a, b tool.Tool) int { return cmp.Compare(a.Name, b.Name) })
@@ -928,11 +925,6 @@ func (s *sessionState) filterTools(tools []tool.Tool) []tool.Tool {
 
 func (s *sessionState) subagentFilterTools(tools []tool.Tool) []tool.Tool {
 	cloned := slices.Clone(tools)
-	for i, t := range cloned {
-		if t.Name == "lsp" && s.freshness != nil {
-			cloned[i] = s.freshness.TrackSnapshots(t)
-		}
-	}
 	if s.currentMode() == modePlan {
 		cloned = planModeTools(cloned)
 	}

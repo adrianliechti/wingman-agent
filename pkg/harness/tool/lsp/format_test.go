@@ -28,24 +28,24 @@ func TestFormatLocationsIncludesSourceText(t *testing.T) {
 	}
 }
 
-func TestFormatLocationsCapsOutput(t *testing.T) {
+func TestFormatLocationsListsEveryLocation(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "main.go")
-	if err := os.WriteFile(path, []byte("package main\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	uri, err := lsp.ParseURI(fileuri.FromPath(path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	locations := make([]lsp.Location, maxListedLocations+20)
-	for i := range locations {
-		locations[i] = lsp.Location{URI: uri}
+	var locations []lsp.Location
+	for _, file := range []string{"a.go", "b.go"} {
+		uri, err := lsp.ParseURI(fileuri.FromPath(filepath.Join(dir, file)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for line := range 300 {
+			locations = append(locations, lsp.Location{URI: uri, Range: lsp.Range{Start: lsp.Position{Line: uint32(line)}}})
+		}
 	}
 	result := formatLocations("References", locations, dir)
-	note := fmt.Sprintf("showing first %d of %d locations", maxListedLocations, len(locations))
-	if !strings.Contains(result, note) || strings.Count(result, "main.go:1:1") != maxListedLocations {
-		t.Fatalf("unexpected truncated locations: %q", result)
+	if !strings.Contains(result, "References (600 found across 2 files):") || strings.Count(result, ".go:") != 600 {
+		t.Fatalf("locations were left out: %d listed", strings.Count(result, ".go:"))
+	}
+	if got := formatLocations("References", nil, dir); got != "No references found" {
+		t.Fatalf("empty result = %q", got)
 	}
 }
 
@@ -67,32 +67,25 @@ func TestFormatDefinitionsIncludesSnippet(t *testing.T) {
 	}
 }
 
-func TestReferenceCountsAreCompleteDeduplicatedAndPageFiles(t *testing.T) {
-	root := t.TempDir()
-	var locations []lsp.Location
-	for group := range 5 {
-		uri, err := lsp.ParseURI(fileuri.FromPath(filepath.Join(root, fmt.Sprintf("calls_%d.go", group))))
+func TestFormatSymbolsGroupsByFile(t *testing.T) {
+	dir := t.TempDir()
+	var symbols []lsp.SymbolInformation
+	for index := range 250 {
+		uri, err := lsp.ParseURI(fileuri.FromPath(filepath.Join(dir, fmt.Sprintf("f%d.go", index%2))))
 		if err != nil {
 			t.Fatal(err)
 		}
-		for line := range 23 + group {
-			locations = append(locations, lsp.Location{URI: uri, Range: lsp.Range{Start: lsp.Position{Line: uint32(line)}}})
-		}
+		symbols = append(symbols, lsp.SymbolInformation{Location: lsp.Location{URI: uri, Range: lsp.Range{Start: lsp.Position{Line: uint32(index)}}}})
+		symbols[index].Name, symbols[index].Kind = fmt.Sprintf("Symbol%03d", index), lsp.SymbolKindFunction
 	}
-	locations = append(locations, locations[0])
-	full := formatReferenceCounts(locations, root, false, resultPage{limit: 100})
-	for _, want := range []string{"125 across 5 files", "declaration excluded", "non-call references", "calls_0.go: 23", "calls_4.go: 27"} {
-		if !strings.Contains(full, want) {
-			t.Fatalf("missing %q: %s", want, full)
-		}
+	result := formatSymbolInformation(symbols, dir)
+	if !strings.Contains(result, "Symbols (250 found):") || strings.Count(result, "\nf0.go:\n") != 1 || strings.Count(result, "\nf1.go:\n") != 1 {
+		t.Fatalf("symbols are not grouped once per file: %s", result)
 	}
-	page := formatReferenceCounts(locations, root, true, resultPage{offset: 2, limit: 2})
-	if strings.Contains(page, "calls_0.go") || !strings.Contains(page, "calls_2.go: 25") || !strings.Contains(page, "offset=4") || !strings.Contains(page, "declaration included") {
-		t.Fatal(page)
+	if strings.Count(result, " (Function) - Line ") != 250 {
+		t.Fatalf("symbols were left out: %s", result)
 	}
-	listed := formatLocations("References", locations[:125], root, resultPage{limit: 100}) + formatLocations("References", locations[:125], root, resultPage{offset: 100, limit: 100})
-	if len(full)*5 >= len(listed) {
-		t.Fatalf("count output not materially smaller: %d vs %d bytes", len(full), len(listed))
+	if got := formatSymbolInformation(nil, dir); got != "No symbols found" {
+		t.Fatalf("empty result = %q", got)
 	}
-	t.Logf("reference count output: %d bytes vs %d bytes of locations (source files absent)", len(full), len(listed))
 }

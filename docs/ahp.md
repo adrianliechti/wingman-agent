@@ -1,4 +1,4 @@
-# Agent, language, and debug protocols
+# Agent and language protocols
 
 `wingman server` exposes an [Agent Host Protocol (AHP)](https://microsoft.github.io/agent-host-protocol/)
 WebSocket endpoint at `/ahp`, on the same port as the browser UI. VS Code
@@ -53,8 +53,7 @@ on both `127.0.0.1` and `::1`, so `localhost` works whichever address a client
 resolves it to, and validates the request Host. It accepts clients that send no `Origin`
 (native clients), the same-origin Web UI, and desktop web views with their own
 URL schemes such as `vscode-file://`. Other websites, including sandboxed
-`Origin: null` frames, are rejected. `/lsp` and `/dap` accept only the
-same-origin Web UI.
+`Origin: null` frames, are rejected. `/lsp` accepts only the same-origin Web UI.
 
 ## One host for every project
 
@@ -101,7 +100,7 @@ changesets, and is the directory its sessions work in. Sessions carry it as
 the protocol's `project` (`uri` and `displayName`), with links in the
 directory resolved; a directory reached through a link opens the project it
 leads to. On `wingman server` each browser window shows one project, and its
-web UI, `/lsp`, `/dap` and REST routes describe that project. The project of
+web UI, `/lsp` and REST routes describe that project. The project of
 the start directory stays open; others open when a window or a session names
 them and close like any project once idle. A window's REST routes refuse the
 chats of other projects.
@@ -178,10 +177,8 @@ In the server package, `Host` owns connections, ordered publication, saved
 session identities, and the project registry. `Project` owns the workspace,
 agents, controllers, terminals, watches, and changesets. `Server` is the web
 adapter: HTTP routing, browser preferences, preview hosting, and the embedded
-UI. Its editor state owns browser LSP document ownership, diagnostic subscribers,
-external-source permissions, and DAP reference IDs. Language servers and debug
-adapters remain workspace resources. Projects notify the optional editor adapter
-of diagnostic invalidation through a callback invoked outside the host lock.
+UI. Its editor state owns browser LSP document ownership and external-source
+permissions. Language servers remain workspace resources.
 The standalone host opens projects without constructing a web server.
 
 Both `Server` and each backend hold an explicit `Project` reference. HTTP
@@ -245,33 +242,30 @@ queues, and terminals. Session controllers and the turn manager own execution,
 backend persistence, pending questions, and duplicate-command receipts. A client
 subscribes to a channel snapshot and applies ordered actions using Microsoft's
 TypeScript reducers. Reconnection obtains fresh snapshots; it does not restart
-an agent or automatically replay uncertain terminal input or debugger commands.
+an agent or automatically replay uncertain terminal input.
 
 | Endpoint | Browser responsibilities | Host responsibilities |
 | --- | --- | --- |
 | `/ahp` | Render sessions/chat/terminals and changes; submit actions | Own agents, queues, approvals, PTYs, watches, and changesets |
-| `/lsp?instance=…` | Synchronize open buffers; request language features; review/apply edits | Route LSP requests to managed language servers and structural fallbacks |
-| `/dap?instance=…` | Show debugger state; request breakpoints, stepping, frames, and variables | Own adapters/debuggees, validate launch plans, retain output, and invalidate references |
+| `/lsp?instance=…` | Synchronize open buffers; request language features; review/apply edits | Route LSP requests to the language servers on `PATH` and structural fallbacks |
 
 Each WebSocket text frame contains one complete UTF-8 JSON message. AHP and LSP
-use JSON-RPC 2.0. DAP uses its own `seq`, `type`, `command`, `request_seq`, and
-`event` envelopes. Native language servers and debug adapters retain their
-Content-Length framing on stdio/TCP. The `instance` value comes from
+use JSON-RPC 2.0. Native language servers retain their Content-Length framing
+on stdio. The `instance` value comes from
 `/api/workspace`; it prevents an old browser from sending operations to a
 replacement workspace. It is an identity check, not an authentication token.
 
-The former session-command/event, terminal, LSP-operation, debug-operation,
-file, diff, and AI editor HTTP routes are removed. HTTP still serves the UI,
-workspace discovery, settings, skills, reviews, tasks/schedules, debugger
-setup, Git history/commands, downloads, and isolated website previews.
+The former session-command/event, terminal, LSP-operation, file, diff, and AI
+editor HTTP routes are removed. HTTP still serves the UI, workspace discovery,
+settings, skills, reviews, tasks/schedules, Git history/commands, downloads,
+and isolated website previews.
 `/content?path=…` retains browser range/streaming support; `/preview?path=…` redirects to the existing
 isolated preview origin. Both URLs retain the workspace instance check.
 
 `GET /api/workspace` replaces `/api/v2/bootstrap`, `/api/capabilities`, and
 `/api/terminals/shells`. It supplies `workspaceId`, `instanceId`, `protocol`,
-`name`, the native host `path`, `platform`, `shells`, `lsp`,
-`debug`, the two `window.*.position` preferences, and optional `managed_tools`
-installation progress. The first request needs no instance; subsequent requests
+`name`, the native host `path`, `platform`, `shells`, and the two
+`window.*.position` preferences. The first request needs no instance; subsequent requests
 with an instance reject a replacement host. The browser seeds its workspace query
 cache from that startup response and refreshes on `workspace_changed` events.
 Task and terminal support are always present on supported builds, so their
@@ -293,7 +287,6 @@ Workspace tools that are not protocol state use REST:
 | `POST /api/workspace/search` | Text search; streams NDJSON `file` events, then `done` (or `error`); aborting the request cancels it. At most 8 at once, one minute each |
 | `POST /api/workspace/reveal` | Shows a workspace path in the host's file manager |
 | `GET /api/workspace/terminals/{terminal}/status` | `{busy}`: whether a terminal runs a command besides its shell |
-| `GET /api/workspace/activity` | Language-service and analysis progress |
 
 ## Git and AHP changesets
 
@@ -474,8 +467,7 @@ its client does. The contributor and the structured result last for the host
 process: reloaded history keeps the result as text. External agents receive no
 client tools.
 
-Terminal channels share the workspace terminal manager, including debugger
-terminals. Following the [terminal URI specification](https://microsoft.github.io/agent-host-protocol/specification/terminal-channel.html#uri),
+Terminal channels share the workspace terminal manager. Following the [terminal URI specification](https://microsoft.github.io/agent-host-protocol/specification/terminal-channel.html#uri),
 Wingman accepts client-chosen schemes, including VS Code's `agenthost-terminal`
 and custom schemes such as `x-my-terminal`. URIs must have the form
 `<scheme>:/<id>`; other `ahp-*` namespaces remain reserved for protocol channels.
@@ -554,12 +546,13 @@ preserves those attachments through draft recovery
 and delivery. Draft chats use the workspace catalogue until a session exists.
 `/compact` is offered as a command when the backend can compact.
 
-## LSP and DAP scope
+## LSP scope
 
-Debugger discovery uses `POST /api/workspace/debug/targets`; launch planning
-and installation progress use `POST /api/workspace/debug/plan`. Debugger
-execution and inspection run over `/dap`. The old `/api/debug/targets` and
-`/api/debug/plan` routes are removed.
+A language server is one of the definitions in the README's language server
+table or of a personal plugin's `.lsp.json`, chosen by file extension and run
+from `PATH` in the project directory. It starts with the first request for a
+file it handles, from the editor, the agent's `lsp` tool, or an agent edit;
+none starts when a project opens.
 
 LSP uses full-document synchronization with increasing versions and UTF-16
 positions. Unsaved buffers are restored after reconnect. Editor buffers are
@@ -567,15 +560,17 @@ kept current in order; a request never pushes its own, possibly older, copy to
 the language server. When several connections edit one file, each request is
 answered for its own connection's buffer, closing one restores another's, and
 an edit computed while another connection's buffer took over answers -32801.
-A buffer that matches the file on disk lets agent reads
-refresh it. The host scans the workspace on its file-change checks, skipping
-hidden, dependency and build directories such as `node_modules`; changes reach
-language servers as `workspace/didChangeWatchedFiles` for the watchers they
-register, and documents opened from disk are refreshed or closed. Supported
-requests cover
+Each language-server session subscribes to filesystem notifications for its
+registered `workspace/didChangeWatchedFiles` patterns and documents it opens
+from disk. External edits refresh those documents, and deletion closes them.
+Editor-owned buffers continue to follow their editor connection. File watching
+works in the terminal and web clients and ends when the language server exits.
+Supported requests cover
 completion/resolve, hover, definitions, implementations, references, signatures,
 symbols, highlights, folding, semantic tokens, rename, code actions/resolve,
-commands, formatting, inlay hints, and pull diagnostics. Type-aware methods
+commands, formatting, inlay hints, and pull diagnostics of an open document.
+Workspace diagnostics (`workspace/diagnostic` and its refresh) are not
+offered. Type-aware methods
 return their empty result for files that no language server covers; structural
 methods use tree-sitter fallbacks. Cancellation uses `$/cancelRequest` and
 answers -32800; timeouts answer -32803, and language-server error codes pass
@@ -589,35 +584,8 @@ and carries `textDocument` to select the underlying language service. A
 browser for review, and the server receives the user's decision; the command's
 two-minute limit pauses during the review. Edit metadata retains revision checks
 and multi-file review, and document versions in edits are the editor's.
-`wingman/documentCapabilities` reports the selected file's capabilities. When a
-client declares `workspace.diagnostics.refreshSupport`, the host sends
-`workspace/diagnostic/refresh` after workspace or language-service changes. Edit
-and diagnostic results carry optional `_wingman` metadata.
-
-DAP supports initialize, launch/attach, configurationDone, source and exception
-breakpoints, continue/next/stepIn/stepOut/stepBack/reverseContinue/pause,
-threads, stackTrace, scopes, variables, evaluate, cancel, terminate, and
-disconnect. It negotiates native paths and one-based positions. Requests on one
-connection run in order; launch, attach, and evaluate run beside them. Launch
-and attach reference a reviewed plan by `_wingmanPlanId`: the host keeps the
-plans its setup flow produced, and prelaunch commands, adapter, and project come
-only from that plan. Breakpoints changed while a session starts reach it.
-`initialize` advertises gateway features; adapter-dependent features, including
-exception breakpoint filters, arrive in a `capabilities` event when they change.
-Breakpoints have stable ids, are reported `pending` until the adapter verifies
-them, and change through `breakpoint` events. Adapter `runInTerminal` requests
-are handled by the host's shared PTY manager, and exited debugger terminals are
-removed. `wingman/status` restores the current shared debug session, output, and
-breakpoint verification; namespaced session/epoch arguments protect browser
-actions from stale state. Each lifecycle event is sent once per connection, and
-a new connection restores through `wingman/status` rather than replayed events.
-Output keeps its category and is sent incrementally with a `_wingmanOffset`;
-telemetry is not shown. Stops and continues are tracked per thread. Browser
-reference IDs are scoped to their connection and stop and cannot refer to an
-object from a later stop. Errors use short `message` codes such as `cancelled`
-and `notStopped`, with readable text in `body.error`. Closing a socket leaves the
-process alive. `disconnect` terminates a launched debuggee and leaves an attached
-one running unless `terminateDebuggee` says otherwise.
+`wingman/documentCapabilities` reports the selected file's capabilities. Edit
+results carry optional `_wingman` metadata.
 
 ## SDK provenance
 
@@ -696,12 +664,11 @@ go test -race ./server -run '^TestAHPConformance$' -count=1 -v
 Tests exercise the official pinned TypeScript SDK and the released 1.0 npm SDK
 against the Go host, including shared sessions, actions, typed questions,
 queues, compatibility, terminals, resource watches, and real Git changesets.
-LSP/DAP tests cover real WebSockets, unsaved buffer versions, cancellation,
-workspace confinement, stdio adapter launch/inspection, process survival across
-reconnect, and expired references. Browser tests cover the complete UI flows.
+LSP tests cover real WebSockets, unsaved buffer versions, cancellation, and
+workspace confinement. Browser tests cover the complete UI flows.
 
 ```bash
-go test -race ./server ./pkg/dap ./pkg/terminal
+go test -race ./server ./pkg/lsp ./pkg/terminal
 npm --prefix server/ui run test:unit
 npm --prefix server/ui run build
 go test -tags=e2e ./server -run TestWebUIE2E -count=1

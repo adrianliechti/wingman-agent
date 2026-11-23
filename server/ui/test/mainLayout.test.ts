@@ -7,7 +7,6 @@ import {
 	type LayoutState,
 	moveTab,
 	placeCenterTab,
-	syncDebugTab,
 } from "../src/mainLayout.ts";
 
 const chat = (sessionId = "s1"): CenterTab => ({
@@ -22,13 +21,6 @@ const file = (path: string): CenterTab => ({
 	type: "file",
 	label: path.split("/").pop() ?? path,
 	path,
-});
-
-const terminal = (id: string): CenterTab => ({
-	id: `terminal:${id}`,
-	type: "terminal",
-	label: "zsh",
-	terminalId: id,
 });
 
 test("placeCenterTab replaces an existing preview tab", () => {
@@ -94,24 +86,6 @@ test("preview replacement stays within the candidate's pane", () => {
 	);
 	assert.equal(tabs[2].pane, "right");
 	assert.equal(tabs[1].preview, true);
-});
-
-test("syncDebugTab absorbs the matching terminal tab", () => {
-	const tabs = syncDebugTab([chat(), terminal("t1")], "t1", true);
-	assert.deepEqual(
-		tabs.map((t) => t.id),
-		["chat:s1", "debug"],
-	);
-	assert.equal(tabs[1].terminalId, "t1");
-});
-
-test("syncDebugTab updates the terminal id in place", () => {
-	const existing: CenterTab[] = [
-		chat(),
-		{ id: "debug", type: "debug", label: "Debug", terminalId: "t1" },
-	];
-	const tabs = syncDebugTab(existing, undefined, false);
-	assert.equal(tabs[1].terminalId, undefined);
 });
 
 test("moveTab adjusts for the removal shift when moving right", () => {

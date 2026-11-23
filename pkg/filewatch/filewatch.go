@@ -12,7 +12,6 @@ import (
 
 type ChangeType uint8
 
-// The values match the LSP FileChangeType.
 const (
 	Created ChangeType = iota + 1
 	Changed
@@ -23,12 +22,6 @@ type Change struct {
 	// Path is slash-separated and relative to the scanned file system.
 	Path string
 	Type ChangeType
-}
-
-// A Source reports the changes since its previous Changes call. The polling
-// Scanner implements it; an OS notification watcher could replace it.
-type Source interface {
-	Changes(ctx context.Context) ([]Change, error)
 }
 
 // ErrLimit reports a walk that exceeded Options.Limit.
@@ -46,7 +39,7 @@ type Options struct {
 	Limit int
 }
 
-// Scanner is a Source that compares size, modification time and mode
+// Scanner compares size, modification time and mode
 // between walks of a directory.
 type Scanner struct {
 	fsys    fs.FS

@@ -3,8 +3,6 @@ package lsp
 import (
 	"context"
 	"fmt"
-	"path/filepath"
-	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"go.lsp.dev/protocol"
@@ -22,10 +20,7 @@ type CommandWorkspaceEdit struct {
 func (s *Session) PrepareRename(ctx context.Context, uri string, line, column int) (protocol.PrepareRenameResult, error) {
 	return retryRPC(ctx, func() (protocol.PrepareRenameResult, error) {
 		return s.rpc.PrepareRename(ctx, &protocol.PrepareRenameParams{
-			TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-				TextDocument: wireDocument(uri),
-				Position:     wirePosition(line, column),
-			},
+			TextDocumentPositionParams: documentPosition(uri, line, column),
 		})
 	})
 }
@@ -33,11 +28,8 @@ func (s *Session) PrepareRename(ctx context.Context, uri string, line, column in
 func (s *Session) Rename(ctx context.Context, uri string, line, column int, newName string) (*protocol.WorkspaceEdit, error) {
 	return retryRPC(ctx, func() (*protocol.WorkspaceEdit, error) {
 		return s.rpc.Rename(ctx, &protocol.RenameParams{
-			TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-				TextDocument: wireDocument(uri),
-				Position:     wirePosition(line, column),
-			},
-			NewName: newName,
+			TextDocumentPositionParams: documentPosition(uri, line, column),
+			NewName:                    newName,
 		})
 	})
 }
@@ -49,7 +41,7 @@ func (s *Session) CodeActions(
 	only []protocol.CodeActionKind,
 	trigger protocol.CodeActionTriggerKind,
 ) ([]protocol.CommandOrCodeAction, error) {
-	diagnostics, _ := s.protocolDiagnostics(ctx, uri)
+	diagnostics, _ := s.DiagnosticsState(ctx, uri)
 	return retryRPC(ctx, func() ([]protocol.CommandOrCodeAction, error) {
 		return s.rpc.CodeAction(ctx, &protocol.CodeActionParams{
 			TextDocument: wireDocument(uri),
@@ -86,21 +78,7 @@ func (s *Session) acquireCommand(ctx context.Context) (func(), error) {
 	}
 }
 
-func (s *Session) ExecuteCommand(ctx context.Context, command protocol.Command) (any, error) {
-	release, err := s.acquireCommand(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-	return s.rpc.ExecuteCommand(ctx, &protocol.ExecuteCommandParams{
-		Command:   command.Command,
-		Arguments: command.Arguments,
-	})
-}
-
-// ExecuteCommandWithEdits runs one serialized command. Each workspace/applyEdit
-// the server sends meanwhile goes to apply, and the server receives its answer.
-func (s *Session) ExecuteCommandWithEdits(ctx context.Context, command protocol.Command, apply func(CommandWorkspaceEdit) bool) (any, error) {
+func (s *Session) ExecuteCommand(ctx context.Context, command protocol.Command, apply func(CommandWorkspaceEdit) bool) (any, error) {
 	release, err := s.acquireCommand(ctx)
 	if err != nil {
 		return nil, err
@@ -139,17 +117,12 @@ func (s *Session) commandEdit(params *protocol.ApplyWorkspaceEditParams) (func(C
 }
 
 func (s *Session) validateCommandEdit(edit protocol.WorkspaceEdit) error {
-	root, ok := fileuri.Path(s.rootURI)
-	if !ok {
-		return fmt.Errorf("the workspace root is not a file URI")
-	}
 	validateURI := func(uri lspuri.URI) error {
 		path, ok := fileuri.Path(uri.String())
 		if !ok {
 			return fmt.Errorf("the edit targets a non-file URI")
 		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if !withinDir(s.root, path) {
 			return fmt.Errorf("the edit targets a file outside the workspace")
 		}
 		return nil

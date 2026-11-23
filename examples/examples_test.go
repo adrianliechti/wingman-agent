@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adrianliechti/wingman-agent/pkg/debugadapter"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/subagent"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/plugin"
@@ -17,32 +16,6 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
-
-func TestDebuggerSamplesExposeEverySupportedLanguage(t *testing.T) {
-	root, err := filepath.Abs("debug")
-	if err != nil {
-		t.Fatal(err)
-	}
-	targets, err := debugadapter.NewRegistry().DetectWorkspace(t.Context(), root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	counts := make(map[string]int)
-	for _, target := range targets {
-		counts[target.Language]++
-	}
-	want := map[string]int{
-		"Go":                    1,
-		"Python":                1,
-		"Java":                  1,
-		"Rust":                  1,
-		"C#/.NET":               1,
-		"JavaScript/TypeScript": 3,
-	}
-	if !reflect.DeepEqual(counts, want) {
-		t.Fatalf("debug sample targets = %#v, want %#v; all targets = %#v", counts, want, targets)
-	}
-}
 
 func TestMCPExampleMatchesConfigSchema(t *testing.T) {
 	data, err := os.ReadFile("mcp.json")

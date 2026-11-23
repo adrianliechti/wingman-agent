@@ -7,7 +7,7 @@ run commands, and help you review changes.
 - Work in a terminal UI or a browser with an editor, Git diffs, and terminals.
 - Use an OpenAI-compatible API, OpenRouter, Ollama, or a Wingman gateway.
 - Connect installed coding agents such as Claude, Codex, Copilot, OpenCode, and Pi.
-- Get code navigation, diagnostics, and integrated debugging.
+- Get code navigation from the language servers you have installed.
 - Extend your workflow with skills, plugins, and MCP servers.
 
 ## Install
@@ -103,17 +103,15 @@ wingman server
 Opens the web UI at `http://localhost:9000`, or another available port. Use
 `--port 9001` to choose a port. The UI includes chat, an agent picker, a file
 editor, changes, and terminals. Select code to chat about it or preview an AI
-edit. Use **Run | Debug** above a supported entry point to launch a debugger.
+edit.
 
 The session list shows the sessions of every agent in the folder, with what
 needs you first. In the desktop app it holds the sessions of every project, and
 opening a session of another project moves the window there while all agents
 keep running; see [sessions and recovery](docs/sessions.md#resume-a-conversation).
 
-Wingman manages language servers and offers to install missing debuggers when
-you launch them. Your project's runtimes and build tools must be installed
-separately. See the [debugging examples](examples/debug/README.md) for supported
-languages and sample projects.
+Code navigation in the editor, and for the agent's `lsp` tool, comes from the
+[language servers](#language-servers) on your `PATH`.
 
 For access from a phone or another computer, see [remote web access](docs/remote-control.md).
 
@@ -121,6 +119,57 @@ To use Wingman in VS Code's Agents window, connect to the server's
 [Agent Host Protocol endpoint](docs/ahp.md) at `ws://localhost:9000/ahp`, or run
 `wingman host` for a host without the web UI that opens any project in your home
 directory, at `ws://localhost:9100/ahp`.
+
+## Language servers
+
+Wingman uses language servers for the editor's code intelligence and for the
+agent's `lsp` tool: definitions, references, hover, symbols, implementations,
+and call hierarchies. It does not install them. A server starts the first time
+a file with one of its extensions is opened in the editor, queried, or edited
+by the agent, and only if its command is on your `PATH` or in a usual tool
+directory such as `~/go/bin`, `~/.cargo/bin`, or Homebrew's. After an agent
+edit, the errors and warnings the server reports for the file within two
+seconds are added to the edit result.
+
+| Language | Command | Install, for example |
+|----------|---------|----------------------|
+| C/C++ | `clangd` | `brew install llvm` or `sudo apt install clangd` |
+| C# | `csharp-ls` | `dotnet tool install --global csharp-ls` |
+| Go | `gopls` | `go install golang.org/x/tools/gopls@latest` |
+| Java | `jdtls` | `brew install jdtls` |
+| Kotlin | `kotlin-lsp` | `brew install JetBrains/utils/kotlin-lsp` |
+| Lua | `lua-language-server` | `brew install lua-language-server` |
+| PHP | `intelephense` | `npm install -g intelephense` |
+| Python | `pyright-langserver` | `npm install -g pyright` |
+| Ruby | `ruby-lsp` | `gem install ruby-lsp` |
+| Rust | `rust-analyzer` | `rustup component add rust-analyzer` |
+| Swift | `sourcekit-lsp` | Included with Xcode and the Swift toolchain |
+| TypeScript, JavaScript | `typescript-language-server` | `npm install -g typescript-language-server typescript` |
+
+These definitions are those of Claude Code's code intelligence plugins. To add
+or replace a server, put a plugin in `~/.wingman/plugins/` with a `.lsp.json`
+file, or an `lspServers` entry in its `plugin.json` or
+`.claude-plugin/plugin.json`, in Claude Code's format. A Claude Code plugin
+directory works as it is:
+
+```json
+{
+  "zls": {
+    "command": "zls",
+    "extensionToLanguage": { ".zig": "zig" }
+  }
+}
+```
+
+`command` and `extensionToLanguage` are required. `args`, `env`,
+`initializationOptions`, `settings`, `workspaceFolder`, `startupTimeout`,
+`shutdownTimeout`, `requestTimeout`, `restartOnCrash`, `maxRestarts`, and
+`diagnostics` (`false` keeps them out of edit results) are optional;
+`transport` is accepted and has no effect. Each
+file extension has one server: a plugin's server takes it from a built-in one,
+and a server with the name of a built-in one replaces it. Language servers of
+a plugin inside a project are not started, so that a repository cannot choose
+a command to run.
 
 ## Everyday controls
 
@@ -241,7 +290,8 @@ for command options.
   used instead, except the skills the Claude apps sync into
   `~/.claude/skills/synced/`, which rely on those apps' own tools.
 - **Plugins:** place a plugin directory in `.wingman/plugins/` or
-  `~/.wingman/plugins/` to add its skills, MCP servers, and hooks.
+  `~/.wingman/plugins/` to add its skills, MCP servers, and hooks. A plugin in
+  `~/.wingman/plugins/` can also add [language servers](#language-servers).
 - **Custom agents:** add specialist instructions in `.wingman/agents/*.md` or
   `~/.wingman/agents/`.
 

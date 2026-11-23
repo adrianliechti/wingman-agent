@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"path/filepath"
 	"strings"
 
+	"github.com/adrianliechti/wingman-agent/internal/pathutil"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
@@ -47,44 +50,87 @@ func DocumentSymbolsFromProtocol(result lsp.DocumentSymbolResult) ([]lsp.Documen
 	}
 }
 
-func (s *Service) WorkspaceSymbols(ctx context.Context, query string) ([]lsp.SymbolInformation, []lsp.WorkspaceSymbol, error) {
+// Without a file, at most this many entries are walked to find the workspace's languages.
+const maxLanguageScan = 20000
+
+// WorkspaceSymbols searches each installed language found in the workspace.
+func (s *Service) WorkspaceSymbols(ctx context.Context, query string) ([]lsp.WorkspaceSymbol, error) {
 	s.lifeMu.RLock()
 	defer s.lifeMu.RUnlock()
 	if s.closed {
-		return nil, nil, fmt.Errorf("language service is closed")
+		return nil, fmt.Errorf("language service is closed")
 	}
-	projects := s.manager.Projects()
-	if len(projects) == 0 {
-		return nil, nil, fmt.Errorf("no LSP servers detected in workspace")
+	paths := s.languageFiles(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	var symbols []lsp.SymbolInformation
-	var workspaceSymbols []lsp.WorkspaceSymbol
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no file in the workspace has an installed language server; pass filePath")
+	}
+	var symbols []lsp.WorkspaceSymbol
 	var failures []error
-	for _, project := range projects {
-		if err := ctx.Err(); err != nil {
+	for _, path := range paths {
+		session, err := s.manager.GetSession(ctx, path)
+		if err == nil {
+			if lsp.CapabilityEnabled(session.Capabilities().WorkspaceSymbolProvider) {
+				var found []lsp.WorkspaceSymbol
+				found, err = session.WorkspaceSymbols(ctx, query)
+				symbols = append(symbols, found...)
+			} else {
+				err = fmt.Errorf("%s does not support workspace symbols", filepath.Ext(path))
+			}
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err != nil {
 			failures = append(failures, err)
-			break
-		}
-		session, err := s.manager.ProjectSession(ctx, project)
-		if err != nil {
-			failures = append(failures, fmt.Errorf("%s (%s): %w", project.Server.Name, project.Dir, err))
-			continue
-		}
-		if !lsp.CapabilityEnabled(session.Capabilities().WorkspaceSymbolProvider) {
-			failures = append(failures, fmt.Errorf("%s (%s): workspace symbols unsupported", project.Server.Name, project.Dir))
-			continue
-		}
-		result, err := session.WorkspaceSymbols(ctx, query)
-		if err != nil {
-			failures = append(failures, fmt.Errorf("%s (%s): %w", project.Server.Name, project.Dir, err))
-			continue
-		}
-		switch result := result.(type) {
-		case lsp.SymbolInformationSlice:
-			symbols = append(symbols, []lsp.SymbolInformation(result)...)
-		case lsp.WorkspaceSymbolSlice:
-			workspaceSymbols = append(workspaceSymbols, []lsp.WorkspaceSymbol(result)...)
 		}
 	}
-	return symbols, workspaceSymbols, errors.Join(failures...)
+	if len(failures) == len(paths) {
+		return nil, errors.Join(failures...)
+	}
+	return symbols, nil
+}
+
+// languageFiles returns one file for each language server that handles files in the workspace.
+func (s *Service) languageFiles(ctx context.Context) []string {
+	var paths []string
+	servers := map[string]bool{}
+	seen := map[string]bool{}
+	entries := 0
+	_ = pathutil.WalkDir(s.root, func(path string, entry fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return filepath.SkipAll
+		}
+		if err != nil {
+			return filepath.SkipDir
+		}
+		if entries++; entries > maxLanguageScan {
+			return filepath.SkipAll
+		}
+		name := entry.Name()
+		if entry.IsDir() {
+			if path != s.root && (strings.HasPrefix(name, ".") || skippedDirs[name]) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		extension := filepath.Ext(name)
+		if extension == "" || seen[extension] {
+			return nil
+		}
+		seen[extension] = true
+		if server := s.manager.FindServer(path); server != nil && !servers[server.Name] {
+			servers[server.Name] = true
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	return paths
+}
+
+var skippedDirs = map[string]bool{
+	"node_modules": true, "vendor": true, "target": true, "build": true, "dist": true,
+	"out": true, "bin": true, "obj": true, "__pycache__": true, "venv": true,
 }

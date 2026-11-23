@@ -54,7 +54,7 @@ interface BridgeOptions {
 }
 
 export interface MonacoLSPBridge {
-	refreshDiagnostics(): Promise<void>;
+	refreshDiagnostics(attempt?: number): Promise<void>;
 	organizeImports(): Promise<boolean>;
 	supports(feature: MonacoLanguageFeature): boolean;
 	dispose(): void;
@@ -111,6 +111,7 @@ export function createMonacoLSPBridge({
 	let disposed = false;
 	let diagnosticsRevision = 0;
 	let diagnosticsController: AbortController | null = null;
+	let diagnosticsRetry: number | undefined;
 	let workspaceURI = "";
 	let activeCapabilities: LSPEditorCapabilities | null = null;
 	let appliedCodeActions = 0;
@@ -1077,8 +1078,9 @@ export function createMonacoLSPBridge({
 			await runSourceAction("source.organizeImports");
 			return appliedCodeActions !== before;
 		},
-		async refreshDiagnostics() {
+		async refreshDiagnostics(attempt = 0) {
 			if (disposed || !sourceModel) return;
+			window.clearTimeout(diagnosticsRetry);
 			diagnosticsController?.abort();
 			const controller = new AbortController();
 			diagnosticsController = controller;
@@ -1090,8 +1092,16 @@ export function createMonacoLSPBridge({
 					documentRequest(file.path, sourceModel),
 					controller.signal,
 				);
-				if (!diagnostics || disposed || revision !== diagnosticsRevision)
+				if (disposed || revision !== diagnosticsRevision) return;
+				if (!diagnostics) {
+					// A server still starting or analyzing has no result yet: keep the markers, ask again.
+					if (attempt < 5)
+						diagnosticsRetry = window.setTimeout(
+							() => void this.refreshDiagnostics(attempt + 1),
+							1500,
+						);
 					return;
+				}
 				monaco.editor.setModelMarkers(
 					sourceModel,
 					markerOwner,
@@ -1102,7 +1112,7 @@ export function createMonacoLSPBridge({
 						),
 				);
 			} catch {
-				// Preserve the last known markers when the server is still analyzing.
+				// Aborted by a newer pull.
 			} finally {
 				requests.delete(controller);
 				if (diagnosticsController === controller) diagnosticsController = null;
@@ -1124,6 +1134,7 @@ export function createMonacoLSPBridge({
 		dispose() {
 			if (disposed) return;
 			disposed = true;
+			window.clearTimeout(diagnosticsRetry);
 			diagnosticsRevision++;
 			for (const controller of requests) controller.abort();
 			requests.clear();

@@ -1,5 +1,4 @@
 import { Search, X } from "lucide-react";
-import type { ReactNode } from "react";
 import type { ServerMessage } from "../types/protocol";
 import type { TabDisposition } from "../types/tabs";
 import type { WorkspaceEditEnvelope } from "../workspaceEdit";
@@ -8,7 +7,6 @@ import { SearchPanel } from "./SearchPanel";
 
 interface Props {
 	workspaceName: string;
-	headerContent?: ReactNode;
 	searching: boolean;
 	searchFocusKey: number;
 	onSearch: () => void;
@@ -31,7 +29,6 @@ interface Props {
 
 export function WorkspaceFilesPanel({
 	workspaceName,
-	headerContent,
 	searching,
 	searchFocusKey,
 	onSearch,
@@ -50,8 +47,6 @@ export function WorkspaceFilesPanel({
 					<span className="min-w-0 flex-1 truncate text-[10px] font-medium uppercase tracking-wider text-fg-dim">
 						Search
 					</span>
-				) : headerContent ? (
-					headerContent
 				) : (
 					<span
 						className="min-w-0 flex-1 truncate text-[10px] font-medium uppercase tracking-wider text-fg-dim"

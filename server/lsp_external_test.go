@@ -9,36 +9,31 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/coder/websocket/wsjson"
 )
 
-// Use a real local gopls as the fixture for Wingman's managed installation,
-// without requiring network downloads in the test suite.
-func copyTestGopls(t *testing.T, wingmanHome string) bool {
+// useInstalledGopls lets a test start the gopls found on PATH.
+func useInstalledGopls(t *testing.T) bool {
 	t.Helper()
-	source, err := exec.LookPath("gopls")
+	path, err := exec.LookPath("gopls")
 	if err != nil {
 		return false
 	}
-	contents, err := os.ReadFile(source)
-	if err != nil {
-		t.Fatal(err)
+	previous := lsp.CommandLookup
+	lsp.CommandLookup = func(command string) string {
+		if command == "gopls" {
+			return path
+		}
+		return ""
 	}
-	destination := filepath.Join(wingmanHome, "tools", "gopls", "bin", filepath.Base(source))
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(destination, contents, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { lsp.CommandLookup = previous })
 	return true
 }
 
 func TestExternalGoIntelliSense(t *testing.T) {
-	if !copyTestGopls(t, testenv.WingmanHome(t)) {
+	if !useInstalledGopls(t) {
 		t.Skip("gopls is not installed")
 	}
 	source := "package main\n\nimport \"context\"\n\nfunc run(ctx context.Context) {\n\tctx.\n}\n"
@@ -81,7 +76,7 @@ func TestExternalGoIntelliSense(t *testing.T) {
 }
 
 func TestExternalCommandEditsWaitForReview(t *testing.T) {
-	if !copyTestGopls(t, testenv.WingmanHome(t)) {
+	if !useInstalledGopls(t) {
 		t.Skip("gopls is not installed")
 	}
 	source := "package main\n\nfunc main() {}\n"
@@ -122,56 +117,49 @@ func TestExternalCommandEditsWaitForReview(t *testing.T) {
 }
 
 func TestExternalWatchedFilesReachTheLanguageServer(t *testing.T) {
-	if !copyTestGopls(t, testenv.WingmanHome(t)) {
+	if !useInstalledGopls(t) {
 		t.Skip("gopls is not installed")
 	}
 	main := "package main\n\nfunc main() { helper() }\n"
 	app, root := newLSPTestApp(t, map[string]string{"go.mod": "module tmp\n\ngo 1.24\n", "main.go": main})
 	c := newLSPTestClient(t, app, root)
 	c.notify("textDocument/didOpen", map[string]any{"textDocument": map[string]any{"uri": c.uri("main.go"), "languageId": "go", "version": 1, "text": main}})
-	undefined := func() bool {
+	waitForHelper := func(undefined bool) {
 		t.Helper()
-		var report struct {
-			Items []struct {
-				Message string `json:"message"`
-			} `json:"items"`
-		}
-		response := c.call("textDocument/diagnostic", map[string]any{"textDocument": map[string]any{"uri": c.uri("main.go")}})
-		if response["error"] != nil {
-			return true // not analyzed yet
-		}
-		data, _ := json.Marshal(response["result"])
-		_ = json.Unmarshal(data, &report)
-		for _, item := range report.Items {
-			if strings.Contains(item.Message, "undefined: helper") {
-				return true
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+			response := c.call("textDocument/diagnostic", map[string]any{"textDocument": map[string]any{"uri": c.uri("main.go")}})
+			var report struct {
+				Kind  string                     `json:"kind"`
+				Items []struct{ Message string } `json:"items"`
 			}
+			data, _ := json.Marshal(response["result"])
+			if response["error"] == nil && json.Unmarshal(data, &report) == nil && report.Kind == "full" {
+				found := false
+				for _, item := range report.Items {
+					found = found || strings.Contains(item.Message, "undefined: helper")
+				}
+				if found == undefined {
+					return
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
-		return false
+		t.Fatalf("timed out waiting for undefined helper diagnostic = %v", undefined)
 	}
-	deadline := time.Now().Add(60 * time.Second)
-	for !undefined() {
-		if time.Now().After(deadline) {
-			t.Fatal("gopls never reported the undefined helper")
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	app.Project.syncWorkspaceFiles(t.Context()) // baseline
-	// A file created outside any editor reaches gopls only as a watched-file event.
-	if err := os.WriteFile(filepath.Join(root, "helper.go"), []byte("package main\n\nfunc helper() {}\n"), 0o644); err != nil {
+	waitForHelper(true)
+	path := filepath.Join(root, "helper.go")
+	if err := os.WriteFile(path, []byte("package main\n\nfunc helper() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	app.Project.syncWorkspaceFiles(t.Context())
-	for undefined() {
-		if time.Now().After(deadline) {
-			t.Fatal("gopls did not learn about helper.go")
-		}
-		time.Sleep(500 * time.Millisecond)
+	waitForHelper(false)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
 	}
+	waitForHelper(true)
 }
 
 func TestExternalDefinitionNavigation(t *testing.T) {
-	if !copyTestGopls(t, testenv.WingmanHome(t)) {
+	if !useInstalledGopls(t) {
 		t.Skip("gopls is not installed")
 	}
 	main := "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hi\")\n}\n"

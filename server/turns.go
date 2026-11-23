@@ -227,9 +227,6 @@ func (s *backendRuntime) finalizeTurn(sid string) {
 	}
 	s.session(sid).replaceHistory()
 	s.Project.flushFiles()
-	if ws := s.Project.workspace; ws != nil && ws.HasLSP() {
-		s.Project.refreshDiagnostics()
-	}
 }
 
 func snapshotHasActive(snapshot code.TurnSnapshot) bool {

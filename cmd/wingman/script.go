@@ -161,8 +161,6 @@ func runScript(ctx context.Context, opts scriptOptions) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, host.Close()) }()
-	stopToolUpdate := startManagedToolUpdate(ctx, host.workspace)
-	defer stopToolUpdate()
 
 	if host.builtin {
 		if opts.Context, err = connectMCP(ctx, host.workspace, os.Stderr); err != nil {
