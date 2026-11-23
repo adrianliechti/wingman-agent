@@ -11,8 +11,7 @@ Replace placeholder package names and remote endpoints before enabling them.
 | [Test skill](skills/run-tests/) | `.wingman/skills/run-tests/` | Run tests through a reusable workflow |
 | [Release plugin](plugins/release-tools/) | `.wingman/plugins/release-tools/` or `~/.wingman/plugins/release-tools/` | Add skills, MCP servers, and a hook together |
 | [Structured output](non-interactive/README.md) | Run from a repository | Extract project metadata as JSON |
-| [Debugger samples](debug/README.md) | Open as a workspace | Try Run and Debug |
-| [C project](c/README.md) | Open as a workspace | Try navigation, diagnostics, and debugging |
+| [C project](c/README.md) | Open as a workspace | Try navigation and diagnostics |
 
 For project instructions, add an `AGENTS.md` or `CLAUDE.md` with build commands,
 conventions, and other guidance to the project root.

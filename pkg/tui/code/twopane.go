@@ -15,7 +15,7 @@ const (
 	twoPaneBreakpoint = 88
 )
 
-// twoPaneOverlay is the shared searchable frame behind /diff and /problems.
+// twoPaneOverlay is the shared searchable frame behind /diff.
 // Wide terminals show list and detail together; narrow terminals drill from
 // the list into a full-width detail view.
 type twoPaneOverlay struct {

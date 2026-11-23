@@ -13,7 +13,8 @@ export function boundTerminalState(state: TerminalState): TerminalState {
 	const content = [...state.content];
 	while (size > terminalTrimmedContentLength && content.length > 1) {
 		const removed = content.shift()!;
-		size -= removed.type === "command" ? removed.output.length : removed.value.length;
+		size -=
+			removed.type === "command" ? removed.output.length : removed.value.length;
 	}
 	const excess = size - terminalTrimmedContentLength;
 	if (excess > 0) {

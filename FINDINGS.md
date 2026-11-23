@@ -15,8 +15,6 @@ A review in five areas (sessions and chats, workspace and transport, LSP, DAP, w
 
 **Still open:**
 - **Sessions:** forking through a compaction turn that isn't the chat's latest forks through the turn before it, without the compaction, because the journal records no input for it. Clients subscribed to a chat channel keep its old title until they resubscribe, since AHP has no chat rename action. Background-task turns stay separate only for the host process; after a restart they merge into the previous turn.
-- **DAP:** with `terminateDebuggee: false`, the process-group kill after the adapter exits can still end a launched debuggee. `_wingmanPlan.configuration` can carry adapter options that run commands (`runtimeExecutable`, `initCommands`); not an escalation, since the same page has terminals.
-- **Terminals:** debugger terminals in `pkg/dap` can't yet tell a cut-off output stream from a normal end; `terminal.Session.SubscribeAt` and `Written` now make that possible.
 - **Resources:** a regular file swapped for a FIFO between the check and the open can still block `resourceRead`.
 - **Unverified:** `ahpHost.fileURI` likely produces unusable `file:` URIs on Windows (`file://C:/…`), and a background job holding a PTY open may hang its close on Linux.
 

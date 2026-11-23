@@ -3,8 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +31,7 @@ func newLSPTestApp(t *testing.T, files map[string]string) (*Server, string) {
 			t.Fatal(err)
 		}
 	}
-	app, err := New(context.Background(), root, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(context.Background(), root, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,43 +285,11 @@ func TestLSPRequestValidation(t *testing.T) {
 	}
 }
 
-func TestLSPWorkspaceDiagnosticsAndActivity(t *testing.T) {
-	app, root := newLSPTestApp(t, nil)
+func TestLSPWorkspaceDiagnosticsAreNotServed(t *testing.T) {
+	app, root := newLSPTestApp(t, map[string]string{"main.go": "package main\n"})
 	c := newLSPTestClient(t, app, root)
-	var report struct {
-		Items   []json.RawMessage `json:"items"`
-		Wingman struct {
-			CheckedFiles       *int     `json:"checked_files"`
-			UnavailableServers []string `json:"unavailable_servers"`
-		} `json:"_wingman"`
-	}
-	c.result("workspace/diagnostic", map[string]any{"previousResultIds": []any{}}, &report)
-	if report.Items == nil || report.Wingman.UnavailableServers == nil || report.Wingman.CheckedFiles == nil || *report.Wingman.CheckedFiles != 0 {
-		t.Fatalf("workspace report = %+v", report)
-	}
-	rec := httptest.NewRecorder()
-	app.handleWorkspaceActivity(rec, httptest.NewRequest(http.MethodGet, "/api/workspace/activity", nil))
-	var activity lspActivityResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &activity); err != nil || activity.Analyzing || activity.Services == nil || len(activity.Services) != 0 {
-		t.Fatalf("activity = %s", rec.Body)
-	}
-}
-
-func TestLSPDiagnosticRefreshReachesCapableClients(t *testing.T) {
-	app, _ := newLSPTestApp(t, nil)
-	conn, ctx := dialEditorTest(t, app, "/lsp")
-	initialize := map[string]any{"capabilities": map[string]any{"workspace": map[string]any{"diagnostics": map[string]any{"refreshSupport": true}}}}
-	editorTestReply(t, conn, ctx, map[string]any{"jsonrpc": "2.0", "id": float64(1), "method": "initialize", "params": initialize})
-	app.Project.refreshDiagnostics()
-	var request struct {
-		ID     string `json:"id"`
-		Method string `json:"method"`
-	}
-	if err := wsjson.Read(ctx, conn, &request); err != nil || request.Method != "workspace/diagnostic/refresh" || request.ID == "" {
-		t.Fatalf("refresh = %+v, %v", request, err)
-	}
-	if err := wsjson.Write(ctx, conn, map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": nil}); err != nil {
-		t.Fatal(err)
+	if response := c.call("workspace/diagnostic", map[string]any{"previousResultIds": []any{}}); response["error"] == nil {
+		t.Fatalf("workspace diagnostics are still served: %v", response)
 	}
 }
 

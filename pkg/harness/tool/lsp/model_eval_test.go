@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code/prompt"
-	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/fs"
@@ -23,6 +23,37 @@ import (
 // Run this same file in the baseline and changed checkout with an explicitly
 // configured model. Unlike the deterministic LSP evaluation, this measures real
 // model tool selection, complete-task correctness, round trips, and token usage.
+// answerJSON takes the JSON object from a final answer, which models may
+// fence or follow an explanation with.
+func answerJSON(text string) string {
+	text = strings.TrimSpace(text)
+	if index := strings.LastIndex(text, "```json"); index >= 0 {
+		block := text[index+len("```json"):]
+		if end := strings.Index(block, "```"); end >= 0 {
+			block = block[:end]
+		}
+		return strings.TrimSpace(block)
+	}
+	if start, end := strings.Index(text, "{"), strings.LastIndex(text, "}"); start >= 0 && end > start {
+		return text[start : end+1]
+	}
+	return text
+}
+
+func TestAnswerJSON(t *testing.T) {
+	const want = `{"definition":"types.go:6","callers":["uses.go:3"]}`
+	for _, text := range []string{
+		want,
+		"```json\n" + want + "\n```",
+		"I found it at `types.go:6`.\n\n```json\n" + want + "\n```",
+		"The answer is " + want + ".",
+	} {
+		if got := answerJSON(text); got != want {
+			t.Errorf("answerJSON(%q) = %q", text, got)
+		}
+	}
+}
+
 func TestLiveLSPToolSelection(t *testing.T) {
 	model := strings.TrimSpace(os.Getenv("WINGMAN_LSP_EVAL_MODEL"))
 	if model == "" {
@@ -44,18 +75,14 @@ func TestLiveLSPToolSelection(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			var options []lsp.ManagerOption
-			if available {
-				managed, err := devtools.New()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if managed.Resolve("gopls") == "" {
-					t.Fatal("managed gopls required")
-				}
-				options = append(options, lsp.WithManagedTools(managed))
+			var servers []lsp.Server
+			if !available {
+				// Shadows the built-in gopls with a command that does not exist.
+				servers = append(servers, lsp.Server{Name: "gopls", Command: filepath.Join(root, "missing-gopls"), ExtensionToLanguage: map[string]string{".go": "go"}})
+			} else if _, err := exec.LookPath("gopls"); err != nil {
+				t.Fatal("gopls is required on PATH")
 			}
-			service := language.New(root, options...)
+			service := language.New(root, servers...)
 			defer service.Close()
 			fsRoot, err := os.OpenRoot(root)
 			if err != nil {
@@ -123,8 +150,7 @@ func TestLiveLSPToolSelection(t *testing.T) {
 				Definition string   `json:"definition"`
 				Callers    []string `json:"callers"`
 			}
-			final = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(final), "```json"), "```"), "```"))
-			if err := json.Unmarshal([]byte(final), &answer); err != nil {
+			if err := json.Unmarshal([]byte(answerJSON(final)), &answer); err != nil {
 				t.Fatalf("invalid final JSON: %v; %s", err, final)
 			}
 			slices.Sort(answer.Callers)
@@ -132,113 +158,5 @@ func TestLiveLSPToolSelection(t *testing.T) {
 				t.Fatalf("incorrect semantic answer: %+v", answer)
 			}
 		})
-	}
-}
-
-// Exercise the model-facing preview -> ordinary edit path, including the private
-// freshness connection used by sessions. No digest or preview token is an input.
-func TestLiveLSPRenamePreview(t *testing.T) {
-	model := strings.TrimSpace(os.Getenv("WINGMAN_LSP_EVAL_MODEL"))
-	if model == "" {
-		t.Skip("set WINGMAN_LSP_EVAL_MODEL and configure an inference provider")
-	}
-	managed, err := devtools.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if managed.Resolve("gopls") == "" {
-		t.Fatal("managed gopls required")
-	}
-	root := t.TempDir()
-	files := map[string]string{
-		"go.mod":    "module lsp-rename.test\n\ngo 1.26\n",
-		"target.go": "package example\n\nfunc Target() int { return 42 }\n",
-		"uses.go":   "package example\n\nfunc First() int { return Target() }\nfunc Second() int { return Target() }\n",
-		"decoy.go":  "package example\n\n// Target remains here.\nvar Text = \"Target\"\nfunc Shadow() int { Target := 7; return Target }\n",
-	}
-	for name, data := range files {
-		if err := os.WriteFile(filepath.Join(root, name), []byte(data), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	service := language.New(root, lsp.WithManagedTools(managed))
-	defer service.Close()
-	fsRoot, err := os.OpenRoot(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fsRoot.Close()
-	freshness := fs.NewFreshness(fsRoot)
-	var tools []tool.Tool
-	for _, candidate := range fs.Tools(fsRoot, &fs.Options{Freshness: freshness}) {
-		if slices.Contains([]string{"read", "grep", "glob", "edit"}, candidate.Name) {
-			tools = append(tools, candidate)
-		}
-	}
-	tools = append(tools, freshness.TrackSnapshots(lsptool.NewTools(service)[0]))
-	cfg, err := harness.ConfigFromEnvironment()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Model = func() string { return model }
-	cfg.Effort = func() string { return "low" }
-	cfg.MaxTurns = 12
-	cfg.ContextWindow = -1
-	cfg.Tools = func() []tool.Tool { return tools }
-	cfg.Instructions = func() string {
-		return prompt.BuildBaseInstructions(prompt.VariantFor(model).Agent, prompt.SectionData{}) + "\nWorkspace: " + root + "\nUse the available tools; do not delegate or request new tools."
-	}
-	a := &harness.Agent{Config: cfg}
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
-	defer cancel()
-	start := time.Now()
-	stream, err := a.Send(ctx, []harness.Content{{Text: "Rename the function Target declared in target.go to Renamed and update its callers. Preserve comments, strings and the unrelated local variable with the same name. Preview the language-server rename, review it, and apply the authorized changes."}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, err := range stream {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	calls, failures, previews, edits := 0, 0, 0, 0
-	for _, message := range a.MessagesSnapshot() {
-		for _, content := range message.Content {
-			if call := content.ToolCall; call != nil {
-				calls++
-				t.Logf("RENAME_TRACE name=%s args=%s", call.Name, call.Args)
-				if call.Name == "lsp" && strings.Contains(call.Args, "previewRename") {
-					previews++
-				}
-				if call.Name == "edit" {
-					edits++
-					if strings.Contains(call.Args, "sha256") {
-						t.Fatal("model supplied a digest")
-					}
-				}
-			}
-			if content.ToolResult != nil && content.ToolResult.IsError {
-				failures++
-				t.Logf("RENAME_ERROR name=%s content=%s", content.ToolResult.Name, content.ToolResult.Content.Text())
-				if content.ToolResult.Name == "lsp" || content.ToolResult.Name == "edit" {
-					t.Errorf("preview/apply failed: %s", content.ToolResult.Content.Text())
-				}
-			}
-		}
-	}
-	usage := a.UsageSnapshot()
-	t.Logf("RENAME_METRIC model=%s elapsed_ms=%d tool_calls=%d tool_errors=%d previews=%d edits=%d input_tokens=%d output_tokens=%d", model, time.Since(start).Milliseconds(), calls, failures, previews, edits, usage.InputTokens, usage.OutputTokens)
-	if previews != 1 || edits != 1 {
-		t.Fatalf("expected one preview and one atomic edit, got %d/%d", previews, edits)
-	}
-	for name, before := range files {
-		want := before
-		if name == "target.go" || name == "uses.go" {
-			want = strings.ReplaceAll(before, "Target", "Renamed")
-		}
-		got, err := os.ReadFile(filepath.Join(root, name))
-		if err != nil || string(got) != want {
-			t.Fatalf("incorrect rename in %s: %q %v", name, got, err)
-		}
 	}
 }

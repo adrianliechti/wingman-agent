@@ -1,78 +1,42 @@
 package lsp
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"maps"
+	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"time"
-
-	"github.com/adrianliechti/wingman-agent/internal/tooling"
-	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 )
 
-const maxRestarts = 3
-
+// Manager starts a language server the first time a file it handles is asked about.
 type Manager struct {
 	workingDir string
 	lifecycle  context.Context
 	cancel     context.CancelFunc
 	connect    sessionConnector
-	sessions   map[string]*sessionEntry
-	restarts   map[string]int
-	closed     bool
-	mu         sync.Mutex
+	lookPath   func(string) string
+	servers    []Server // in order of registration
 
-	detectMu              sync.Mutex
-	roots                 []projectRoot
-	detectedAt            time.Time
-	initializationOptions map[string][]byte
-	managedTools          tooling.ManagedTools
-	registry              *Registry
+	mu       sync.Mutex
+	sessions map[string]*sessionEntry // by server name
+	restarts map[string]int
+	closed   bool
+
+	commandMu sync.Mutex
+	commands  map[string]foundCommand
 }
 
-// ServerActivity describes one live language-server session without starting
-// a new one. It is intended for lightweight workspace status surfaces.
-type ServerActivity struct {
-	Server     string         `json:"server"`
-	Label      string         `json:"label"`
-	ProjectDir string         `json:"project_dir"`
-	Analyzing  bool           `json:"analyzing"`
-	Operations []WorkProgress `json:"operations"`
+type foundCommand struct {
+	path string
+	at   time.Time
 }
 
-type ManagerOption func(*Manager)
-
-// WithServerInitializationOptions adds opaque initialization options to every
-// detected server with the given name. The options are marshalled once and
-// copied into each server descriptor before a session starts.
-func WithServerInitializationOptions(name string, value any) ManagerOption {
-	return func(manager *Manager) {
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			return
-		}
-		if manager.initializationOptions == nil {
-			manager.initializationOptions = make(map[string][]byte)
-		}
-		manager.initializationOptions[serverOptionsKey(name)] = encoded
-	}
-}
-
-// WithManagedTools requires Wingman's managed copy for supported language tools.
-func WithManagedTools(tools tooling.ManagedTools) ManagerOption {
-	return func(manager *Manager) {
-		manager.managedTools = tools
-	}
-}
-
-// sessionEntry is shared by warmup and on-demand callers. The result is
-// published by closing done; failed entries are removed so later calls retry.
+// sessionEntry is shared by every caller waiting for a server to start. The
+// result is published by closing done; failed entries are removed so later
+// calls retry.
 type sessionEntry struct {
 	done    chan struct{}
 	session *Session
@@ -82,21 +46,26 @@ type sessionEntry struct {
 
 type sessionConnector func(context.Context, string, Server) (*Session, error)
 
-const detectionCacheTTL = 30 * time.Second
+const commandCacheTTL = 30 * time.Second
 
-func NewManager(workingDir string, options ...ManagerOption) *Manager {
+// NewManager gives registered servers precedence over the built-ins.
+func NewManager(workingDir string, servers ...Server) *Manager {
 	lifecycle, cancel := context.WithCancel(context.Background())
 	manager := &Manager{
 		workingDir: workingDir,
 		lifecycle:  lifecycle,
 		cancel:     cancel,
 		connect:    connect,
+		lookPath:   CommandLookup,
 		sessions:   make(map[string]*sessionEntry),
 		restarts:   make(map[string]int),
+		commands:   make(map[string]foundCommand),
 	}
-	for _, option := range options {
-		if option != nil {
-			option(manager)
+	seen := make(map[string]bool)
+	for _, server := range slices.Concat(servers, defaultServers) {
+		if !seen[server.Name] {
+			seen[server.Name] = true
+			manager.servers = append(manager.servers, cloneServer(server))
 		}
 	}
 	return manager
@@ -106,183 +75,67 @@ func (m *Manager) WorkingDir() string {
 	return m.workingDir
 }
 
-func (m *Manager) detect() []projectRoot {
-	m.detectMu.Lock()
-	defer m.detectMu.Unlock()
-	if m.detectedAt.IsZero() || time.Since(m.detectedAt) >= detectionCacheTTL {
-		m.roots = detectAll(m.workingDir, m.managedTools, m.registry)
-		for index := range m.roots {
-			if options := m.initializationOptions[serverOptionsKey(m.roots[index].Server.Name)]; len(options) > 0 {
-				m.roots[index].Server.InitializationOptions = slices.Clone(options)
-			}
-		}
-		m.detectedAt = time.Now()
-	}
-	return cloneProjectRoots(m.roots)
-}
-
-// Detection results are cached, but every public lookup returns an isolated
-// descriptor. Server contains slices, so a shallow copy would let a caller
-// mutate the cache (and, for catalog-backed fields, the global catalog) by
-// changing Args, Languages, or InitializationOptions in a returned value.
-func cloneProjectRoots(values []projectRoot) []projectRoot {
-	cloned := make([]projectRoot, len(values))
-	for index, value := range values {
-		cloned[index] = value
-		cloned[index].Server.Args = slices.Clone(value.Server.Args)
-		cloned[index].Server.Languages = slices.Clone(value.Server.Languages)
-		cloned[index].Server.ExtensionToLanguage = maps.Clone(value.Server.ExtensionToLanguage)
-		cloned[index].Server.InitializationOptions = slices.Clone(value.Server.InitializationOptions)
-	}
-	return cloned
-}
-
-// InvalidateDetection makes newly installed or updated servers visible on the
-// next lookup without waiting for the detection cache TTL. Crash counters are
-// reset because an updated tool deserves a fresh restart budget.
-func (m *Manager) InvalidateDetection() {
-	m.detectMu.Lock()
-	m.detectedAt = time.Time{}
-	m.detectMu.Unlock()
-	m.mu.Lock()
-	clear(m.restarts)
-	m.mu.Unlock()
-}
-
-// SetServerInitializationOptions updates future sessions for a server. An
-// active session for that server is closed because LSP initialization options
-// cannot be changed after startup.
-func (m *Manager) SetServerInitializationOptions(name string, value any) error {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	optionsKey := serverOptionsKey(name)
-	m.detectMu.Lock()
-	if bytes.Equal(m.initializationOptions[optionsKey], encoded) {
-		m.detectMu.Unlock()
-		return nil
-	}
-	if m.initializationOptions == nil {
-		m.initializationOptions = make(map[string][]byte)
-	}
-	m.initializationOptions[optionsKey] = encoded
-	m.detectedAt = time.Time{}
-	m.detectMu.Unlock()
-
-	var stale []*Session
-	m.mu.Lock()
-	for key, entry := range m.sessions {
-		if entry.session != nil && strings.EqualFold(entry.session.server.Name, name) {
-			stale = append(stale, entry.session)
-			delete(m.sessions, key)
-		}
-	}
-	m.mu.Unlock()
-	closeSessions(stale)
-	return nil
-}
-
-func serverOptionsKey(name string) string {
-	return strings.ToLower(strings.TrimSpace(name))
-}
-
-// serverInitializationOptionsCurrentLocked reports whether a descriptor still
-// carries the manager's current options. Callers hold detectMu so an options
-// update cannot race the decision to publish a newly connected session.
-func (m *Manager) serverInitializationOptionsCurrentLocked(server Server) bool {
-	options, configured := m.initializationOptions[serverOptionsKey(server.Name)]
-	return !configured || bytes.Equal(server.InitializationOptions, options)
-}
-
+// FindServer never starts a server.
 func (m *Manager) FindServer(filePath string) *Server {
-	project := m.findProject(filePath)
-	if project == nil {
+	server, err := m.serverFor(filePath)
+	if err != nil {
 		return nil
 	}
-	server := project.Server
+	server = cloneServer(server)
 	return &server
 }
 
-func (m *Manager) findProject(filePath string) *projectRoot {
-	return findProject(m.detect(), filePath)
-}
-
-func findProject(projects []projectRoot, filePath string) *projectRoot {
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(filePath), "."))
-	if ext == "" {
-		return nil
-	}
-
-	dir := filepath.Dir(filePath)
-	var best *projectRoot
-	bestLen := -1
-
-	for _, root := range projects {
-		if !isSubPath(root.Dir, dir) {
-			continue
+// Each extension has one server: the first registered that claims it, installed or not.
+func (m *Manager) configuredServer(filePath string) *Server {
+	for i := range m.servers {
+		if m.servers[i].LanguageIDForPath(filePath) != "" {
+			return &m.servers[i]
 		}
-		if len(root.Dir) <= bestLen {
-			continue
-		}
-		if !slices.Contains(root.Server.Languages, ext) {
-			continue
-		}
-		candidate := root
-		best = &candidate
-		bestLen = len(root.Dir)
 	}
-
-	return best
+	return nil
 }
 
-func (m *Manager) DetectServers() []Server {
-	var servers []Server
-	seen := make(map[string]bool)
-
-	for _, root := range m.detect() {
-		key := serverKey(root.Server)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		servers = append(servers, root.Server)
+func (m *Manager) serverFor(filePath string) (Server, error) {
+	kind := filepath.Ext(filePath)
+	if kind == "" {
+		kind = filepath.Base(filePath)
 	}
-
-	return servers
-}
-
-func (m *Manager) Projects() []Project { return m.detect() }
-
-func (m *Manager) ProjectSession(ctx context.Context, project Project) (*Session, error) {
-	return m.getSession(ctx, project)
-}
-
-func (m *Manager) WarmUpFile(filePath string) {
-	if project := m.findProject(filePath); project != nil {
-		_, _ = m.getOrStartSession(*project)
+	config := m.configuredServer(filePath)
+	if config == nil {
+		return Server{}, fmt.Errorf("no language server is configured for %s files", kind)
 	}
+	server := *config
+	server.path = m.commandPath(server.Command)
+	if server.path != "" {
+		return server, nil
+	}
+	// An existing process can still serve requests after its executable moves.
+	if session, ok := m.ActiveSession(filePath); ok {
+		return session.server, nil
+	}
+	return Server{}, fmt.Errorf("language server %s for %s files is not installed: %q not found on PATH", server.Name, kind, server.Command)
 }
 
-func projectKey(project projectRoot) string {
-	return filepath.Clean(project.Dir) + "\x00" + serverKey(project.Server)
-}
-
-func serverKey(server Server) string {
-	return server.Command + "\x00" + strings.Join(server.Args, "\x00") + "\x00" + string(server.InitializationOptions)
+func (m *Manager) commandPath(command string) string {
+	m.commandMu.Lock()
+	defer m.commandMu.Unlock()
+	if found, ok := m.commands[command]; ok && time.Since(found.at) < commandCacheTTL {
+		return found.path
+	}
+	path := m.lookPath(command)
+	if path != "" {
+		// A miss is not remembered, so a server works as soon as it is installed.
+		m.commands[command] = foundCommand{path: path, at: time.Now()}
+	}
+	return path
 }
 
 func (m *Manager) GetSession(ctx context.Context, filePath string) (*Session, error) {
-	project := m.findProject(filePath)
-	if project == nil {
-		return nil, fmt.Errorf("no LSP server found for file: %s", filePath)
+	server, err := m.serverFor(filePath)
+	if err != nil {
+		return nil, err
 	}
-
-	return m.getSession(ctx, *project)
-}
-
-func (m *Manager) getSession(ctx context.Context, project projectRoot) (*Session, error) {
-	entry, err := m.getOrStartSession(project)
+	entry, err := m.getOrStartSession(server)
 	if err != nil {
 		return nil, err
 	}
@@ -294,9 +147,8 @@ func (m *Manager) getSession(ctx context.Context, project projectRoot) (*Session
 	}
 }
 
-func (m *Manager) getOrStartSession(project projectRoot) (*sessionEntry, error) {
-	server := project.Server
-	key := projectKey(project)
+func (m *Manager) getOrStartSession(server Server) (*sessionEntry, error) {
+	key := server.Name
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -304,19 +156,15 @@ func (m *Manager) getOrStartSession(project projectRoot) (*sessionEntry, error) 
 		return nil, fmt.Errorf("LSP manager is closed")
 	}
 
-	var openedDocuments []openDocument
-	restarting := false
-	if previous := m.sessions[key]; previous != nil {
+	previous := m.sessions[key]
+	if previous != nil {
 		if previous.session == nil || previous.session.IsAlive() {
 			return previous, nil
 		}
-		openedDocuments = previous.session.openedDocuments()
-		delete(m.sessions, key)
+		if m.restarts[key] >= server.restarts() {
+			return nil, fmt.Errorf("LSP server %s reached its restart limit (%d), not restarting", key, server.restarts())
+		}
 		m.restarts[key]++
-		restarting = true
-	}
-	if m.restarts[key] > maxRestarts {
-		return nil, fmt.Errorf("LSP server %s crashed %d times, not restarting", server.Name, maxRestarts)
 	}
 	entry := &sessionEntry{done: make(chan struct{})}
 	m.sessions[key] = entry
@@ -324,94 +172,95 @@ func (m *Manager) getOrStartSession(project projectRoot) (*sessionEntry, error) 
 	// Session startup is shared workspace state. Keep it alive when the request
 	// that discovered the server is cancelled (for example, when a hover moves)
 	// and let each caller stop waiting independently.
-	go m.startSession(project, key, entry, openedDocuments, restarting)
+	go m.startSession(server, entry, previous)
 	return entry, nil
 }
 
-func (m *Manager) startSession(project projectRoot, key string, entry *sessionEntry, openedDocuments []openDocument, restarting bool) {
-	server := project.Server
-	parent := m.lifecycle
-	if parent == nil {
-		parent = context.Background()
-	}
-	connectCtx, cancelConnect := context.WithCancel(parent)
-	defer cancelConnect()
+func (m *Manager) startSession(server Server, entry, previous *sessionEntry) {
+	ctx := m.lifecycle
 
-	connector := m.connect
-	if connector == nil {
-		connector = connect
+	dir := m.workingDir
+	if server.WorkspaceFolder != "" {
+		if dir = server.WorkspaceFolder; !filepath.IsAbs(dir) {
+			dir = filepath.Join(m.workingDir, dir)
+		}
 	}
-	session, err := connector(connectCtx, project.Dir, server)
+	session, err := m.connect(ctx, dir, server)
 	if err == nil && session == nil {
 		err = fmt.Errorf("start %s: connector returned no session", server.Name)
 	}
 	if err == nil {
-		err = connectCtx.Err()
+		err = ctx.Err()
 	}
-	if err == nil {
-		for _, document := range openedDocuments {
+	if err == nil && previous != nil {
+		for _, doc := range previous.session.openedDocuments() {
 			m.mu.Lock()
-			closed := slices.Contains(entry.closed, document.Path)
+			closed := slices.Contains(entry.closed, doc.Path)
 			m.mu.Unlock()
-			if document.Path == "" || closed {
+			if closed {
 				continue
 			}
-			var syncErr error
-			if document.Editor {
-				_, syncErr = session.SyncEditorDocument(connectCtx, document.Path, document.Content, document.Saved)
-			} else if document.Saved {
-				_, syncErr = session.SaveDocument(connectCtx, document.Path, document.Content)
+			if doc.Saved && !doc.Editor {
+				// Disk may have changed while the server was offline.
+				_, err = session.OpenDocument(ctx, doc.Path)
+				if errors.Is(err, os.ErrNotExist) {
+					err = nil
+				}
 			} else {
-				_, syncErr = session.SyncDocument(connectCtx, document.Path, document.Content)
+				_, err = session.syncDocument(ctx, doc.Path, doc.Content, doc.Saved, doc.Editor)
 			}
-			if syncErr != nil {
-				err = fmt.Errorf("restore open document %s: %w", document.Path, syncErr)
+			if err != nil {
+				err = fmt.Errorf("restore %s: %w", doc.Path, err)
 				break
 			}
 		}
 	}
-	if err != nil && restarting {
-		err = fmt.Errorf("restart %s: %w", server.Name, err)
-	}
 
-	m.detectMu.Lock()
 	m.mu.Lock()
-	if m.closed {
-		err = fmt.Errorf("LSP manager is closed")
-	} else if err == nil && !m.serverInitializationOptionsCurrentLocked(server) {
-		err = fmt.Errorf("LSP server %s initialization options changed during startup", server.Name)
+	// Finish closes received during replay before a caller can reopen a buffer.
+	for len(entry.closed) > 0 && !m.closed {
+		closed := entry.closed
+		entry.closed = nil
+		m.mu.Unlock()
+		for _, path := range closed {
+			if previous != nil {
+				previous.session.forgetDocument(path)
+			}
+			if err == nil {
+				err = session.CloseDocument(ctx, path)
+			}
+		}
+		m.mu.Lock()
 	}
-	if err == nil {
+	switch {
+	case m.closed:
+		err = fmt.Errorf("LSP manager is closed")
+	case err == nil:
 		entry.session = session
-	} else {
-		delete(m.sessions, key)
+	case previous != nil:
+		// Keep editor buffers for the next allowed restart attempt.
+		m.sessions[server.Name] = previous
+		err = fmt.Errorf("restart %s: %w", server.Name, err)
+	default:
+		delete(m.sessions, server.Name)
 	}
 	entry.err = err
-	closed := entry.closed
-	entry.closed = nil
 	close(entry.done)
 	m.mu.Unlock()
-	m.detectMu.Unlock()
-
 	if err != nil && session != nil {
 		session.Close()
-	}
-	if err == nil {
-		for _, path := range closed {
-			_ = session.CloseDocument(connectCtx, path)
-		}
 	}
 }
 
 // CloseDocument ends an editor document's lifetime, also while its server is
 // stopped or restarting, so that a restart does not restore it.
 func (m *Manager) CloseDocument(ctx context.Context, filePath string) error {
-	project := m.findProject(filePath)
-	if project == nil {
+	server := m.configuredServer(filePath)
+	if server == nil {
 		return nil
 	}
 	m.mu.Lock()
-	entry := m.sessions[projectKey(*project)]
+	entry := m.sessions[server.Name]
 	switch {
 	case entry == nil:
 	case entry.session == nil:
@@ -428,83 +277,43 @@ func (m *Manager) CloseDocument(ctx context.Context, filePath string) error {
 	return nil
 }
 
+// ActiveSession returns the file's session only if its server already runs.
 func (m *Manager) ActiveSession(filePath string) (*Session, bool) {
-	project := m.findProject(filePath)
-	if project == nil {
+	server := m.configuredServer(filePath)
+	if server == nil {
 		return nil, false
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if entry := m.sessions[projectKey(*project)]; entry != nil && entry.session != nil && entry.session.IsAlive() {
+	if entry := m.sessions[server.Name]; entry != nil && entry.session != nil && entry.session.IsAlive() {
 		return entry.session, true
 	}
 	return nil, false
 }
 
+func (m *Manager) liveSessions() []*Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sessions := make([]*Session, 0, len(m.sessions))
+	for _, entry := range m.sessions {
+		if entry.session != nil && entry.session.IsAlive() {
+			sessions = append(sessions, entry.session)
+		}
+	}
+	return sessions
+}
+
+func (m *Manager) Running() bool {
+	return len(m.liveSessions()) > 0
+}
+
 // FilesChanged passes disk changes to every live session.
 func (m *Manager) FilesChanged(ctx context.Context, changes []FileChange) {
-	m.mu.Lock()
-	sessions := make([]*Session, 0, len(m.sessions))
-	for _, entry := range m.sessions {
-		if entry.session != nil && entry.session.IsAlive() {
-			sessions = append(sessions, entry.session)
-		}
-	}
-	m.mu.Unlock()
-	for _, session := range sessions {
+	for _, session := range m.liveSessions() {
 		_ = session.FilesChanged(ctx, changes)
 	}
-}
-
-func (m *Manager) Activities() []ServerActivity {
-	m.mu.Lock()
-	sessions := make([]*Session, 0, len(m.sessions))
-	for _, entry := range m.sessions {
-		if entry.session != nil && entry.session.IsAlive() {
-			sessions = append(sessions, entry.session)
-		}
-	}
-	m.mu.Unlock()
-
-	result := make([]ServerActivity, 0, len(sessions))
-	for _, session := range sessions {
-		projectDir, _ := fileuri.Path(session.rootURI)
-		operations := session.Progress()
-		label := session.server.Label
-		if label == "" {
-			label = session.server.Name
-		}
-		result = append(result, ServerActivity{
-			Server:     session.server.Name,
-			Label:      label,
-			ProjectDir: projectDir,
-			Analyzing:  len(operations) > 0,
-			Operations: operations,
-		})
-	}
-	slices.SortFunc(result, func(a, b ServerActivity) int {
-		if order := strings.Compare(a.ProjectDir, b.ProjectDir); order != 0 {
-			return order
-		}
-		return strings.Compare(a.Server, b.Server)
-	})
-	return result
-}
-
-func (m *Manager) WarmUpServers() {
-	go func() {
-		if m.lifecycle != nil && m.lifecycle.Err() != nil {
-			return
-		}
-		for _, project := range m.detect() {
-			if m.lifecycle != nil && m.lifecycle.Err() != nil {
-				return
-			}
-			_, _ = m.getOrStartSession(project)
-		}
-	}()
 }
 
 func (m *Manager) Close() {
@@ -520,20 +329,13 @@ func (m *Manager) Close() {
 	}
 	clear(m.sessions)
 	m.mu.Unlock()
-	if m.cancel != nil {
-		m.cancel()
-	}
+	m.cancel()
 
-	closeSessions(sessions)
-}
-
-func closeSessions(sessions []*Session) {
 	var wait sync.WaitGroup
 	for _, session := range sessions {
-		if session == nil {
-			continue
+		if session != nil {
+			wait.Go(session.Close)
 		}
-		wait.Go(session.Close)
 	}
 	wait.Wait()
 }

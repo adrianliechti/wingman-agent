@@ -18,10 +18,11 @@ import (
 const codexExtensionNamespace = "com.openai"
 
 type resolvedManifest struct {
-	Manifest     Manifest
-	Path         string
-	Hooks        json.RawMessage
-	HooksPresent bool
+	Manifest        Manifest
+	Path            string
+	Hooks           json.RawMessage
+	HooksPresent    bool
+	LanguageServers json.RawMessage
 }
 
 func hasPluginManifest(root string) bool {
@@ -50,6 +51,10 @@ func loadResolvedManifest(root string) (resolvedManifest, []string, error) {
 	resolved := resolvedManifest{
 		Manifest: manifest,
 		Path:     resolvedPath,
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(content, &fields) == nil {
+		resolved.LanguageServers = fields[languageServersField]
 	}
 	if extension, ok := manifest.Extensions[codexExtensionNamespace]; ok {
 		resolved.Hooks, resolved.HooksPresent, err = hookDeclaration(extension)

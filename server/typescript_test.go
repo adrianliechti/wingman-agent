@@ -79,7 +79,6 @@ func TestAHPTypeScriptIntegration(t *testing.T) {
 	s.mux.Get("/api/workspace/files", s.handleFileSearch)
 	s.mux.Post("/api/workspace/search", s.handleWorkspaceSearch)
 	s.mux.Get("/api/workspace/terminals/{terminal}/status", s.handleTerminalStatus)
-	s.mux.Get("/api/workspace/activity", s.handleWorkspaceActivity)
 	s.mux.Get("/fixture/inputs", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, agent.Messages("")) })
 	s.mux.Get("/api/workspace/git/diff", s.handleGitDiff)
 	s.mux.Get("/api/workspace/git", s.handleWorkspaceGit)

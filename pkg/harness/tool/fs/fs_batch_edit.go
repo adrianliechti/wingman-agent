@@ -104,9 +104,6 @@ func applyFileEdits(ctx context.Context, root *os.Root, freshness *Freshness, gu
 			if err != nil {
 				return nil, fmt.Sprintf("read %s: %v", displayPath, err)
 			}
-			if freshness.staleContent(ctx, target, before, ref) {
-				return nil, fmt.Sprintf("%s: content changed since the preview; refresh it", displayPath)
-			}
 		}
 		mode := os.FileMode(0o644)
 		if exists {

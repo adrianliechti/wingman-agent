@@ -192,15 +192,16 @@ func (s *sessionState) configureTools() error {
 	s.fileWriteRoots = append(s.fileWriteRoots, privateTemp)
 	s.scriptOptions = &schedule.Options{WorkDir: ws.RootPath, Disabled: a.cfg.DisableShell, Elicitation: elicit, Shell: shellOpts}
 
-	tools := ws.WithEditDiagnostics(fs.Tools(ws.Root, &fs.Options{
+	tools := fs.Tools(ws.Root, &fs.Options{
 		AllowedReadRoots:  s.fileReadRoots,
 		AllowedWriteRoots: s.fileWriteRoots,
 		Freshness:         s.freshness,
-	}))
+	})
 	if !a.cfg.DisableShell {
 		execTools := shell.ExecTools(s.resources.execManager, ws.RootPath, elicit, shellOpts)
 		tools = append(tools, fs.WrapWithWorkspaceSnapshot(ws.Root, execTools)...)
 	}
+	tools = ws.WithLanguageSync(tools)
 	tools = append(tools, schedule.Tools(s.schedules, s.scriptOptions)...)
 	tools = append(tools, elicitation.Tools(elicit)...)
 	if !a.cfg.DisableWebFetch {

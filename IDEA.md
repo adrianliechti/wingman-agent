@@ -49,7 +49,7 @@ for the editor. Last refreshed 2026-11-21.
 - **Tab** — coordinated multi-file suggestions.
 - **Editor** — persist open tabs, split layout, panel sizes; settings page, keybindings, theme picker.
 - **Navigation** — outline, breadcrumbs, workspace symbol search (needs HTTP route; LSP tool already has it).
-- **Debug/test** — watch expressions + debug console (backend already accepts `watch`/`repl`); Test Explorer; coverage.
+- **Test** — Test Explorer; coverage.
 - **Git** — hunk/line staging, amend, file-tree status decorations; merge-conflict editor; stash; blame/timeline.
 - **PRs** — PR/issue view; live status on PR links (AG); post `/code-review` findings as PR comments.
 - **Notebooks** — `.ipynb` view and edit (AG has a viewer).

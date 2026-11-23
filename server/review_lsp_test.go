@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -15,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
+	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 )
@@ -142,11 +143,18 @@ func handle(m message) {
 		reply(map[string]any{"capabilities": map[string]any{
 			"textDocumentSync":       map[string]any{"openClose": true, "change": 1},
 			"hoverProvider":          true,
+			"diagnosticProvider":     map[string]any{},
 			"renameProvider":         true,
 			"executeCommandProvider": map[string]any{"commands": []string{"review.edit"}},
 		}})
 	case "shutdown":
 		reply(nil)
+	case "textDocument/diagnostic":
+		reply(map[string]any{"kind": "full", "items": []any{map[string]any{
+			"range": zero, "severity": 2, "code": "W1", "source": "fixture",
+			"message": map[string]string{"kind": "markdown", "value": "**unused**"},
+			"tags": []int{1}, "data": map[string]string{"fix": "remove"},
+		}}})
 	case "exit":
 		os.Exit(0)
 	case "textDocument/didOpen":
@@ -239,25 +247,32 @@ func handle(m message) {
 }
 `
 
-// reviewLSPInstallFake installs the fake as Wingman's managed gopls. Call it
-// before the app is created: server detection is cached.
+// reviewLSPInstallFake makes the fake the gopls that Wingman finds. Call it
+// before the app is created: command lookups are cached.
 func reviewLSPInstallFake(t *testing.T) string {
 	t.Helper()
 	goTool, err := exec.LookPath("go")
 	if err != nil {
 		t.Skip("the go toolchain is needed to build the fake language server")
 	}
-	home := testenv.WingmanHome(t)
 	source := t.TempDir()
 	for name, content := range map[string]string{"go.mod": "module reviewlspfake\n\ngo 1.21\n", "main.go": reviewLSPFakeSource} {
 		if err := os.WriteFile(filepath.Join(source, name), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	binary := filepath.Join(home, "tools", "gopls", "bin", "gopls")
+	binary := filepath.Join(t.TempDir(), "gopls")
 	if runtime.GOOS == "windows" {
 		binary += ".exe"
 	}
+	previous := lsp.CommandLookup
+	lsp.CommandLookup = func(command string) string {
+		if command == "gopls" {
+			return binary
+		}
+		return ""
+	}
+	t.Cleanup(func() { lsp.CommandLookup = previous })
 	build := exec.Command(goTool, "build", "-o", binary, ".")
 	build.Dir = source
 	build.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=", "CGO_ENABLED=0")
@@ -437,6 +452,29 @@ func reviewLSPErrorCode(message map[string]any) any {
 
 const reviewLSPGoMod = "module review\n\ngo 1.24\n"
 
+func TestLSPDiagnosticsPreserveServerFields(t *testing.T) {
+	reviewLSPInstallFake(t)
+	app, root := newLSPTestApp(t, map[string]string{"main.go": "package main\n"})
+	c := newLSPTestClient(t, app, root)
+	var report struct {
+		Kind  string
+		Items []map[string]any
+	}
+	c.result("textDocument/diagnostic", map[string]any{"textDocument": map[string]any{"uri": c.uri("main.go")}}, &report)
+	if report.Kind != "full" || len(report.Items) != 1 {
+		t.Fatalf("diagnostic report = %+v", report)
+	}
+	for field, want := range map[string]any{
+		"code": "W1", "source": "fixture", "severity": float64(2),
+		"message": map[string]any{"kind": "markdown", "value": "**unused**"},
+		"tags":    []any{float64(1)}, "data": map[string]any{"fix": "remove"},
+	} {
+		if got := report.Items[0][field]; !reflect.DeepEqual(got, want) {
+			t.Errorf("diagnostic %s = %v, want %v", field, got, want)
+		}
+	}
+}
+
 // Bug: when one connection closes a document that another connection still has
 // open, the language server keeps the closing connection's discarded buffer and
 // the remaining editor's requests are answered against it. The remaining
@@ -601,8 +639,7 @@ func TestReviewLSPTypingDuringColdStartKeepsTheConnection(t *testing.T) {
 
 // Bug: releaseDocument holds the gateway-wide lspDocumentsMu while it waits on
 // the language server, so one wedged server stalls document sync on every
-// connection (even for files no server covers) and the workspace poller's
-// refreshDiagnostics.
+// connection (even for files no server covers).
 func TestReviewLSPWedgedServerDoesNotStallOtherConnections(t *testing.T) {
 	control := reviewLSPInstallFake(t)
 	reviewLSPFlag(t, control, "wedge")
@@ -627,20 +664,10 @@ func TestReviewLSPWedgedServerDoesNotStallOtherConnections(t *testing.T) {
 		t.Fatal("closing the document did not wait for the server; the test setup is invalid")
 	}
 
-	refreshed := make(chan struct{})
-	go func() {
-		app.refreshDiagnostics()
-		close(refreshed)
-	}()
 	c.open("notes.txt", "plain but unsaved\n", 1)
 	c.request(4, "textDocument/documentSymbol", map[string]any{"textDocument": map[string]any{"uri": c.uri("notes.txt")}})
 	if _, ok := c.response(4, 3*time.Second); !ok {
 		t.Error("a file without a language server stalled behind another connection's wedged server")
-	}
-	select {
-	case <-refreshed:
-	case <-time.After(3 * time.Second):
-		t.Error("refreshDiagnostics stalled behind a wedged language server")
 	}
 }
 
@@ -656,7 +683,7 @@ func TestReviewLSPDocumentClosedDuringRestartIsNotRestored(t *testing.T) {
 		t.Fatalf("hover = %q", got)
 	}
 	reviewLSPKillFakes(control)
-	for deadline := time.Now().Add(10 * time.Second); len(app.Project.workspace.LSPActivities()) != 0; time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(10 * time.Second); app.Project.workspace.LanguageService().Running(); time.Sleep(20 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("the killed language server still reports as alive")
 		}
@@ -814,7 +841,7 @@ func TestReviewLSPDocumentsAreReleasedWhenTheLastConnectionLeaves(t *testing.T) 
 
 	_ = a.conn.Close(websocket.StatusNormalClosure, "")
 	time.Sleep(200 * time.Millisecond)
-	if content, open := app.Project.workspace.EditorLSPDocumentContent(path); !open || content != "package main // shared\n" {
+	if content, open := app.Project.workspace.LanguageService().DocumentContent(path); !open || content != "package main // shared\n" {
 		t.Fatalf("closing one of two connections released the document: %q, %v", content, open)
 	}
 	_ = b.conn.Close(websocket.StatusNormalClosure, "")
@@ -822,7 +849,7 @@ func TestReviewLSPDocumentsAreReleasedWhenTheLastConnectionLeaves(t *testing.T) 
 		app.editor.lspDocumentsMu.Lock()
 		owners := len(app.editor.lspDocuments)
 		app.editor.lspDocumentsMu.Unlock()
-		if _, open := app.Project.workspace.EditorLSPDocumentContent(path); !open && owners == 0 {
+		if _, open := app.Project.workspace.LanguageService().DocumentContent(path); !open && owners == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -862,11 +889,6 @@ func TestReviewLSPConcurrentConnectionsStress(t *testing.T) {
 				}
 				id++
 				_ = p.write(map[string]any{"jsonrpc": "2.0", "id": id, "method": "textDocument/documentSymbol", "params": map[string]any{"textDocument": map[string]any{"uri": p.uri(name)}}})
-				if round%3 == 0 {
-					id++
-					_ = p.write(map[string]any{"jsonrpc": "2.0", "id": id, "method": "workspace/diagnostic", "params": map[string]any{"previousResultIds": []any{}}})
-					go app.refreshDiagnostics()
-				}
 				if _, ok := p.response(id, 10*time.Second); !ok {
 					t.Errorf("peer %d round %d: no response", i, round)
 					return
@@ -887,19 +909,19 @@ func TestReviewLSPConcurrentConnectionsStress(t *testing.T) {
 	wait.Wait()
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		app.editor.lspDocumentsMu.Lock()
-		owners, refreshers := len(app.editor.lspDocuments), len(app.editor.lspRefreshers)
+		owners := len(app.editor.lspDocuments)
 		app.editor.lspDocumentsMu.Unlock()
 		open := 0
 		for i := range 4 {
-			if _, ok := app.Project.workspace.EditorLSPDocumentContent(filepath.Join(root, fmt.Sprintf("f%d.go", i))); ok {
+			if _, ok := app.Project.workspace.LanguageService().DocumentContent(filepath.Join(root, fmt.Sprintf("f%d.go", i))); ok {
 				open++
 			}
 		}
-		if owners == 0 && refreshers == 0 && open == 0 {
+		if owners == 0 && open == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("after all connections left: %d owned paths, %d refreshers, %d open documents", owners, refreshers, open)
+			t.Fatalf("after all connections left: %d owned paths, %d open documents", owners, open)
 		}
 	}
 }

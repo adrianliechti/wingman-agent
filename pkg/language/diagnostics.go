@@ -1,175 +1,87 @@
 package language
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
-type Position struct {
-	Line      int `json:"line"`
-	Character int `json:"character"`
-}
-
-type Range struct {
-	Start Position `json:"start"`
-	End   Position `json:"end"`
-}
-
-type Severity int
-
 const (
-	SeverityError       Severity = 1
-	SeverityWarning     Severity = 2
-	SeverityInformation Severity = 3
-	SeverityHint        Severity = 4
+	editDiagnosticsWait = 2 * time.Second
+	editDiagnosticsShow = 10
 )
 
-type Diagnostic struct {
-	Range    Range    `json:"range"`
-	Severity Severity `json:"severity,omitempty"`
-	Code     any      `json:"code,omitempty"`
-	Source   string   `json:"source,omitempty"`
-	Message  string   `json:"message"`
-	// Wire is the server's complete diagnostic, including tags and data.
-	Wire json.RawMessage `json:"-"`
+// FileDiagnostics returns an open document's diagnostics. The boolean is
+// false when the server has not reported any yet.
+func (s *Service) FileDiagnostics(ctx context.Context, filePath string, content *string) ([]lsp.Diagnostic, bool, error) {
+	var known bool
+	raw, err := withLSPDocument(ctx, s, filePath, content, func(session *lsp.Session, uri string) ([]lsp.Diagnostic, error) {
+		diagnostics, reported := session.WaitForDiagnostics(ctx, uri, 2*time.Second)
+		known = reported
+		return diagnostics, nil
+	})
+	return raw, known, err
 }
 
-type WorkspaceReport struct {
-	Diagnostics        map[string][]Diagnostic
-	CheckedFiles       int
-	DiscoveredFiles    int
-	DiscoveryTruncated bool
-	UnknownFiles       int
-	UnavailableServers []string
-	Analyzing          bool
-}
-
-func DiagnosticsFromProtocol(values []lsp.Diagnostic) []Diagnostic {
-	result := make([]Diagnostic, 0, len(values))
-	for _, value := range values {
-		source, _ := value.Source.Get()
-		message := ""
-		switch value := value.Message.(type) {
-		case lsp.String:
-			message = string(value)
-		case *lsp.MarkupContent:
-			message = value.Value
-		}
-		result = append(result, Diagnostic{
-			Range: Range{
-				Start: Position{Line: int(value.Range.Start.Line), Character: int(value.Range.Start.Character)},
-				End:   Position{Line: int(value.Range.End.Line), Character: int(value.Range.End.Character)},
-			},
-			Severity: Severity(value.Severity),
-			Code:     value.Code,
-			Source:   source,
-			Message:  message,
-			Wire:     wireDiagnostic(value),
-		})
+// EditDiagnostics returns errors and warnings for the text written by the edit.
+func (s *Service) EditDiagnostics(ctx context.Context, filePath, editedText string) string {
+	s.lifeMu.RLock()
+	defer s.lifeMu.RUnlock()
+	if s.closed {
+		return ""
 	}
-	return result
-}
-
-func wireDiagnostic(value lsp.Diagnostic) json.RawMessage {
-	data, err := lsp.Marshal(value)
+	if server := s.manager.FindServer(filePath); server == nil || !server.ReportsDiagnostics() {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, editDiagnosticsWait)
+	defer cancel()
+	session, err := s.manager.GetSession(ctx, filePath)
 	if err != nil {
-		return nil
+		return ""
 	}
-	return data
-}
-
-func FormatDiagnosticLine(path string, diagnostic Diagnostic) string {
-	source := ""
-	if diagnostic.Source != "" {
-		source = fmt.Sprintf("[%s] ", diagnostic.Source)
-	}
-	return fmt.Sprintf("%s:%d:%d %s: %s%s", path, diagnostic.Range.Start.Line+1, diagnostic.Range.Start.Character+1, SeverityName(diagnostic.Severity), source, diagnostic.Message)
-}
-
-func severityRank(severity Severity) int {
-	switch severity {
-	case SeverityError:
-		return 0
-	case SeverityWarning:
-		return 1
-	case SeverityInformation:
-		return 2
-	case SeverityHint:
-		return 3
-	default:
-		return 4
-	}
-}
-
-func CompareSeverity(a, b Severity) int { return severityRank(a) - severityRank(b) }
-
-func DiagnosticSummary(values []Diagnostic) string {
-	counts := make(map[Severity]int)
-	for _, value := range values {
-		counts[value.Severity]++
-	}
-	var parts []string
-	add := func(severity Severity, singular, plural string) {
-		count := counts[severity]
-		delete(counts, severity)
-		if count == 0 {
-			return
+	report := session.DiagnosticsForEdit(ctx, filePath, editedText, editDiagnosticsWait)
+	var errors, warnings []lsp.Diagnostic
+	for _, value := range report {
+		switch value.Severity {
+		case lsp.DiagnosticSeverityError, 0:
+			errors = append(errors, value)
+		case lsp.DiagnosticSeverityWarning:
+			warnings = append(warnings, value)
 		}
-		label := plural
-		if count == 1 {
-			label = singular
+	}
+	found := slices.Concat(errors, warnings)
+	if len(found) == 0 {
+		return ""
+	}
+	path := filePath
+	if rel, err := filepath.Rel(s.root, filePath); err == nil && filepath.IsLocal(rel) {
+		path = rel
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "lsp diagnostics for %s (%d errors, %d warnings):", path, len(errors), len(warnings))
+	for _, value := range found[:min(len(found), editDiagnosticsShow)] {
+		severity := "Error"
+		if value.Severity == lsp.DiagnosticSeverityWarning {
+			severity = "Warning"
 		}
-		parts = append(parts, fmt.Sprintf("%d %s", count, label))
+		fmt.Fprintf(&out, "\n  %s:%d:%d %s: ", path, int64(value.Range.Start.Line)+1, int64(value.Range.Start.Character)+1, severity)
+		if source, _ := value.Source.Get(); source != "" {
+			fmt.Fprintf(&out, "[%s] ", source)
+		}
+		switch message := value.Message.(type) {
+		case lsp.String:
+			out.WriteString(string(message))
+		case *lsp.MarkupContent:
+			out.WriteString(message.Value)
+		}
 	}
-	add(SeverityError, "error", "errors")
-	add(SeverityWarning, "warning", "warnings")
-	add(SeverityInformation, "info", "info")
-	add(SeverityHint, "hint", "hints")
-	other := 0
-	for _, count := range counts {
-		other += count
+	if len(found) > editDiagnosticsShow {
+		fmt.Fprintf(&out, "\n  ... and %d more", len(found)-editDiagnosticsShow)
 	}
-	if other > 0 {
-		parts = append(parts, fmt.Sprintf("%d other", other))
-	}
-	return strings.Join(parts, ", ")
-}
-
-func FormatDiagnostics(values []Diagnostic, filePath, root string) string {
-	sorted := slices.Clone(values)
-	slices.SortStableFunc(sorted, func(a, b Diagnostic) int { return CompareSeverity(a.Severity, b.Severity) })
-	var result strings.Builder
-	fmt.Fprintf(&result, "Diagnostics (%d found: %s):\n", len(sorted), DiagnosticSummary(sorted))
-	path := relativeDiagnosticPath(root, filePath)
-	for _, diagnostic := range sorted {
-		fmt.Fprintf(&result, "  %s\n", FormatDiagnosticLine(path, diagnostic))
-	}
-	return result.String()
-}
-
-func SeverityName(severity Severity) string {
-	switch severity {
-	case SeverityError:
-		return "Error"
-	case SeverityWarning:
-		return "Warning"
-	case SeverityInformation:
-		return "Info"
-	case SeverityHint:
-		return "Hint"
-	default:
-		return "Unknown"
-	}
-}
-
-func relativeDiagnosticPath(root, path string) string {
-	if rel, err := filepath.Rel(root, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return rel
-	}
-	return path
+	return out.String()
 }

@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/internal/testenv"
 	"github.com/adrianliechti/wingman-agent/pkg/remote"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -349,7 +348,7 @@ func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
 		StaticFS = os.DirFS(dir)
 		t.Cleanup(func() { StaticFS = previous })
 	}
-	copyTestGopls(t, testenv.WingmanHome(t))
+	useInstalledGopls(t)
 	workDir := t.TempDir()
 	if err := os.WriteFile(
 		filepath.Join(workDir, "theme-preview.html"),
@@ -452,7 +451,7 @@ func TestWebUIE2ECodingAgentWorkflows(t *testing.T) {
 	ctx := t.Context()
 	// The browser tests cover the desktop app's server, whose windows may
 	// move between projects.
-	app, err := New(ctx, workDir, &ServerOptions{NoBrowser: true, Projects: true, disableManagedTools: true})
+	app, err := New(ctx, workDir, &ServerOptions{NoBrowser: true, Projects: true})
 	if err != nil {
 		t.Fatal(err)
 	}

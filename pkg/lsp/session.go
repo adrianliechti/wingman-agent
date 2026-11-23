@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"os"
 	"os/exec"
@@ -28,8 +27,7 @@ type Session struct {
 	server     Server
 	conn       jsonrpc2.Conn
 	rpc        protocol.Server
-	cmd        *exec.Cmd
-	rootURI    string
+	root       string
 	cancelFunc context.CancelFunc
 
 	documentMu   sync.Mutex
@@ -37,11 +35,11 @@ type Session struct {
 	applyEditMu  sync.Mutex
 	mu           sync.Mutex
 	documents    map[string]*document
-	progress     map[string]WorkProgress
+	progress     map[string]bool // work-done progress tokens in flight
 	applyEdit    func(CommandWorkspaceEdit) bool
 	watchMu      sync.Mutex
+	disk         *diskWatches
 	watchers     map[string][]fileWatcher // by registration id
-	created      time.Time
 	pullDiags    bool
 	capabilities protocol.ServerCapabilities
 	alive        atomic.Bool
@@ -53,7 +51,6 @@ type Session struct {
 // "tracked" and "opened" are distinct.
 type document struct {
 	opened  bool
-	sum     uint64
 	version int
 	saved   bool
 	editor  bool // kept current, in order, by an editor connection
@@ -62,6 +59,8 @@ type document struct {
 	wireDiagnostics []protocol.Diagnostic
 	published       bool
 }
+
+func (d *document) diskBacked() bool { return d != nil && d.opened && d.saved && !d.editor }
 
 func (s *Session) document(uri string) *document {
 	doc := s.documents[uri]
@@ -72,12 +71,17 @@ func (s *Session) document(uri string) *document {
 	return doc
 }
 
-const startupTimeout = 30 * time.Second
-
 func connect(ctx context.Context, workingDir string, server Server) (*Session, error) {
-	cmd := exec.Command(server.Command, server.Args...)
+	root, err := filepath.Abs(workingDir)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(server.executable(), server.Args...)
 	cmd.Dir = workingDir
-	cmd.Env = tooling.Environment(server.Command, os.Environ())
+	cmd.Env = tooling.Environment(server.executable(), os.Environ())
+	for key, value := range server.Env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
 	cmd.Stderr = io.Discard
 
 	setSysProcAttr(cmd)
@@ -103,12 +107,11 @@ func connect(ctx context.Context, workingDir string, server Server) (*Session, e
 
 	session := &Session{
 		server:     server,
-		cmd:        cmd,
-		rootURI:    fileuri.FromPath(workingDir),
+		root:       root,
+		disk:       newDiskWatches(connCtx, root),
 		cancelFunc: cancel,
 		documents:  make(map[string]*document),
-		progress:   make(map[string]WorkProgress),
-		created:    time.Now(),
+		progress:   make(map[string]bool),
 	}
 	session.alive.Store(true)
 
@@ -123,9 +126,11 @@ func connect(ctx context.Context, workingDir string, server Server) (*Session, e
 	go func() {
 		<-conn.Done()
 		session.alive.Store(false)
+		cancel()
+		session.stopDiskWatches()
 	}()
 
-	initCtx, initCancel := context.WithTimeout(ctx, startupTimeout)
+	initCtx, initCancel := context.WithTimeout(ctx, server.startupTimeout())
 	defer initCancel()
 
 	if err := session.initialize(initCtx); err != nil {
@@ -194,20 +199,8 @@ func (s *Session) IsAlive() bool {
 	return s.alive.Load()
 }
 
-// WorkProgress is one server-reported background operation. Title is stable
-// for the lifetime of an operation; Message and Percentage may be updated by
-// subsequent progress reports.
-type WorkProgress struct {
-	Title      string  `json:"title,omitempty"`
-	Message    string  `json:"message,omitempty"`
-	Percentage *uint32 `json:"percentage,omitempty"`
-}
-
 type progressUpdate struct {
-	Kind       string  `json:"kind"`
-	Title      string  `json:"title,omitempty"`
-	Message    *string `json:"message,omitempty"`
-	Percentage *uint32 `json:"percentage,omitempty"`
+	Kind string `json:"kind"`
 }
 
 func (s *Session) applyProgress(token string, update progressUpdate) {
@@ -215,32 +208,13 @@ func (s *Session) applyProgress(token string, update progressUpdate) {
 	defer s.mu.Unlock()
 
 	if s.progress == nil {
-		s.progress = make(map[string]WorkProgress)
+		s.progress = make(map[string]bool)
 	}
 	switch update.Kind {
 	case "begin":
-		progress := WorkProgress{Title: update.Title}
-		applyProgressUpdate(&progress, update)
-		s.progress[token] = progress
-	case "report":
-		progress := s.progress[token]
-		applyProgressUpdate(&progress, update)
-		s.progress[token] = progress
+		s.progress[token] = true
 	case "end":
 		delete(s.progress, token)
-	}
-}
-
-func applyProgressUpdate(progress *WorkProgress, update progressUpdate) {
-	if update.Title != "" {
-		progress.Title = update.Title
-	}
-	if update.Message != nil {
-		progress.Message = *update.Message
-	}
-	if update.Percentage != nil {
-		percentage := *update.Percentage
-		progress.Percentage = &percentage
 	}
 }
 
@@ -250,30 +224,6 @@ func (s *Session) Analyzing() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.progress) > 0
-}
-
-func (s *Session) Progress() []WorkProgress {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	result := make([]WorkProgress, 0, len(s.progress))
-	for _, progress := range s.progress {
-		if progress.Percentage != nil {
-			percentage := *progress.Percentage
-			progress.Percentage = &percentage
-		}
-		result = append(result, progress)
-	}
-	slices.SortFunc(result, func(a, b WorkProgress) int {
-		if order := strings.Compare(a.Title, b.Title); order != 0 {
-			return order
-		}
-		return strings.Compare(a.Message, b.Message)
-	})
-	return result
-}
-
-func (s *Session) Age() time.Duration {
-	return time.Since(s.created)
 }
 
 type openDocument struct {
@@ -305,7 +255,8 @@ func (s *Session) openedDocuments() []openDocument {
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
 		s.alive.Store(false)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		s.stopDiskWatches()
+		ctx, cancel := context.WithTimeout(context.Background(), s.server.shutdownTimeout())
 		defer cancel()
 
 		_ = s.rpc.Shutdown(ctx)
@@ -363,39 +314,37 @@ func (s *Session) OpenDocument(ctx context.Context, filePath string) (string, er
 	return s.openDocumentLocked(ctx, filePath)
 }
 
-func (s *Session) openDocumentLocked(ctx context.Context, filePath string) (string, error) {
-	uri := fileuri.FromPath(filePath)
+func (s *Session) openDocumentLocked(ctx context.Context, filePath string) (uri string, err error) {
+	uri = fileuri.FromPath(filePath)
 	s.mu.Lock()
 	doc := s.documents[uri]
-	dirty := doc != nil && doc.opened && !doc.saved
+	keepBuffer := doc != nil && doc.opened && (doc.editor || !doc.saved)
+	opening := doc == nil || !doc.opened
 	s.mu.Unlock()
-	if dirty {
-		// A disk-backed request must never replace an unsaved buffer.
+	if keepBuffer {
+		// Only the editor can replace its buffer, including after a save.
 		return uri, nil
+	}
+	// Subscribe before the read so a concurrent save cannot fall in between.
+	if opening {
+		s.watchDiskDocument(filePath, true)
+		defer func() {
+			if err != nil {
+				s.watchDiskDocument(filePath, false)
+			}
+		}()
 	}
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
 	}
-	return s.syncDocumentLocked(ctx, filePath, content, true, false)
-}
-
-// SyncDocument updates the language server with an editor buffer without
-// claiming that the buffer has been saved to disk.
-func (s *Session) SyncDocument(ctx context.Context, filePath, content string) (string, error) {
-	return s.syncDocument(ctx, filePath, []byte(content), false, false)
-}
-
-// SaveDocument synchronizes an editor buffer and explicitly tells the server
-// that the same content has been persisted to disk.
-func (s *Session) SaveDocument(ctx context.Context, filePath, content string) (string, error) {
-	return s.syncDocument(ctx, filePath, []byte(content), true, false)
+	return s.syncDocumentLocked(ctx, filePath, string(content), true, false)
 }
 
 // SyncEditorDocument applies an editor's in-order buffer update and marks the
 // document as editor-owned until it is closed.
 func (s *Session) SyncEditorDocument(ctx context.Context, filePath, content string, saved bool) (string, error) {
-	return s.syncDocument(ctx, filePath, []byte(content), saved, true)
+	return s.syncDocument(ctx, filePath, content, saved, true)
 }
 
 // SyncRequestDocument makes a request's buffer snapshot available, unless an
@@ -411,7 +360,7 @@ func (s *Session) SyncRequestDocument(ctx context.Context, filePath, content str
 	if owned {
 		return uri, nil
 	}
-	return s.syncDocumentLocked(ctx, filePath, []byte(content), false, false)
+	return s.syncDocumentLocked(ctx, filePath, content, false, false)
 }
 
 // CloseDocument ends the lifetime of an editor-owned document. A session can
@@ -428,6 +377,7 @@ func (s *Session) closeDocumentLocked(ctx context.Context, filePath string) erro
 	s.mu.Lock()
 	doc := s.documents[uri]
 	opened := doc != nil && doc.opened
+	wasDisk := doc.diskBacked()
 	s.mu.Unlock()
 	if !opened {
 		return nil
@@ -442,6 +392,9 @@ func (s *Session) closeDocumentLocked(ctx context.Context, filePath string) erro
 	s.mu.Lock()
 	delete(s.documents, uri)
 	s.mu.Unlock()
+	if wasDisk {
+		s.watchDiskDocument(filePath, false)
+	}
 	if err != nil {
 		return fmt.Errorf("didClose: %w", err)
 	}
@@ -465,33 +418,19 @@ func (s *Session) DocumentContent(filePath string) (string, bool) {
 	return doc.content, true
 }
 
-// DocumentSnapshot identifies the text/version used for an LSP edit preview.
-func (s *Session) DocumentSnapshot(filePath string) (string, int, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc := s.documents[fileuri.FromPath(filePath)]
-	if doc == nil || !doc.opened {
-		return "", 0, false
-	}
-	return doc.content, doc.version, true
-}
-
-func (s *Session) syncDocument(ctx context.Context, filePath string, content []byte, saved, editor bool) (string, error) {
+func (s *Session) syncDocument(ctx context.Context, filePath, content string, saved, editor bool) (string, error) {
 	s.documentMu.Lock()
 	defer s.documentMu.Unlock()
 	return s.syncDocumentLocked(ctx, filePath, content, saved, editor)
 }
 
-func (s *Session) syncDocumentLocked(ctx context.Context, filePath string, content []byte, saved, editor bool) (string, error) {
+func (s *Session) syncDocumentLocked(ctx context.Context, filePath, content string, saved, editor bool) (string, error) {
 	uri := fileuri.FromPath(filePath)
-
-	h := fnv.New64a()
-	h.Write(content)
-	sum := h.Sum64()
 
 	s.mu.Lock()
 	doc := s.document(uri)
-	opened, unchanged, wasSaved := doc.opened, doc.sum == sum, doc.saved
+	opened, unchanged, wasSaved := doc.opened, doc.content == content, doc.saved
+	wasDisk := doc.diskBacked()
 	version := doc.version + 1
 	if opened && !unchanged {
 		doc.version = version
@@ -507,8 +446,7 @@ func (s *Session) syncDocumentLocked(ctx context.Context, filePath string, conte
 		}
 		var text *string
 		if policy.includeText {
-			value := string(content)
-			text = &value
+			text = &content
 		}
 		if err := s.rpc.DidSave(ctx, &protocol.DidSaveTextDocumentParams{
 			TextDocument: protocol.TextDocumentIdentifier{URI: lspuri.MustParse(uri)},
@@ -521,15 +459,14 @@ func (s *Session) syncDocumentLocked(ctx context.Context, filePath string, conte
 
 	switch {
 	case opened && unchanged:
-		if !saved || wasSaved {
-			return uri, nil
-		}
-		if err := notifySaved(); err != nil {
-			return "", err
+		if saved && !wasSaved {
+			if err := notifySaved(); err != nil {
+				return "", err
+			}
 		}
 
 	case opened:
-		if changes := documentChanges(policy.change, doc.content, string(content)); len(changes) > 0 {
+		if changes := documentChanges(policy.change, doc.content, content); len(changes) > 0 {
 			if err := s.rpc.DidChange(ctx, &protocol.DidChangeTextDocumentParams{
 				TextDocument: protocol.VersionedTextDocumentIdentifier{
 					TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: lspuri.MustParse(uri)},
@@ -553,7 +490,7 @@ func (s *Session) syncDocumentLocked(ctx context.Context, filePath string, conte
 					URI:        lspuri.MustParse(uri),
 					LanguageID: protocol.LanguageKind(s.server.LanguageIDForPath(filePath)),
 					Version:    1,
-					Text:       string(content),
+					Text:       content,
 				},
 			}); err != nil {
 				return "", fmt.Errorf("didOpen: %w", err)
@@ -564,14 +501,17 @@ func (s *Session) syncDocumentLocked(ctx context.Context, filePath string, conte
 	s.mu.Lock()
 	doc = s.document(uri)
 	doc.opened = true
-	doc.sum = sum
-	doc.saved = saved
+	doc.saved = saved || (opened && unchanged && wasSaved && !editor)
 	doc.editor = doc.editor || editor
-	doc.content = string(content)
+	doc.content = content
+	isDisk := doc.diskBacked()
 	if !opened {
 		doc.version = 1
 	}
 	s.mu.Unlock()
+	if wasDisk != isDisk {
+		s.watchDiskDocument(filePath, isDisk)
+	}
 
 	return uri, nil
 }
@@ -655,15 +595,6 @@ func (s *Session) publishedProtocolDiagnostics(uri string) ([]protocol.Diagnosti
 	return slices.Clone(doc.wireDiagnostics), doc.published
 }
 
-func (s *Session) PushSeen(uri string) bool {
-	_, published := s.publishedProtocolDiagnostics(uri)
-	return published
-}
-
-func (s *Session) SupportsPullDiagnostics() bool {
-	return s.pullDiags
-}
-
 func (s *Session) pullProtocolDiagnostics(ctx context.Context, uri string) ([]protocol.Diagnostic, bool) {
 	callCtx, callCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer callCancel()
@@ -682,7 +613,10 @@ func (s *Session) pullProtocolDiagnostics(ctx context.Context, uri string) ([]pr
 	return nil, false
 }
 
-func (s *Session) protocolDiagnostics(ctx context.Context, uri string) ([]protocol.Diagnostic, bool) {
+// DiagnosticsState reports the diagnostics for uri and whether the server has
+// actually produced a result: known=false means the server neither published
+// nor answered a pull request, so "no diagnostics" cannot be concluded.
+func (s *Session) DiagnosticsState(ctx context.Context, uri string) ([]Diagnostic, bool) {
 	if published, ok := s.publishedProtocolDiagnostics(uri); ok {
 		return published, true
 	}
@@ -692,11 +626,35 @@ func (s *Session) protocolDiagnostics(ctx context.Context, uri string) ([]protoc
 	return nil, false
 }
 
-// DiagnosticsState reports the diagnostics for uri and whether the server has
-// actually produced a result: known=false means the server neither published
-// nor answered a pull request, so "no diagnostics" cannot be concluded.
-func (s *Session) DiagnosticsState(ctx context.Context, uri string) ([]Diagnostic, bool) {
-	return s.protocolDiagnostics(ctx, uri)
+// DiagnosticsForEdit returns a report only if the server kept the exact text
+// written by the edit throughout the request. An editor can own the same URI.
+func (s *Session) DiagnosticsForEdit(ctx context.Context, filePath, editedText string, timeout time.Duration) []Diagnostic {
+	uri, err := s.OpenDocument(ctx, filePath)
+	if err != nil {
+		return nil
+	}
+	doc, version := s.revisionForText(uri, editedText)
+	if doc == nil {
+		return nil
+	}
+	diagnostics, _ := s.WaitForDiagnostics(ctx, uri, timeout)
+	if current, currentVersion := s.revisionForText(uri, editedText); current != doc || currentVersion != version {
+		return nil
+	}
+	return diagnostics
+}
+
+// Take a snapshot between completed document updates. A close and reopen
+// replaces the document and starts its version counter at one again.
+func (s *Session) revisionForText(uri, text string) (*document, int) {
+	s.documentMu.Lock()
+	defer s.documentMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if doc := s.documents[uri]; doc != nil && doc.opened && doc.content == text {
+		return doc, doc.version
+	}
+	return nil, 0
 }
 
 func (s *Session) WaitForDiagnostics(ctx context.Context, uri string, timeout time.Duration) ([]Diagnostic, bool) {
@@ -719,64 +677,32 @@ func (s *Session) WaitForDiagnostics(ctx context.Context, uri string, timeout ti
 	}
 }
 
-const (
-	methodDefinition     = "textDocument/definition"
-	methodTypeDefinition = "textDocument/typeDefinition"
-	methodImplementation = "textDocument/implementation"
-	methodReferences     = "textDocument/references"
-)
-
-// locations runs any of the position-based navigation requests, all of which
-// answer with Location | Location[] | LocationLink[].
-func (s *Session) locations(ctx context.Context, method, uri string, line, column int) ([]Location, error) {
-	documentPosition := protocol.TextDocumentPositionParams{
-		TextDocument: wireDocument(uri),
-		Position:     wirePosition(line, column),
-	}
-	switch method {
-	case methodDefinition:
-		result, err := retryRPC(ctx, func() (protocol.DefinitionResult, error) {
-			return s.rpc.Definition(ctx, &protocol.DefinitionParams{TextDocumentPositionParams: documentPosition})
-		})
-		return locationsFromDefinition(result), err
-	case methodTypeDefinition:
-		result, err := retryRPC(ctx, func() (protocol.DefinitionResult, error) {
-			return s.rpc.TypeDefinition(ctx, &protocol.TypeDefinitionParams{TextDocumentPositionParams: documentPosition})
-		})
-		return locationsFromDefinition(result), err
-	case methodImplementation:
-		result, err := retryRPC(ctx, func() (protocol.DefinitionResult, error) {
-			return s.rpc.Implementation(ctx, &protocol.ImplementationParams{TextDocumentPositionParams: documentPosition})
-		})
-		return locationsFromDefinition(result), err
-	case methodReferences:
-		return s.ReferenceLocations(ctx, uri, line, column)
-	default:
-		return nil, fmt.Errorf("unsupported location method %q", method)
-	}
-}
-
 func (s *Session) DefinitionLocations(ctx context.Context, uri string, line, column int) ([]Location, error) {
-	return s.locations(ctx, methodDefinition, uri, line, column)
+	result, err := retryRPC(ctx, func() (protocol.DefinitionResult, error) {
+		return s.rpc.Definition(ctx, &protocol.DefinitionParams{TextDocumentPositionParams: documentPosition(uri, line, column)})
+	})
+	return locationsFromDefinition(result), err
 }
 
 func (s *Session) TypeDefinitionLocations(ctx context.Context, uri string, line, column int) ([]Location, error) {
-	return s.locations(ctx, methodTypeDefinition, uri, line, column)
+	result, err := retryRPC(ctx, func() (protocol.DefinitionResult, error) {
+		return s.rpc.TypeDefinition(ctx, &protocol.TypeDefinitionParams{TextDocumentPositionParams: documentPosition(uri, line, column)})
+	})
+	return locationsFromDefinition(result), err
 }
 
 func (s *Session) ImplementationLocations(ctx context.Context, uri string, line, column int) ([]Location, error) {
-	return s.locations(ctx, methodImplementation, uri, line, column)
+	result, err := retryRPC(ctx, func() (protocol.DefinitionResult, error) {
+		return s.rpc.Implementation(ctx, &protocol.ImplementationParams{TextDocumentPositionParams: documentPosition(uri, line, column)})
+	})
+	return locationsFromDefinition(result), err
 }
 
-func (s *Session) ReferenceLocations(ctx context.Context, uri string, line, column int, includeDeclaration ...bool) ([]Location, error) {
-	include := true
-	if len(includeDeclaration) > 0 {
-		include = includeDeclaration[0]
-	}
+func (s *Session) ReferenceLocations(ctx context.Context, uri string, line, column int, includeDeclaration bool) ([]Location, error) {
 	result, err := retryRPC(ctx, func() ([]protocol.Location, error) {
 		return s.rpc.References(ctx, &protocol.ReferenceParams{
-			TextDocumentPositionParams: protocol.TextDocumentPositionParams{TextDocument: wireDocument(uri), Position: wirePosition(line, column)},
-			Context:                    protocol.ReferenceContext{IncludeDeclaration: include},
+			TextDocumentPositionParams: documentPosition(uri, line, column),
+			Context:                    protocol.ReferenceContext{IncludeDeclaration: includeDeclaration},
 		})
 	})
 	return []Location(result), err
@@ -784,18 +710,12 @@ func (s *Session) ReferenceLocations(ctx context.Context, uri string, line, colu
 
 func (s *Session) Hover(ctx context.Context, uri string, line, column int) (*Hover, error) {
 	return retryRPC(ctx, func() (*protocol.Hover, error) {
-		return s.rpc.Hover(ctx, &protocol.HoverParams{TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-			TextDocument: wireDocument(uri),
-			Position:     wirePosition(line, column),
-		}})
+		return s.rpc.Hover(ctx, &protocol.HoverParams{TextDocumentPositionParams: documentPosition(uri, line, column)})
 	})
 }
 
 func (s *Session) CompletionItems(ctx context.Context, uri string, line, column int, completionContext *CompletionContext) (CompletionList, error) {
-	params := &protocol.CompletionParams{TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-		TextDocument: wireDocument(uri),
-		Position:     wirePosition(line, column),
-	}}
+	params := &protocol.CompletionParams{TextDocumentPositionParams: documentPosition(uri, line, column)}
 	if completionContext != nil {
 		params.Context = *completionContext
 	}
@@ -829,10 +749,7 @@ func (s *Session) ResolveCompletionItem(ctx context.Context, item CompletionItem
 }
 
 func (s *Session) SignatureHelp(ctx context.Context, uri string, line, column int, signatureContext *SignatureHelpContext) (*SignatureHelp, error) {
-	params := &protocol.SignatureHelpParams{TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-		TextDocument: wireDocument(uri),
-		Position:     wirePosition(line, column),
-	}}
+	params := &protocol.SignatureHelpParams{TextDocumentPositionParams: documentPosition(uri, line, column)}
 	if signatureContext != nil {
 		params.Context = *signatureContext
 	}
@@ -851,18 +768,32 @@ func (s *Session) DocumentSymbols(ctx context.Context, uri string) (DocumentSymb
 	})
 }
 
-func (s *Session) WorkspaceSymbols(ctx context.Context, query string) (WorkspaceSymbolResult, error) {
-	return retryRPC(ctx, func() (protocol.WorkspaceSymbolResult, error) {
+func (s *Session) WorkspaceSymbols(ctx context.Context, query string) ([]WorkspaceSymbol, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.RequestTimeout())
+	defer cancel()
+	result, err := retryRPC(ctx, func() (protocol.WorkspaceSymbolResult, error) {
 		return s.rpc.Symbols(ctx, &protocol.WorkspaceSymbolParams{Query: query})
 	})
+	if err != nil {
+		return nil, err
+	}
+	switch symbols := result.(type) {
+	case protocol.WorkspaceSymbolSlice:
+		return symbols, nil
+	case protocol.SymbolInformationSlice:
+		converted := make([]WorkspaceSymbol, len(symbols))
+		for i, symbol := range symbols {
+			converted[i] = WorkspaceSymbol{BaseSymbolInformation: symbol.BaseSymbolInformation, Location: &symbols[i].Location}
+		}
+		return converted, nil
+	default:
+		return nil, nil
+	}
 }
 
 func (s *Session) DocumentHighlights(ctx context.Context, uri string, line, column int) ([]DocumentHighlight, error) {
 	result, err := retryRPC(ctx, func() ([]protocol.DocumentHighlight, error) {
-		return s.rpc.DocumentHighlight(ctx, &protocol.DocumentHighlightParams{TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-			TextDocument: wireDocument(uri),
-			Position:     wirePosition(line, column),
-		}})
+		return s.rpc.DocumentHighlight(ctx, &protocol.DocumentHighlightParams{TextDocumentPositionParams: documentPosition(uri, line, column)})
 	})
 	if err != nil {
 		return nil, err
@@ -888,21 +819,17 @@ func (s *Session) SemanticTokens(ctx context.Context, uri string) (*SemanticToke
 
 func (s *Session) PrepareCallHierarchy(ctx context.Context, uri string, line, column int) ([]CallHierarchyItem, error) {
 	return retryRPC(ctx, func() ([]protocol.CallHierarchyItem, error) {
-		return s.rpc.PrepareCallHierarchy(ctx, &protocol.CallHierarchyPrepareParams{TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-			TextDocument: wireDocument(uri),
-			Position:     wirePosition(line, column),
-		}})
+		return s.rpc.PrepareCallHierarchy(ctx, &protocol.CallHierarchyPrepareParams{TextDocumentPositionParams: documentPosition(uri, line, column)})
 	})
 }
 
 func (s *Session) workspaceFolders() []protocol.WorkspaceFolder {
-	path, _ := fileuri.Path(s.rootURI)
-	return []protocol.WorkspaceFolder{{URI: lspuri.MustParse(s.rootURI), Name: filepath.Base(path)}}
+	return []protocol.WorkspaceFolder{{URI: lspuri.MustParse(fileuri.FromPath(s.root)), Name: filepath.Base(s.root)}}
 }
 
 func (s *Session) initialize(ctx context.Context) error {
 	processID := int32(os.Getpid())
-	rootURI := lspuri.MustParse(s.rootURI)
+	rootURI := lspuri.MustParse(fileuri.FromPath(s.root))
 	params := &protocol.InitializeParams{
 		WorkspaceFoldersInitializeParams: protocol.WorkspaceFoldersInitializeParams{
 			WorkspaceFolders: protocol.NewNullable(s.workspaceFolders()),
@@ -1017,8 +944,18 @@ func (s *Session) initialize(ctx context.Context) error {
 	if err := s.rpc.Initialized(ctx, &protocol.InitializedParams{}); err != nil {
 		return fmt.Errorf("initialized notification: %w", err)
 	}
+	if len(s.server.Settings) > 0 {
+		if err := s.rpc.DidChangeConfiguration(ctx, &protocol.DidChangeConfigurationParams{Settings: protocol.LSPAny(s.server.Settings)}); err != nil {
+			return fmt.Errorf("configuration notification: %w", err)
+		}
+	}
 
 	return nil
+}
+
+// RequestTimeout is how long the server is given to answer a request.
+func (s *Session) RequestTimeout() time.Duration {
+	return s.server.requestTimeout()
 }
 
 func (s *Session) Capabilities() protocol.ServerCapabilities {

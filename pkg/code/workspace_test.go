@@ -2,7 +2,6 @@ package code
 
 import (
 	"context"
-	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -16,196 +15,11 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	"github.com/adrianliechti/wingman-agent/pkg/dap"
-	"github.com/adrianliechti/wingman-agent/pkg/debugadapter"
-	"github.com/adrianliechti/wingman-agent/pkg/devtools"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
+	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 	"github.com/adrianliechti/wingman-agent/pkg/mcp"
 	"github.com/adrianliechti/wingman-agent/pkg/skill"
 )
-
-func TestManagedToolsUpdateWaitContextStopsWaiting(t *testing.T) {
-	update := &ManagedToolsUpdate{done: make(chan struct{})}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := update.WaitContext(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("WaitContext error = %v, want context cancellation", err)
-	}
-}
-
-func TestWorkspaceCloseCancelsManagedToolUpdates(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	update := &ManagedToolsUpdate{cancel: cancel, done: make(chan struct{})}
-	workspace := &Workspace{
-		managedUpdates: map[*ManagedToolsUpdate]struct{}{update: {}},
-	}
-
-	workspace.Close()
-	select {
-	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("workspace close did not cancel its managed tool update")
-	}
-}
-
-func TestDebugToolSetupBlocksLaunchAndCanCloseWorkspace(t *testing.T) {
-	testenv.UserHome(t)
-	testenv.WingmanHome(t)
-	t.Setenv("WINGMAN_MANAGED_TOOLS", "on")
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/demo\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	workspace, err := NewWorkspace(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	workspace.WarmUp()
-	t.Cleanup(workspace.Close)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	checked := false
-	_, err = workspace.UpdateDebugTools(ctx, "Go", true, func(progress devtools.Progress) {
-		if progress.Phase != devtools.ProgressChecking {
-			return
-		}
-		checked = true
-		if _, err := workspace.DAP.Start(ctx, dap.StartOptions{}); !errors.Is(err, dap.ErrBusy) {
-			t.Errorf("launch during update = %v, want ErrBusy", err)
-		}
-		cancel()
-		workspace.Close()
-	})
-	if !checked || !errors.Is(err, context.Canceled) {
-		t.Fatalf("setup = %v, checking = %t", err, checked)
-	}
-}
-
-type managedToolDirectoryStub struct{}
-
-func (managedToolDirectoryStub) ToolDir(string) string { return "" }
-
-func TestManagedToolRequirementsIncludeJavaDebuggerAndHost(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "pom.xml"), []byte("<project/>\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	workspace := &Workspace{
-		RootPath:      root,
-		debugRegistry: debugadapter.NewRegistry(managedToolDirectoryStub{}),
-	}
-
-	findJDTLS := func(requirements []devtools.Requirement) (devtools.Requirement, bool) {
-		for _, requirement := range requirements {
-			if slices.Contains(requirement.Alternatives, "jdtls") {
-				return requirement, true
-			}
-		}
-		return devtools.Requirement{}, false
-	}
-
-	lspOnly, err := workspace.managedToolRequirements(context.Background(), ManagedLSPTools, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if requirement, ok := findJDTLS(lspOnly); !ok {
-		t.Fatalf("LSP-only JDT LS requirement = %+v, found %t", requirement, ok)
-	}
-
-	dapOnly, err := workspace.managedToolRequirements(context.Background(), ManagedDAPTools, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if requirement, ok := findJDTLS(dapOnly); !ok {
-		t.Fatalf("DAP-only JDT LS host requirement = %+v, found %t", requirement, ok)
-	}
-	foundDebugger := false
-	for _, requirement := range dapOnly {
-		foundDebugger = foundDebugger || slices.Contains(requirement.Alternatives, "java-debug-adapter")
-	}
-	if !foundDebugger {
-		t.Fatalf("DAP-only Java debugger requirement was not detected: %+v", dapOnly)
-	}
-
-	editor, err := workspace.managedToolRequirements(context.Background(), ManagedEditorTools, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if requirement, ok := findJDTLS(editor); !ok {
-		t.Fatalf("editor JDT LS requirement = %+v, found %t", requirement, ok)
-	}
-}
-
-func TestManagedDAPRequirementsIncludeJavaScriptDebugger(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"scripts":{"start":"node server.js"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	workspace := &Workspace{RootPath: root}
-	requirements, err := workspace.managedToolRequirements(context.Background(), ManagedDAPTools, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, requirement := range requirements {
-		if slices.Contains(requirement.Alternatives, "js-debug-adapter") && slices.Contains(requirement.Projects, root) {
-			return
-		}
-	}
-	t.Fatalf("JavaScript debugger requirement not detected: %+v", requirements)
-}
-
-func TestManagedDebugRequirementsSelectOnlyRequestedLanguage(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("WINGMAN_JAVA_DEBUG_BUNDLE", "")
-	for name, contents := range map[string]string{
-		"go.mod":       "module example.com/demo\n\ngo 1.25\n",
-		"pom.xml":      "<project/>\n",
-		"package.json": "{}\n",
-		"main.py":      "print('hello')\n",
-	} {
-		if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	workspace := &Workspace{
-		RootPath:      root,
-		debugRegistry: debugadapter.NewRegistry(managedToolDirectoryStub{}),
-	}
-	for _, test := range []struct {
-		language string
-		commands []string
-	}{
-		{language: "Go", commands: []string{"dlv"}},
-		{language: "Python", commands: []string{"debugpy-adapter"}},
-		{language: "Java", commands: []string{"java-debug-adapter", "jdtls"}},
-	} {
-		t.Run(test.language, func(t *testing.T) {
-			requirements, err := workspace.managedToolRequirements(context.Background(), ManagedDAPTools, test.language)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var commands []string
-			for _, requirement := range requirements {
-				commands = append(commands, requirement.Alternatives...)
-			}
-			slices.Sort(commands)
-			if !slices.Equal(commands, test.commands) {
-				t.Fatalf("commands = %v, want %v", commands, test.commands)
-			}
-		})
-	}
-	requirements, err := workspace.managedToolRequirements(context.Background(), ManagedLSPTools, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, requirement := range requirements {
-		for _, command := range requirement.Alternatives {
-			if slices.Contains([]string{"dlv", "debugpy-adapter", "java-debug-adapter", "js-debug-adapter"}, command) {
-				t.Fatalf("startup language tools include debugger %q", command)
-			}
-		}
-	}
-}
 
 func TestWarmUpCreatesLSPManagerOutsideGitRepository(t *testing.T) {
 	testenv.UserHome(t)
@@ -218,7 +32,7 @@ func TestWarmUpCreatesLSPManagerOutsideGitRepository(t *testing.T) {
 	defer w.Close()
 
 	w.WarmUp()
-	if w.Language == nil {
+	if w.LanguageService() == nil {
 		t.Fatal("language service was not created")
 	}
 }
@@ -474,7 +288,7 @@ func waitForMCPToolNames(t *testing.T, w *Workspace, want ...string) {
 	}
 }
 
-func TestWithEditDiagnosticsPassesThroughWithoutLanguageService(t *testing.T) {
+func TestLanguageSyncPassesThroughWithoutLanguageService(t *testing.T) {
 	w := &Workspace{RootPath: t.TempDir()}
 
 	execute := func(ctx context.Context, args map[string]any) (tool.Result, error) {
@@ -482,36 +296,39 @@ func TestWithEditDiagnosticsPassesThroughWithoutLanguageService(t *testing.T) {
 			tool.FileChangesMetadata: []tool.FileChange{{Path: "main.go", AfterExists: true}},
 		}}, nil
 	}
-	tools := w.WithEditDiagnostics([]tool.Tool{
-		{Name: "edit", Execute: execute},
-		{Name: "read", Execute: execute},
-	})
-
-	for _, tl := range tools {
-		out, err := tl.Execute(context.Background(), map[string]any{"edits": []any{map[string]any{"file_path": "main.go"}}})
-		if err != nil {
-			t.Fatalf("%s: %v", tl.Name, err)
+	for _, tl := range w.WithLanguageSync([]tool.Tool{{Name: "edit", Execute: execute}, {Name: "note"}}) {
+		if tl.Execute == nil {
+			continue
 		}
-		if out.Content.Text() != "diff output" {
-			t.Fatalf("%s output = %q, want passthrough with no LSP manager", tl.Name, out.Content.Text())
+		out, err := tl.Execute(context.Background(), nil)
+		if err != nil || out.Content.Text() != "diff output" {
+			t.Fatalf("%s = %q, %v; want the result unchanged", tl.Name, out.Content.Text(), err)
 		}
 	}
 }
 
-func TestEditedPathsCoverBatchedEdits(t *testing.T) {
-	result := tool.Result{Metadata: map[string]any{tool.FileChangesMetadata: []tool.FileChange{
-		{Path: "a.go", AfterExists: true},
-		{Path: "b/b.go", AfterExists: true},
-		{Path: "a.go", AfterExists: true},
-		{Path: "gone.go"},
-		{Path: "large.go", AfterExists: true, AfterRef: &tool.FileContentRef{Size: 12 << 20}},
-	}}}
+func TestLanguageFileChangesNameEveryAffectedPath(t *testing.T) {
+	root := t.TempDir()
+	w := &Workspace{RootPath: root}
+	outside := filepath.Join(t.TempDir(), "other.go")
 
-	if got := editedPaths(result); !slices.Equal(got, []string{"a.go", "b/b.go"}) {
-		t.Fatalf("editedPaths = %v", got)
+	got := w.languageFileChanges([]tool.FileChange{
+		{Path: "new.go", AfterExists: true},
+		{Path: "edited.go", BeforeExists: true, AfterExists: true},
+		{Path: "gone.go", BeforeExists: true},
+		{Path: "to.go", MovedFrom: "from.go", BeforeExists: true, AfterExists: true},
+		{Path: outside, BeforeExists: true, AfterExists: true},
+	})
+	want := []lsp.FileChange{
+		{Path: filepath.Join(root, "new.go"), Type: lsp.FileChangeTypeCreated},
+		{Path: filepath.Join(root, "edited.go"), Type: lsp.FileChangeTypeChanged},
+		{Path: filepath.Join(root, "gone.go"), Type: lsp.FileChangeTypeDeleted},
+		{Path: filepath.Join(root, "from.go"), Type: lsp.FileChangeTypeDeleted},
+		{Path: filepath.Join(root, "to.go"), Type: lsp.FileChangeTypeCreated},
+		{Path: outside, Type: lsp.FileChangeTypeChanged},
 	}
-	if got := editedPaths(tool.Text("no metadata")); got != nil {
-		t.Fatalf("editedPaths without metadata = %v", got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("changes = %+v, want %+v", got, want)
 	}
 }
 

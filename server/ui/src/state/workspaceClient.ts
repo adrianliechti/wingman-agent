@@ -1,7 +1,6 @@
 import type { WorkspaceInfo } from "../api/workspace.ts";
 import { ChangesetClient } from "./changesetClient.ts";
 import { FileClient } from "./fileClient.ts";
-import { DAPClient } from "./dapClient.ts";
 import { LSPClient } from "./lspClient.ts";
 import {
 	MessageKind,
@@ -140,7 +139,6 @@ export class WorkspaceClient {
 	readonly http: ReturnType<typeof createWorkspaceHTTP>;
 	readonly ahp: AHPConnection;
 	readonly lsp: LSPClient;
-	readonly dap: DAPClient;
 	readonly files: FileClient;
 	readonly changesets: ChangesetClient;
 	/** The host's sessions, kept current from its root notifications. */
@@ -162,7 +160,6 @@ export class WorkspaceClient {
 	>();
 	constructor(scope: Bootstrap, ahp = new AHPConnection(scope)) {
 		this.lsp = new LSPClient(scope.instanceId);
-		this.dap = new DAPClient(scope.instanceId);
 		this.files = new FileClient(ahp, this.lsp);
 		this.changesets = new ChangesetClient(ahp, scope.namespace);
 		this.scope = scope;
@@ -191,17 +188,8 @@ export class WorkspaceClient {
 	readonly getConnected = () => this.ahp.getConnected();
 	readonly subscribeConnection = (listener: () => void) =>
 		this.ahp.subscribeConnection(listener);
-	readonly subscribe = (listener: (event: ServerMessage) => void) => {
-		const releaseHost = this.ahp.subscribe(listener);
-		const releaseDiagnostics = this.lsp.connection.onEvent((method) => {
-			if (method === "workspace/diagnostic/refresh")
-				listener({ type: "diagnostics_changed" });
-		});
-		return () => {
-			releaseHost();
-			releaseDiagnostics();
-		};
-	};
+	readonly subscribe = (listener: (event: ServerMessage) => void) =>
+		this.ahp.subscribe(listener);
 	/** A migrated chat key lives under another URI; owners replace the key. */
 	readonly onRedirect = (listener: (from: string, to: string) => void) => {
 		this.redirectListeners.add(listener);
@@ -216,7 +204,6 @@ export class WorkspaceClient {
 	}
 	stop() {
 		this.changesets.close();
-		this.dap.close();
 		this.lsp.close();
 		this.ahp.stop();
 		this.store.disconnect();

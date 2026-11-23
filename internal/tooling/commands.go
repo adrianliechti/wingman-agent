@@ -1,6 +1,5 @@
-// Package tooling contains repository-private command discovery and project
-// traversal policy shared by language servers, debug adapters, and managed
-// developer tools.
+// Package tooling finds the commands of language servers, also in the
+// standard tool directories a GUI process does not have on its PATH.
 package tooling
 
 import (
@@ -11,13 +10,6 @@ import (
 	"runtime"
 	"strings"
 )
-
-var projectDirectories = []string{
-	filepath.Join("node_modules", ".bin"),
-	filepath.Join(".venv", "bin"), filepath.Join("venv", "bin"), filepath.Join("env", "bin"),
-	filepath.Join(".venv", "Scripts"), filepath.Join("venv", "Scripts"), filepath.Join("env", "Scripts"),
-	filepath.Join("vendor", "bin"),
-}
 
 func Candidates(goos, command string) []string {
 	if goos == "windows" {
@@ -95,32 +87,6 @@ func findExecutable(directories []string, command string) string {
 		}
 	}
 	return ""
-}
-
-func ResolveProject(project, workspace, command string) string {
-	project = filepath.Clean(project)
-	workspace = filepath.Clean(workspace)
-	rel, err := filepath.Rel(workspace, project)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return ""
-	}
-	for {
-		directories := make([]string, 0, len(projectDirectories))
-		for _, directory := range projectDirectories {
-			directories = append(directories, filepath.Join(project, directory))
-		}
-		if resolved := Find(directories, command); resolved != "" {
-			return resolved
-		}
-		if project == workspace {
-			return ""
-		}
-		parent := filepath.Dir(project)
-		if parent == project {
-			return ""
-		}
-		project = parent
-	}
 }
 
 func LookPath(command string) (string, error) {

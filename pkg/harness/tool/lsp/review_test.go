@@ -1,63 +1,25 @@
 package lsp
 
 import (
-	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/lsp"
 )
 
-func TestInvalidArgumentsDoNotStartLSP(t *testing.T) {
-	service, path, _ := fixtureService(t, "ok")
-	inspect := NewTools(service)[0]
-	for _, args := range []map[string]any{
-		{"operation": "diagnostics", "file_path": true},
-		{"operation": "workspaceSymbol", "query": 2},
-		{"operation": "status", "file_path": nil},
-		{"operation": "hover", "file_path": path, "symbol": "value", "column": 1},
-		{"operation": "hover", "file_path": path, "symbol": "value", "line": nil},
-		{"operation": "codeActions", "file_path": path, "action_title": 1},
-		{"operation": "codeActions", "file_path": path, "line": 1},
-		{"operation": "codeActions", "file_path": path, "line": 99, "column": 1},
-		{"operation": "findReferences", "file_path": path, "line": 1, "column": 1, "output_mode": 1},
-		{"operation": "findReferences", "file_path": path, "line": 1, "column": 1, "output_mode": "invalid"},
-		{"operation": "findReferences", "file_path": path, "line": 1, "column": 1, "include_declaration": "yes"},
-		{"operation": "status", "include_declaration": "yes"},
-	} {
-		if _, err := inspect.Execute(t.Context(), args); err == nil {
-			t.Errorf("accepted invalid arguments: %v", args)
-		}
+func TestAmbiguousTextRequiresCoordinates(t *testing.T) {
+	path := positionTestFile(t, "func run() { run() }\n")
+	if _, err := positionOfSymbolOnLine(path, 1, "run"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("line ambiguity: %v", err)
 	}
-	if len(service.Manager().Activities()) != 0 {
-		t.Fatal("invalid arguments started a language server")
+	if _, err := positionOfSymbol(path, "run"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("file ambiguity: %v", err)
 	}
-	if len(NewTools(nil)) != 0 {
-		t.Fatal("nil service exposed a tool")
-	}
-}
-
-func TestCancelledLSPRequestsReturnContextError(t *testing.T) {
-	service, path, _ := fixtureService(t, "ok")
-	inspect := NewTools(service)[0]
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	if _, err := inspect.Execute(ctx, map[string]any{"operation": "status"}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled status: %v", err)
-	}
-	// Start the fixture first, so the deadline falls in the diagnostics wait.
-	if _, _, err := openFile(t.Context(), service.Manager(), path); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel = context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	result, err := inspect.Execute(ctx, map[string]any{"operation": "diagnostics", "file_path": path})
-	if !errors.Is(err, context.DeadlineExceeded) || result.Content.Text() != "" {
-		t.Fatalf("cancelled diagnostics returned success: %q %v", result.Content.Text(), err)
+	path = positionTestFile(t, "// 😀\nfunc unique() {}\n")
+	if pos, err := positionOfSymbol(path, "unique"); err != nil || pos.Line != 1 || pos.Character != 5 {
+		t.Fatalf("unique: %v %v", pos, err)
 	}
 }
 

@@ -16,15 +16,10 @@ import {
 	projectHref,
 	workspaceClient,
 } from "./state/workspaceClient.ts";
-import {
-	type QueryClient,
-	useQuery,
-	useQueryClient,
-} from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	AppWindow,
 	Bot,
-	Bug,
 	ChartColumn,
 	Compass,
 	Code2,
@@ -45,20 +40,16 @@ import {
 	MessageSquare,
 	MessageSquarePlus,
 	Menu as MenuIcon,
-	Monitor,
-	MonitorPlay,
 	PanelBottom,
 	PanelLeftClose,
 	PanelLeftOpen,
 	PanelRightOpen,
 	PanelTop,
 	Plus,
-	RefreshCw,
 	Search,
 	Save,
 	SaveAll,
 	SquareTerminal,
-	Stethoscope,
 	Wrench,
 } from "lucide-react";
 import {
@@ -81,13 +72,6 @@ import {
 	Separator,
 	usePanelRef,
 } from "react-resizable-panels";
-import { getInspectAvailability } from "./api/workspace";
-import {
-	controlDebug,
-	getDebugSession,
-	getDebugState,
-	type DebugSession,
-} from "./api/debug";
 import { createWorkspaceFile } from "./api/files";
 import { queryKeys } from "./api/query";
 import { deleteSession, forkSession } from "./api/sessions";
@@ -124,7 +108,6 @@ import {
 	paneOf,
 	type PaneSide,
 	placeCenterTab,
-	syncDebugTab,
 } from "./mainLayout";
 import { formatAgentName } from "./utils/agents";
 import {
@@ -133,13 +116,6 @@ import {
 	type PaletteSkill,
 } from "./components/CommandPalette";
 import { DiffsPanel } from "./components/DiffsPanel";
-import {
-	DebugLauncher,
-	type DebugLauncherSeed,
-} from "./components/DebugLauncher";
-import { DebugTab } from "./components/DebugTab";
-import { DebugOutputTab } from "./components/DebugOutputTab";
-import { DebugToolbar, type DebugOperation } from "./components/DebugToolbar";
 
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ErrorPanel } from "./components/ErrorScreen";
@@ -148,12 +124,10 @@ import type {
 	FileTabHandle,
 } from "./components/FileTab";
 import { InsightsView } from "./components/InsightsView";
-import { ProblemsPanel } from "./components/ProblemsPanel";
 import { TasksPanel } from "./components/TasksPanel";
 import { TaskTab } from "./components/TaskTab";
 import { TerminalView } from "./components/TerminalView";
 import { WorkspaceFilesPanel } from "./components/WorkspaceFilesPanel";
-import { WorkspaceActivity } from "./components/WorkspaceActivity";
 import {
 	Dialog,
 	dialogButtonClass,
@@ -215,8 +189,7 @@ const CompareTab = lazy(async () => {
 	await import("./monacoRuntime");
 	return { default: (await import("./components/CompareTab")).CompareTab };
 });
-type WorkspaceTab = "changes" | "files" | "inspect";
-type DebugContentView = "output" | "terminal";
+type WorkspaceTab = "changes" | "files";
 type CloseRequest = { kind: "file" | "terminal"; tab: CenterTab } | null;
 type SaveConflictRequest = { path: string; closeTabId?: string } | null;
 type WorkspaceEditRequest = {
@@ -275,8 +248,6 @@ function readSessionsLayout(): SessionsLayout {
 		return { open: false, width: SESSIONS_PANEL_DEFAULT_SIZE };
 	}
 }
-const DEBUG_DETAILS_MIN_SIZE = 240;
-const DEBUG_DETAILS_MAX_SIZE = 480;
 // Width per workspace tab below which the label is replaced by its icon.
 const WORKSPACE_TAB_LABEL_MIN_WIDTH = 58;
 
@@ -363,16 +334,6 @@ function moveWorkspaceTab(tab: CenterTab, from: string, to: string): CenterTab {
 	};
 }
 
-async function stopActiveDebugSession(queryClient: QueryClient) {
-	const current = await queryClient.fetchQuery({
-		queryKey: queryKeys.debug.session,
-		queryFn: ({ signal }) => getDebugSession(signal),
-		staleTime: 0,
-	});
-	if (!current.session || current.session.state === "terminated") return null;
-	return controlDebug("stop", current.session.session_id);
-}
-
 async function terminalCloseState(terminalId: string) {
 	for (let attempt = 0; attempt < 2; attempt++) {
 		const terminal = await getTerminal(terminalId);
@@ -428,28 +389,6 @@ export default function App() {
 	} = useSessions();
 	useServerQueryInvalidation(subscribe, connected);
 	const queryClient = useQueryClient();
-	useEffect(() => {
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		let stateChanged = false;
-		const release = client.dap.subscribe((event) => {
-			if (!["wingman/status", "output", "disconnected"].includes(event)) return;
-			stateChanged ||= event !== "output";
-			if (timer !== undefined) return;
-			timer = setTimeout(() => {
-				const key = stateChanged ? queryKeys.debug.all : queryKeys.debug.output;
-				timer = undefined;
-				stateChanged = false;
-				void queryClient.invalidateQueries(
-					{ queryKey: key },
-					{ cancelRefetch: false },
-				);
-			}, 16);
-		});
-		return () => {
-			release();
-			clearTimeout(timer);
-		};
-	}, [client, queryClient]);
 	const toast = useToast();
 	const {
 		documents,
@@ -467,15 +406,10 @@ export default function App() {
 	} = useOpenDocuments(subscribe);
 	const workspace = useWorkspaceInfo();
 	const gitState = useQuery(gitStatusQuery);
-	const { inspect: showInspect, debug: showDebug } =
-		getInspectAvailability(workspace);
-	const languageServicesKey = `${workspace?.lsp ?? false}:${workspace?.managed_tools?.state ?? ""}`;
-	const [requestedWorkspaceTab, setRequestedWorkspaceTab] =
-		useState<WorkspaceTab>("files");
+	const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("files");
 	const terminalDocked = workspace?.["window.terminal.position"] === "bottom";
 	const [activeDockedTerminalId, setActiveDockedTerminalId] = useState("");
 	const lastCenterActiveIdRef = useRef(initialTab.id);
-	const [problemsRefreshKey, setProblemsRefreshKey] = useState(0);
 	const [workspaceSearching, setWorkspaceSearching] = useState(false);
 	const [searchFocusKey, setSearchFocusKey] = useState(0);
 	const [sidePanelCollapsed, setSidePanelCollapsed] = useState(false);
@@ -517,7 +451,7 @@ export default function App() {
 		const observer = new ResizeObserver(updateCompactMode);
 		observer.observe(element);
 		return () => observer.disconnect();
-	}, [sidePanelCollapsed, sidebarPosition, showInspect, sessionsDocked]);
+	}, [sidePanelCollapsed, sidebarPosition, sessionsDocked]);
 	const appRef = useRef<HTMLDivElement>(null);
 	const sidePanelWidthRef = useRef(SIDE_PANEL_DEFAULT_SIZE);
 	const sidePanelRef = usePanelRef();
@@ -533,17 +467,11 @@ export default function App() {
 			revision: sidebarLayout.revision + 1,
 		});
 	}, [preferredSidebarPosition, sidebarLayout, sidePanelRef]);
-	const debugDetailsPanelRef = usePanelRef();
-	const [debugDetailsWidth, setDebugDetailsWidth] = useState(
-		DEBUG_DETAILS_MIN_SIZE,
-	);
 	const terminalShells = workspace?.shells ?? EMPTY_SHELLS;
 	const terminalsQuery = useQuery({
 		...terminalQueries.list(),
 	});
 	const terminalCreatingRef = useRef(false);
-	const debugTerminalIDsRef = useRef(new Set<string>());
-	const exitedDebugTerminalIDsRef = useRef(new Set<string>());
 
 	const {
 		tabs,
@@ -601,16 +529,6 @@ export default function App() {
 	const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
 	/** The move to another project that is still opening it. */
 	const projectSwitch = useRef<AbortController | null>(null);
-	const [debugLauncher, setDebugLauncher] = useState<DebugLauncherSeed | null>(
-		null,
-	);
-	const [debugContentView, setDebugContentView] =
-		useState<DebugContentView>("output");
-	const [debugDetailsVisible, setDebugDetailsVisible] = useState(true);
-	const [debugSession, setDebugSession] = useState<DebugSession>();
-	const debugSessionRef = useRef<DebugSession | undefined>(undefined);
-	const followedDebugStopRef = useRef("");
-	const [debugControlBusy, setDebugControlBusy] = useState(false);
 
 	const openWorkspaceEditFiles = (paths: readonly string[]) => {
 		if (paths.length === 0) return;
@@ -753,7 +671,6 @@ export default function App() {
 		if (!terminalsQuery.data) return;
 		const entries = terminalsQuery.data;
 		const ids = new Set(entries.map((entry) => entry.id));
-		const debugTerminalIDs = [...debugTerminalIDsRef.current];
 		setTabs((prev) => {
 			const next = prev.filter(
 				(tab) => tab.type !== "terminal" || ids.has(tab.terminalId ?? ""),
@@ -761,7 +678,6 @@ export default function App() {
 			const known = new Set(
 				next.flatMap((tab) => (tab.terminalId ? [tab.terminalId] : [])),
 			);
-			for (const id of debugTerminalIDs) known.add(id);
 			for (const entry of entries) {
 				if (known.has(entry.id)) continue;
 				next.push({
@@ -942,10 +858,6 @@ export default function App() {
 		activeTab.type === "chat"
 			? activeTab.sessionId || draftKey(activeTab.backendId ?? agentId)
 			: currentSessionId || draftKey(agentId);
-	const workspaceTab =
-		requestedWorkspaceTab === "inspect" && !showInspect
-			? "files"
-			: requestedWorkspaceTab;
 
 	const activeSession = sessionId ? sessions[sessionId] : undefined;
 
@@ -1182,117 +1094,6 @@ export default function App() {
 			"keep",
 		);
 	};
-	const openDebugLauncher = (seed: DebugLauncherSeed) => {
-		setDebugLauncher({ ...seed });
-	};
-	const invalidateDebugDetails = () => {
-		void queryClient.invalidateQueries({
-			queryKey: queryKeys.debug.inspection,
-			exact: true,
-		});
-		void queryClient.invalidateQueries({
-			queryKey: queryKeys.debug.output,
-			exact: true,
-		});
-	};
-	const applyDebugSession = (session?: DebugSession) => {
-		const current = debugSessionRef.current;
-		if (
-			session &&
-			current?.session_id === session.session_id &&
-			session.state_version < current.state_version
-		)
-			return;
-		debugSessionRef.current = session;
-		setDebugSession(session);
-		if (session?.terminal_id)
-			debugTerminalIDsRef.current.add(session.terminal_id);
-		const active = !!session && session.state !== "terminated";
-		const terminalId =
-			active &&
-			session.terminal_id &&
-			!exitedDebugTerminalIDsRef.current.has(session.terminal_id)
-				? session.terminal_id
-				: undefined;
-		const pane = activePaneRef.current;
-		setTabs((current) => syncDebugTab(current, terminalId, active, pane));
-		if (!terminalId)
-			setDebugContentView((view) => (view === "terminal" ? "output" : view));
-		queryClient.setQueryData(queryKeys.debug.session, { session });
-	};
-	const debugStateQuery = useQuery({
-		queryKey: queryKeys.debug.state,
-		enabled: showDebug,
-		staleTime: 0,
-		queryFn: ({ signal }) => getDebugState(undefined, signal),
-		refetchInterval: (current) => {
-			const session = current.state.data?.session;
-			if (!session || session.state === "terminated") return false;
-			return 10_000;
-		},
-	});
-
-	const syncDebugSession = useEffectEvent(applyDebugSession);
-	useEffect(() => {
-		if (!showDebug) {
-			// oxlint-disable-next-line react/set-state-in-effect -- Synchronize the external debugger with tabs, terminal state, and the query cache.
-			syncDebugSession(undefined);
-			return;
-		}
-		if (debugStateQuery.data) {
-			// oxlint-disable-next-line react/set-state-in-effect -- Synchronize the external debugger with tabs, terminal state, and the query cache.
-			syncDebugSession(debugStateQuery.data.session);
-		}
-	}, [debugStateQuery.data, showDebug]);
-
-	const revealDebugStop = useEffectEvent(openFile);
-	useEffect(() => {
-		const state = debugStateQuery.data;
-		const session = state?.session;
-		const frame = state?.frame;
-		if (
-			session?.state !== "stopped" ||
-			debugSession?.session_id !== session.session_id ||
-			debugSession.state_version !== session.state_version ||
-			!frame?.source?.path ||
-			frame.line < 1
-		) {
-			return;
-		}
-		const stopKey = `${session.session_id}:${session.state_version}`;
-		if (followedDebugStopRef.current === stopKey) return;
-		followedDebugStopRef.current = stopKey;
-		revealDebugStop(frame.source.path, frame.line, Math.max(1, frame.column));
-	}, [debugSession, debugStateQuery.data]);
-
-	const handleDebugControl = async (operation: DebugOperation) => {
-		const session = debugSession;
-		if (!session || session.state === "terminated" || debugControlBusy) return;
-		setDebugControlBusy(true);
-		const threadId = session.stop?.thread_id;
-		let result: Awaited<ReturnType<typeof controlDebug>>;
-		try {
-			result = await controlDebug(operation, session.session_id, threadId);
-		} catch (error) {
-			toast({
-				title: `Could not ${debugOperationLabel(operation)}`,
-				description: error instanceof Error ? error.message : String(error),
-				tone: "error",
-			});
-			setDebugControlBusy(false);
-			return;
-		}
-		setDebugControlBusy(false);
-		if (result.session) {
-			applyDebugSession(result.session);
-			void queryClient.invalidateQueries({
-				queryKey: queryKeys.debug.state,
-				exact: true,
-			});
-			invalidateDebugDetails();
-		}
-	};
-
 	const closeTabNow = (id: string) => {
 		const idx = tabs.findIndex((t) => t.id === id);
 		if (idx < 0) return;
@@ -1557,22 +1358,6 @@ export default function App() {
 		if (closeRequest || saveConflict || filePathRequest) return false;
 		const tab = tabs.find((item) => item.id === id);
 		if (!tab) return true;
-		if (tab.type === "debug") {
-			try {
-				const result = await stopActiveDebugSession(queryClient);
-				if (result) applyDebugSession(result.session);
-				setDebugContentView("output");
-				closeTabNow(tab.id);
-				return true;
-			} catch (error) {
-				toast({
-					title: "Could not stop debugger",
-					description: error instanceof Error ? error.message : String(error),
-					tone: "error",
-				});
-			}
-			return false;
-		}
 		if (tab.type === "file" && tab.path && dirtyPaths.has(tab.path)) {
 			setCloseRequest({ kind: "file", tab });
 			return true;
@@ -2236,11 +2021,6 @@ export default function App() {
 			`${Math.round(inPixels)}px`,
 		);
 	};
-	const handleDebugDetailsResize = ({ inPixels }: PanelSize) => {
-		const visible = inPixels > 0;
-		setDebugDetailsVisible(visible);
-		if (visible) setDebugDetailsWidth(Math.round(inPixels));
-	};
 	// The list's width follows a drag without rendering the app again.
 	const handleSessionsResize = ({ inPixels }: PanelSize) => {
 		const open = inPixels >= 1;
@@ -2324,71 +2104,11 @@ export default function App() {
 		});
 	};
 	const showSidePanel = (tab: WorkspaceTab) => {
-		setRequestedWorkspaceTab(tab);
+		setWorkspaceTab(tab);
 		if (sidePanelRef.current?.isCollapsed()) {
 			sidePanelRef.current.resize(`${sidePanelWidthRef.current}px`);
 			setSidePanelCollapsed(false);
 		}
-	};
-	const toggleDebugDetails = () => {
-		const panel = debugDetailsPanelRef.current;
-		if (!panel) {
-			setDebugDetailsVisible((visible) => !visible);
-			return;
-		}
-		if (panel.isCollapsed()) {
-			setDebugDetailsVisible(true);
-			panel.resize(`${DEBUG_DETAILS_MIN_SIZE}px`);
-		} else {
-			setDebugDetailsVisible(false);
-			panel.collapse();
-		}
-	};
-	const showDebugDetails = () => {
-		setDebugDetailsVisible(true);
-		if (debugDetailsPanelRef.current?.isCollapsed()) {
-			debugDetailsPanelRef.current.resize(`${DEBUG_DETAILS_MIN_SIZE}px`);
-		}
-	};
-	const showDebugger = () => {
-		const terminalId =
-			debugSession?.state !== "terminated" &&
-			debugSession?.terminal_id &&
-			!exitedDebugTerminalIDsRef.current.has(debugSession.terminal_id)
-				? debugSession.terminal_id
-				: undefined;
-		const pane = activePaneRef.current;
-		setTabs((current) => syncDebugTab(current, terminalId, true, pane));
-		if (terminalId) setDebugContentView("terminal");
-		showDebugDetails();
-		setActiveTabId("debug");
-	};
-	const showDebugSession = (session: DebugSession) => {
-		if (session.terminal_id)
-			exitedDebugTerminalIDsRef.current.delete(session.terminal_id);
-		applyDebugSession(session);
-		void queryClient.invalidateQueries({
-			queryKey: queryKeys.debug.state,
-			exact: true,
-		});
-		invalidateDebugDetails();
-		setDebugContentView(session.terminal_id ? "terminal" : "output");
-		showDebugDetails();
-		setActiveTabId("debug");
-	};
-	const showDebugFailure = (session: DebugSession) => {
-		applyDebugSession(session);
-		invalidateDebugDetails();
-		const pane = activePaneRef.current;
-		setTabs((current) => syncDebugTab(current, undefined, true, pane));
-		setDebugContentView("output");
-		showDebugDetails();
-		setActiveTabId("debug");
-	};
-	const handleDebugTerminalExit = (id: string) => {
-		exitedDebugTerminalIDsRef.current.add(id);
-		setTabs((current) => syncDebugTab(current, undefined, false));
-		setDebugContentView("output");
 	};
 	const showWorkspaceSearch = () => {
 		showSidePanel("files");
@@ -2695,67 +2415,6 @@ export default function App() {
 				</ChatTabLayout>
 			);
 		}
-		if (tab.type === "debug") {
-			return (
-				<Group
-					id="debug-layout"
-					orientation="horizontal"
-					className="h-full min-h-0 min-w-0 overflow-hidden"
-				>
-					<Panel
-						id="debug-content"
-						minSize="160px"
-						className="relative min-h-0 min-w-0 overflow-hidden"
-					>
-						<div
-							className={debugContentView === "output" ? "h-full" : "hidden"}
-						>
-							<DebugOutputTab />
-						</div>
-						{tab.terminalId && (
-							<div
-								className={
-									debugContentView === "terminal" ? "h-full" : "hidden"
-								}
-							>
-								<TerminalView
-									id={tab.terminalId}
-									active={debugContentView === "terminal"}
-									onExit={handleDebugTerminalExit}
-									onTitle={setTerminalTitle}
-								/>
-							</div>
-						)}
-					</Panel>
-					<ResizeHandle
-						label="Resize debugger details"
-						hidden={!debugDetailsVisible}
-					/>
-					<Panel
-						id="debug-details"
-						panelRef={debugDetailsPanelRef}
-						defaultSize={debugDetailsVisible ? `${debugDetailsWidth}px` : "0px"}
-						minSize={`${DEBUG_DETAILS_MIN_SIZE}px`}
-						maxSize={`${DEBUG_DETAILS_MAX_SIZE}px`}
-						collapsedSize="0px"
-						collapsible
-						groupResizeBehavior="preserve-pixel-size"
-						onResize={handleDebugDetailsResize}
-						inert={!debugDetailsVisible}
-						className="h-full overflow-hidden border-l border-border-subtle"
-					>
-						<div className="h-full" aria-label="Debugger details">
-							<DebugTab
-								onOpenFile={(path, line, column) =>
-									openFile(path, line, column)
-								}
-								onStopped={showDebugDetails}
-							/>
-						</div>
-					</Panel>
-				</Group>
-			);
-		}
 		if (tab.type === "terminal") return null;
 		if (tab.type === "task" && tab.taskId) {
 			return (
@@ -2811,41 +2470,15 @@ export default function App() {
 					line={tab.line}
 					column={tab.column}
 					navigationKey={tab.navigationKey}
-					subscribe={subscribe}
 					onChange={(value) => {
 						keepTab(tab.id);
 						updateDraft(tab.path!, value);
-					}}
-					onSave={async () => {
-						if (document.untitled) {
-							requestSaveAs(tab, document);
-							return { ok: false };
-						}
-						return saveFile(tab.path!);
 					}}
 					onReload={() => void reloadDocument(tab.path!, tab.external ?? false)}
 					onOpenFile={openFile}
 					onApplyWorkspaceEdit={requestWorkspaceEdit}
 					onAskSelection={askAboutEditorSelection}
-					onLaunchDebug={(target, action) => {
-						const currentPath = tab.path;
-						if (!currentPath) return;
-						if (debugSession && debugSession.state !== "terminated") {
-							showDebugger();
-							toast({
-								title: "Debug session already active",
-								description: "Stop it before starting another target.",
-							});
-							return;
-						}
-						openDebugLauncher({
-							target,
-							action,
-							currentPath,
-						});
-					}}
 					view={fileViews[tab.id] ?? defaultFileView(tab.path)}
-					languageServicesKey={languageServicesKey}
 				/>
 			);
 		}
@@ -3067,62 +2700,10 @@ export default function App() {
 					)}
 				</button>
 			)}
-			{activeTab.type === "debug" && (
-				<>
-					<button
-						type="button"
-						className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-bg-hover hover:text-fg-muted ${debugDetailsVisible ? "text-fg-muted" : "text-fg-dim"}`}
-						onClick={toggleDebugDetails}
-						title={
-							debugDetailsVisible
-								? "Hide debugger details"
-								: "Show debugger details"
-						}
-						aria-label={
-							debugDetailsVisible
-								? "Hide debugger details"
-								: "Show debugger details"
-						}
-					>
-						<Bug size={13} />
-					</button>
-					{activeTab.terminalId && (
-						<button
-							type="button"
-							className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg-muted"
-							onClick={() =>
-								setDebugContentView((view) =>
-									view === "terminal" ? "output" : "terminal",
-								)
-							}
-							title={
-								debugContentView === "terminal"
-									? "Show debug output"
-									: "Show terminal"
-							}
-							aria-label={
-								debugContentView === "terminal"
-									? "Show debug output"
-									: "Show terminal"
-							}
-						>
-							{debugContentView === "terminal" ? (
-								<MonitorPlay size={13} />
-							) : (
-								<Monitor size={13} />
-							)}
-						</button>
-					)}
-				</>
-			)}
 			<NewItemLauncher
 				onNewChat={() => void handleNewSession()}
 				onNewTerminal={() => void createTerminal()}
 				onNewTextFile={workspaceSwitching ? undefined : openUntitledFile}
-			/>
-			<WorkspaceActivity
-				hasLSP={workspace?.lsp ?? false}
-				tools={workspace?.managed_tools}
 			/>
 		</div>
 	);
@@ -3134,9 +2715,6 @@ export default function App() {
 	}[] = [
 		{ id: "files", icon: FolderTree, label: "Files" },
 		{ id: "changes", icon: GitCompareArrows, label: "Changes" },
-		...(showInspect
-			? ([{ id: "inspect", icon: Stethoscope, label: "Inspect" }] as const)
-			: []),
 	];
 	const workspaceTabs = (
 		<div
@@ -3152,7 +2730,7 @@ export default function App() {
 					icon={tab.icon}
 					label={tab.label}
 					iconOnly={workspaceTabsCompact}
-					onClick={() => setRequestedWorkspaceTab(tab.id)}
+					onClick={() => setWorkspaceTab(tab.id)}
 				/>
 			))}
 		</div>
@@ -3166,34 +2744,7 @@ export default function App() {
 				className="relative min-h-0 flex-1 overflow-hidden pt-0.5"
 				role="tabpanel"
 			>
-				<div
-					className={
-						workspaceTab === "inspect" ? "flex h-full flex-col" : "hidden"
-					}
-				>
-					<div className="flex h-9 shrink-0 items-center px-3">
-						<span className="text-[10px] font-medium uppercase tracking-wide text-fg-dim">
-							Diagnostics
-						</span>
-						<div className="flex-1" />
-						<button
-							type="button"
-							onClick={() => setProblemsRefreshKey((value) => value + 1)}
-							title="Refresh diagnostics"
-							aria-label="Refresh diagnostics"
-							className="flex h-6 w-6 items-center justify-center rounded text-fg-dim hover:bg-bg-hover hover:text-fg"
-						>
-							<RefreshCw size={11} />
-						</button>
-					</div>
-					<div className="relative min-h-0 flex-1 overflow-hidden">
-						<ProblemsPanel
-							onOpenFile={openFile}
-							refreshKey={problemsRefreshKey}
-						/>
-					</div>
-				</div>
-				{workspaceTab === "inspect" ? null : workspaceTab === "changes" ? (
+				{workspaceTab === "changes" ? (
 					<DiffsPanel
 						git={!!gitState.data || gitState.isError}
 						canInit={gitState.data === null}
@@ -3207,15 +2758,6 @@ export default function App() {
 				) : (
 					<WorkspaceFilesPanel
 						workspaceName={workspace?.name ?? "Files"}
-						headerContent={
-							debugSession && debugSession.state !== "terminated" ? (
-								<DebugToolbar
-									session={debugSession}
-									busy={debugControlBusy}
-									onControl={(operation) => void handleDebugControl(operation)}
-								/>
-							) : undefined
-						}
 						searching={workspaceSearching}
 						searchFocusKey={searchFocusKey}
 						onSearch={showWorkspaceSearch}
@@ -3653,50 +3195,6 @@ export default function App() {
 				/>
 			)}
 
-			<DebugLauncher
-				open={debugLauncher !== null}
-				seed={debugLauncher ?? undefined}
-				onClose={() => setDebugLauncher(null)}
-				onStarted={(session) => {
-					showDebugSession(session);
-					toast({
-						title:
-							session.state === "stopped"
-								? "Debugger stopped at target"
-								: "Debug session started",
-						tone: "success",
-					});
-				}}
-				onFailed={(message) => {
-					const previousID = debugSessionRef.current?.session_id;
-					void getDebugSession()
-						.then(({ session }) => {
-							// Only a session created by this launch attempt carries its
-							// failure output; a leftover session would hide the error.
-							if (
-								session?.state === "terminated" &&
-								session.error &&
-								session.session_id !== previousID
-							) {
-								showDebugFailure(session);
-								return;
-							}
-							toast({
-								title: "Debugger could not start",
-								description: message,
-								tone: "error",
-							});
-						})
-						.catch(() => {
-							toast({
-								title: "Debugger could not start",
-								description: message,
-								tone: "error",
-							});
-						});
-				}}
-			/>
-
 			<Dialog
 				open={filePathRequest !== null}
 				title="Save As"
@@ -4077,25 +3575,6 @@ function ChatTabLayout({
 			</aside>
 		</div>
 	);
-}
-
-function debugOperationLabel(operation: DebugOperation): string {
-	switch (operation) {
-		case "continue":
-			return "continue debugging";
-		case "next":
-			return "step over";
-		case "stepIn":
-			return "step into";
-		case "stepOut":
-			return "step out";
-		case "stepBack":
-			return "step back";
-		case "pause":
-			return "pause debugging";
-		case "stop":
-			return "stop debugging";
-	}
 }
 
 function TerminalDockTabs({

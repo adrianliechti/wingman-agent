@@ -3,18 +3,13 @@ package server
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/code/agent"
-	"github.com/adrianliechti/wingman-agent/pkg/dap"
-	"github.com/adrianliechti/wingman-agent/pkg/devtools"
-	"github.com/adrianliechti/wingman-agent/pkg/filewatch"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/telemetry"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
@@ -47,16 +42,9 @@ type Project struct {
 	fileMonitor     *watch.Monitor
 	skillFiles      *watch.Monitor
 	prevGit         bool
-	hasLSP          atomic.Bool // language servers and debuggers, as last found:
-	hasDebug        atomic.Bool // finding them looks through the whole folder
 	prevFingerprint uint64
-	workspaceFiles  filewatch.Source // feeds language-server file watchers
-	fileScanning    atomic.Bool
-
-	managedTools atomic.Pointer[managedToolsStatus] // immutable published snapshot
 
 	host             *Host
-	onDiagnostics    func()    // optional web subscriber, protected by host.mu
 	dir              string    // the project's identity: its directory with links resolved
 	namespace        string    // prefix of the channels this project names itself
 	used             time.Time // when a client last reached the project; protected by host.mu
@@ -118,64 +106,12 @@ func (h *Host) newProject(workDir string) (_ *Project, err error) {
 		return option.ID
 	}
 	ws.WarmUp()
-	if terminal.Supported() {
-		_ = ws.WithDAPManager(func(manager *dap.Manager) error {
-			manager.SetTerminalLauncher(s)
-			return nil
-		})
-	}
 
 	s.prevGit = ws.IsGitRepo()
 	s.fileMonitor = watch.New(watch.Options{Active: s.hasClients}, s.checkWorkspace)
-	s.workspaceFiles = filewatch.NewScanner(ws.Root.FS(), ".", filewatch.Options{
-		Recursive: true,
-		Skip:      func(_ string, entry fs.DirEntry) bool { return entry.IsDir() && isExcludedDir(entry.Name()) },
-		Track:     func(_ string, entry fs.DirEntry) bool { return !entry.IsDir() },
-		Limit:     100000,
-	})
 	s.background.Go(func() {
-		// Whether the project has language servers and debuggers is found by
-		// looking through its folder, which takes a while in a large one. The
-		// project opens without waiting, and other projects behind it; a window
-		// that showed it meanwhile hears of what was found.
-		s.hasLSP.Store(ws.HasLSP())
-		s.hasDebug.Store(s.debugAvailable(serverCtx))
-		if (s.hasLSP.Load() || s.hasDebug.Load()) && serverCtx.Err() == nil {
-			s.workspaceChanged(Frame{Type: EvtWorkspaceChanged})
-		}
 		s.fileMonitor.Run(serverCtx)
 	})
-	if !h.disableManagedTools {
-		update := ws.StartManagedToolsUpdate(serverCtx, code.ManagedLSPTools, func(progress devtools.Progress) {
-			s.setManagedToolsStatus(managedToolsStatus{
-				State: "installing", Tool: progress.Tool, Label: progress.Label, Phase: progress.Phase,
-				Current: progress.Current, Total: progress.Total,
-			})
-		})
-		s.background.Go(func() {
-			changed, updateErr := update.WaitContext(serverCtx)
-			if serverCtx.Err() != nil {
-				return
-			}
-			if updateErr != nil {
-				fmt.Fprintf(os.Stderr, "managed tools warning: %v\n", updateErr)
-				if devtools.IsUnavailable(updateErr) {
-					s.setManagedToolsStatus(managedToolsStatus{
-						State: "error", Error: updateErr.Error(), Unavailable: devtools.ToolLabels(devtools.UnavailableTools(updateErr)),
-					})
-				} else {
-					s.setManagedToolsStatus(managedToolsStatus{State: "ready"})
-				}
-			} else {
-				s.setManagedToolsStatus(managedToolsStatus{State: "ready"})
-			}
-			if changed && serverCtx.Err() == nil {
-				if s.fileMonitor != nil {
-					s.fileMonitor.Flush()
-				}
-			}
-		})
-	}
 	s.skillFiles = watch.New(watch.Options{
 		Fallback: 2 * time.Second,
 		Active:   s.hasClients,

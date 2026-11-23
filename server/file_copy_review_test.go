@@ -38,7 +38,7 @@ func TestFileCopyRejectsOwnDescendants(test *testing.T) {
 			if tc.alias != "" {
 				testenv.DirLink(test, "symlink", filepath.FromSlash(tc.alias), filepath.Join(dir, "alias"))
 			}
-			app := newDebugTestServer(test, dir)
+			app := newEditorTestServer(test, dir)
 			if err := copyResource(test, app, "source", tc.to); err == nil {
 				test.Error("copy into its own source was accepted")
 			}
@@ -57,7 +57,7 @@ func TestFileCopyAllowsSiblingDirectory(test *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "source", "file.txt"), []byte("contents"), 0644); err != nil {
 		test.Fatal(err)
 	}
-	app := newDebugTestServer(test, dir)
+	app := newEditorTestServer(test, dir)
 	if err := copyResource(test, app, "source", "source-copy"); err != nil {
 		test.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestFileCopyPreservesSymlinks(test *testing.T) {
 	for name, target := range links {
 		testenv.DirLink(test, "symlink", target, filepath.Join(dir, "source", name))
 	}
-	app := newDebugTestServer(test, dir)
+	app := newEditorTestServer(test, dir)
 	for _, from := range []string{"source", "source/file-link"} {
 		test.Run(from, func(test *testing.T) {
 			to := from + "-copy"

@@ -41,7 +41,7 @@ func TestReviewHostOfOneFolderFiltersSavedSessions(t *testing.T) {
 	testenv.WingmanHome(t)
 	allowed, excluded := canonicalPath(t.TempDir()), canonicalPath(t.TempDir())
 	reviewSaveHostAlias(t, excluded, "ahp-session:/excluded", "wingman")
-	h, err := NewHost(t.Context(), &HostOptions{folder: allowed, disableManagedTools: true})
+	h, err := NewHost(t.Context(), &HostOptions{folder: allowed})
 	if err != nil {
 		t.Fatal(err)
 	}

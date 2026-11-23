@@ -17,32 +17,6 @@ export const queryKeys = {
 		all: ["server", "terminals"] as const,
 		list: ["server", "terminals", "list"] as const,
 	},
-	diagnostics: {
-		all: ["server", "diagnostics"] as const,
-		workspace: ["server", "diagnostics", "workspace"] as const,
-	},
-	lsp: {
-		all: ["server", "lsp"] as const,
-		activity: ["server", "lsp", "activity"] as const,
-	},
-	debug: {
-		all: ["server", "debug"] as const,
-		session: ["server", "debug", "session"] as const,
-		state: ["server", "debug", "state"] as const,
-		inspection: ["server", "debug", "inspection"] as const,
-		output: ["server", "debug", "output"] as const,
-		scopes: (sessionId: string, stateVersion: number, frameId: number) =>
-			["server", "debug", "scopes", sessionId, stateVersion, frameId] as const,
-		variables: (sessionId: string, stateVersion: number, reference: number) =>
-			[
-				"server",
-				"debug",
-				"variables",
-				sessionId,
-				stateVersion,
-				reference,
-			] as const,
-	},
 	// Outside git.all: working-tree changes do not alter commit history, and
 	// recomputing the history walk on every edit would be wasted work.
 	gitInsights: ["server", "git-insights"] as const,
@@ -136,9 +110,6 @@ export function invalidateForServerMessage(
 			break;
 		case "terminals_changed":
 			invalidate(queryKeys.terminals.all);
-			break;
-		case "diagnostics_changed":
-			invalidate(queryKeys.diagnostics.all);
 			break;
 		case "diffs_changed":
 			invalidate(queryKeys.diffs.all);

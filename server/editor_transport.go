@@ -9,31 +9,35 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/adrianliechti/wingman-agent/pkg/language"
 	"github.com/adrianliechti/wingman-agent/server/ahp"
 	"github.com/coder/websocket"
 	"go.lsp.dev/jsonrpc2"
 )
 
 // editorState belongs to the web adapter. Headless projects have no editor
-// connections, document ownership or browser-facing debug references.
+// connections or document ownership.
 type editorState struct {
-	dapReferenceSeq  atomic.Uint64
 	lspDocumentsMu   sync.Mutex
 	lspDocuments     map[string]*lspDocument
-	lspRefreshers    map[*lspConnection]struct{}
 	lspExternalMu    sync.Mutex
 	lspExternalPaths map[string]bool
 }
 
-// The browser transports use one UTF-8 JSON message per WebSocket frame.
-// Native language servers and debug adapters keep their Content-Length framing.
+// The browser transport uses one UTF-8 JSON message per WebSocket frame.
+// Native language servers keep their Content-Length framing.
 // Slow peers are disconnected instead of dropping protocol messages.
-type editorSocket struct {
-	ctx     context.Context
-	cancel  context.CancelFunc
-	writer  *wsClient
-	mu      sync.Mutex
-	pending map[string]context.CancelCauseFunc
+type lspConnection struct {
+	server    *Server
+	language  *language.Service
+	ctx       context.Context
+	cancel    context.CancelFunc
+	writer    *wsClient
+	mu        sync.Mutex
+	pending   map[string]context.CancelCauseFunc
+	documents map[string]lspBuffer
+	replies   map[string]chan json.RawMessage
+	sequence  atomic.Uint64
 }
 
 var (
@@ -41,53 +45,78 @@ var (
 	errEditorTimeout   = errors.New("request timed out")
 )
 
-func (s *Server) acceptEditorSocket(w http.ResponseWriter, r *http.Request) (*editorSocket, error) {
-	// Only the same-origin Web UI uses /lsp and /dap; the default origin check
-	// keeps other pages from driving language servers and debuggers.
+func (s *Server) acceptLSPConnection(w http.ResponseWriter, r *http.Request) (*lspConnection, error) {
+	service := s.Project.workspace.LanguageService()
+	if service == nil {
+		err := errors.New("language service unavailable")
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return nil, err
+	}
+	// The default origin check confines /lsp to the same-origin web UI.
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return nil, err
 	}
 	conn.SetReadLimit(8 << 20)
 	ctx, cancel := context.WithCancel(s.Project.ctx)
-	p := &editorSocket{ctx: ctx, cancel: cancel, writer: newWSClient(conn), pending: map[string]context.CancelCauseFunc{}}
-	go p.writer.run()
+	c := &lspConnection{
+		server:    s,
+		language:  service,
+		ctx:       ctx,
+		cancel:    cancel,
+		writer:    newWSClient(conn),
+		pending:   make(map[string]context.CancelCauseFunc),
+		documents: make(map[string]lspBuffer),
+		replies:   make(map[string]chan json.RawMessage),
+	}
+	go c.writer.run()
 	go func() { <-ctx.Done(); _ = conn.CloseNow() }()
-	return p, nil
+	return c, nil
 }
 
-func (p *editorSocket) close() { p.cancel(); p.writer.close(); _ = p.writer.conn.CloseNow() }
-func (p *editorSocket) send(value any) {
+func (c *lspConnection) close() {
+	c.cancel()
+	c.writer.close()
+	_ = c.writer.conn.CloseNow()
+}
+
+func (c *lspConnection) send(value any) {
 	data, err := json.Marshal(value)
-	if err != nil || !p.writer.enqueue(data) {
-		p.cancel()
+	if err != nil || !c.writer.enqueue(data) {
+		c.cancel()
 	}
 }
 
 // begin registers a cancellable request. A zero timeout leaves the request
 // bounded only by the socket and explicit cancellation.
-func (p *editorSocket) begin(id string, timeout time.Duration) (context.Context, func(), error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if _, exists := p.pending[id]; exists {
+func (c *lspConnection) begin(id string, timeout time.Duration) (context.Context, func(), error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.pending[id]; exists {
 		return nil, nil, errors.New("duplicate request id")
 	}
-	if len(p.pending) >= 64 {
+	if len(c.pending) >= 64 {
 		return nil, nil, errors.New("too many outstanding requests")
 	}
-	ctx, cancel := context.WithCancelCause(p.ctx)
+	ctx, cancel := context.WithCancelCause(c.ctx)
 	stop := context.CancelFunc(func() {})
 	if timeout > 0 {
 		ctx, stop = context.WithTimeoutCause(ctx, timeout, errEditorTimeout)
 	}
-	p.pending[id] = cancel
-	return ctx, func() { stop(); cancel(context.Canceled); p.mu.Lock(); delete(p.pending, id); p.mu.Unlock() }, nil
+	c.pending[id] = cancel
+	return ctx, func() {
+		stop()
+		cancel(context.Canceled)
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+	}, nil
 }
 
-func (p *editorSocket) cancelRequest(id string) {
-	p.mu.Lock()
-	cancel := p.pending[id]
-	p.mu.Unlock()
+func (c *lspConnection) cancelRequest(id string) {
+	c.mu.Lock()
+	cancel := c.pending[id]
+	c.mu.Unlock()
 	if cancel != nil {
 		cancel(errEditorCancelled)
 	}
@@ -102,16 +131,16 @@ func editorRequestError(ctx context.Context, err error) error {
 	return err
 }
 
-func (p *editorSocket) notify(method string, params any) {
-	p.send(ahp.Notify(method, params))
+func (c *lspConnection) notify(method string, params any) {
+	c.send(ahp.Notify(method, params))
 }
 
-func (p *editorSocket) reply(id json.RawMessage, result any, err error) {
+func (c *lspConnection) reply(id json.RawMessage, result any, err error) {
 	if len(id) == 0 {
 		return
 	}
 	if err == nil {
-		p.send(ahp.Reply(id, result, nil))
+		c.send(ahp.Reply(id, result, nil))
 		return
 	}
 	rpc := &ahp.Error{Code: -32603, Message: err.Error()}
@@ -131,5 +160,5 @@ func (p *editorSocket) reply(id json.RawMessage, result any, err error) {
 			rpc.Data = json.RawMessage(native.Data)
 		}
 	}
-	p.send(ahp.Reply(id, nil, rpc))
+	c.send(ahp.Reply(id, nil, rpc))
 }

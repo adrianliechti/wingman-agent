@@ -82,7 +82,7 @@ func TestSavedSessionsListReadUnlessLeftUnread(t *testing.T) {
 	testenv.WingmanHome(t)
 	protocolTestGateway(t)
 	dir := canonicalPath(t.TempDir())
-	first, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	first, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestSavedSessionsListReadUnlessLeftUnread(t *testing.T) {
 		}
 	}
 	first.Close()
-	restarted, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	restarted, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}

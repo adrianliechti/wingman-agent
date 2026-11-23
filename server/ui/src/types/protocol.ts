@@ -33,7 +33,6 @@ export type ServerMessage = {
 		| "files_changed"
 		| "diffs_changed"
 		| "git_index_changed"
-		| "diagnostics_changed"
 		| "workspace_changed"
 		| "tasks_changed"
 		| "terminals_changed"
@@ -180,34 +179,6 @@ export interface DiagnosticEntry {
 	source?: string;
 }
 
-export interface WorkspaceDiagnostics {
-	diagnostics: DiagnosticEntry[];
-	checked_files: number;
-	discovered_files: number;
-	discovery_truncated: boolean;
-	unknown_files: number;
-	unavailable_servers: string[];
-	analyzing: boolean;
-}
-
-export interface LSPWorkProgress {
-	title?: string;
-	message?: string;
-	percentage?: number;
-}
-
-export interface LSPServiceActivity {
-	server: string;
-	label: string;
-	project: string;
-	analyzing: boolean;
-	operations: LSPWorkProgress[];
-}
-
-export interface LSPActivityStatus {
-	analyzing: boolean;
-	services: LSPServiceActivity[];
-}
 // Stable wire kinds, independent of the model-facing elicit tool name.
 export type PromptKind = "ask" | "confirm";
 

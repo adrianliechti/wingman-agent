@@ -64,10 +64,6 @@ type App struct {
 	footerHint string
 	toast      *toast
 
-	backgroundStatus  string
-	backgroundWarning bool
-	backgroundExpiry  time.Time
-
 	showWelcome bool
 
 	editor  *Editor
@@ -517,27 +513,12 @@ func (a *App) setFooterHint(hint string) {
 }
 
 const (
-	toastDuration             = 2500 * time.Millisecond
-	backgroundWarningDuration = 15 * time.Second
+	toastDuration = 2500 * time.Millisecond
 )
 
 func (a *App) showToast(message string, color ansi.Color) {
 	a.toast = &toast{message: message, color: color, expiresAt: time.Now().Add(toastDuration)}
 	a.invalidate()
-}
-
-// SetBackgroundStatus reports optional workspace setup without interrupting
-// input or adding infrastructure messages to the conversation transcript.
-func (a *App) SetBackgroundStatus(message string, warning bool) {
-	a.post(func() {
-		a.backgroundStatus = message
-		a.backgroundWarning = warning
-		a.backgroundExpiry = time.Time{}
-		if message != "" && warning {
-			a.backgroundExpiry = time.Now().Add(backgroundWarningDuration)
-		}
-		a.invalidate()
-	})
 }
 
 // Warn shows a non-fatal agent warning, such as truncated project
@@ -562,16 +543,6 @@ func (a *App) Notice(sessionID string, notice code.Notice) {
 			return cellNotice(notice.String(), color, width)
 		})
 	})
-}
-
-func (a *App) expireBackgroundStatus(now time.Time) {
-	if a.backgroundExpiry.IsZero() || now.Before(a.backgroundExpiry) {
-		return
-	}
-	a.backgroundStatus = ""
-	a.backgroundWarning = false
-	a.backgroundExpiry = time.Time{}
-	a.invalidate()
 }
 
 func (a *App) expireToast(now time.Time) {
@@ -784,7 +755,6 @@ func (a *App) Run() error {
 		case now := <-ticker.C:
 			a.expireQuitGate(now)
 			a.expireToast(now)
-			a.expireBackgroundStatus(now)
 			a.expireUsage(now)
 			a.pollDiffPanel(false)
 			a.flushDraftWhenIdle(now)

@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/fileuri"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -51,8 +50,8 @@ func editorTestReply(t *testing.T, conn *websocket.Conn, ctx context.Context, re
 
 func TestLSPWebSocketDocumentVersionsAndScope(t *testing.T) {
 	root := t.TempDir()
-	writeDebugTestFile(t, root, "main.go", "package main\nfunc Disk() {}\n")
-	app := newDebugTestServer(t, root)
+	writeEditorTestFile(t, root, "main.go", "package main\nfunc Disk() {}\n")
+	app := newEditorTestServer(t, root)
 	app.Project.scope = WorkspaceScope{"workspace", "instance"}
 	conn, ctx := dialEditorTest(t, app, "/lsp")
 	call := func(id float64, method string, params any) map[string]any {
@@ -134,9 +133,9 @@ func TestLSPWebSocketDocumentVersionsAndScope(t *testing.T) {
 
 func TestLSPWebSocketProtocolErrorsAndEmptyResults(t *testing.T) {
 	root := t.TempDir()
-	writeDebugTestFile(t, root, "main.go", "package main\n\nfunc Disk() {}\n\nfunc use() { Disk() }\n")
-	writeDebugTestFile(t, root, "notes.txt", "plain text\n")
-	app := newDebugTestServer(t, root)
+	writeEditorTestFile(t, root, "main.go", "package main\n\nfunc Disk() {}\n\nfunc use() { Disk() }\n")
+	writeEditorTestFile(t, root, "notes.txt", "plain text\n")
+	app := newEditorTestServer(t, root)
 	conn, ctx := dialEditorTest(t, app, "/lsp")
 	code := func(response map[string]any) any {
 		t.Helper()
@@ -207,7 +206,7 @@ func TestLSPWebSocketProtocolErrorsAndEmptyResults(t *testing.T) {
 }
 
 func TestEditorSocketErrorCodes(t *testing.T) {
-	socket := &editorSocket{ctx: t.Context(), writer: newWSClient(nil), pending: map[string]context.CancelCauseFunc{}}
+	socket := &lspConnection{ctx: t.Context(), writer: newWSClient(nil), pending: map[string]context.CancelCauseFunc{}}
 	cancelled, done, _ := socket.begin("1", time.Minute)
 	defer done()
 	socket.cancelRequest("1")
@@ -232,23 +231,21 @@ func TestEditorSocketErrorCodes(t *testing.T) {
 	}
 }
 
-func TestEditorSocketsRejectForeignOrigins(t *testing.T) {
-	app := newDebugTestServer(t, t.TempDir())
+func TestEditorSocketRejectsForeignOrigins(t *testing.T) {
+	app := newEditorTestServer(t, t.TempDir())
 	web := httptest.NewServer(app.checkInstance(app.mux))
 	t.Cleanup(web.Close)
-	for _, path := range []string{"/lsp", "/dap"} {
-		for _, origin := range []string{"null", "https://client.example", "vscode-file://vscode-app"} {
-			conn, _, err := websocket.Dial(t.Context(), strings.Replace(web.URL, "http:", "ws:", 1)+path+"?instance="+app.Project.scope.InstanceID, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{origin}}})
-			if err == nil {
-				conn.CloseNow()
-				t.Fatalf("%s accepted origin %s", path, origin)
-			}
+	for _, origin := range []string{"null", "https://client.example", "vscode-file://vscode-app"} {
+		conn, _, err := websocket.Dial(t.Context(), strings.Replace(web.URL, "http:", "ws:", 1)+"/lsp?instance="+app.Project.scope.InstanceID, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{origin}}})
+		if err == nil {
+			conn.CloseNow()
+			t.Fatalf("/lsp accepted origin %s", origin)
 		}
 	}
 }
 
 func TestLegacyProtocolRoutesAreRemoved(t *testing.T) {
-	app := newDebugTestServer(t, t.TempDir())
+	app := newEditorTestServer(t, t.TempDir())
 	for _, route := range []string{
 		"GET /api/capabilities", "GET /api/v2/bootstrap", "GET /api/terminals/shells",
 		"GET /api/files", "POST /api/files", "DELETE /api/files", "GET /api/files/read", "GET /api/files/search", "POST /api/files/content-search", "POST /api/files/write", "POST /api/files/write-batch", "POST /api/files/rename", "POST /api/files/copy", "GET /api/files/path", "POST /api/files/reveal", "GET /api/files/download", "GET /api/files/preview", "GET /api/lsp/file",
@@ -268,6 +265,7 @@ func TestLegacyProtocolRoutesAreRemoved(t *testing.T) {
 		"POST /api/lsp/hover", "POST /api/lsp/document",
 		"POST /api/debug/targets", "POST /api/debug/plan", "GET /api/skills",
 		"GET /api/debug/state", "POST /api/debug/start", "POST /api/debug/control",
+		"POST /api/workspace/debug/targets", "POST /api/workspace/debug/plan",
 	} {
 		t.Run(route, func(t *testing.T) {
 			method, path, _ := strings.Cut(route, " ")
@@ -277,59 +275,5 @@ func TestLegacyProtocolRoutesAreRemoved(t *testing.T) {
 				t.Fatalf("legacy route returned %d: %s", recorder.Code, recorder.Body.String())
 			}
 		})
-	}
-}
-
-func TestDAPWebSocketBreakpointsAndReferenceLifetime(t *testing.T) {
-	root := t.TempDir()
-	writeDebugTestFile(t, root, "main.go", "package main\nfunc main() {}\n")
-	app := newDebugTestServer(t, root)
-	app.Project.scope = WorkspaceScope{"workspace", "instance"}
-	conn, ctx := dialEditorTest(t, app, "/dap")
-	call := func(seq float64, command string, args any) map[string]any {
-		return editorTestReply(t, conn, ctx, map[string]any{"seq": seq, "type": "request", "command": command, "arguments": args})
-	}
-	if response := call(1, "threads", nil); response["success"] != false {
-		t.Fatal(response)
-	}
-	response := call(2, "initialize", map[string]any{"adapterID": "wingman", "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path"})
-	if response["success"] != true || response["body"].(map[string]any)["supportsConfigurationDoneRequest"] != true {
-		t.Fatal(response)
-	}
-	response = call(3, "setBreakpoints", map[string]any{"source": map[string]any{"path": filepath.Join(root, "main.go")}, "breakpoints": []any{map[string]any{"line": 2, "condition": "x > 0", "hitCondition": "3"}}})
-	if response["success"] != true {
-		t.Fatal(response)
-	}
-	response = call(4, "wingman/status", map[string]any{"source": map[string]any{"path": "main.go"}})
-	points := response["body"].(map[string]any)["breakpoints"].([]any)
-	if len(points) != 1 || points[0].(map[string]any)["hit_condition"] != "3" {
-		t.Fatal(response)
-	}
-	if response := call(5, "setBreakpoints", map[string]any{"source": map[string]any{"path": "../main.go"}}); response["success"] != false {
-		t.Fatal(response)
-	}
-	if response := call(6, "launch", map[string]any{"program": "/tmp/arbitrary"}); response["success"] != false {
-		t.Fatal("unreviewed launch accepted", response)
-	}
-	// Adapter reference numbers may be reused at the next stop. Browser IDs
-	// must not be reusable across either stops or WebSocket connections.
-	c := &dapConnection{server: app, references: map[int]dapReference{}}
-	status := dap.Status{SessionID: "debug", State: dap.StateStopped, StateVersion: 1}
-	first, _ := c.reference(status, 1, "frame")
-	status.StateVersion++
-	second, _ := c.reference(status, 1, "frame")
-	if first == second {
-		t.Fatal("frame id reused after resume")
-	}
-	if _, err := c.nativeReference(status, first, "frame"); err == nil {
-		t.Fatal("stale frame accepted")
-	}
-	other := &dapConnection{server: app, references: map[int]dapReference{}}
-	third, _ := other.reference(status, 1, "frame")
-	if third == second {
-		t.Fatal("frame id reused after reconnect")
-	}
-	if _, err := other.nativeReference(status, second, "frame"); err == nil {
-		t.Fatal("another connection's frame accepted")
 	}
 }

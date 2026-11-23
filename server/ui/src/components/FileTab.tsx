@@ -10,25 +10,19 @@ import {
 	useState,
 	useCallback,
 } from "react";
-import type { DebugAction, DebugTarget } from "../api/debug";
 import {
 	workspaceFileDownloadURL,
 	workspaceFilePreviewURL,
 } from "../api/files";
 import { registerEditorSaveParticipant } from "../editorSaveParticipants";
 import { useColorScheme } from "../hooks/useColorScheme";
-import type { OpenDocument, SaveResult } from "../hooks/useOpenDocuments";
+import type { OpenDocument } from "../hooks/useOpenDocuments";
 import {
 	createMonacoLSPBridge,
 	type MonacoLSPBridge,
 	revealEditorPosition,
 } from "../monacoLsp";
-import {
-	createMonacoDebugBridge,
-	type MonacoDebugBridge,
-} from "../monacoDebug";
 import { defineWingmanThemes, wingmanThemeName } from "../monacoThemes";
-import type { ServerMessage } from "../types/protocol";
 import type { WorkspaceEditEnvelope } from "../workspaceEdit";
 import { textPreviewKind } from "../utils/filePreview";
 import { DataPreview } from "./DataPreview";
@@ -43,9 +37,7 @@ interface Props {
 	line?: number;
 	column?: number;
 	navigationKey?: number;
-	subscribe?: (handler: (message: ServerMessage) => void) => () => void;
 	onChange: (value: string) => void;
-	onSave: () => Promise<SaveResult>;
 	onReload: () => void;
 	onOpenFile?: (
 		path: string,
@@ -57,10 +49,8 @@ interface Props {
 		envelope: WorkspaceEditEnvelope,
 		label: string,
 	) => Promise<boolean>;
-	onLaunchDebug?: (target: DebugTarget, action: DebugAction) => void;
 	onAskSelection?: (selection: EditorSelectionContext) => void;
 	view?: "code" | "preview";
-	languageServicesKey?: string;
 }
 
 export interface EditorSelectionContext {
@@ -179,16 +169,12 @@ export function FileTab({
 	line,
 	column,
 	navigationKey,
-	subscribe,
 	onChange,
-	onSave,
 	onReload,
 	onOpenFile,
 	onApplyWorkspaceEdit,
-	onLaunchDebug,
 	onAskSelection,
 	view = "code",
-	languageServicesKey = "",
 }: Props) {
 	const retainedModelRef = useRef<ReturnType<
 		typeof retainDocumentModel
@@ -198,14 +184,9 @@ export function FileTab({
 	const contextMenuListenerRef = useRef<{ dispose(): void } | null>(null);
 	const saveParticipantDisposeRef = useRef<(() => void) | null>(null);
 	const lspBridgeRef = useRef<MonacoLSPBridge | null>(null);
-	const debugBridgeRef = useRef<MonacoDebugBridge | null>(null);
-	const diagnosticsTimerRef = useRef<number | null>(null);
 	const onOpenFileRef = useRef(onOpenFile);
 	const onApplyWorkspaceEditRef = useRef(onApplyWorkspaceEdit);
-	const onLaunchDebugRef = useRef(onLaunchDebug);
 	const onAskSelectionRef = useRef(onAskSelection);
-	const onSaveRef = useRef(onSave);
-	const languageServicesKeyRef = useRef(languageServicesKey);
 	const syncingEditorRef = useRef(false);
 	const scheme = useColorScheme();
 	const toast = useToast();
@@ -220,10 +201,8 @@ export function FileTab({
 	useEffect(() => {
 		onOpenFileRef.current = onOpenFile;
 		onApplyWorkspaceEditRef.current = onApplyWorkspaceEdit;
-		onLaunchDebugRef.current = onLaunchDebug;
 		onAskSelectionRef.current = onAskSelection;
-		onSaveRef.current = onSave;
-	}, [onApplyWorkspaceEdit, onAskSelection, onLaunchDebug, onOpenFile, onSave]);
+	}, [onApplyWorkspaceEdit, onAskSelection, onOpenFile]);
 
 	const dirty = document.draft !== document.savedContent;
 	const file = document.file;
@@ -237,8 +216,6 @@ export function FileTab({
 		contextMenuListenerRef.current?.dispose();
 		contextMenuListenerRef.current = null;
 		disposeLSPIntegration();
-		debugBridgeRef.current?.dispose();
-		debugBridgeRef.current = null;
 		if (retainedModelRef.current) {
 			retainedModelRef.current.release(
 				editorRef.current?.saveViewState() ?? null,
@@ -294,9 +271,6 @@ export function FileTab({
 
 	useEffect(() => {
 		return () => {
-			if (diagnosticsTimerRef.current !== null) {
-				window.clearTimeout(diagnosticsTimerRef.current);
-			}
 			disposeEditorIntegration();
 		};
 	}, [disposeEditorIntegration]);
@@ -351,12 +325,6 @@ export function FileTab({
 	]);
 
 	useEffect(() => {
-		if (languageServicesKeyRef.current === languageServicesKey) return;
-		languageServicesKeyRef.current = languageServicesKey;
-		refreshLSPIntegration();
-	}, [languageServicesKey, refreshLSPIntegration]);
-
-	useEffect(() => {
 		if (!file || file.binary || !editorRef.current) return;
 		const timer = window.setTimeout(
 			() => void loadDiagnostics(),
@@ -364,20 +332,6 @@ export function FileTab({
 		);
 		return () => window.clearTimeout(timer);
 	}, [dirty, document.draft, file, loadDiagnostics]);
-
-	useEffect(() => {
-		if (!subscribe) return;
-		return subscribe((message) => {
-			if (message.type !== "diagnostics_changed") return;
-			if (diagnosticsTimerRef.current !== null) {
-				window.clearTimeout(diagnosticsTimerRef.current);
-			}
-			diagnosticsTimerRef.current = window.setTimeout(() => {
-				diagnosticsTimerRef.current = null;
-				void loadDiagnostics();
-			}, 200);
-		});
-	}, [loadDiagnostics, subscribe]);
 
 	useLayoutEffect(() => {
 		const editor = editorRef.current;
@@ -549,19 +503,6 @@ export function FileTab({
 								},
 							);
 							if (!document.external && !document.untitled) {
-								debugBridgeRef.current = createMonacoDebugBridge({
-									monaco,
-									editor,
-									path: file.path,
-									onLaunchTarget: (target, action) => {
-										void (async () => {
-											const saved = await onSaveRef.current();
-											if (saved.ok) {
-												onLaunchDebugRef.current?.(target, action);
-											}
-										})();
-									},
-								});
 								refreshLSPIntegration();
 							}
 							revealEditorPosition(editor, line, column);
@@ -571,9 +512,7 @@ export function FileTab({
 						}}
 						options={{
 							contextmenu: false,
-							codeLens: true,
 							find: { addExtraSpaceOnTop: false },
-							glyphMargin: true,
 							minimap: { enabled: false },
 							fontSize: 12,
 							lineNumbers: "on",

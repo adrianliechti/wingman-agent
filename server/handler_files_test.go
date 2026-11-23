@@ -130,7 +130,7 @@ func TestFilePreviewServesWebsiteAssetsInline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	app, err := New(context.Background(), workDir, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}

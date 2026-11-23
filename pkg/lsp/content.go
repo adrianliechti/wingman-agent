@@ -31,7 +31,7 @@ func (s *Session) advertisesContent(scheme string) bool {
 
 // jdtls predates LSP 3.18 and serves class files through its own request.
 func (s *Session) classFileContents(scheme string) bool {
-	return scheme == "jdt" && s.server.Command == "jdtls"
+	return scheme == "jdt" && s.server.Name == "jdtls"
 }
 
 // VirtualContent reads a virtual document through LSP 3.18

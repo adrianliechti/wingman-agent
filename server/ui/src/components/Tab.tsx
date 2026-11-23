@@ -1,6 +1,5 @@
 import {
 	Bot,
-	Bug,
 	ChartColumn,
 	FileText,
 	GitCompare,
@@ -16,7 +15,6 @@ export type TabKind =
 	| "diff"
 	| "compare"
 	| "terminal"
-	| "debug"
 	| "task"
 	| "insights";
 
@@ -60,17 +58,15 @@ export function Tab({
 	const Icon =
 		kind === "chat"
 			? MessageSquare
-			: kind === "debug"
-				? Bug
-				: kind === "terminal"
-					? SquareTerminal
-					: kind === "diff" || kind === "compare"
-						? GitCompare
-						: kind === "task"
-							? Bot
-							: kind === "insights"
-								? ChartColumn
-								: FileText;
+			: kind === "terminal"
+				? SquareTerminal
+				: kind === "diff" || kind === "compare"
+					? GitCompare
+					: kind === "task"
+						? Bot
+						: kind === "insights"
+							? ChartColumn
+							: FileText;
 
 	return (
 		<button

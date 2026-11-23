@@ -18,7 +18,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/adrianliechti/wingman-agent/pkg/dap"
 	"github.com/adrianliechti/wingman-agent/pkg/terminal"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -675,43 +674,6 @@ func TestReviewWorkspaceTerminalCatalogueRecoversFromOverflow(t *testing.T) {
 	})
 	if !slices.Contains(got(), "ahp-terminal:/"+s.Project.namespace+"/"+running.ID()) || len(got()) > 33 {
 		t.Fatalf("catalogue %d entries", len(got()))
-	}
-}
-
-func TestReviewWorkspaceTerminalDebugTerminalsReplaceExitedOnes(t *testing.T) {
-	s, endpoint := reviewWorkspaceTerminalServer(t)
-	client := protocolTestClient(t, endpoint, "observer")
-	launch := func(script string) dap.TerminalProcess {
-		t.Helper()
-		process, err := s.Project.LaunchTerminal(t.Context(), dap.TerminalLaunch{Title: "Debug", Path: "/bin/sh", Args: []string{"-c", script}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return process
-	}
-	first := launch("printf 'debuggee-out\\n'; exit 4")
-	firstURI := "ahp-terminal:/" + s.Project.namespace + "/" + first.ID()
-	reviewWorkspaceTerminalEventually(t, "debuggee exit published", func() bool {
-		view, _ := reviewWorkspaceTerminalLookup(s, firstURI)
-		return view.exit != nil
-	})
-	view, _ := reviewWorkspaceTerminalLookup(s, firstURI)
-	if view.owner != hostClient || view.title != "Debug" || !strings.Contains(view.content, "debuggee-out") || view.exit.ExitCode == nil || *view.exit.ExitCode != 4 {
-		t.Fatalf("debug terminal: %+v", view)
-	}
-	shell := protocolTestClient(t, endpoint, "user")
-	createTestTerminal(t, shell, "ahp-terminal:/user-shell", "user")
-	second := launch("sleep 30")
-	reviewWorkspaceTerminalEventually(t, "exited debuggee removed", func() bool {
-		_, old := reviewWorkspaceTerminalLookup(s, firstURI)
-		_, current := reviewWorkspaceTerminalLookup(s, "ahp-terminal:/"+s.Project.namespace+"/"+second.ID())
-		return !old && current
-	})
-	if _, ok := reviewWorkspaceTerminalLookup(s, "ahp-terminal:/user-shell"); !ok {
-		t.Fatal("a debug launch removed a user shell")
-	}
-	if _, _, err := client.Subscribe(t.Context(), firstURI); err == nil {
-		t.Fatal("removed debug terminal still subscribable")
 	}
 }
 

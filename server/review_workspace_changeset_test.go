@@ -51,7 +51,7 @@ func reviewWorkspaceChangesetRepo(t *testing.T, files map[string]string) string 
 
 func reviewWorkspaceChangesetHost(t *testing.T, root string) *Project {
 	t.Helper()
-	h := newDebugTestServer(t, root).Project
+	h := newEditorTestServer(t, root).Project
 	t.Cleanup(h.host.Close)
 	return h
 }
@@ -253,7 +253,7 @@ func TestReviewWorkspaceChangesetBinaryChangesKeepIdentity(t *testing.T) {
 
 func TestReviewWorkspaceChangesetComparisonRetention(t *testing.T) {
 	root := t.TempDir()
-	app := newDebugTestServer(t, root)
+	app := newEditorTestServer(t, root)
 	h := app.Project
 	t.Cleanup(h.host.Close)
 	web := httptest.NewServer(app)

@@ -10,7 +10,7 @@ const commandCenterTitle = "commands"
 
 func builtinGroup(name string) string {
 	switch name {
-	case "/diff", "/problems", "/context":
+	case "/diff", "/context":
 		return "Workspace"
 	case "/resume", "/fork", "/recap", "/clear", "/copy", "/export", "/queue", "/discard", "/voice":
 		return "Session"

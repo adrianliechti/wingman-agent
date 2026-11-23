@@ -6,7 +6,6 @@ import {
 } from "./fileFixture.ts";
 import { loseFirstInputReceipt } from "./ahpFaults.ts";
 import { mockGit } from "./gitFixture.ts";
-import { mockDebugSession } from "./dapFixture.ts";
 import {
 	mockLanguage,
 	waitLanguageResult,
@@ -635,92 +634,6 @@ test("preserves the visible reply when a finished turn collapses its working ste
 			),
 		)
 		.toBeLessThan(2);
-});
-
-test("keeps mixed background activity compact in the titlebar", async ({
-	page,
-}) => {
-	await mockWorkspace(page, async (route) => {
-		await route.fulfill({
-			json: {
-				git: false,
-				lsp: true,
-				debug: false,
-				platform: "linux",
-				name: "workspace",
-				managed_tools: {
-					state: "installing",
-					phase: "updating",
-					tool: "debugpy",
-					label: "Python debugger",
-					current: 2,
-					total: 4,
-				},
-			},
-		});
-	});
-	await page.route("**/api/workspace/activity", async (route) => {
-		await route.fulfill({
-			json: {
-				analyzing: true,
-				services: [
-					{
-						server: "custom-lsp",
-						label: "A bespoke language",
-						project: "packages/a-very-long-project-name",
-						analyzing: true,
-						operations: [
-							{
-								title: "Reading project symbols",
-								message:
-									"Resolving a dependency with a deliberately long display name",
-								percentage: 42,
-							},
-						],
-					},
-				],
-			},
-		});
-	});
-
-	await composer(page);
-	const beacon = page.locator("[data-activity-center] button");
-	await expect(beacon).toHaveText("");
-	await expect(beacon).toHaveAttribute("data-activity-summary", "running");
-	await expect(beacon.locator("svg.animate-spin")).toHaveCount(1);
-	const newButton = page.getByRole("button", { name: "New", exact: true });
-	await expect(newButton).toBeVisible();
-	const newButtonBox = await newButton.boundingBox();
-	const notificationBox = await beacon.boundingBox();
-	expect(
-		newButtonBox && notificationBox
-			? notificationBox.x >= newButtonBox.x + newButtonBox.width
-			: false,
-	).toBe(true);
-	const beaconStyle = await beacon.evaluate((element) => {
-		const style = getComputedStyle(element);
-		return {
-			background: style.backgroundColor,
-			border: style.borderTopWidth,
-			width: element.getBoundingClientRect().width,
-		};
-	});
-	expect(beaconStyle).toEqual({
-		background: "rgba(0, 0, 0, 0)",
-		border: "0px",
-		width: 32,
-	});
-	await beacon.click();
-	const popup = page.getByRole("dialog", { name: "Workspace activity" });
-	await expect(popup).toBeVisible();
-	await expectFloatingInViewport(page, popup);
-	await expect(popup.locator("[data-activity-state=running]")).toHaveCount(2);
-	await expect(popup.locator("[data-activity-hint]")).toHaveCSS(
-		"-webkit-line-clamp",
-		"2",
-	);
-	const box = await popup.boundingBox();
-	expect(box?.height ?? 999).toBeLessThan(240);
 });
 
 test("keeps the active tab visible as the tab strip fills", async ({
@@ -1577,91 +1490,11 @@ test("uses canonical product names for agents", async ({ page }) => {
 	).toBeVisible();
 });
 
-test("groups diagnostics by file and opens individual problems", async ({
-	page,
-}) => {
-	await mockWorkspace(page, async (route) => {
-		await route.fulfill({
-			json: {
-				git: false,
-				lsp: true,
-				debug: false,
-				platform: "linux",
-				name: "workspace",
-			},
-		});
-	});
-	const diagnostics = [
-		{
-			path: "completion.go",
-			line: 3,
-			column: 5,
-			severity: "error",
-			message: "Undefined symbol",
-			source: "gopls",
-		},
-		{
-			path: "completion.go",
-			line: 7,
-			column: 2,
-			severity: "warning",
-			message: "Value is never used",
-			source: "compiler",
-		},
-		{
-			path: "nested/example.go",
-			line: 2,
-			column: 1,
-			severity: "info",
-			message: "Consider simplifying this expression",
-			source: "gopls",
-		},
-	];
-	await mockLanguage(page, "workspace/diagnostic", async (route) => {
-		await route.fulfill({
-			json: {
-				diagnostics,
-				checked_files: 2,
-				discovered_files: 2,
-				discovery_truncated: false,
-				unknown_files: 0,
-				unavailable_servers: [],
-				analyzing: false,
-			},
-		});
-	});
-
-	await composer(page);
-	await page
-		.getByRole("tablist", { name: "Side panel views" })
-		.getByRole("tab", { name: "Inspect" })
-		.click();
-	await expect(page.getByText("Diagnostics", { exact: true })).toBeVisible();
-	await expect(
-		page.getByRole("tablist", { name: "Inspector views" }),
-	).toHaveCount(0);
-	const completionGroup = page.locator('[data-problem-file="completion.go"]');
-	const nestedGroup = page.locator('[data-problem-file="nested/example.go"]');
-	await expect(completionGroup.locator("[data-problem-entry]")).toHaveCount(2);
-	await expect(nestedGroup.locator("[data-problem-entry]")).toHaveCount(1);
-	await expect(completionGroup.getByText("L3:5")).toHaveCount(0);
-	await expect(completionGroup.getByText("gopls")).toHaveCount(0);
-	await expect(
-		completionGroup.getByRole("button", { name: "Undefined symbol" }),
-	).toHaveAttribute("title", "Undefined symbol · completion.go:3:5 · gopls");
-
-	await completionGroup.getByText("Undefined symbol").click();
-	await expect(
-		page.locator('[data-center-tab="file:completion.go"]'),
-	).toHaveAttribute("data-tab-preview", "true");
-});
-
 test("uses each Git status slot for its stage action", async ({ page }) => {
 	await mockWorkspace(page, async (route) => {
 		await route.fulfill({
 			json: {
 				git: true,
-				lsp: false,
 			},
 		});
 	});
@@ -1783,7 +1616,6 @@ test("commits a manually entered message with a responsive footer", async ({
 		await route.fulfill({
 			json: {
 				git: true,
-				lsp: false,
 			},
 		});
 	});
@@ -1875,7 +1707,6 @@ test("compares branches and commits in a main content tab", async ({
 		await route.fulfill({
 			json: {
 				git: true,
-				lsp: false,
 			},
 		});
 	});
@@ -2265,7 +2096,6 @@ test("shows and copies diagnostics for comparison failures", async ({
 		await route.fulfill({
 			json: {
 				git: true,
-				lsp: false,
 			},
 		});
 	});
@@ -2817,6 +2647,51 @@ test("leaves TypeScript project diagnostics to the active language server", asyn
 	).toHaveCount(0);
 });
 
+test("shows diagnostics that are ready only after the first pulls", async ({
+	page,
+}) => {
+	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
+		await route.fulfill({
+			json: {
+				workspace_uri: "file:///workspace",
+				language_server: true,
+			},
+		});
+	});
+	// The language server has no result while it starts; nothing edits the file meanwhile.
+	let firstPull = 0;
+	let pulls = 0;
+	await mockLanguage(page, "textDocument/diagnostic", async (route) => {
+		pulls++;
+		firstPull ||= Date.now();
+		if (Date.now() - firstPull < 800) {
+			await route.fulfill({ status: 500 });
+			return;
+		}
+		await route.fulfill({
+			json: [
+				{
+					line: 1,
+					column: 1,
+					end_line: 1,
+					end_column: 6,
+					severity: "error",
+					message: "late problem",
+				},
+			],
+		});
+	});
+
+	await composer(page);
+	await page
+		.getByRole("treeitem", { name: /standalone-diagnostics\.tsx/ })
+		.click();
+	const editor = page.locator(".monaco-editor");
+	await expect(editor).toBeVisible();
+	await expect(editor.locator(".squiggly-error")).not.toHaveCount(0);
+	expect(pulls).toBeGreaterThan(1);
+});
+
 test("shows one project-aware TypeScript hover", async ({ page }) => {
 	let hoverRequests = 0;
 	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
@@ -2890,57 +2765,6 @@ test("does not flash standalone diagnostics while the project LSP starts", async
 		releaseCapabilities();
 	}
 	await expect(diagnostics).toHaveCount(0);
-});
-
-test("upgrades an open editor when its language server becomes available", async ({
-	page,
-}) => {
-	let languageServer = false;
-	let toolsState: "installing" | "ready" = "installing";
-	let editorCapabilityRequests = 0;
-	await mockWorkspace(page, async (route) => {
-		await route.fulfill({
-			json: {
-				git: false,
-				lsp: languageServer,
-				debug: false,
-				platform: "linux",
-				name: "workspace",
-				managed_tools: { state: toolsState },
-			},
-		});
-	});
-	await mockLanguage(page, "wingman/documentCapabilities", async (route) => {
-		editorCapabilityRequests++;
-		await route.fulfill({
-			json: {
-				workspace_uri: "file:///workspace",
-				language_server: languageServer,
-				definition: languageServer,
-			},
-		});
-	});
-	await mockLanguage(page, "textDocument/diagnostic", async (route) => {
-		await route.fulfill({ json: [] });
-	});
-
-	await composer(page);
-	await page
-		.getByRole("treeitem", { name: /standalone-diagnostics\.tsx/ })
-		.click();
-	await expect.poll(() => editorCapabilityRequests).toBe(1);
-
-	languageServer = true;
-	toolsState = "ready";
-	await expect
-		.poll(() => editorCapabilityRequests, { timeout: 10_000 })
-		.toBeGreaterThan(1);
-	await page.locator(".monaco-editor").click({ button: "right" });
-	await expect(
-		page
-			.getByRole("menu", { name: "Editor actions" })
-			.getByRole("menuitem", { name: "Go to Definition" }),
-	).toBeEnabled();
 });
 
 test("save awaits LSP actions that add and remove Go imports", async ({
@@ -3309,7 +3133,7 @@ test("discovers new agents after earlier tasks finish during the same turn", asy
 	);
 	await mockWorkspace(page, (route) =>
 		route.fulfill({
-			json: { git: false, lsp: false },
+			json: { git: false },
 		}),
 	);
 	let running = false;
@@ -3496,7 +3320,6 @@ test("keeps scheduled-agent actions above inspector clipping", async ({
 		await route.fulfill({
 			json: {
 				git: false,
-				lsp: false,
 			},
 		});
 	});
@@ -5234,421 +5057,6 @@ test("uses accessible desktop panels and command navigation", async ({
 				violation.impact === "serious" || violation.impact === "critical",
 		),
 	).toEqual([]);
-});
-
-test("asks before installing the debugger and shows popup state and retry", async ({
-	page,
-}) => {
-	await writeFile(
-		workspacePath("completion.go"),
-		"package main\n\nfunc main() {}\n",
-	);
-	await mockWorkspace(page, async (route) => {
-		const response = await route.fetch();
-		await route.fulfill({
-			json: { ...(await response.json()), debug: false },
-		});
-	});
-	await page.addInitScript(() => {
-		const originalFetch = window.fetch.bind(window);
-		const state = window as typeof window & { debugInstallRequests: number };
-		state.debugInstallRequests = 0;
-		let installedPlan: unknown;
-		const tools = [
-			{
-				tool: "delve",
-				label: "Go debugger",
-				installed: false,
-				installable: true,
-			},
-		];
-		window.fetch = (input, init) => {
-			if (input !== "/api/workspace/debug/plan")
-				return originalFetch(input, init);
-			const install = JSON.parse(init?.body as string).install;
-			if (!install && !installedPlan) {
-				return Promise.resolve(
-					new Response(
-						JSON.stringify({ type: "installation_required", tools }) + "\n",
-					),
-				);
-			}
-			if (install) state.debugInstallRequests++;
-			if (install && state.debugInstallRequests === 1) {
-				return Promise.resolve(
-					new Response(
-						JSON.stringify({
-							type: "error",
-							error:
-								"Debugger setup is already in progress. Try again when it finishes.",
-						}) + "\n",
-					),
-				);
-			}
-			const encoder = new TextEncoder();
-			return Promise.resolve(
-				new Response(
-					new ReadableStream({
-						start(controller) {
-							if (installedPlan)
-								controller.enqueue(
-									encoder.encode(
-										JSON.stringify({
-											type: "tools",
-											tools: tools.map((tool) => ({
-												...tool,
-												installed: true,
-											})),
-										}) + "\n",
-									),
-								);
-							controller.enqueue(
-								encoder.encode(
-									JSON.stringify({
-										type: "progress",
-										progress: {
-											tool: "delve",
-											label: "Go debugger",
-											phase: installedPlan ? "updating" : "installing",
-											current: 1,
-											total: 1,
-										},
-									}) + "\n",
-								),
-							);
-							window.addEventListener(
-								"finish-debug-setup",
-								(event) => {
-									let result = (event as CustomEvent).detail;
-									if (result.type === "update-failed")
-										result = {
-											type: "plan",
-											plan: installedPlan,
-											warning:
-												"Could not update debugger tools. Using the installed version.",
-										};
-									if (result.type === "plan") {
-										installedPlan = result.plan;
-										controller.enqueue(
-											encoder.encode(
-												JSON.stringify({
-													type: "tools",
-													tools: tools.map((tool) => ({
-														...tool,
-														installed: true,
-													})),
-												}) + "\n",
-											),
-										);
-									}
-									controller.enqueue(
-										encoder.encode(JSON.stringify(result) + "\n"),
-									);
-									controller.close();
-								},
-								{ once: true },
-							);
-						},
-					}),
-					{ headers: { "Content-Type": "application/x-ndjson" } },
-				),
-			);
-		};
-	});
-	await composer(page);
-	await page.getByRole("treeitem", { name: /completion\.go/ }).click();
-	await page
-		.locator(".codelens-decoration")
-		.getByText("Debug", { exact: true })
-		.click();
-	const popup = page.getByRole("dialog", { name: "Debug main" });
-	await expect(popup.getByText("Not installed", { exact: true })).toBeVisible();
-	await expect(
-		popup.getByRole("button", { name: "Install debugger" }),
-	).toBeVisible();
-	const installRequests = () =>
-		page.evaluate(
-			() =>
-				(window as typeof window & { debugInstallRequests: number })
-					.debugInstallRequests,
-		);
-	expect(await installRequests()).toBe(0);
-	await popup.getByRole("button", { name: "Cancel" }).click();
-	await expect(popup).toHaveCount(0);
-	await page
-		.locator(".codelens-decoration")
-		.getByText("Debug", { exact: true })
-		.click();
-	await expect(popup.getByText("Not installed", { exact: true })).toBeVisible();
-	expect(await installRequests()).toBe(0);
-	await popup.getByRole("button", { name: "Install debugger" }).click();
-	await expect(
-		popup.getByText(
-			"Debugger setup is already in progress. Try again when it finishes.",
-		),
-	).toBeVisible();
-	await expect(popup.getByText("Not installed", { exact: true })).toBeVisible();
-	await expect(
-		popup.getByText("Installation failed", { exact: true }),
-	).toHaveCount(0);
-	await popup.getByRole("button", { name: "Retry" }).click();
-	await expect(popup.getByRole("status")).toContainText(
-		"Installing Go debugger…",
-	);
-	await expect(
-		popup.getByRole("button", { name: "Start debugging" }),
-	).toHaveCount(0);
-	await page.evaluate(() =>
-		window.dispatchEvent(
-			new CustomEvent("finish-debug-setup", {
-				detail: { type: "error", error: "Debugger download failed" },
-			}),
-		),
-	);
-	await expect(popup.getByText("Debugger download failed")).toBeVisible();
-	await expect(
-		popup.getByText("Installation failed", { exact: true }),
-	).toBeVisible();
-	await popup.getByRole("button", { name: "Retry" }).click();
-	await expect(popup.getByRole("status")).toContainText(
-		"Installing Go debugger…",
-	);
-	await page.evaluate(() =>
-		window.dispatchEvent(
-			new CustomEvent("finish-debug-setup", {
-				detail: {
-					type: "plan",
-					plan: {
-						action: "debug",
-						title: "Debug main",
-						adapter: "delve",
-						terminal_available: true,
-						project_dir: ".",
-						request: "launch",
-						io: "output",
-						configuration: { program: "." },
-						breakpoints: [],
-						function_breakpoints: [],
-					},
-				},
-			}),
-		),
-	);
-	await expect(
-		popup.getByRole("button", { name: "Start debugging" }),
-	).toBeVisible();
-	await expect(popup.getByRole("status")).toHaveCount(0);
-	await expect(popup.getByText("Installed", { exact: true })).toBeVisible();
-	expect(await installRequests()).toBe(3);
-	await popup.getByRole("button", { name: "Cancel" }).click();
-	await expect(popup).toHaveCount(0);
-	await page
-		.locator(".codelens-decoration")
-		.getByText("Debug", { exact: true })
-		.click();
-	await expect(popup.getByRole("status")).toContainText(
-		"Updating Go debugger…",
-	);
-	await expect(popup.getByText("Updating…", { exact: true })).toBeVisible();
-	await page.evaluate(() =>
-		window.dispatchEvent(
-			new CustomEvent("finish-debug-setup", {
-				detail: { type: "update-failed" },
-			}),
-		),
-	);
-	await expect(popup.getByText("Installed", { exact: true })).toBeVisible();
-	await expect(
-		popup.getByText(
-			"Could not update debugger tools. Using the installed version.",
-		),
-	).toBeVisible();
-	await expect(
-		popup.getByRole("button", { name: "Start debugging" }),
-	).toBeVisible();
-	await expect(
-		popup.getByRole("button", { name: "Install debugger" }),
-	).toHaveCount(0);
-	expect(await installRequests()).toBe(3);
-});
-
-test("stops the active debugger when the Debug tab closes", async ({
-	page,
-}) => {
-	let session = {
-		session_id: "debug-session-1",
-		adapter: "delve",
-		language: "Go",
-		target: "./cmd/example",
-		mode: "debug",
-		request: "launch",
-		io: "terminal",
-		terminal_id: "debug-terminal-1",
-		capabilities: { supports_step_back: false },
-		state_version: 3,
-		state: "running",
-		started_at: "2026-08-19T10:00:00Z",
-	};
-	const controls: Array<Record<string, unknown>> = [];
-
-	await mockWorkspace(page, async (route) => {
-		await route.fulfill({
-			json: {
-				git: false,
-				lsp: false,
-				debug: true,
-				platform: "linux",
-				name: "workspace",
-			},
-		});
-	});
-	await mockDebugSession(
-		page,
-		() => ({ session, output: "ready\n" }),
-		(command, params) => {
-			if (command !== "disconnect") return;
-			controls.push(params);
-			session = { ...session, state: "terminated", state_version: 4 };
-			return {};
-		},
-	);
-
-	await composer(page);
-	const debugTab = page.locator('[data-center-tab="debug"]');
-	await expect(debugTab).toBeVisible();
-	await debugTab.click();
-	await expect(
-		page.locator('[data-center-tab="terminal:debug-terminal-1"]'),
-	).toHaveCount(0);
-	const details = page.getByLabel("Debugger details", { exact: true });
-	await expect(details).toBeVisible();
-	const initialWidth = (await details.boundingBox())?.width ?? 0;
-	const resizeHandle = page.getByRole("separator", {
-		name: "Resize debugger details",
-	});
-	const handleBox = await resizeHandle.boundingBox();
-	if (!handleBox) throw new Error("debugger resize handle is not visible");
-	await page.mouse.move(
-		handleBox.x + handleBox.width / 2,
-		handleBox.y + handleBox.height / 2,
-	);
-	await page.mouse.down();
-	await page.mouse.move(handleBox.x - 60, handleBox.y + handleBox.height / 2);
-	await page.mouse.up();
-	await expect
-		.poll(async () => (await details.boundingBox())?.width ?? 0)
-		.toBeGreaterThan(initialWidth + 30);
-	await page.getByRole("button", { name: "Hide debugger details" }).click();
-	await expect(details).toBeHidden();
-	await page.getByRole("button", { name: "Show debugger details" }).click();
-	await expect(details).toBeVisible();
-
-	await page.getByRole("treeitem", { name: /completion\.go/ }).click();
-	await expect(
-		page.locator('[data-center-tab="file:completion.go"]'),
-	).toBeVisible();
-	await expect(
-		page.getByRole("toolbar", { name: "Debug controls" }),
-	).toBeVisible();
-	await expect(page.getByRole("button", { name: "Pause" })).toBeVisible();
-	await debugTab.click();
-	await page.getByRole("button", { name: "Show terminal" }).click();
-	await expect(
-		page.getByRole("button", { name: "Show debug output" }),
-	).toBeVisible();
-	await page.getByRole("button", { name: "Show debug output" }).click();
-	await expect(page.getByLabel("Debug output")).toBeVisible();
-	await debugTab.hover();
-	await page.getByTitle("Close Debug", { exact: true }).click();
-
-	await expect.poll(() => controls.length).toBe(1);
-	expect(controls[0]).toMatchObject({
-		terminateDebuggee: true,
-		_wingmanSessionId: session.session_id,
-	});
-	await expect(debugTab).toHaveCount(0);
-});
-
-test("follows debugger stops into the source editor", async ({ page }) => {
-	const lines = Array.from({ length: 90 }, (_, index) =>
-		index === 69 ? "var breakpointTarget = 70" : `// line ${index + 1}`,
-	);
-	await writeFile(workspacePath("debug-follow.go"), `${lines.join("\n")}\n`);
-
-	let session = {
-		session_id: "debug-follow-session",
-		adapter: "delve",
-		language: "Go",
-		target: "./debug-follow.go",
-		mode: "debug",
-		request: "launch",
-		io: "output",
-		capabilities: { supports_step_back: false },
-		state_version: 1,
-		state: "running",
-		stop: undefined as { reason: string; thread_id: number } | undefined,
-		started_at: "2026-08-22T10:00:00Z",
-	};
-	const evaluations: Array<Record<string, unknown>> = [];
-
-	await mockWorkspace(page, async (route) => {
-		await route.fulfill({
-			json: {
-				git: false,
-				lsp: false,
-				debug: true,
-				platform: "linux",
-				name: "workspace",
-			},
-		});
-	});
-	await mockDebugSession(
-		page,
-		() => ({
-			session,
-			frame:
-				session.state === "stopped"
-					? {
-							id: 21,
-							name: "main",
-							source: { path: "debug-follow.go" },
-							line: 70,
-							column: 5,
-						}
-					: undefined,
-		}),
-		(command, params) => {
-			if (command !== "evaluate") return;
-			evaluations.push(params);
-			return { result: "70", type: "int", variablesReference: 0 };
-		},
-	);
-
-	await composer(page);
-	await expect(page.locator('[data-center-tab="debug"]')).toBeVisible();
-	session = {
-		...session,
-		state: "stopped",
-		state_version: 2,
-		stop: { reason: "breakpoint", thread_id: 1 },
-	};
-
-	const sourceTab = page.locator('[data-center-tab="file:debug-follow.go"]');
-	await expect(sourceTab).toHaveAttribute("aria-selected", "true");
-	const stoppedLine = page.locator(".view-line:visible", {
-		hasText: "breakpointTarget = 70",
-	});
-	await expect(stoppedLine).toBeVisible();
-	await stoppedLine.hover({ position: { x: 72, y: 8 } });
-	await expect.poll(() => evaluations.length).toBe(1);
-	expect(evaluations[0]).toMatchObject({
-		expression: "breakpointTarget",
-		_wingmanSessionId: "debug-follow-session",
-		frameId: 21,
-		_wingmanStateVersion: 2,
-	});
-	expect(evaluations[0].context).toBe("hover");
-	await expect(page.locator(".monaco-hover:visible")).toContainText("70");
 });
 
 test("recovers an unfinished response in another browser and after reload", async ({

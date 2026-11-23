@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/http"
 	"net/url"
 	"os"
 	pathpkg "path"
@@ -46,53 +45,14 @@ type editorCapabilitiesResponse struct {
 	InlayHints                        bool     `json:"inlay_hints"`
 }
 
-type lspActivityResponse struct {
-	Analyzing bool                 `json:"analyzing"`
-	Services  []lspServiceActivity `json:"services"`
-}
-
-type lspServiceActivity struct {
-	Server     string             `json:"server"`
-	Label      string             `json:"label"`
-	Project    string             `json:"project"`
-	Analyzing  bool               `json:"analyzing"`
-	Operations []lsp.WorkProgress `json:"operations"`
-}
-
-func (s *Server) handleWorkspaceActivity(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.lspActivity())
-}
-
-func (s *Server) lspActivity() lspActivityResponse {
-	activities := s.Project.workspace.LSPActivities()
-	services := make([]lspServiceActivity, 0, len(activities))
-	analyzing := false
-	for _, activity := range activities {
-		project, err := filepath.Rel(s.Project.workspace.RootPath, activity.ProjectDir)
-		if err != nil || project == ".." || filepath.IsAbs(project) || strings.HasPrefix(project, ".."+string(filepath.Separator)) {
-			project = filepath.Base(activity.ProjectDir)
-		}
-		project = filepath.ToSlash(project)
-		services = append(services, lspServiceActivity{
-			Server:     activity.Server,
-			Label:      activity.Label,
-			Project:    project,
-			Analyzing:  activity.Analyzing,
-			Operations: activity.Operations,
-		})
-		analyzing = analyzing || activity.Analyzing
-	}
-	return lspActivityResponse{Analyzing: analyzing, Services: services}
-}
-
-func (s *Server) lspEditorCapabilities(ctx context.Context, filePath string) editorCapabilitiesResponse {
-	capabilities, hasServer, err := s.Project.workspace.EditorLSPCapabilities(ctx, filePath)
+func (c *lspConnection) lspEditorCapabilities(ctx context.Context, filePath string) editorCapabilitiesResponse {
+	capabilities, hasServer, err := c.language.Capabilities(ctx, filePath)
 	if err != nil {
 		// A missing or failed server must not disable structural fallbacks.
 		hasServer = false
 	}
 	response := editorCapabilitiesResponse{
-		WorkspaceURI:       fileuri.FromPath(s.Project.workspace.RootPath),
+		WorkspaceURI:       fileuri.FromPath(c.server.Project.workspace.RootPath),
 		LanguageServer:     hasServer,
 		Completion:         true,
 		Hover:              true,
@@ -247,7 +207,8 @@ type lspWorkspaceDocument struct {
 	Exists   bool   `json:"exists"`
 }
 
-func (s *Server) workspaceEditDocuments(edits ...*lsp.WorkspaceEdit) (map[string]lspWorkspaceDocument, error) {
+func (c *lspConnection) workspaceEditDocuments(edits ...*lsp.WorkspaceEdit) (map[string]lspWorkspaceDocument, error) {
+	ws := c.server.Project.workspace
 	documents := make(map[string]lspWorkspaceDocument)
 	for _, edit := range edits {
 		for _, key := range workspaceEditURIs(edit) {
@@ -258,15 +219,15 @@ func (s *Server) workspaceEditDocuments(edits ...*lsp.WorkspaceEdit) (map[string
 			if !ok {
 				return nil, fmt.Errorf("language server edit targets a non-file URI")
 			}
-			rel, err := filepath.Rel(s.Project.workspace.RootPath, filePath)
+			rel, err := filepath.Rel(ws.RootPath, filePath)
 			if err != nil || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return nil, fmt.Errorf("language server edit targets a file outside the workspace")
 			}
-			content, err := s.Project.workspace.Root.ReadFile(rel)
+			content, err := ws.Root.ReadFile(rel)
 			switch {
 			case err == nil:
 				document := lspWorkspaceDocument{Path: filepath.ToSlash(rel), Revision: fileRevision(content), Exists: true}
-				if buffer, ok := s.Project.workspace.EditorLSPDocumentContent(filePath); ok {
+				if buffer, ok := c.language.DocumentContent(filePath); ok {
 					document.Revision = fileRevision([]byte(buffer))
 				}
 				documents[key] = document

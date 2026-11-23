@@ -15,12 +15,6 @@ import (
 // The TreeSitter* methods answer from syntax alone, for files without a
 // language server. Cross-file results are name-matched candidates.
 
-const maxTreeSitterSymbols = 1000
-
-func TreeSitterSupported(filePath string) bool {
-	return treesitter.Supported(filePath)
-}
-
 func (s *Service) TreeSitterDefinitions(ctx context.Context, filePath string, content *string, line, column int) ([]lsp.Location, error) {
 	relative, source, err := s.treeSitterInput(filePath, content)
 	if err != nil {
@@ -95,80 +89,6 @@ func (s *Service) TreeSitterDocumentSymbols(filePath string, content *string) ([
 	return documentSymbols(treesitter.FileSymbols(filePath, source)), nil
 }
 
-// TreeSitterWorkspaceSymbols searches every supported file, or with
-// uncoveredOnly only those no language server is configured for. The bool
-// reports a result capped at maxTreeSitterSymbols.
-func (s *Service) TreeSitterWorkspaceSymbols(ctx context.Context, query string, uncoveredOnly bool) ([]lsp.SymbolInformation, bool, error) {
-	var include func(string) bool
-	if uncoveredOnly {
-		include = func(file string) bool {
-			return !s.hasLSPServerFor(filepath.Join(s.root, filepath.FromSlash(file)))
-		}
-	}
-	defs, truncated, err := s.syntax.Symbols(ctx, query, maxTreeSitterSymbols, include)
-	if err != nil {
-		return nil, false, err
-	}
-	result := make([]lsp.SymbolInformation, 0, len(defs))
-	for _, def := range defs {
-		location, err := s.location(def.File, def.NameRange)
-		if err != nil {
-			return nil, false, err
-		}
-		var symbol lsp.SymbolInformation
-		symbol.Name, symbol.Kind, symbol.Location = def.Name, lsp.SymbolKind(symbolKind(def.Kind)), location
-		result = append(result, symbol)
-	}
-	return result, truncated, nil
-}
-
-func (s *Service) TreeSitterIncomingCalls(ctx context.Context, filePath string, line, column int) ([]lsp.CallHierarchyIncomingCall, error) {
-	relative, source, err := s.treeSitterInput(filePath, nil)
-	if err != nil {
-		return nil, err
-	}
-	calls, err := s.syntax.IncomingCalls(ctx, relative, source, line, column)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]lsp.CallHierarchyIncomingCall, 0, len(calls))
-	for _, call := range calls {
-		item, err := s.callItem(call.Definition)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, lsp.CallHierarchyIncomingCall{From: item, FromRanges: protocolRanges(call.Sites)})
-	}
-	return result, nil
-}
-
-// TreeSitterOutgoingCalls also returns callee names without a workspace
-// declaration, typically library or dynamic calls.
-func (s *Service) TreeSitterOutgoingCalls(ctx context.Context, filePath string, line, column int) ([]lsp.CallHierarchyOutgoingCall, []string, error) {
-	relative, source, err := s.treeSitterInput(filePath, nil)
-	if err != nil {
-		return nil, nil, err
-	}
-	calls, err := s.syntax.OutgoingCalls(ctx, relative, source, line, column)
-	if err != nil {
-		return nil, nil, err
-	}
-	var result []lsp.CallHierarchyOutgoingCall
-	var unresolved []string
-	for _, call := range calls {
-		if call.File == "" {
-			unresolved = append(unresolved, call.Name)
-			continue
-		}
-		item, err := s.callItem(call.Definition)
-		if err != nil {
-			return nil, nil, err
-		}
-		result = append(result, lsp.CallHierarchyOutgoingCall{To: item, FromRanges: protocolRanges(call.Sites)})
-	}
-	return result, unresolved, nil
-}
-
 func (s *Service) treeSitterInput(filePath string, content *string) (string, []byte, error) {
 	relative, err := filepath.Rel(s.root, filePath)
 	if err != nil {
@@ -199,20 +119,6 @@ func (s *Service) definitionLocations(defs []treesitter.Definition) ([]lsp.Locat
 		result = append(result, location)
 	}
 	return result, nil
-}
-
-func (s *Service) callItem(def treesitter.Definition) (lsp.CallHierarchyItem, error) {
-	location, err := s.location(def.File, def.Range)
-	if err != nil {
-		return lsp.CallHierarchyItem{}, err
-	}
-	return lsp.CallHierarchyItem{
-		Name:           def.Name,
-		Kind:           lsp.SymbolKind(symbolKind(def.Kind)),
-		URI:            location.URI,
-		Range:          location.Range,
-		SelectionRange: protocolRange(def.NameRange),
-	}, nil
 }
 
 func (s *Service) treeSitterCompletionItems(filePath string, content *string) ([]lsp.CompletionItem, error) {
@@ -340,14 +246,6 @@ func protocolRange(value treesitter.SymRange) lsp.Range {
 		Start: lsp.Position{Line: uint32(value.StartLine), Character: uint32(value.StartCol)},
 		End:   lsp.Position{Line: uint32(value.EndLine), Character: uint32(value.EndCol)},
 	}
-}
-
-func protocolRanges(values []treesitter.SymRange) []lsp.Range {
-	result := make([]lsp.Range, 0, len(values))
-	for _, value := range values {
-		result = append(result, protocolRange(value))
-	}
-	return result
 }
 
 func completionKind(kind treesitter.Kind) int {

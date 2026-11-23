@@ -177,11 +177,6 @@ func (a *App) footerLine(width int) string {
 		switch a.operation {
 		case operationShell:
 			label, color = "Running shell command", t.Magenta
-		case operationDiagnostics:
-			label = "Scanning workspace problems"
-			if a.backgroundStatus != "" {
-				label += " · " + a.backgroundStatus
-			}
 		case operationCompact:
 			label = "Compacting context"
 		}
@@ -189,14 +184,6 @@ func (a *App) footerLine(width int) string {
 	}
 	if activity := a.activityStatus(width - 2*len(cellIndent) - ansi.Width(rightText)); activity != "" {
 		return withRight(activity)
-	}
-
-	if a.backgroundStatus != "" {
-		color := t.BrBlack
-		if a.backgroundWarning {
-			color = t.Yellow
-		}
-		return withRight(colored(color, a.backgroundStatus))
 	}
 
 	if a.isShellInput() {

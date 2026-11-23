@@ -58,7 +58,7 @@ func TestServerShowsOtherProjectsInWindowsOfOneHost(t *testing.T) {
 	if err := os.Mkdir(other, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, Projects: true, disableManagedTools: true})
+	s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, Projects: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestServerOfEveryProjectOpensAnyFolderAfterItsChecks(t *testing.T) {
 	protocolTestGateway(t)
 	dir := canonicalPath(t.TempDir())
 	outside := canonicalPath(t.TempDir())
-	s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, Projects: true, disableManagedTools: true})
+	s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, Projects: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestServerOfOneFolderShowsNoOtherProject(t *testing.T) {
 	if err := os.Mkdir(nested, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true, disableManagedTools: true})
+	s, err := New(t.Context(), dir, &ServerOptions{NoBrowser: true})
 	if err != nil {
 		t.Fatal(err)
 	}

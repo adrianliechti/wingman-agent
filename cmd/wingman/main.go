@@ -16,20 +16,11 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
-func startManagedToolUpdate(ctx context.Context, workspace *code.Workspace) func() {
-	update := workspace.StartManagedToolsUpdate(ctx, code.ManagedLSPTools)
-	go func() {
-		_, updateErr := update.Wait()
-		if updateErr != nil {
-			fmt.Fprintf(os.Stderr, "Managed tools warning: %v\n", updateErr)
-		}
-	}()
-	return update.Cancel
-}
-
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), shutdownSignals()...)
 	defer cancel()
+
+	go code.RemoveLegacyTools()
 
 	args := os.Args[1:]
 
