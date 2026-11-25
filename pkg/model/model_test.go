@@ -17,6 +17,9 @@ func TestCurrentProviderModels(t *testing.T) {
 	}{
 		{"thinkingmachines/Inkling-2-Small", "Inkling 2 Small", ClassSmall, 1_048_576, 131_072},
 		{"thinkingmachines/Inkling-2-Mini", "Inkling 2 Mini", ClassSmall, 1_048_576, 131_072},
+		{"microsoft/MAI-Cyber-2-Flash", "MAI Cyber 2 Flash", ClassMedium, 1_000_000, 64_000},
+		{"MAI-Cyber-1.1-Flash", "MAI Cyber 1.1 Flash", ClassMedium, 256_000, 64_000},
+		{"MAI-Cyber-1-Flash", "MAI Cyber 1 Flash", ClassMedium, 256_000, 64_000},
 		{"kimi-k3", "Kimi K3", ClassLarge, 1_048_576, 131_072},
 		{"glm-5.3", "GLM 5.3", ClassMedium, 1_000_000, 131_072},
 		{"gemini-3.7-flash", "Gemini 3.7 Flash", ClassMedium, 1_114_112, 65_536},
@@ -79,6 +82,10 @@ func TestCurrentProviderModelAvailability(t *testing.T) {
 		"grok-4.6":           true,
 		"inkling-2-mini":     true,
 		"inkling-2-small":    true,
+
+		"MAI-Cyber-2-Flash":   true,
+		"MAI-Cyber-1.1-Flash": true,
+		"MAI-Cyber-1-Flash":   true,
 	})
 
 	ids := make([]string, 0, len(available))
@@ -91,6 +98,7 @@ func TestCurrentProviderModelAvailability(t *testing.T) {
 		"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5-mini",
 		"claude-sonnet-5-5", "glm-5.3", "kimi-k3", "MiniMax-M3", "grok-4.6",
 		"inkling-2-small", "inkling-2-mini",
+		"MAI-Cyber-2-Flash", "MAI-Cyber-1.1-Flash", "MAI-Cyber-1-Flash",
 	}
 	if !slices.Equal(ids, want) {
 		t.Fatalf("Available() ids = %v, want %v", ids, want)
@@ -333,6 +341,7 @@ func TestCanonicalID(t *testing.T) {
 		"qwen/qwen3.8-27b:Q4_K_M":            "qwen3.8",
 		"anthropic/claude-sonnet-5-5:latest": "claude-sonnet-5-5",
 		"MiniMax-M3":                         "minimax-m3",
+		"MAI-Cyber-Flash":                    "MAI-Cyber-Flash",
 		"anthropic/gpt-6-astra":              "anthropic/gpt-6-astra",
 		"unknown/deployment:tag":             "unknown/deployment:tag",
 		"gpt-5.6-sol-preview":                "gpt-5.6-sol-preview",
