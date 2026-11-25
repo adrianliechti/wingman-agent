@@ -1046,6 +1046,39 @@ var Models = []Model{
 
 		Efforts: []string{"none", "low", "medium", "high", "xhigh", "max"},
 	},
+
+	// Microsoft
+	// Reserve Wingman's usual 64K output budget within each shared window.
+
+	{
+		ID:        "mai-cyber-2-flash",
+		Namespace: "microsoft",
+		Name:      "MAI Cyber 2 Flash",
+		Class:     ClassMedium,
+
+		Output:  64_000,
+		Context: 1_000_000,
+	},
+
+	{
+		ID:        "mai-cyber-1.1-flash",
+		Namespace: "microsoft",
+		Name:      "MAI Cyber 1.1 Flash",
+		Class:     ClassMedium,
+
+		Output:  64_000,
+		Context: 256_000,
+	},
+
+	{
+		ID:        "mai-cyber-1-flash",
+		Namespace: "microsoft",
+		Name:      "MAI Cyber 1 Flash",
+		Class:     ClassMedium,
+
+		Output:  64_000,
+		Context: 256_000,
+	},
 }
 
 // Available returns the catalog entries a backend serves, in preference order

@@ -170,6 +170,7 @@ func TestModelSelectionPreservesConfiguredAliases(t *testing.T) {
 		want       string
 	}{
 		{"gpt-5.6", []string{"openai/gpt-5.6-sol"}, "openai/gpt-5.6-sol"},
+		{"MAI-Cyber-Flash", []string{"MAI-Cyber-Flash", "MAI-Cyber-2-Flash"}, "MAI-Cyber-Flash"},
 		{"GPT-6-SOL", []string{"openai/gpt-6-sol"}, "openai/gpt-6-sol"},
 		{"gpt-6-sol", []string{"gpt-6-sol", "openai/gpt-6-sol"}, "gpt-6-sol"},
 		{"custom-deployment", []string{"custom-deployment"}, "custom-deployment"},
