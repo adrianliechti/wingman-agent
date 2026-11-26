@@ -23,6 +23,10 @@ type recapProvider interface {
 	Recap(context.Context, string) (string, error)
 }
 
+type sideQuestioner interface {
+	Ask(ctx context.Context, sessionID, question string, onText func(string)) (string, error)
+}
+
 type contextStatsProvider interface {
 	ContextStats(string) (harness.ContextStats, bool)
 }

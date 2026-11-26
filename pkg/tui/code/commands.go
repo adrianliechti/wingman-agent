@@ -98,6 +98,12 @@ func (a *App) builtinCommands() []slashCommand {
 	if _, ok := a.agent.(recapProvider); ok {
 		cmds = append(cmds, slashCommand{Name: "/recap", Desc: "Summarize the session so far", Run: (*App).showRecap})
 	}
+	if _, ok := a.agent.(sideQuestioner); ok {
+		cmds = append(cmds, slashCommand{
+			Name: "/btw", Hint: "<question>", Desc: "Ask a side question; the answer stays out of the conversation", Busy: true,
+			Run: func(a *App) { a.askAside("") }, RunArgs: (*App).askAside,
+		})
+	}
 	if _, ok := a.agent.(code.Compactor); ok {
 		cmds = append(cmds, slashCommand{
 			Name: "/compact", Hint: "[focus]", Desc: "Summarize the conversation to free context",

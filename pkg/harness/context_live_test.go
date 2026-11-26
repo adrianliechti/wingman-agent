@@ -345,8 +345,12 @@ func testLiveContext(t *testing.T, model, switchModel string) {
 	if measured <= 0 {
 		t.Fatal("backend returned no usable context usage")
 	}
-	cfg.ContextWindow = int(measured) / 2
+	// A terse model's history is small next to the instructions: half of it
+	// would leave no room for the latest input and a checkpoint.
+	_, stepRequest := a.newStepRequest(ctx)
+	_, fixed := requestPrefix(stepRequest)
 	cfg.ReserveTokens = 1000
+	cfg.ContextWindow = max(int(measured)/2, fixed+cfg.ReserveTokens+2500)
 	revisionBefore := a.StateSnapshot().ContextRevision
 	t.Logf("forcing auto compaction: measured=%d window=%d", measured, cfg.ContextWindow)
 	reply = run(a, "Continue the original task without tools. Reply with four labeled lines: Release code; Current environment; Deployment (PERFORMED or NOT_PERFORMED); Tests (PERFORMED or NOT_PERFORMED). Use the recorded facts, not assumptions.")

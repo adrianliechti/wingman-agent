@@ -89,34 +89,7 @@ func compactionFocus(focus string) string {
 }
 
 func (a *Agent) summarizeInContext(ctx context.Context, req *request, messages []Message, instructions string) (string, error) {
-	summaryReq := *req
-	summaryReq.outputSchema = nil
-	// Keep tool definitions in the cached prefix, but disable tool selection.
-	summaryReq.disableTools = true
-	summaryReq.messages = append(slices.Clone(messages), hiddenContextMessage(instructions))
-
-	captureContent := a.Telemetry.CapturesMessageContent()
-	inferenceRequest := telemetry.InferenceRequest{
-		Model:          summaryReq.model,
-		ConversationID: conversationID(ctx, a.CacheKey),
-		Streaming:      true,
-		ReasoningLevel: summaryReq.effort,
-	}
-	if captureContent {
-		inferenceRequest.Content = telemetryInferenceContent(summaryReq.messages, summaryReq.instructions, summaryReq.tools)
-	}
-	inferenceCtx, inference := a.Telemetry.StartInference(ctx, inferenceRequest)
-	resp, err := a.complete(inferenceCtx, &summaryReq, func(Message, error) bool { return true })
-	inference.End(streamingInferenceResult(resp, err, captureContent))
-	if resp != nil {
-		chargeTaskUsage(ctx, resp.usage)
-		// Summary usage is session cost, not a measurement of the context.
-		if usage := resp.usage; usage != (Usage{}) {
-			if recordErr := a.recordEvents(RuntimeEvent{Type: EventUsage, Usage: &usage}); recordErr != nil {
-				return "", recordErr
-			}
-		}
-	}
+	resp, err := a.completeInContext(ctx, req, messages, instructions, func(Message, error) bool { return true })
 	if err != nil {
 		return "", err
 	}
@@ -129,8 +102,48 @@ func (a *Agent) summarizeInContext(ctx context.Context, req *request, messages [
 	if len(extractToolCalls(resp.messages)) > 0 {
 		return "", fmt.Errorf("summary response called tools instead of producing a checkpoint")
 	}
+	return visibleAssistantText(resp.messages), nil
+}
+
+// completeInContext samples one hidden request appended to the cached prefix,
+// with tool selection disabled. Its usage is session cost, not a measurement
+// of the context.
+func (a *Agent) completeInContext(ctx context.Context, req *request, messages []Message, instructions string, yield func(Message, error) bool) (*response, error) {
+	inContext := *req
+	inContext.outputSchema = nil
+	// Keep tool definitions in the cached prefix, but disable tool selection.
+	inContext.disableTools = true
+	// The appended request must not separate reasoning from its output.
+	messages, _ = dropDanglingReasoning(messages)
+	inContext.messages = append(slices.Clone(messages), hiddenContextMessage(instructions))
+
+	captureContent := a.Telemetry.CapturesMessageContent()
+	inferenceRequest := telemetry.InferenceRequest{
+		Model:          inContext.model,
+		ConversationID: conversationID(ctx, a.CacheKey),
+		Streaming:      true,
+		ReasoningLevel: inContext.effort,
+	}
+	if captureContent {
+		inferenceRequest.Content = telemetryInferenceContent(inContext.messages, inContext.instructions, inContext.tools)
+	}
+	inferenceCtx, inference := a.Telemetry.StartInference(ctx, inferenceRequest)
+	resp, err := a.complete(inferenceCtx, &inContext, yield)
+	inference.End(streamingInferenceResult(resp, err, captureContent))
+	if resp != nil {
+		chargeTaskUsage(ctx, resp.usage)
+		if usage := resp.usage; usage != (Usage{}) {
+			if recordErr := a.recordEvents(RuntimeEvent{Type: EventUsage, Usage: &usage}); recordErr != nil {
+				return nil, recordErr
+			}
+		}
+	}
+	return resp, err
+}
+
+func visibleAssistantText(messages []Message) string {
 	var parts []string
-	for _, message := range resp.messages {
+	for _, message := range messages {
 		if message.Role != RoleAssistant || message.Hidden {
 			continue
 		}
@@ -140,7 +153,7 @@ func (a *Agent) summarizeInContext(ctx context.Context, req *request, messages [
 			}
 		}
 	}
-	return strings.Join(parts, "\n\n"), nil
+	return strings.Join(parts, "\n\n")
 }
 
 // Recap uses the current checkpoint as well as recent messages, preserving

@@ -126,6 +126,15 @@ func (e *responseFailure) Error() string {
 	return "response failed"
 }
 
+// eventFailure classifies a terminal error event. As in streamedProviderFailure,
+// one without a code or message is a broken stream, which is retried.
+func eventFailure(code, message, retryAfter string, outputStarted bool) error {
+	if code == "" && strings.TrimSpace(message) == "" {
+		return &streamFailure{err: errors.New("response failed without an error"), outputStarted: outputStarted}
+	}
+	return &responseFailure{code: code, message: message, retryAfter: retryAfter, outputStarted: outputStarted}
+}
+
 // streamedProviderFailure recovers the provider's error from the generic
 // stream error openai-go returns for any event with a top-level "error"
 // member. The Responses API nests its error object there, and some gateways
@@ -537,19 +546,11 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 			incomplete = true
 
 		case responses.ResponseFailedEvent:
-			return nil, &responseFailure{
-				code:          string(e.Response.Error.Code),
-				message:       e.Response.Error.Message,
-				retryAfter:    streamedRetryAfter(e.Response.Error.JSON.ExtraFields["headers"].Raw()),
-				outputStarted: outputStarted,
-			}
+			failure := e.Response.Error
+			return nil, eventFailure(string(failure.Code), failure.Message, streamedRetryAfter(failure.JSON.ExtraFields["headers"].Raw()), outputStarted)
 
 		case responses.ResponseErrorEvent:
-			return nil, &responseFailure{
-				code:          e.Code,
-				message:       e.Message,
-				outputStarted: outputStarted,
-			}
+			return nil, eventFailure(e.Code, e.Message, "", outputStarted)
 		}
 
 		// completed and incomplete carry the authoritative final response.
@@ -610,9 +611,11 @@ func (c *Config) complete(ctx context.Context, r *request, yield func(Message, e
 
 // outputItemsToInput applies the same replay checks to item-done events and
 // final responses. Unfinished tool calls/reasoning cannot be replayed; partial
-// assistant text is retained for continuity after a cutoff.
+// assistant text is retained for continuity after a cutoff. Status is optional
+// on the wire, so only an explicit unfinished one rejects an item.
 func outputItemsToInput(output []responses.ResponseOutputItemUnion) []responses.ResponseInputItemUnionParam {
 	var items []responses.ResponseInputItemUnionParam
+	finished := func(status string) bool { return status == "" || status == "completed" }
 
 	for _, item := range output {
 		switch it := item.AsAny().(type) {
@@ -623,8 +626,7 @@ func outputItemsToInput(output []responses.ResponseOutputItemUnion) []responses.
 			}
 
 		case responses.ResponseReasoningItem:
-			// Status is optional for reasoning; reject explicit unfinished items.
-			if it.Status != "" && it.Status != "completed" {
+			if !finished(string(it.Status)) {
 				continue
 			}
 			var p responses.ResponseReasoningItemParam
@@ -633,7 +635,7 @@ func outputItemsToInput(output []responses.ResponseOutputItemUnion) []responses.
 			}
 
 		case responses.ResponseFunctionToolCall:
-			if it.Status != "completed" {
+			if !finished(string(it.Status)) {
 				continue
 			}
 			var p responses.ResponseFunctionToolCallParam

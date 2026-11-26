@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
+	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
 // sendCancellingOnRetry runs one turn and cancels at the first announced
@@ -155,6 +156,81 @@ func TestProviderErrorE2EProviderTransientCodes(t *testing.T) {
 			retries, runErr := sendCancellingOnRetry(t, &harness.Agent{Config: e2eConfig(t)})
 			if runErr == nil || !strings.Contains(runErr.Error(), code) || len(retries) != 0 || len(p.snapshot()) != 1 {
 				t.Fatalf("error=%v retries=%+v requests=%d", runErr, retries, len(p.snapshot()))
+			}
+		})
+	}
+}
+
+// A failure event that carries neither a code nor a message says nothing about
+// the request, so it is retried like a stream that ended early (Codex does the
+// same). One that explains itself is still classified by what it says.
+func TestProviderErrorE2EFailureWithoutDetailsRetries(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		event    map[string]any
+		terminal bool
+	}{
+		{"response.failed without error", map[string]any{"type": "response.failed", "response": map[string]any{"status": "failed"}}, false},
+		{"response.failed with empty error", map[string]any{"type": "response.failed", "response": map[string]any{"error": map[string]any{"message": " "}}}, false},
+		{"error event without details", map[string]any{"type": "error"}, false},
+		{"response.failed with unknown code", map[string]any{"type": "response.failed", "response": map[string]any{"error": map[string]any{"code": "unknown_failure", "message": "not possible"}}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newContextProvider(t, func(w http.ResponseWriter, _ contextRequest) { sseEvent(w, tc.event) })
+			retries, runErr := sendCancellingOnRetry(t, &harness.Agent{Config: e2eConfig(t)})
+			if len(p.snapshot()) != 1 {
+				t.Fatalf("requests = %d", len(p.snapshot()))
+			}
+			if tc.terminal {
+				if len(retries) != 0 || runErr == nil || !strings.Contains(runErr.Error(), "unknown_failure") {
+					t.Fatalf("terminal error=%v retries=%+v", runErr, retries)
+				}
+				return
+			}
+			if len(retries) != 1 || retries[0].Reason != "Connection interrupted" || !errors.Is(runErr, context.Canceled) {
+				t.Fatalf("error=%v retries=%+v", runErr, retries)
+			}
+		})
+	}
+}
+
+// An item's status is optional in the Responses API and compatible servers
+// omit it. A finished call must still run: dropping it ends the turn with
+// nothing done. openai-python's tool runner and Codex accept the same shape.
+func TestProviderE2EToolCallWithoutStatusRuns(t *testing.T) {
+	call := map[string]any{"type": "function_call", "call_id": "read-1", "name": "read", "arguments": "{}"}
+	completed := func(output ...any) map[string]any {
+		return map[string]any{"type": "response.completed", "response": map[string]any{"output": output, "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}}}
+	}
+	for _, tc := range []struct {
+		name   string
+		events []map[string]any
+	}{
+		{"done event", []map[string]any{{"type": "response.output_item.done", "output_index": 0, "item": call}, completed()}},
+		{"final output", []map[string]any{completed(call)}},
+		{"done event and final output", []map[string]any{{"type": "response.output_item.done", "output_index": 0, "item": call}, completed(call)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var executions atomic.Int64
+			p := newContextProvider(t, func(w http.ResponseWriter, req contextRequest) {
+				if bytes.Contains(req.Input, []byte(`"function_call_output"`)) {
+					fmt.Fprint(w, completedText("The file holds the release notes."))
+					return
+				}
+				for _, event := range tc.events {
+					sseEvent(w, event)
+				}
+			})
+			a := &harness.Agent{Config: e2eConfig(t, tool.Tool{Name: "read", Execute: func(context.Context, map[string]any) (tool.Result, error) {
+				executions.Add(1)
+				return tool.Text("release notes"), nil
+			}})}
+			if err := drain(t, a, "read the file"); err != nil {
+				t.Fatal(err)
+			}
+			requests := p.snapshot()
+			if executions.Load() != 1 || len(requests) != 2 || !bytes.Contains(requests[1].Input, []byte("release notes")) {
+				t.Fatalf("executions=%d requests=%d", executions.Load(), len(requests))
 			}
 		})
 	}

@@ -16,7 +16,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	monty "github.com/adrianliechti/go-monty"
@@ -258,7 +257,7 @@ func run(ctx context.Context, sandbox *sandbox, toolbox tool.Toolbox, code strin
 	if err != nil {
 		cancel()
 	}
-	unawaited := calls.wait()
+	unawaited := session.Wait()
 
 	var typing *monty.TypingError
 	var exception *monty.Exception
@@ -341,18 +340,11 @@ type calls struct {
 	toolbox tool.Toolbox
 	report  func(string)
 
-	order   sync.RWMutex
-	running sync.WaitGroup
-	active  atomic.Int64
+	order sync.RWMutex
 }
 
 func (c *calls) bind(t tool.Tool) tools.SchemaFunc {
 	return func(ctx context.Context, args map[string]any) (any, error) {
-		c.running.Add(1)
-		c.active.Add(1)
-		defer c.running.Done()
-		defer c.active.Add(-1)
-
 		if t.Effect != nil && t.Effect(args) == tool.EffectReadOnly {
 			c.order.RLock()
 			defer c.order.RUnlock()
@@ -379,14 +371,6 @@ func (c *calls) bind(t tool.Tool) tools.SchemaFunc {
 		}
 		return output, nil
 	}
-}
-
-// wait blocks until every started call has returned and reports how many
-// were still running.
-func (c *calls) wait() int {
-	active := int(c.active.Load())
-	c.running.Wait()
-	return active
 }
 
 // structured finds the JSON a tool with an output schema returned: the last

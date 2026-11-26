@@ -17,8 +17,8 @@ github.com/abemedia/go-cfb v0.2.0 h1:amLvu7/DX65XtcmMuc0an/t09W36gMOrnYwLxGGmwX8
 github.com/abemedia/go-cfb v0.2.0/go.mod h1:ytSRuNKf2VMDQDs8TSZ/VmkVfS4giAdc4xl5XOnpKKA=
 github.com/adrianliechti/go-extract v0.0.0-20261029154039-97b29af3f71f h1:YosMo9d86cM65yZN8pUVKMjpUMNV2jBDTUx5z04eaRA=
 github.com/adrianliechti/go-extract v0.0.0-20261029154039-97b29af3f71f/go.mod h1:LZKkKLbEJucjbYH003wJSifMPs9lVWI7LGpCpyXo4q0=
-github.com/adrianliechti/go-monty v0.0.0-20261121154152-726f5b2d4fd8 h1:g2HHWBjDaa0z9m1h4rvoYRYM8TfTG4T7WWzoWoPeq48=
-github.com/adrianliechti/go-monty v0.0.0-20261121154152-726f5b2d4fd8/go.mod h1:PYWwD8FhhWYnxb6GgqcC/Gn75MD7U590kysL8TICTpE=
+github.com/adrianliechti/go-monty v0.0.0-20261127001111-234467dac315 h1:GvfiRER6OWVJFceFqF9pulc9b830WGs1am0rGnAsoZs=
+github.com/adrianliechti/go-monty v0.0.0-20261127001111-234467dac315/go.mod h1:PYWwD8FhhWYnxb6GgqcC/Gn75MD7U590kysL8TICTpE=
 github.com/adrianliechti/go-shell v0.1.12 h1:KZxGgv/n9ohB+g5gQDnvolp3WjdEsZ/gckYO0pmRlrM=
 github.com/adrianliechti/go-shell v0.1.12/go.mod h1:WwNDLx2RxEuyTc8kb90wyytIG21QfTL4yjnLyAtU9uo=
 github.com/alecthomas/assert/v2 v2.11.0 h1:2Q9r3ki8+JYXvGsDyBXwH3LcJ+WK5D0gc5E8vS6K3D0=

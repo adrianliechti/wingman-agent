@@ -140,6 +140,15 @@ The browser composer also offers steering and queue controls. Editing a queued
 message preserves your separate composer draft. Restored queues stay paused
 until you resume them, so reopening a session does not run saved work immediately.
 
+## Ask a side question
+
+With the built-in Wingman agent, `/btw <question>` in the terminal UI asks
+about the session without becoming part of it: the question and its answer are
+not added to the conversation, and a turn that is running keeps going. The
+answer comes from what the conversation already holds, so no tool runs. It
+opens in its own view; press `i` to copy the question and answer into your
+prompt, or Escape to return to chat.
+
 ## Watch agents
 
 With the built-in Wingman agent, run `/agents` in the terminal UI to list the

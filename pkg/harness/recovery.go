@@ -233,6 +233,29 @@ func isReasoningReplayError(err error) bool {
 func (a *Agent) repairToolHistory(preserveReasoning bool) error {
 	messages, changed := migrateFinishHistory(a.contextSnapshot())
 
+	cleaned, closed := closeToolCalls(messages, "No recorded result is available for this tool call. It may have been interrupted; execution and side effects are unknown. Check the current state before retrying.")
+	changed = changed || closed
+
+	// An explicit end_turn:false can intentionally leave reasoning at the
+	// end of history. Keep it for the provider's next sampling request.
+	if !preserveReasoning {
+		if pruned, ok := dropDanglingReasoning(cleaned); ok {
+			cleaned = pruned
+			changed = true
+		}
+	}
+
+	if !changed {
+		return nil
+	}
+	return a.replaceContext("repair tool and reasoning history", cleaned)
+}
+
+// closeToolCalls gives each call without a result one that carries notice and
+// removes results without a call. It edits the content of messages in place.
+func closeToolCalls(messages []Message, notice string) ([]Message, bool) {
+	changed := false
+
 	callIDs := make(map[string]bool)
 	outputIDs := make(map[string]bool)
 
@@ -271,7 +294,7 @@ func (a *Agent) repairToolHistory(preserveReasoning bool) error {
 			if call := c.ToolCall; call != nil && call.ID != "" && !outputIDs[call.ID] {
 				missing = append(missing, Message{Role: RoleAssistant, Content: []Content{{ToolResult: &ToolResult{
 					ID: call.ID, Name: call.Name, Args: call.Args, IsError: true,
-					Content: tool.TextContent("No recorded result is available for this tool call. It may have been interrupted; execution and side effects are unknown. Check the current state before retrying."),
+					Content: tool.TextContent(notice),
 				}}}})
 				outputIDs[call.ID] = true
 				changed = true
@@ -281,19 +304,5 @@ func (a *Agent) repairToolHistory(preserveReasoning bool) error {
 			cleaned = append(cleaned, m)
 		}
 	}
-	cleaned = append(cleaned, missing...)
-
-	// An explicit end_turn:false can intentionally leave reasoning at the
-	// end of history. Keep it for the provider's next sampling request.
-	if !preserveReasoning {
-		if pruned, ok := dropDanglingReasoning(cleaned); ok {
-			cleaned = pruned
-			changed = true
-		}
-	}
-
-	if !changed {
-		return nil
-	}
-	return a.replaceContext("repair tool and reasoning history", cleaned)
+	return append(cleaned, missing...), changed
 }

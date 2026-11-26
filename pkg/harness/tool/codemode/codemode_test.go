@@ -336,9 +336,10 @@ func TestUnawaitedCallsFinish(t *testing.T) {
 }
 
 func TestFailedScriptStopsItsCalls(t *testing.T) {
-	stopped := make(chan struct{})
+	started, stopped := make(chan struct{}), make(chan struct{})
 	box := &fakeToolbox{tools: []tool.Tool{
 		textTool("wait", tool.EffectReadOnly, nil, func(ctx context.Context, _ map[string]any) (string, error) {
+			close(started)
 			select {
 			case <-ctx.Done():
 				close(stopped)
@@ -347,9 +348,19 @@ func TestFailedScriptStopsItsCalls(t *testing.T) {
 				return "late", nil
 			}
 		}),
+		// Lets the script fail only once its call runs: one that has not
+		// started by then is never run, so there is nothing to see stop.
+		textTool("running", tool.EffectReadOnly, nil, func(ctx context.Context, _ map[string]any) (string, error) {
+			select {
+			case <-started:
+				return "yes", nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}),
 	}}
 	start := time.Now()
-	result := runCode(t, box, "pending = wait()\nraise ValueError('boom')")
+	result := runCode(t, box, "pending = wait()\nawait running()\nraise ValueError('boom')")
 	if !result.IsError || !strings.Contains(result.Content.Text(), "ValueError: boom") {
 		t.Fatalf("result = %q", result.Content.Text())
 	}

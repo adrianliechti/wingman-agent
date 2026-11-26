@@ -193,6 +193,7 @@ In the terminal UI, use `@` to attach files and `Ctrl+P` to find commands.
 | `/model` | Choose a model and reasoning effort |
 | `/agent` or `/plan` | Switch to Agent or Plan mode |
 | `/agents` | Watch agents and view scheduled tasks |
+| `/btw <question>` | Ask a side question; the answer stays out of the conversation |
 | `/diff` | Review working tree changes |
 | `/mcp` | Show MCP servers, their state, and their tools |
 | `/skills` | Show available skills and where each comes from |

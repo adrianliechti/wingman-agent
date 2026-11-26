@@ -97,7 +97,7 @@ func TestCompleteRetainsOnlyReplayableOutput(t *testing.T) {
 						calls = calls || c.ToolCall != nil
 					}
 				}
-				if reasoning != (status == "completed" || status == "") || calls != (status == "completed") {
+				if replayable := status == "completed" || status == ""; reasoning != replayable || calls != replayable {
 					t.Fatalf("unreplayable output retained: reasoning=%t calls=%t", reasoning, calls)
 				}
 				if !resp.incomplete || lastAssistantText(resp.messages) != "Partial answer" {

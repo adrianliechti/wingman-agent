@@ -185,6 +185,60 @@ func TestCompactionE2ETerminalSummaryFailureSkipsBriefing(t *testing.T) {
 	}
 }
 
+// The recent window can begin at the text a reasoning item led to, which
+// leaves that item last in the summary input. A provider that pairs reasoning
+// with its output rejects it there, and the checkpoint would silently come
+// from the bounded briefing instead of the full history.
+func TestCompactionE2ESummaryInputKeepsReasoningPaired(t *testing.T) {
+	var summaries, rejected, briefings atomic.Int64
+	newContextProvider(t, func(w http.ResponseWriter, req contextRequest) {
+		if !isCheckpointRequest(req) {
+			briefings.Add(1)
+			writeSummary(w, "Briefing checkpoint")
+			return
+		}
+		summaries.Add(1)
+		var items []struct{ Type, Role string }
+		if err := json.Unmarshal(req.Input, &items); err != nil {
+			t.Error(err)
+		}
+		for i, item := range items {
+			if item.Type != "reasoning" {
+				continue
+			}
+			if i+1 == len(items) || items[i+1].Role == "user" {
+				rejected.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, `{"error":{"type":"invalid_request_error","param":"input","message":"Item 'rs_1' of type 'reasoning' was provided without its required following item."}}`)
+				return
+			}
+		}
+		if !strings.Contains(string(req.Input), "earlier progress") || strings.Contains(string(req.Input), "recent progress") {
+			t.Error("summary input must hold the older history and not the recent window")
+		}
+		fmt.Fprint(w, completedText("In-context checkpoint"))
+	})
+	cfg := e2eConfig(t)
+	cfg.ContextWindow, cfg.ReserveTokens = 40_000, 2_000
+	a := &harness.Agent{Config: cfg, Messages: []harness.Message{
+		{Role: harness.RoleUser, Content: []harness.Content{{Text: "original objective"}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Text: strings.Repeat("earlier progress ", 3000)}}},
+		// Too large for the window, so the window starts at the text below.
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Reasoning: &harness.Reasoning{ID: "rs_1", Content: strings.Repeat("A", 80_000), Model: "test-model"}}}},
+		{Role: harness.RoleAssistant, Content: []harness.Content{{Text: "recent progress"}}},
+	}}
+	if _, err := a.Compact(t.Context(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if summaries.Load() != 1 || rejected.Load() != 0 || briefings.Load() != 0 {
+		t.Fatalf("summaries=%d rejected=%d briefings=%d", summaries.Load(), rejected.Load(), briefings.Load())
+	}
+	if !contextContains(a, "In-context checkpoint") || !contextContains(a, "recent progress") || contextContains(a, "earlier progress") {
+		t.Fatal("checkpoint must replace the older history and keep the recent window")
+	}
+}
+
 // An input rejection may be an overflow in wording the agent does not
 // recognize, or a history item the transcript omits. Only the bounded
 // briefing gets past those, so it stays the fallback.

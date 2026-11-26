@@ -458,6 +458,15 @@ func (a *Agent) Recap(ctx context.Context, id string) (string, error) {
 	return s.harness.Recap(ctx)
 }
 
+// Ask answers a side question from the session's context without adding to it.
+func (a *Agent) Ask(ctx context.Context, id, question string, onText func(string)) (string, error) {
+	s := a.session(id)
+	if s == nil {
+		return "", fmt.Errorf("session %s not found", id)
+	}
+	return s.harness.Ask(ctx, question, onText)
+}
+
 func (a *Agent) Compact(ctx context.Context, id, focus string) (harness.CompactResult, error) {
 	s := a.session(id)
 	if s == nil {

@@ -26,6 +26,9 @@ func (a *App) openOverlay(o Overlay) {
 }
 
 func (a *App) closeOverlay() {
+	if closer, ok := a.overlay.(interface{ Close() }); ok {
+		closer.Close()
+	}
 	a.overlay = nil
 	a.invalidate()
 }

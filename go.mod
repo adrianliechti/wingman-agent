@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/adrianliechti/go-extract v0.0.0-20261029154039-97b29af3f71f
-	github.com/adrianliechti/go-monty v0.0.0-20261121154152-726f5b2d4fd8
+	github.com/adrianliechti/go-monty v0.0.0-20261127001111-234467dac315
 	github.com/adrianliechti/go-shell v0.1.12
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/bmatcuk/doublestar/v4 v4.10.7
