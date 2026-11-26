@@ -94,6 +94,7 @@ type Workspace struct {
 	warmed           bool
 	mcpToolsByServer map[string][]tool.Tool
 	mcpApproval      *tool.Elicitation
+	mcpChanged       func()
 	lspTools         []tool.Tool
 
 	mcpCatalogOnce    sync.Once
@@ -227,7 +228,7 @@ func loadMCP(workDir string, plugins []plugin.Plugin) *mcp.Manager {
 	}
 
 	// Load each file on its own so one broken config does not hide the other.
-	projectConfig := filepath.Join(workDir, "mcp.json")
+	projectConfig := projectMCPConfigPath(workDir)
 	configs := map[string]mcp.ServerConfig{}
 	trustRequired := map[string]string{}
 	found := false
@@ -381,6 +382,7 @@ func (w *Workspace) InitMCP(ctx context.Context, ui ...UI) error {
 		w.mcpToolsByServer = toolsByServer
 	}
 	w.mu.Unlock()
+	w.notifyMCPChanged()
 	return errors.Join(toolsErrs...)
 }
 
@@ -453,14 +455,16 @@ func (w *Workspace) refreshMCPServerTools(ctx context.Context, manager *mcp.Mana
 	}
 
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.closed {
+		w.mu.Unlock()
 		return
 	}
 	if w.mcpToolsByServer == nil {
 		w.mcpToolsByServer = make(map[string][]tool.Tool)
 	}
 	w.mcpToolsByServer[serverName] = tools
+	w.mu.Unlock()
+	w.notifyMCPChanged()
 }
 
 func flattenMCPTools(byServer map[string][]tool.Tool) []tool.Tool {
@@ -491,10 +495,12 @@ func (w *Workspace) Close() {
 	w.Changes = nil
 	w.mcpToolsByServer = nil
 	w.mcpRefreshCancel = nil
+	w.mcpChanged = nil
 	w.lspTools = nil
 	w.mu.Unlock()
 	if mcpManager != nil {
 		mcpManager.SetToolListChangedHandler(nil)
+		mcpManager.SetStatusChangedHandler(nil)
 	}
 	if mcpRefreshCancel != nil {
 		mcpRefreshCancel()

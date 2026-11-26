@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool/schedule"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
@@ -171,7 +171,7 @@ func TestSessionSwitchDiscardsPendingTurnUpdatesAndComposerContent(t *testing.T)
 		a.pendingContent = []harness.Content{{Text: "old attachment"}}
 		a.pendingEcho = []pendingEchoItem{{ID: "old-input", Text: "queued"}}
 		message := harness.Message{Content: []harness.Content{{Text: "old output"}}}
-		a.handleTurnEvent(corecode.TurnEvent{SessionID: "session", Message: &message})
+		a.handleTurnEvent(code.TurnEvent{SessionID: "session", Message: &message})
 		a.onSessionUpdate("session")
 		synctest.Wait() // Leave the old repaint waiting in the UI queue.
 		a.activateSession("other")
@@ -187,21 +187,21 @@ func TestSessionSwitchDiscardsPendingTurnUpdatesAndComposerContent(t *testing.T)
 
 func TestFinishingTurnDoesNotClearTheNextTurnsOutput(t *testing.T) {
 	testenv.WingmanHome(t)
-	for _, state := range []corecode.TurnInputState{corecode.TurnInputCompleted, corecode.TurnInputFailed, corecode.TurnInputCancelled, corecode.TurnInputIncomplete} {
+	for _, state := range []code.TurnInputState{code.TurnInputCompleted, code.TurnInputFailed, code.TurnInputCancelled, code.TurnInputIncomplete} {
 		t.Run(string(state), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				a, coder := newStreamTestApp(nil)
-				a.turns = corecode.NewTurnManager(a.ctx, coder, a.handleTurnEvent)
+				a.turns = code.NewTurnManager(a.ctx, coder, a.handleTurnEvent)
 				defer a.turns.Close()
 				a.termFocused = true
 				previous := harness.Message{Content: []harness.Content{{Text: "previous output"}}}
-				a.handleTurnEvent(corecode.TurnEvent{SessionID: "session", Message: &previous})
-				a.handleTurnEvent(corecode.TurnEvent{SessionID: "session", State: state, Executed: true, Err: errors.New("test failure")})
+				a.handleTurnEvent(code.TurnEvent{SessionID: "session", Message: &previous})
+				a.handleTurnEvent(code.TurnEvent{SessionID: "session", State: state, Executed: true, Err: errors.New("test failure")})
 				// TurnManager emits the next Active and output after the terminal
 				// callback returns, potentially before the UI processes that callback.
-				a.handleTurnEvent(corecode.TurnEvent{SessionID: "session", State: corecode.TurnInputActive})
+				a.handleTurnEvent(code.TurnEvent{SessionID: "session", State: code.TurnInputActive})
 				next := harness.Message{Content: []harness.Content{{Text: "next output"}}}
-				a.handleTurnEvent(corecode.TurnEvent{SessionID: "session", Message: &next})
+				a.handleTurnEvent(code.TurnEvent{SessionID: "session", Message: &next})
 				synctest.Wait()
 				drainStateUpdates(a)
 				output := ansi.Strip(strings.Join(a.streamCells(100), "\n"))
@@ -282,7 +282,7 @@ func TestRejectedTurnKeepsComposerAndAttachments(t *testing.T) {
 	a.pendingFiles = []string{"main.go"}
 	content := []harness.Content{{Text: "attached content"}}
 	a.pendingContent = content
-	a.turns = corecode.NewTurnManager(a.ctx, coder, a.handleTurnEvent)
+	a.turns = code.NewTurnManager(a.ctx, coder, a.handleTurnEvent)
 	a.turns.Close()
 	a.submitInput()
 	if a.editor.Text() != "keep this draft" || !reflect.DeepEqual(a.pendingFiles, []string{"main.go"}) || !reflect.DeepEqual(a.pendingContent, content) {
@@ -307,7 +307,7 @@ func TestAcceptedUserInputPrecedesImmediateStreamOutput(t *testing.T) {
 		a, base := newStreamTestApp(nil)
 		coder := &streamingTestAgent{uiTestAgent: base}
 		a.agent = coder
-		a.turns = corecode.NewTurnManager(a.ctx, coder, a.handleTurnEvent)
+		a.turns = code.NewTurnManager(a.ctx, coder, a.handleTurnEvent)
 		defer a.turns.Close()
 		if !a.submitAgentInput([]harness.Content{{Text: "user input"}}, "user input") {
 			t.Fatal("submission failed")
@@ -324,7 +324,7 @@ func TestAcceptedUserInputPrecedesImmediateStreamOutput(t *testing.T) {
 func TestToolProgressIgnoresOtherSessions(t *testing.T) {
 	a, _ := newStreamTestApp(nil)
 	a.streamCurrent = streamSnapshot{toolID: "call", toolName: "shell"}
-	a.onToolProgress(corecode.WithSessionID(context.Background(), "other"), "call", "wrong session")
+	a.onToolProgress(code.WithSessionID(context.Background(), "other"), "call", "wrong session")
 	if a.streamCurrent.toolProgress != "" {
 		t.Fatal("another session changed the visible tool")
 	}

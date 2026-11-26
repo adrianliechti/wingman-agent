@@ -8,6 +8,7 @@ type SkillEntry struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	InputHint   string `json:"input_hint,omitempty"`
+	Scope       string `json:"scope,omitempty"`
 }
 
 // skillBlocks expands leading or inline /skill and $skill invocations into
@@ -45,6 +46,7 @@ func (s *Project) skillCatalogue() []SkillEntry {
 			Name:        sk.Qualified(),
 			Description: sk.Description,
 			InputHint:   hint,
+			Scope:       sk.Scope(),
 		})
 	}
 	return result

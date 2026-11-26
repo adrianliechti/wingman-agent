@@ -36,9 +36,11 @@ type Manager struct {
 	elicit atomic.Pointer[ElicitFunc]
 
 	toolListChanged atomic.Pointer[ToolListChangedFunc]
+	statusChanged   atomic.Pointer[func()]
 	telemetry       atomic.Pointer[telemetry.Telemetry]
 
 	mu                  sync.RWMutex
+	status              map[string]Status
 	sessions            map[string]*mcp.ClientSession
 	sessionObservations map[*mcp.ClientSession]*telemetry.MCPSession
 }
@@ -51,6 +53,7 @@ func NewManager(cfg *Config) *Manager {
 
 		Credentials: DefaultCredentialStore(),
 
+		status:              make(map[string]Status),
 		sessions:            make(map[string]*mcp.ClientSession),
 		sessionObservations: make(map[*mcp.ClientSession]*telemetry.MCPSession),
 	}
@@ -68,10 +71,13 @@ func (m *Manager) Connect(ctx context.Context, authorize ...func(context.Context
 		}
 		if m.TrustRequired[name] != "" {
 			if len(authorize) == 0 || authorize[0] == nil {
-				errs = append(errs, fmt.Errorf("MCP server %s requires approval of %s", name, m.TrustRequired[name]))
+				err := fmt.Errorf("MCP server %s requires approval of %s", name, m.TrustRequired[name])
+				m.setStatus(name, StateUnapproved, err)
+				errs = append(errs, err)
 				continue
 			}
 			if err := authorize[0](ctx, name, m.Servers[name]); err != nil {
+				m.setStatus(name, StateUnapproved, err)
 				errs = append(errs, err)
 				continue
 			}
@@ -111,12 +117,17 @@ func (m *Manager) addSession(ctx context.Context, name string, session *mcp.Clie
 		m.sessionObservations[session] = observation
 	}
 	m.mu.Unlock()
+	m.setStatus(name, StateConnected, nil)
 
-	if observation != nil {
-		go func() {
-			observation.End(telemetry.Outcome{Err: session.Wait()})
-		}()
-	}
+	go func() {
+		err := session.Wait()
+		if observation != nil {
+			observation.End(telemetry.Outcome{Err: err})
+		}
+		if m.Session(name) == session {
+			m.setStatus(name, StateDisconnected, err)
+		}
+	}()
 }
 
 // SetTelemetry instruments clients created by this manager. It should normally
@@ -170,17 +181,21 @@ func (m *Manager) Session(name string) *mcp.ClientSession {
 const connectTimeout = 30 * time.Second
 
 func (m *Manager) connect(ctx context.Context, name string, server ServerConfig) error {
+	m.setStatus(name, StateConnecting, nil)
+
 	client := m.newClient(name, server)
 
 	handler, err := m.oauthHandler(name, server)
 
 	if err != nil {
+		m.setFailed(name, err)
 		return Redact(fmt.Errorf("MCP server %s: %w", name, err))
 	}
 
 	transport, err := createTransport(server, m.Dir, handler)
 
 	if err != nil {
+		m.setFailed(name, err)
 		return Redact(fmt.Errorf("MCP server %s: %w", name, err))
 	}
 
@@ -192,8 +207,9 @@ func (m *Manager) connect(ctx context.Context, name string, server ServerConfig)
 
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && parent.Err() == nil {
-			return Redact(fmt.Errorf("%s: no answer within %s: %w", name, connectTimeout, err))
+			err = fmt.Errorf("no answer within %s: %w", connectTimeout, err)
 		}
+		m.setFailed(name, err)
 		return Redact(fmt.Errorf("%s: %w", name, err))
 	}
 

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"slices"
 
-	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
 )
 
@@ -33,7 +33,7 @@ func (a *App) showSessionPicker(back bool) {
 				}
 			}
 			sessions = filtered
-			slices.SortFunc(sessions, func(a, b corecode.SessionInfo) int {
+			slices.SortFunc(sessions, func(a, b code.SessionInfo) int {
 				return cmp.Compare(b.UpdatedAt.UnixNano(), a.UpdatedAt.UnixNano())
 			})
 
@@ -46,7 +46,7 @@ func (a *App) showSessionPicker(back bool) {
 			}
 
 			items := make([]PopupItem, 0, len(sessions))
-			byID := make(map[string]corecode.SessionInfo, len(sessions))
+			byID := make(map[string]code.SessionInfo, len(sessions))
 			for _, session := range sessions {
 				label := session.Title
 				if label == "" {
@@ -84,7 +84,7 @@ func shortSessionID(id string) string {
 	return id[:8]
 }
 
-func (a *App) loadSessionInfo(info corecode.SessionInfo) {
+func (a *App) loadSessionInfo(info code.SessionInfo) {
 	previousID := a.sessionID
 	a.runSessionOperation("Failed to load session", func(ctx context.Context, _ string) error { return a.agent.LoadSession(ctx, info.ID) }, func() {
 		a.switchToSession(previousID, info.ID, fmt.Sprintf("Resumed session from %s", info.UpdatedAt.Format("Jan 2 15:04")))

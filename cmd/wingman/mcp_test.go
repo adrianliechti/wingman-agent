@@ -32,6 +32,17 @@ func TestParseMCPAddRemote(t *testing.T) {
 	if err != nil || server.Transport != "sse" {
 		t.Fatalf("server = %+v err = %v", server, err)
 	}
+
+	for _, args := range [][]string{
+		{"exa", "https://mcp.exa.ai/mcp"},
+		{"exa", "-H", "X-Key: 1", "https://mcp.exa.ai/mcp"},
+		{"exa", "--", "https://mcp.exa.ai/mcp"},
+	} {
+		_, server, _, err = parseMCPAdd(args)
+		if err != nil || server.URL != "https://mcp.exa.ai/mcp" || server.Command != "" {
+			t.Fatalf("%q: server = %+v err = %v", args, server, err)
+		}
+	}
 }
 
 func TestParseMCPAddStdio(t *testing.T) {
@@ -55,6 +66,9 @@ func TestParseMCPAddErrors(t *testing.T) {
 		{},
 		{"name"},
 		{"name", "--url", "https://x", "--", "cmd"},
+		{"name", "--url", "https://x", "https://y"},
+		{"name", "https://x", "extra"},
+		{"name", "https://x", "-e", "A=1"},
 		{"name", "--url", "ftp://x"},
 		{"name", "--url", "https://x", "--transport", "grpc"},
 		{"name", "--url", "https://x", "-H", "nocolon"},

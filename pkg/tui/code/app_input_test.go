@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
@@ -78,8 +78,8 @@ func (a *unattendedUITestAgent) SetUnattended(_ context.Context, _ string, enabl
 	a.unattended = enabled
 	return nil
 }
-func (a *unattendedUITestAgent) Modes(string) ([]corecode.Mode, string) {
-	return []corecode.Mode{{ID: "agent", Name: "Agent"}, {ID: "plan", Name: "Plan"}}, a.mode
+func (a *unattendedUITestAgent) Modes(string) ([]code.Mode, string) {
+	return []code.Mode{{ID: "agent", Name: "Agent"}, {ID: "plan", Name: "Plan"}}, a.mode
 }
 
 func TestBacktabPreservesPlanWithIndependentUnattendedPolicy(t *testing.T) {

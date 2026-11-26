@@ -5,6 +5,7 @@ import {
 	GitCompare,
 	Loader2,
 	MessageSquare,
+	Plug,
 	SquareTerminal,
 	X,
 } from "lucide-react";
@@ -16,7 +17,8 @@ export type TabKind =
 	| "compare"
 	| "terminal"
 	| "task"
-	| "insights";
+	| "insights"
+	| "connections";
 
 export function Tab({
 	id,
@@ -66,7 +68,9 @@ export function Tab({
 						? Bot
 						: kind === "insights"
 							? ChartColumn
-							: FileText;
+							: kind === "connections"
+								? Plug
+								: FileText;
 
 	return (
 		<button

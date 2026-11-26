@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/task"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
@@ -45,10 +45,10 @@ type userShellRecorder interface {
 }
 
 type uiAwareAgent interface {
-	SetUI(corecode.UI)
+	SetUI(code.UI)
 }
 
-func setAgentUI(a corecode.Agent, ui corecode.UI) {
+func setAgentUI(a code.Agent, ui code.UI) {
 	if aware, ok := a.(uiAwareAgent); ok {
 		aware.SetUI(ui)
 	}

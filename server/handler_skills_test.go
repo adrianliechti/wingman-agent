@@ -52,7 +52,8 @@ Specify $ARGUMENTS.
 	for _, entry := range entries {
 		if entry.Name == "speckit-specify" &&
 			entry.Description == "Create a feature specification" &&
-			entry.InputHint == "<feature description>" {
+			entry.InputHint == "<feature description>" &&
+			entry.Scope == "project" {
 			found = true
 			break
 		}

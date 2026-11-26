@@ -957,6 +957,94 @@ test("the command palette waits for file results matching its current query", as
 	).toBeVisible();
 });
 
+test("the command palette opens the connections: MCP servers, plugins and skills", async ({
+	page,
+}) => {
+	await page.route("**/api/workspace/mcp", (route) =>
+		route.fulfill({
+			json: [
+				{
+					name: "docs",
+					transport: "http",
+					scope: "global",
+					target: "https://mcp.example.com/mcp",
+					state: "connected",
+					tools: [{ name: "search", description: "Search the documentation" }],
+				},
+				{
+					name: "local",
+					transport: "stdio",
+					scope: "project",
+					target: "npx -y server",
+					state: "failed",
+					error: "no such file or directory",
+					tools: [],
+				},
+			],
+		}),
+	);
+	await page.route("**/api/workspace/plugins", (route) =>
+		route.fulfill({
+			json: [
+				{
+					name: "release-tools",
+					version: "1.0.0",
+					description: "Release checklist",
+					scope: "project",
+					skills: 1,
+					mcp_servers: 3,
+					language_servers: 0,
+					hooks: true,
+				},
+			],
+		}),
+	);
+	await page.route("**/api/workspace/skills", (route) =>
+		route.fulfill({
+			json: [
+				{ name: "commit", description: "Create a commit", scope: "builtin" },
+				{ name: "deploy", description: "Deploy a preview", scope: "project" },
+			],
+		}),
+	);
+	await composer(page);
+	await page.keyboard.press("Control+k");
+	const palette = page.getByRole("dialog", { name: "Command palette" });
+	await palette
+		.getByRole("combobox", { name: "Search commands" })
+		.fill("connections");
+	await palette.getByRole("option", { name: /Show connections/ }).click();
+	await expect(
+		page
+			.getByRole("tablist", { name: "Open tabs" })
+			.getByRole("tab", { name: "Connections" }),
+	).toHaveAttribute("aria-selected", "true");
+	await expect(page.getByText("1 of 2 connected · 1 tool")).toBeVisible();
+
+	const docs = page.getByRole("region", { name: "docs" });
+	await expect(docs).toContainText("Connected · 1 tool");
+	await expect(docs).toContainText("https://mcp.example.com/mcp");
+	const tool = docs.getByRole("button", { name: /search/ });
+	await expect(tool).toContainText("Search the documentation");
+	await tool.click();
+	await expect(tool).toHaveAttribute("aria-expanded", "true");
+
+	const local = page.getByRole("region", { name: "local" });
+	await expect(local).toContainText("Failed");
+	await expect(local).toContainText("no such file or directory");
+
+	const plugin = page.locator('[data-plugin="release-tools"]');
+	await expect(plugin).toContainText("1.0.0");
+	await expect(plugin).toContainText("1 skill · 3 MCP servers · hooks");
+
+	// A project's own skills come before the built-in ones.
+	const skills = page.locator("[data-skill]");
+	await expect(skills).toHaveCount(2);
+	await expect(skills.first()).toContainText("/deploy");
+	await expect(skills.first()).toContainText("project");
+	await expect(skills.last()).toContainText("built-in");
+});
+
 test("prompt history arrows preserve drafts, selection, and multiline editing", async ({
 	page,
 }) => {
@@ -6597,9 +6685,7 @@ test.describe("session list", () => {
 			changes: { status: IDLE | READ | ARCHIVED },
 		});
 		await expect(sessionRow(page, "fleet-old")).toHaveCount(0);
-		await sessionsPanel(page)
-			.getByRole("button", { name: "Filter sessions" })
-			.click();
+		await page.getByRole("button", { name: "Filter sessions" }).click();
 		await page.getByRole("menuitemradio", { name: "Archived" }).click();
 		await expect(sessionRow(page, "fleet-old")).toBeVisible();
 		await expect(sessionRow(page, "fleet-finished")).toHaveCount(0);

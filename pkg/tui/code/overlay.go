@@ -134,6 +134,33 @@ func (p *pager) Render(width, height int) []string {
 	return lines
 }
 
+// infoOverlay pages through lines it rebuilds on every render, so it follows what it shows.
+type infoOverlay struct {
+	build  func(width int) (title string, lines []string)
+	pager  pager
+	height int
+}
+
+func (a *App) showInfo(build func(width int) (title string, lines []string)) {
+	o := &infoOverlay{build: build}
+	o.pager.hints = dim("↑↓/jk/wheel scroll · g/G top/bottom · esc back to chat")
+	a.openOverlay(o)
+}
+
+func (o *infoOverlay) Render(width, height int) []string {
+	o.height = height
+	o.pager.title, o.pager.lines = o.build(width)
+	return o.pager.Render(width, height)
+}
+
+func (o *infoOverlay) HandleKey(ev inline.KeyEvent) bool {
+	return o.pager.HandleKey(ev, o.height)
+}
+
+func (o *infoOverlay) HandleMouse(ev inline.MouseEvent) {
+	o.pager.HandleMouse(ev, o.height)
+}
+
 // transcriptLines renders committed messages with nothing truncated. A nil
 // isToolHidden shows every tool result.
 func transcriptLines(messages []harness.Message, width int, isToolHidden func(string) bool) []string {

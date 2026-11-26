@@ -49,6 +49,20 @@ func (s *Skill) Qualified() string {
 	return s.Plugin + ":" + s.Name
 }
 
+// Scope names where a skill comes from: builtin, plugin, personal or project.
+func (s *Skill) Scope() string {
+	switch {
+	case s.Plugin != "":
+		return "plugin"
+	case s.Bundled:
+		return "builtin"
+	case filepath.IsAbs(s.Location):
+		return "personal"
+	default:
+		return "project"
+	}
+}
+
 // InvocationHint returns the explicit Claude-compatible argument hint or a
 // neutral hint derived from the declared positional argument names.
 func (s *Skill) InvocationHint() string {

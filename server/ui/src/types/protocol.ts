@@ -36,7 +36,8 @@ export type ServerMessage = {
 		| "workspace_changed"
 		| "tasks_changed"
 		| "terminals_changed"
-		| "skills_changed";
+		| "skills_changed"
+		| "mcp_changed";
 	session?: string;
 	backend?: string;
 };

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
@@ -17,16 +17,16 @@ import (
 type queueTestAgent struct {
 	*uiTestAgent
 	mu        sync.Mutex
-	persisted corecode.TurnQueueState
+	persisted code.TurnQueueState
 	sent      chan string
 }
 
-func (a *queueTestAgent) LoadTurnQueue(string) (corecode.TurnQueueState, error) {
+func (a *queueTestAgent) LoadTurnQueue(string) (code.TurnQueueState, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.persisted, nil
 }
-func (a *queueTestAgent) SaveTurnQueue(_ string, s corecode.TurnQueueState) error {
+func (a *queueTestAgent) SaveTurnQueue(_ string, s code.TurnQueueState) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.persisted = s
@@ -47,10 +47,10 @@ func newQueueTestApp(t *testing.T, count int) (*App, *queueTestAgent) {
 	app.editor = NewEditor()
 	fakeQueue := &queueTestAgent{uiTestAgent: fake, sent: make(chan string, count+1)}
 	for i := range count {
-		fakeQueue.persisted.Inputs = append(fakeQueue.persisted.Inputs, corecode.TurnInput{ID: strings.Repeat("x", i+1), Content: []harness.Content{{Text: "recovered follow-up"}}})
+		fakeQueue.persisted.Inputs = append(fakeQueue.persisted.Inputs, code.TurnInput{ID: strings.Repeat("x", i+1), Content: []harness.Content{{Text: "recovered follow-up"}}})
 	}
 	app.agent = fakeQueue
-	app.turns = corecode.NewTurnManager(app.ctx, fakeQueue, app.handleTurnEvent)
+	app.turns = code.NewTurnManager(app.ctx, fakeQueue, app.handleTurnEvent)
 	app.drafts = newDraftStore(nil, "")
 	t.Cleanup(app.turns.Close)
 	app.syncQueuedInputs()
@@ -132,7 +132,7 @@ func TestAltEnterQueuesAndShiftEnterInsertsNewline(t *testing.T) {
 	}
 	app.handleKey(inline.KeyEvent{Key: inline.KeyEnter, Alt: true})
 	snapshot := app.turns.Snapshot("session")
-	if len(snapshot.Inputs) != 2 || snapshot.Inputs[1].Intent != corecode.TurnInputFollowUp {
+	if len(snapshot.Inputs) != 2 || snapshot.Inputs[1].Intent != code.TurnInputFollowUp {
 		t.Fatalf("Alt+Enter did not queue: %+v", snapshot)
 	}
 }

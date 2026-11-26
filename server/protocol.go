@@ -21,6 +21,7 @@ const (
 	EvtTurnInput        = "turn_input"
 	EvtTasksChanged     = "tasks_changed"
 	EvtSkillsChanged    = "skills_changed"
+	EvtMCPChanged       = "mcp_changed"
 )
 
 const (

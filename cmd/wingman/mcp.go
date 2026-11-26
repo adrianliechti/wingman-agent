@@ -134,18 +134,6 @@ func findMCPEntry(name string) (mcpEntry, error) {
 	return mcpEntry{}, fmt.Errorf("MCP server %q not found (run 'wingman mcp list')", name)
 }
 
-func mcpTransportName(server mcp.ServerConfig) string {
-	if server.URL == "" {
-		return "stdio"
-	}
-
-	if server.Transport == "sse" {
-		return "sse"
-	}
-
-	return "http"
-}
-
 func mcpTarget(server mcp.ServerConfig) string {
 	if server.URL != "" {
 		return server.URL
@@ -202,7 +190,7 @@ func runMCPList(args []string) error {
 	fmt.Fprintln(w, "NAME\tTYPE\tTARGET\tSCOPE\tAUTH")
 
 	for _, entry := range entries {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", entry.Name, mcpTransportName(entry.Server), mcpTarget(entry.Server), entry.Scope, mcpAuthStatus(store, entry.Server))
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", entry.Name, entry.Server.Kind(), mcpTarget(entry.Server), entry.Scope, mcpAuthStatus(store, entry.Server))
 	}
 
 	return w.Flush()
@@ -237,7 +225,7 @@ func printMCPEntry(w io.Writer, entry mcpEntry, store *mcp.CredentialStore) {
 
 	fmt.Fprintf(w, "%s\n", entry.Name)
 	fmt.Fprintf(w, "  Scope:     %s (%s)\n", entry.Scope, entry.Path)
-	fmt.Fprintf(w, "  Type:      %s\n", mcpTransportName(server))
+	fmt.Fprintf(w, "  Type:      %s\n", server.Kind())
 
 	if server.URL != "" {
 		fmt.Fprintf(w, "  URL:       %s\n", server.URL)
@@ -281,7 +269,7 @@ func parseMCPAdd(args []string) (string, mcp.ServerConfig, mcpAddOptions, error)
 
 	opts := mcpAddOptions{Scope: mcpScopeGlobal}
 
-	fs := newFlags("wingman mcp add NAME (--url URL | -- COMMAND [ARGS...])")
+	fs := newFlags("wingman mcp add NAME (URL | -- COMMAND [ARGS...])")
 	fs.String(&url, "--url URL", "endpoint of a remote (HTTP) server")
 	fs.String(&transport, "--transport, -t TYPE", "http (default) or sse for remote servers")
 	fs.Strings(&headers, "--header, -H \"K: V\"", "header sent to a remote server (repeatable)")
@@ -298,7 +286,7 @@ func parseMCPAdd(args []string) (string, mcp.ServerConfig, mcpAddOptions, error)
 	}
 
 	if len(positional) == 0 {
-		return "", mcp.ServerConfig{}, opts, errors.New("usage: wingman mcp add NAME (--url URL | -- COMMAND [ARGS...])")
+		return "", mcp.ServerConfig{}, opts, errors.New("usage: wingman mcp add NAME (URL | -- COMMAND [ARGS...])")
 	}
 
 	name := positional[0]
@@ -312,6 +300,14 @@ func parseMCPAdd(args []string) (string, mcp.ServerConfig, mcpAddOptions, error)
 		return "", mcp.ServerConfig{}, opts, err
 	}
 
+	if url == "" && len(command) > 0 && isHTTPURL(command[0]) {
+		if len(command) > 1 {
+			return "", mcp.ServerConfig{}, opts, fmt.Errorf("unexpected arguments after the URL: %s", strings.Join(command[1:], " "))
+		}
+
+		url, command = command[0], nil
+	}
+
 	var server mcp.ServerConfig
 
 	switch {
@@ -319,7 +315,7 @@ func parseMCPAdd(args []string) (string, mcp.ServerConfig, mcpAddOptions, error)
 		return "", mcp.ServerConfig{}, opts, errors.New("specify either --url or a command, not both")
 
 	case url != "":
-		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		if !isHTTPURL(url) {
 			return "", mcp.ServerConfig{}, opts, fmt.Errorf("invalid url %q", url)
 		}
 
@@ -382,10 +378,14 @@ func parseMCPAdd(args []string) (string, mcp.ServerConfig, mcpAddOptions, error)
 		}
 
 	default:
-		return "", mcp.ServerConfig{}, opts, errors.New("specify --url URL or a command after --")
+		return "", mcp.ServerConfig{}, opts, errors.New("specify a URL or a command after --")
 	}
 
 	return name, server, opts, nil
+}
+
+func isHTTPURL(value string) bool {
+	return strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")
 }
 
 func runMCPAdd(ctx context.Context, args []string) error {
@@ -568,14 +568,14 @@ func printMCPHelp(w io.Writer) {
 Usage:
   wingman mcp list                               List configured servers (alias: ls)
   wingman mcp get NAME                           Show a server's configuration
-  wingman mcp add NAME --url URL [flags]         Add a remote (HTTP/SSE) server
+  wingman mcp add NAME URL [flags]               Add a remote (HTTP/SSE) server
   wingman mcp add NAME [flags] -- COMMAND [ARGS] Add a stdio server
   wingman mcp remove NAME [--scope SCOPE]        Remove a server (alias: rm)
   wingman mcp login NAME [--callback-port N]     Log in to a remote server with OAuth
   wingman mcp logout NAME                        Forget stored OAuth credentials
 
 Add flags:
-  --url URL             Endpoint of a remote server
+  --url URL             Endpoint of a remote server (same as URL after NAME)
   --transport, -t TYPE  http (default) or sse for remote servers
   --header, -H "K: V"   Header sent to a remote server (repeatable)
   --env, -e K=V         Environment variable for a stdio server (repeatable)
@@ -588,9 +588,9 @@ Remote servers that require OAuth open your browser on 'add' and 'login'.
 Tokens are stored in ~/.wingman/mcp-credentials.json and refreshed automatically.
 
 Examples:
-  wingman mcp add remote --url https://mcp.example.com/mcp
+  wingman mcp add remote https://mcp.example.com/mcp
   wingman mcp add fs -- npx -y @modelcontextprotocol/server-filesystem .
-  wingman mcp add api --url https://api.example.com/mcp -H "X-Api-Key: secret"
+  wingman mcp add api https://api.example.com/mcp -H "X-Api-Key: secret"
   wingman mcp login remote
 `, mcp.DefaultCallbackPort)
 }

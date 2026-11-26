@@ -85,6 +85,13 @@ func (a *App) builtinCommands() []slashCommand {
 	if _, ok := a.agent.(contextStatsProvider); ok {
 		cmds = append(cmds, slashCommand{Name: "/context", Desc: "Show context window usage", Busy: true, Run: (*App).showContextStats})
 	}
+	if a.agent.Name() == code.BuiltinAgentName {
+		cmds = append(cmds, slashCommand{Name: "/mcp", Desc: "Show MCP servers and their tools", Busy: true, Run: (*App).showMCPServers})
+	}
+	cmds = append(cmds,
+		slashCommand{Name: "/skills", Desc: "Show available skills", Busy: true, Run: (*App).showSkills},
+		slashCommand{Name: "/plugins", Desc: "Show installed plugins", Busy: true, Run: (*App).showPlugins},
+	)
 	if _, ok := a.agent.(taskProvider); ok {
 		cmds = append(cmds, slashCommand{Name: "/agents", Desc: "Watch agents and view scheduled tasks", Busy: true, Run: (*App).showAgents})
 	}
@@ -136,15 +143,7 @@ func (a *App) skillCommands() []slashCommand {
 	skills := workspace.Skills()
 	for i := range skills {
 		s := &skills[i]
-
-		// A plugin skill whose bare name lost to another source is only
-		// reachable qualified, so offer the name that actually works.
-		name := s.Name
-		if s.Plugin != "" && skill.FindSkill(s.Name, skills) != s {
-			name = s.Qualified()
-		}
-
-		cmds = append(cmds, slashCommand{Name: "/" + name, Desc: s.Description, Hint: s.InvocationHint()})
+		cmds = append(cmds, slashCommand{Name: "/" + skillCommandName(s, skills), Desc: s.Description, Hint: s.InvocationHint()})
 	}
 	slices.SortStableFunc(cmds, func(a, b slashCommand) int {
 		if a.Name == "/init" {
@@ -156,6 +155,15 @@ func (a *App) skillCommands() []slashCommand {
 		return cmp.Compare(a.Name, b.Name)
 	})
 	return cmds
+}
+
+// A plugin skill whose bare name lost to another source is only reachable
+// qualified, so this is the name that actually works.
+func skillCommandName(s *skill.Skill, skills []skill.Skill) string {
+	if s.Plugin != "" && skill.FindSkill(s.Name, skills) != s {
+		return s.Qualified()
+	}
+	return s.Name
 }
 
 func (a *App) agentCommands() []slashCommand {

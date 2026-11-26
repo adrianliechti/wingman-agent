@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/theme"
@@ -76,7 +76,7 @@ func TestUserShellCommandExecutesPrintsOutputAndRecordsForAgent(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("recorded messages = %d, want 1", len(msgs))
 	}
-	cmd, output, exitCode, ok := corecode.ParseUserShellCommand(msgs[0].Content[0].AsText())
+	cmd, output, exitCode, ok := code.ParseUserShellCommand(msgs[0].Content[0].AsText())
 	if !ok {
 		t.Fatalf("recorded message is not <user_shell_command>:\n%s", msgs[0].Content[0].AsText())
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/adrianliechti/wingman-agent/pkg/layout"
 )
@@ -30,6 +31,25 @@ type ServerConfig struct {
 	// Dir overrides the manager-wide working directory for this server alone.
 	// Plugin-provided servers run in their own package or data directory.
 	Dir string `json:"-"`
+}
+
+// Kind names the transport: stdio, sse or http.
+func (s ServerConfig) Kind() string {
+	if s.URL == "" {
+		return "stdio"
+	}
+	if s.Transport == "sse" {
+		return "sse"
+	}
+	return "http"
+}
+
+// Target is the command line or the endpoint, without the credentials a URL can carry.
+func (s ServerConfig) Target() string {
+	if s.URL != "" {
+		return redactURL(s.URL)
+	}
+	return strings.Join(append([]string{s.Command}, s.Args...), " ")
 }
 
 // OAuthConfig tunes the authorization code flow for a remote server. Without

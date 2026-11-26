@@ -678,6 +678,7 @@ func (a *App) Run() error {
 		})
 	}
 
+	a.agent.Workspace().SetMCPChangedHandler(a.requestRender)
 	startup.Go(func() {
 		a.agent.Workspace().WarmUp()
 		a.post(func() { a.pollDiffPanel(false) })

@@ -14,7 +14,7 @@ import (
 	"github.com/go-git/go-git/v5"
 
 	"github.com/adrianliechti/wingman-agent/internal/testenv"
-	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/ansi"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
@@ -50,7 +50,7 @@ func TestRunWaitsForStartupBeforeReturning(t *testing.T) {
 					stopped:     make(chan struct{}),
 					release:     release,
 				}
-				agent.workspace = &corecode.Workspace{RootPath: dir}
+				agent.workspace = &code.Workspace{RootPath: dir}
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				app := New(ctx, agent, "session")
@@ -118,7 +118,7 @@ func TestStartupLoadsDiffsAndAcceptsInputWhileModelDiscoveryIsBlocked(t *testing
 		started:     make(chan struct{}),
 		stopped:     make(chan struct{}),
 	}
-	agent.workspace = &corecode.Workspace{RootPath: dir}
+	agent.workspace = &code.Workspace{RootPath: dir}
 	ctx, cancel := context.WithCancel(context.Background())
 	app := New(ctx, agent, "session")
 	inputR, inputW := io.Pipe()

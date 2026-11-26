@@ -45,6 +45,7 @@ import {
 	PanelLeftOpen,
 	PanelRightOpen,
 	PanelTop,
+	Plug,
 	Plus,
 	Search,
 	Save,
@@ -124,6 +125,7 @@ import type {
 	FileTabHandle,
 } from "./components/FileTab";
 import { InsightsView } from "./components/InsightsView";
+import { ConnectionsView } from "./components/ConnectionsView";
 import { TasksPanel } from "./components/TasksPanel";
 import { TaskTab } from "./components/TaskTab";
 import { TerminalView } from "./components/TerminalView";
@@ -135,7 +137,7 @@ import {
 	useToast,
 } from "./components/ui/Feedback";
 import { FloatingMenu, FloatingSurface } from "./components/ui/Floating";
-import { SessionsPanel } from "./components/SessionsPanel";
+import { SessionsPanel, SessionsToolbar } from "./components/SessionsPanel";
 import {
 	currentFleet,
 	useFleet,
@@ -1091,6 +1093,12 @@ export default function App() {
 	const openInsights = () => {
 		showCenterTab(
 			{ id: "insights", type: "insights", label: "Insights" },
+			"keep",
+		);
+	};
+	const openConnections = () => {
+		showCenterTab(
+			{ id: "connections", type: "connections", label: "Connections" },
 			"keep",
 		);
 	};
@@ -2244,6 +2252,13 @@ export default function App() {
 					},
 				]
 			: []),
+		{
+			id: "connections",
+			label: "Show connections",
+			hint: "MCP servers, plugins, skills",
+			icon: <Plug size={12} className="text-fg-dim shrink-0" />,
+			run: openConnections,
+		},
 		...(terminalShells.length === 0
 			? [
 					{
@@ -2433,6 +2448,7 @@ export default function App() {
 				/>
 			);
 		}
+		if (tab.type === "connections") return <ConnectionsView key={tab.id} />;
 		if (
 			tab.type === "compare" &&
 			tab.compareBase &&
@@ -2623,7 +2639,7 @@ export default function App() {
 		<div
 			data-window-interactive
 			data-titlebar-sessions
-			className="relative z-20 flex shrink-0 items-center overflow-hidden px-1"
+			className={`relative z-20 flex shrink-0 items-center overflow-hidden pl-1 ${sessionsDocked ? "pr-2" : "pr-1"}`}
 			style={{
 				width: sessionsDocked
 					? "calc(var(--sessions-panel-width) - var(--window-controls-inset) - var(--window-menu-inset))"
@@ -2631,6 +2647,12 @@ export default function App() {
 			}}
 		>
 			{sessionsToggle}
+			{sessionsDocked && (
+				<>
+					<div className="min-w-0 flex-1" />
+					<SessionsToolbar />
+				</>
+			)}
 		</div>
 	);
 	const agentsShown = activeTab.type === "chat" && agentsTab === activeTab.id;

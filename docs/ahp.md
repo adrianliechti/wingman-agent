@@ -517,8 +517,8 @@ paths. The web UI negotiates 1.1; 1.0 clients receive the legacy queue/steering 
 Side chats, chats from other providers, TCP channels, experimental channel
 windows, and protocol-native automations are not advertised. Chat drafts and a chat's own read and archived flags last while its project is open.
 The remaining Wingman extensions are the `x-wingman/workspaceChanged` root
-notification (`files_changed`, `workspace_changed`, `skills_changed` and
-`tasks_changed`), the root's `_meta["wingman.host"]` and
+notification (`files_changed`, `workspace_changed`, `skills_changed`,
+`mcp_changed` and `tasks_changed`), the root's `_meta["wingman.host"]` and
 `_meta["wingman.workspace"]` identities used to detect a replaced host or
 workspace, and `createTerminal`'s `_meta["wingman.shell"]`.
 Sessions, models, terminals and Git changes reach clients through the standard
@@ -530,9 +530,22 @@ attachments.
 ## Skills and commands
 
 `GET /api/workspace/skills` lists the workspace's effective skill catalogue,
-including bundled, personal, project and plugin skills. Plugin entries retain
+including bundled, personal, project and plugin skills, each with its `scope`
+(`builtin`, `personal`, `project` or `plugin`). Plugin entries retain
 their `plugin:skill` names. Listing is independent of the backend and session
 and never starts an agent; `/api/skills` has been removed.
+
+`GET /api/workspace/mcp` lists the workspace's MCP servers with their
+transport, scope (`global`, `project` or `plugin`), target, connection `state`
+(`pending`, `connecting`, `connected`, `failed`, `unapproved`, `login_required`
+or `disconnected`), last `error` and `tools`. Targets and errors omit the
+credentials a URL can carry; headers and environment values are never
+included. `mcp_changed` follows every change to this list.
+
+`GET /api/workspace/plugins` lists the plugins loaded for the workspace with
+their `version`, `description`, `scope` (`personal` or `project`) and what
+each brings: the number of `skills`, `mcp_servers` and `language_servers`, and
+whether it has `hooks`. Plugins are fixed while a workspace is open.
 
 The standard chat-scoped AHP `completions` request supplies the combined skill
 and native command picker for an existing session. `/` is advertised as a

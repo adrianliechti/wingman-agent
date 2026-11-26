@@ -280,6 +280,8 @@ func (s *Server) registerRoutes(r chi.Router) {
 		r.Post("/settings/window.terminal.position", s.handleWindowTerminalSettings)
 		r.Post("/settings/window.sidebar.position", s.handleWindowSidebarSettings)
 		r.Get("/workspace/skills", s.handleSkills)
+		r.Get("/workspace/mcp", s.handleMCPServers)
+		r.Get("/workspace/plugins", s.handlePlugins)
 		r.Get("/workspace/files", s.handleFileSearch)
 		r.Post("/workspace/search", s.handleWorkspaceSearch)
 		r.Post("/workspace/reveal", s.handleReveal)

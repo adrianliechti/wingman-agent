@@ -120,6 +120,7 @@ func (h *Host) newProject(workDir string) (_ *Project, err error) {
 		s.skillFiles.Run(serverCtx)
 	})
 
+	ws.SetMCPChangedHandler(func() { s.workspaceChanged(Frame{Type: EvtMCPChanged}) })
 	s.background.Go(func() {
 		if err := ws.InitMCP(serverCtx); err != nil && serverCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "MCP init warning: %v\n", err)

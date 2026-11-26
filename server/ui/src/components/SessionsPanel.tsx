@@ -106,6 +106,157 @@ type Menu = {
 	y: number;
 };
 
+function useAgentName(agents: ReturnType<typeof useAgents>) {
+	return useMemo(() => {
+		const names = new Map(
+			agents.map((agent) => [agent.id, formatAgentName(agent.id, agent.name)]),
+		);
+		return (id: string) => names.get(id) ?? formatAgentName(id);
+	}, [agents]);
+}
+
+/** The list's search, filter and notification switches. They sit in the
+ * window's toolbar above the list, and beside the list on a phone. */
+export function SessionsToolbar({ touch = false }: { touch?: boolean }) {
+	const toast = useToast();
+	const agents = useAgents();
+	const agentName = useAgentName(agents);
+	const { loaded, starting, counts } = useFleet();
+	const notifications = useNotificationSetting();
+	const [view, setView] = useFleetView();
+	const { filter, provider, searching } = view;
+	const [filterButton, setFilterButton] = useState<HTMLButtonElement | null>(
+		null,
+	);
+	const [filterOpen, setFilterOpen] = useState(false);
+	const iconButton = `flex shrink-0 items-center justify-center rounded text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg ${touch ? "size-11" : "size-6"}`;
+
+	return (
+		<>
+			{loaded && starting.length > 0 && (
+				<Loader2
+					size={11}
+					className="mr-1.5 shrink-0 animate-spin text-fg-dim"
+					role="status"
+					aria-label={`Listing sessions of ${starting.map(agentName).join(", ")}`}
+				/>
+			)}
+			<button
+				type="button"
+				className={iconButton}
+				onClick={() => {
+					setView({ searching: !searching, search: "" });
+				}}
+				title={searching ? "Close search" : "Search sessions"}
+				aria-label={searching ? "Close search" : "Search sessions"}
+			>
+				{searching ? (
+					<X size={touch ? 18 : 12} />
+				) : (
+					<Search size={touch ? 18 : 12} />
+				)}
+			</button>
+			<button
+				ref={setFilterButton}
+				type="button"
+				className={`${iconButton} ${filter !== "all" || provider ? "text-fg" : ""}`}
+				onClick={() => setFilterOpen((value) => !value)}
+				title="Filter sessions"
+				aria-label="Filter sessions"
+				aria-haspopup="menu"
+				aria-expanded={filterOpen}
+			>
+				<ListFilter size={touch ? 18 : 12} />
+			</button>
+			{notifications.supported && (
+				<button
+					type="button"
+					className={iconButton}
+					onClick={() =>
+						void notifications.set(!notifications.enabled).then((done) => {
+							if (!done)
+								toast({
+									title: "Notifications are blocked",
+									description:
+										"Allow notifications for this site in the browser settings.",
+									tone: "error",
+								});
+						})
+					}
+					title={
+						notifications.enabled
+							? "Turn off notifications"
+							: "Notify me when a session needs me or finishes"
+					}
+					aria-label={
+						notifications.enabled
+							? "Turn off notifications"
+							: "Turn on notifications"
+					}
+					aria-pressed={notifications.enabled}
+				>
+					{notifications.enabled ? (
+						<Bell size={touch ? 18 : 12} />
+					) : (
+						<BellOff size={touch ? 18 : 12} />
+					)}
+				</button>
+			)}
+			<FloatingMenu
+				open={filterOpen}
+				onOpenChange={setFilterOpen}
+				reference={filterButton}
+				placement="bottom-end"
+				label="Filter sessions"
+				className="z-[100] min-w-[180px] rounded-md border border-border bg-bg-elevated py-1 shadow-xl"
+			>
+				{FILTERS.map((item) => (
+					<MenuRadio
+						key={item.id}
+						checked={filter === item.id}
+						label={item.label}
+						count={
+							item.id === "needs-input"
+								? counts.needsInput
+								: item.id === "running"
+									? counts.working
+									: undefined
+						}
+						onSelect={() => {
+							setView({ filter: item.id });
+							setFilterOpen(false);
+						}}
+					/>
+				))}
+				{agents.length > 1 && (
+					<>
+						<div className="my-1 border-t border-border-subtle" />
+						<MenuRadio
+							checked={!provider}
+							label="All agents"
+							onSelect={() => {
+								setView({ provider: "" });
+								setFilterOpen(false);
+							}}
+						/>
+						{agents.map((agent) => (
+							<MenuRadio
+								key={agent.id}
+								checked={provider === agent.id}
+								label={agentName(agent.id)}
+								onSelect={() => {
+									setView({ provider: agent.id });
+									setFilterOpen(false);
+								}}
+							/>
+						))}
+					</>
+				)}
+			</FloatingMenu>
+		</>
+	);
+}
+
 /** Every session of every agent: what waits for the user first, then what works, then the rest by day. */
 export function SessionsPanel({
 	currentSessionId,
@@ -116,12 +267,10 @@ export function SessionsPanel({
 	touch = false,
 }: Props) {
 	const client = workspaceClient();
-	const toast = useToast();
 	const act = useSessionAction();
 	const { backend } = useWorkspace();
 	const agents = useAgents();
-	const { sessions, loaded, error, starting, counts } = useFleet();
-	const notifications = useNotificationSetting();
+	const { sessions, loaded, error } = useFleet();
 	const now = useNow();
 	const here = useHere();
 	const [view, setView] = useFleetView();
@@ -129,10 +278,6 @@ export function SessionsPanel({
 	const setFilter = (next: FleetFilter) => setView({ filter: next });
 	const setProvider = (next: string) => setView({ provider: next });
 	const setSearch = (next: string) => setView({ search: next });
-	const [filterButton, setFilterButton] = useState<HTMLButtonElement | null>(
-		null,
-	);
-	const [filterOpen, setFilterOpen] = useState(false);
 	const [menu, setMenu] = useState<Menu | null>(null);
 	/** The sessions each group shows beyond its first ones. */
 	const [more, setMore] = useState<Readonly<Record<string, number>>>({});
@@ -141,12 +286,7 @@ export function SessionsPanel({
 	useEffect(() => {
 		if (searching) searchInput.current?.focus();
 	}, [searching]);
-	const agentName = useMemo(() => {
-		const names = new Map(
-			agents.map((agent) => [agent.id, formatAgentName(agent.id, agent.name)]),
-		);
-		return (id: string) => names.get(id) ?? formatAgentName(id);
-	}, [agents]);
+	const agentName = useAgentName(agents);
 	// An agent lists the sessions of its own CLI only once it runs, so the list
 	// starts the agents it shows: every agent, or the one it is filtered to.
 	const agentIds = agents.map((agent) => agent.id).join("\n");
@@ -204,106 +344,31 @@ export function SessionsPanel({
 	const emptyText = search.trim()
 		? "No matching sessions"
 		: (FILTERS.find((item) => item.id === filter)?.empty ?? "");
-	const iconButton = `flex shrink-0 items-center justify-center rounded text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg ${touch ? "size-11" : "size-6"}`;
 
 	return (
 		<nav className="flex h-full w-full flex-col" aria-label="Sessions">
-			<div
-				className={`flex h-9 shrink-0 items-center gap-0.5 pr-1.5 ${searching ? "pl-1.5" : "pl-3"}`}
-			>
-				{/* The search takes the place of the title while it is open. */}
-				{searching ? (
-					<input
-						ref={searchInput}
-						value={search}
-						onChange={(event) => setSearch(event.target.value)}
-						onKeyDown={(event) => {
-							if (event.key !== "Escape") return;
-							event.stopPropagation();
-							setView({ searching: false, search: "" });
-						}}
-						placeholder="Search sessions"
-						aria-label="Search sessions"
-						className={`mr-1 min-w-0 flex-1 rounded-md border border-border bg-bg-input px-2 text-[12px] text-fg outline-none placeholder:text-fg-dim focus:border-border-strong ${touch ? "h-9" : "h-6"}`}
-					/>
-				) : (
-					<>
-						<span className="text-[10px] font-medium tracking-wide text-fg-dim uppercase">
-							Sessions
-						</span>
-						{loaded && starting.length > 0 && (
-							<Loader2
-								size={11}
-								className="ml-1.5 animate-spin text-fg-dim"
-								role="status"
-								aria-label={`Listing sessions of ${starting.map(agentName).join(", ")}`}
-							/>
-						)}
-						<div className="flex-1" />
-					</>
-				)}
-				<button
-					type="button"
-					className={iconButton}
-					onClick={() => {
-						setView({ searching: !searching, search: "" });
-					}}
-					title={searching ? "Close search" : "Search sessions"}
-					aria-label={searching ? "Close search" : "Search sessions"}
-				>
+			{(touch || searching) && (
+				<div className="flex h-9 shrink-0 items-center gap-0.5 px-1.5">
 					{searching ? (
-						<X size={touch ? 18 : 12} />
+						<input
+							ref={searchInput}
+							value={search}
+							onChange={(event) => setSearch(event.target.value)}
+							onKeyDown={(event) => {
+								if (event.key !== "Escape") return;
+								event.stopPropagation();
+								setView({ searching: false, search: "" });
+							}}
+							placeholder="Search sessions"
+							aria-label="Search sessions"
+							className={`min-w-0 flex-1 rounded-md border border-border bg-bg-input px-2 text-[12px] text-fg outline-none placeholder:text-fg-dim focus:border-border-strong ${touch ? "mr-1 h-9" : "h-6"}`}
+						/>
 					) : (
-						<Search size={touch ? 18 : 12} />
+						<div className="flex-1" />
 					)}
-				</button>
-				<button
-					ref={setFilterButton}
-					type="button"
-					className={`${iconButton} ${filter !== "all" || provider ? "text-fg" : ""}`}
-					onClick={() => setFilterOpen((value) => !value)}
-					title="Filter sessions"
-					aria-label="Filter sessions"
-					aria-haspopup="menu"
-					aria-expanded={filterOpen}
-				>
-					<ListFilter size={touch ? 18 : 12} />
-				</button>
-				{notifications.supported && (
-					<button
-						type="button"
-						className={iconButton}
-						onClick={() =>
-							void notifications.set(!notifications.enabled).then((done) => {
-								if (!done)
-									toast({
-										title: "Notifications are blocked",
-										description:
-											"Allow notifications for this site in the browser settings.",
-										tone: "error",
-									});
-							})
-						}
-						title={
-							notifications.enabled
-								? "Turn off notifications"
-								: "Notify me when a session needs me or finishes"
-						}
-						aria-label={
-							notifications.enabled
-								? "Turn off notifications"
-								: "Turn on notifications"
-						}
-						aria-pressed={notifications.enabled}
-					>
-						{notifications.enabled ? (
-							<Bell size={touch ? 18 : 12} />
-						) : (
-							<BellOff size={touch ? 18 : 12} />
-						)}
-					</button>
-				)}
-			</div>
+					{touch && <SessionsToolbar touch />}
+				</div>
+			)}
 			{(filter !== "all" || provider) && (
 				<div className="flex shrink-0 flex-wrap items-center gap-1 px-2 pb-1.5">
 					{filter !== "all" && (
@@ -448,57 +513,6 @@ export function SessionsPanel({
 					</button>
 				)}
 			</div>
-			<FloatingMenu
-				open={filterOpen}
-				onOpenChange={setFilterOpen}
-				reference={filterButton}
-				placement="bottom-end"
-				label="Filter sessions"
-				className="z-[100] min-w-[180px] rounded-md border border-border bg-bg-elevated py-1 shadow-xl"
-			>
-				{FILTERS.map((item) => (
-					<MenuRadio
-						key={item.id}
-						checked={filter === item.id}
-						label={item.label}
-						count={
-							item.id === "needs-input"
-								? counts.needsInput
-								: item.id === "running"
-									? counts.working
-									: undefined
-						}
-						onSelect={() => {
-							setFilter(item.id);
-							setFilterOpen(false);
-						}}
-					/>
-				))}
-				{agents.length > 1 && (
-					<>
-						<div className="my-1 border-t border-border-subtle" />
-						<MenuRadio
-							checked={!provider}
-							label="All agents"
-							onSelect={() => {
-								setProvider("");
-								setFilterOpen(false);
-							}}
-						/>
-						{agents.map((agent) => (
-							<MenuRadio
-								key={agent.id}
-								checked={provider === agent.id}
-								label={agentName(agent.id)}
-								onSelect={() => {
-									setProvider(agent.id);
-									setFilterOpen(false);
-								}}
-							/>
-						))}
-					</>
-				)}
-			</FloatingMenu>
 			{menu && (
 				<FloatingMenu
 					open

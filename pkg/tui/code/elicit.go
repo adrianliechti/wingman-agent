@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness/tool"
 )
 
@@ -51,7 +51,7 @@ func (a *App) recordPrompt(ctx context.Context, title, message, answer string) {
 	epoch := a.sessionEpoch
 	a.sessionMu.Unlock()
 	a.post(func() {
-		id := corecode.SessionIDFromContext(ctx)
+		id := code.SessionIDFromContext(ctx)
 		if a.sessionEpoch != epoch || (id != "" && id != a.sessionID) {
 			return
 		}
@@ -72,7 +72,7 @@ func (a *App) beginPrompt(ctx context.Context, show func() func()) (context.Cont
 	var closePrompt func()
 
 	a.post(func() {
-		id := corecode.SessionIDFromContext(ctx)
+		id := code.SessionIDFromContext(ctx)
 		if ctx.Err() != nil || a.sessionEpoch != epoch || (id != "" && id != a.sessionID) {
 			cancel()
 			return

@@ -4,9 +4,12 @@ import type { ServerMessage } from "../types/protocol";
 export const queryKeys = {
 	all: ["server"] as const,
 	workspace: ["server", "workspace"] as const,
+	mcp: ["server", "mcp"] as const,
+	plugins: ["server", "plugins"] as const,
 	skills: {
 		all: ["server", "skills"] as const,
 		list: ["server", "skills", "list"] as const,
+		catalogue: ["server", "skills", "catalogue"] as const,
 	},
 	chatCommands: {
 		all: ["server", "chat-commands"] as const,
@@ -107,6 +110,9 @@ export function invalidateForServerMessage(
 		case "skills_changed":
 			invalidate(queryKeys.skills.all);
 			invalidate(queryKeys.chatCommands.all);
+			break;
+		case "mcp_changed":
+			invalidate(queryKeys.mcp);
 			break;
 		case "terminals_changed":
 			invalidate(queryKeys.terminals.all);

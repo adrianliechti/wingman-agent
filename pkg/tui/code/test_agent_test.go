@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/model"
 )
 
 type uiTestAgent struct {
-	workspace *corecode.Workspace
+	workspace *code.Workspace
 	messages  []harness.Message
 	revision  uint64
 	snapshots int
@@ -21,12 +21,12 @@ type uiTestAgent struct {
 	effort    string
 	efforts   []string
 	mode      string
-	sessions  []corecode.SessionInfo
+	sessions  []code.SessionInfo
 }
 
 func newUITestAgent(messages []harness.Message) *uiTestAgent {
 	return &uiTestAgent{
-		workspace: &corecode.Workspace{RootPath: "/workspace"},
+		workspace: &code.Workspace{RootPath: "/workspace"},
 		messages:  messages,
 		model:     "gpt-5.6-sol",
 		effort:    "medium",
@@ -35,8 +35,8 @@ func newUITestAgent(messages []harness.Message) *uiTestAgent {
 	}
 }
 
-func (a *uiTestAgent) Name() string                   { return corecode.BuiltinAgentName }
-func (a *uiTestAgent) Workspace() *corecode.Workspace { return a.workspace }
+func (a *uiTestAgent) Name() string               { return code.BuiltinAgentName }
+func (a *uiTestAgent) Workspace() *code.Workspace { return a.workspace }
 func (a *uiTestAgent) Models(string) ([]model.Model, string) {
 	if a.models != nil {
 		return append([]model.Model(nil), a.models...), a.model
@@ -54,30 +54,30 @@ func (a *uiTestAgent) SetEffort(_ context.Context, _ string, value string) error
 	a.effort = value
 	return nil
 }
-func (a *uiTestAgent) Modes(string) ([]corecode.Mode, string) {
-	return []corecode.Mode{
+func (a *uiTestAgent) Modes(string) ([]code.Mode, string) {
+	return []code.Mode{
 		{ID: "agent", Name: "Agent"},
 		{ID: "plan", Name: "Plan"},
-		corecode.UnattendedMode(),
+		code.UnattendedMode(),
 	}, a.mode
 }
 func (a *uiTestAgent) SetMode(_ context.Context, _, mode string) error {
 	a.mode = mode
 	return nil
 }
-func (a *uiTestAgent) ListSessions(context.Context) ([]corecode.SessionInfo, error) {
+func (a *uiTestAgent) ListSessions(context.Context) ([]code.SessionInfo, error) {
 	return a.sessions, nil
 }
 func (a *uiTestAgent) NewSession(context.Context) (string, error)  { return "new", nil }
 func (a *uiTestAgent) LoadSession(context.Context, string) error   { return nil }
 func (a *uiTestAgent) DeleteSession(context.Context, string) error { return nil }
 func (a *uiTestAgent) Messages(string) []harness.Message           { return a.messages }
-func (a *uiTestAgent) HistorySnapshot(string) corecode.HistorySnapshot {
+func (a *uiTestAgent) HistorySnapshot(string) code.HistorySnapshot {
 	a.snapshots++
-	return corecode.HistorySnapshot{Messages: harness.CloneMessages(a.messages), Revision: a.revision}
+	return code.HistorySnapshot{Messages: harness.CloneMessages(a.messages), Revision: a.revision}
 }
-func (a *uiTestAgent) HistoryVersion(string) corecode.HistoryVersion {
-	return corecode.HistoryVersion{Revision: a.revision, MessageCount: len(a.messages)}
+func (a *uiTestAgent) HistoryVersion(string) code.HistoryVersion {
+	return code.HistoryVersion{Revision: a.revision, MessageCount: len(a.messages)}
 }
 func (a *uiTestAgent) Usage(string) harness.Usage { return harness.Usage{} }
 func (a *uiTestAgent) Send(context.Context, string, []harness.Content) (iter.Seq2[harness.Message, error], error) {
@@ -89,7 +89,7 @@ func (a *uiTestAgent) Close() error  { return nil }
 func (a *uiTestAgent) RecordUserShellCommand(_ string, command, output string, exitCode int, duration time.Duration) error {
 	a.messages = append(a.messages, harness.Message{
 		Role:    harness.RoleUser,
-		Content: []harness.Content{{Text: corecode.FormatUserShellCommand(command, output, exitCode, duration)}},
+		Content: []harness.Content{{Text: code.FormatUserShellCommand(command, output, exitCode, duration)}},
 	})
 	a.revision++
 	return nil

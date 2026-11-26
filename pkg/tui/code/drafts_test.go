@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 	"github.com/adrianliechti/wingman-agent/pkg/harness"
 	"github.com/adrianliechti/wingman-agent/pkg/tui/inline"
 )
 
 func TestDraftStorePersistsAttachmentsAndDoesNotResurrectSentDraft(t *testing.T) {
 	dir := t.TempDir()
-	workspace := &corecode.Workspace{MemoryPath: filepath.Join(dir, "memory")}
+	workspace := &code.Workspace{MemoryPath: filepath.Join(dir, "memory")}
 	store := newDraftStore(workspace, "backend")
 	draft := composerState{Text: "unsent", Files: []string{"main.go"}, Content: []harness.Content{{Text: "attachment context"}}}
 	store.Set("session", draft)

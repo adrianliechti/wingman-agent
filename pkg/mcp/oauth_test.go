@@ -382,6 +382,9 @@ func TestManagerWithoutCredentialRequiresLogin(t *testing.T) {
 	if !errors.Is(err, ErrLoginRequired) || !strings.Contains(err.Error(), "wingman mcp login protected") {
 		t.Fatalf("err = %v", err)
 	}
+	if got := manager.Status("protected"); got.State != StateLoginRequired || !strings.Contains(got.Error, "wingman mcp login protected") {
+		t.Fatalf("status = %+v", got)
+	}
 	if as.registrations != 0 && as.authorizes != 0 {
 		t.Fatalf("unexpected browser flow: registrations = %d authorizes = %d", as.registrations, as.authorizes)
 	}

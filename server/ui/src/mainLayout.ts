@@ -3,7 +3,15 @@ import type { TabDisposition } from "./types/tabs";
 
 export interface CenterTab {
 	id: string;
-	type: "chat" | "file" | "diff" | "compare" | "terminal" | "task" | "insights";
+	type:
+		| "chat"
+		| "file"
+		| "diff"
+		| "compare"
+		| "terminal"
+		| "task"
+		| "insights"
+		| "connections";
 	label: string;
 	path?: string;
 	diffLayer?: DiffLayer;

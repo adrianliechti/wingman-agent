@@ -15,22 +15,24 @@ func Redact(err error) error {
 	if err == nil {
 		return nil
 	}
-	text := endpointURL.ReplaceAllStringFunc(err.Error(), func(raw string) string {
-		u, parseErr := url.Parse(raw)
-		if parseErr != nil {
-			return "[url]"
-		}
-		query := u.RawQuery != ""
-		u.User, u.RawQuery, u.Fragment = nil, "", ""
-		if query {
-			return u.String() + "?[redacted]"
-		}
-		return u.String()
-	})
+	text := endpointURL.ReplaceAllStringFunc(err.Error(), redactURL)
 	if text == err.Error() {
 		return err
 	}
 	return redacted{text: text, err: err}
+}
+
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "[url]"
+	}
+	query := u.RawQuery != ""
+	u.User, u.RawQuery, u.Fragment = nil, "", ""
+	if query {
+		return u.String() + "?[redacted]"
+	}
+	return u.String()
 }
 
 type redacted struct {

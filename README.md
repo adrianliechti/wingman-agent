@@ -194,6 +194,9 @@ In the terminal UI, use `@` to attach files and `Ctrl+P` to find commands.
 | `/agent` or `/plan` | Switch to Agent or Plan mode |
 | `/agents` | Watch agents and view scheduled tasks |
 | `/diff` | Review working tree changes |
+| `/mcp` | Show MCP servers, their state, and their tools |
+| `/skills` | Show available skills and where each comes from |
+| `/plugins` | Show installed plugins and what each adds |
 | `/help` | Browse commands and skills |
 
 See [sessions and recovery](docs/sessions.md) for queues and drafts, and
@@ -307,7 +310,7 @@ For example, use `/security-review triage findings.json` to validate a report or
 Connect an MCP server from the command line:
 
 ```bash
-wingman mcp add remote --url https://mcp.example.com/mcp
+wingman mcp add remote https://mcp.example.com/mcp
 wingman mcp list
 wingman mcp remove remote
 ```
@@ -315,6 +318,12 @@ wingman mcp remove remote
 Add `--scope project` to save a server in the project's `mcp.json`. Personal
 servers are stored in `~/.wingman/mcp.json`. Servers that require OAuth open a
 browser for sign-in.
+
+To see which servers are connected and the tools each one offers, run `/mcp`
+in the terminal UI or choose **Show connections** from the browser's command
+palette. A server that failed to start is listed with its error. The browser
+page also lists the installed plugins and the available skills; in the
+terminal UI, `/plugins` and `/skills` show them.
 
 The model can write a short Python script that calls its tools, MCP tools
 included, and get back only the result. See [code mode](docs/code-mode.md).

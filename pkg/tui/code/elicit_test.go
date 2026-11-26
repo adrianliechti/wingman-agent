@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	corecode "github.com/adrianliechti/wingman-agent/pkg/code"
+	"github.com/adrianliechti/wingman-agent/pkg/code"
 )
 
 func TestFreeTextAnswerPreservesTurnPhase(t *testing.T) {
@@ -109,7 +109,7 @@ func TestQuestionsFromAnotherSessionDoNotOpen(t *testing.T) {
 	app.editor.SetText("current draft")
 	done := make(chan error, 1)
 	go func() {
-		_, err := app.askLineLocked(corecode.WithSessionID(t.Context(), "background"), "Other session's question", "answer")
+		_, err := app.askLineLocked(code.WithSessionID(t.Context(), "background"), "Other session's question", "answer")
 		done <- err
 	}()
 	select {
@@ -160,7 +160,7 @@ func TestPromptReceiptDoesNotCrossSessionActivations(t *testing.T) {
 
 func TestPromptReceiptFromAnotherSessionIsIgnored(t *testing.T) {
 	app, _ := newQueueTestApp(t, 0)
-	app.recordPrompt(corecode.WithSessionID(t.Context(), "other"), "Approval", "Old question", "Yes")
+	app.recordPrompt(code.WithSessionID(t.Context(), "other"), "Approval", "Old question", "Yes")
 	(<-app.queue)()
 	if len(app.chat) != 0 {
 		t.Fatal("another session's prompt receipt appeared in the chat")
